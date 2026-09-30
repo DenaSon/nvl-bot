@@ -1,0 +1,15 @@
+[Unit]
+Description=NVL Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+EnvironmentFile=/etc/nvlbot/nvlbot.env
+ExecStart=/root/venv/bin/python3 /root/bot_final_v49-2.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

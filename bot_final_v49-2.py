@@ -3726,6 +3726,81 @@ async def _os_user_exists(username: str, host: str = None, port: int = 22) -> bo
         ok, _, _ = await run_cmd("id", "-u", username)
     return ok
 
+async def _ensure_ssh_linux_user_for_renewal(username: str, owner_row, new_exp_db: str):
+    """
+    Self-heal برای اکانت‌های SSH قدیمی/منقضی که رکوردشان در master_bot.db باقی مانده ولی
+    Linux user آن‌ها (مثلاً بعد از Migration/Rebuild که فقط کاربران فعال بازسازی شده‌اند)
+    دیگر وجود ندارد.
+
+    این تابع فقط هنگام تمدید صدا زده می‌شود:
+      • اگر Linux user وجود داشته باشد، هیچ تغییری نمی‌دهد.
+      • اگر وجود نداشته باشد، همان username/password/users_limit ذخیره‌شده در DB را روی
+        host واقعی اکانت بازسازی می‌کند و expiry را مستقیماً روی تاریخ تمدید جدید می‌گذارد.
+      • در شکست chpasswd، user تازه‌ساخته‌شده Rollback و حذف می‌شود.
+      • DB و کیف‌پول را دست نمی‌زند؛ ادامهٔ مسیر تمدید عادی مسئول commit نهایی است.
+
+    خروجی: (ok, err, kind, recreated)
+    """
+    if not owner_row:
+        return False, "اطلاعات اکانت در دیتابیس پیدا نشد.", "other", False
+
+    host, port = await _acct_host_port(owner_row)
+    if await _os_user_exists(username, host, port):
+        return True, "", "", False
+
+    password = owner_row[0]
+    users_limit = owner_row[3]
+    if not password:
+        return False, "رمز ذخیره‌شدهٔ اکانت خالی است و بازسازی امن ممکن نیست.", "other", False
+
+    log.warning(
+        "Self-heal تمدید: Linux user %s روی %s:%s وجود ندارد؛ بازسازی از DB آغاز شد.",
+        username, host, port
+    )
+
+    ok_add, err_add, kind_add = await _run_linux_cmd_on_host(
+        host, port, "sudo", "useradd", "-s", "/bin/false", "-e", new_exp_db, username
+    )
+    if not ok_add:
+        # اگر بین check و useradd یک اجرای هم‌زمان کاربر را ساخته باشد، آن را شکست واقعی ندان.
+        if "already exists" not in (err_add or "").lower():
+            return False, err_add, kind_add, False
+
+    ok_pw, err_pw, kind_pw = await _run_linux_cmd_on_host(
+        host, port, "sudo", "chpasswd", input_data=f"{username}:{password}\n".encode()
+    )
+    if not ok_pw:
+        # فقط اگر خودمان واقعاً useradd را انجام داده‌ایم Rollback حذف انجام شود؛ در حالت
+        # race/already-exists ممکن است user متعلق به اجرای دیگری باشد و نباید حذف شود.
+        if ok_add:
+            await _run_linux_cmd_on_host(host, port, "sudo", "userdel", "-f", username)
+        return False, err_pw, kind_pw, False
+
+    await _sync_user_limit_file(username, users_limit, host, port)
+
+    # اگر معماری دوباره به Edge-as-Data-Plane برگشت، Mirror روی Core را فقط وقتی user آنجا
+    # وجود ندارد به‌صورت best-effort بازسازی می‌کنیم. شکست Mirror تمدید primary را fail نمی‌کند.
+    core_public_ip = await asyncio.to_thread(_get_core_public_ip_cached)
+    if core_public_ip and core_public_ip != host:
+        try:
+            core_exists = await _os_user_exists(username, core_public_ip, 22)
+            if not core_exists:
+                core_add, _, _ = await _run_linux_cmd_on_host(
+                    core_public_ip, 22, "sudo", "useradd", "-s", "/bin/false", "-e", new_exp_db, username
+                )
+                if core_add:
+                    core_pw, core_err, _ = await _run_linux_cmd_on_host(
+                        core_public_ip, 22, "sudo", "chpasswd",
+                        input_data=f"{username}:{password}\n".encode()
+                    )
+                    if not core_pw:
+                        log.warning("Self-heal Mirror Core برای %s در chpasswd شکست خورد: %s", username, core_err)
+        except Exception:
+            log.exception("Self-heal Mirror Core برای %s شکست خورد (غیربحرانی).", username)
+
+    log.warning("Self-heal تمدید: Linux user %s با موفقیت از DB بازسازی شد.", username)
+    return True, "", "", True
+
 async def _get_os_bot_users():
     """
     🆕 «کاربران یتیم»: یوزرنیم‌های لینوکسی‌ای که ظاهراً توسط خودِ ربات ساخته شده‌اند (همان الگویی
@@ -11488,6 +11563,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             new_exp_db = new_exp_dt.strftime("%Y-%m-%d")
 
             _exp_host, _exp_port = await _acct_host_port(cur)
+
+            # 🛠 Self-heal فقط برای تمدید: بعضی اکانت‌های منقضیِ قدیمی بعد از Migration در DB
+            # باقی مانده‌اند ولی Linux user آن‌ها بازسازی نشده است. قبل از usermod، در صورت
+            # نبودن user آن را از اطلاعات DB بازسازی می‌کنیم؛ مسیر «کاهش تمدید» عمداً user
+            # مفقود را ایجاد نمی‌کند چون قرار نیست یک سرویس غیرفعال را احیا کند.
+            if mode == 'extend':
+                heal_ok, heal_err, heal_kind, _recreated = await _ensure_ssh_linux_user_for_renewal(
+                    un, cur, new_exp_db
+                )
+                if not heal_ok:
+                    await query.message.reply_text(
+                        _fmt_linux_error("بازسازی خودکار اکانت برای تمدید", heal_err, heal_kind),
+                        parse_mode="HTML"
+                    )
+                    safe_clear_context(context); return
+
             ok, err, kind = await _mirror_linux_cmd(_exp_host, _exp_port, "sudo", "usermod", "-e", new_exp_db, un)
             if not ok:
                 await query.message.reply_text(_fmt_linux_error("تمدید اکانت" if mode == 'extend' else "کاهش تمدید اکانت", err, kind), parse_mode="HTML")

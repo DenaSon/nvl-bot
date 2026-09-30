@@ -1,0 +1,127 @@
+#!/bin/bash
+# ============================================================================
+# demote_core_to_edge_v2.sh — تنزلِ Core فعلی به یک Edgeِ معمولی (معماریِ جدید)
+# ----------------------------------------------------------------------------
+# جایگزینِ demote_core_to_edge.sh در معماریِ Control-Plane/Data-Plane.
+#
+# چرا این نسخه خیلی ساده‌تر از قبلی است:
+# در معماریِ قدیم، این سرور (Core) تنها جایی بود که useradd واقعی رویش اجرا می‌شد؛ پس
+# «تنزل» یعنی همهٔ Edgeها باید ترافیکِ مشتری را DNAT به سمتِ Core جدید کنند و خودِ این
+# سرور هم باید یک Edgeِ DNAT‌کننده می‌شد.
+# در معماریِ جدید، طبقِ setup_edge_datapath.sh، این سرور از قبل (چون همیشه هم
+# Control-Plane هم یک Data-Plane همیشه‌روشن بوده) خودش مستقیماً sshd/gost/badvpn/
+# ip-limiter را برای Mirrorِ کاملِ کاربران اجرا می‌کند. پس «تنزل» فقط یعنی:
+#   ۱) خاموش/غیرفعال‌کردنِ نقشِ Control-Plane (خودِ ربات + تایمرِ sync).
+#   ۲) بازنشسته‌کردنِ هویتِ WireGuardِ «Core» و گرفتنِ یک هویتِ Edgeِ تازه (چون یک
+#      PrivateKey هرگز نباید هم‌زمان روی دو دستگاه فعال باشد).
+#   ۳) وصل‌شدنِ این هویتِ تازه به Core جدید (فقط برای مدیریت، نه عبورِ ترافیکِ مشتری).
+# ❌ هیچ DNAT/MASQUERADEای لازم نیست چون این سرور به هیچ سرورِ دیگری چیزی را فوروارد
+#    نمی‌کند — کاربرانِ رویش (که تا همین الان هم واقعاً همین‌جا فعال بودند، چه به‌عنوانِ
+#    Mirror و چه اگر دامنه هنگامِ Failover موقتاً به همین سرور اشاره کرده باشد) همچنان
+#    مستقیماً همین‌جا سرویس می‌گیرند.
+#
+# ⚠️ نکته‌ای که باید دستی تصمیم بگیرید: طبقِ طراحیِ Mirror (بند ۲ درخواستِ اصلی)، این سرور
+# تا همین الان کپیِ کاملِ *همهٔ* کاربرانِ کل سیستم را داشته، نه فقط کاربرانِ «خودش». این
+# اسکریپت آن‌ها را پاک نمی‌کند (حذفِ خودکارِ صدها/هزاران یوزرِ لینوکسی ریسکِ قطعیِ زنده دارد)
+# — تصمیمِ پاک‌سازیِ Mirrorِ اضافی را به عهدهٔ خودتان و به‌صورتِ دستی/بعداً می‌گذارد.
+#
+# نحوهٔ اجرا:
+#   sudo bash demote_core_to_edge_v2.sh <NEW_CORE_PUBLIC_IP>
+# مثال:
+#   sudo bash demote_core_to_edge_v2.sh 46.101.114.34
+# ============================================================================
+
+set -euo pipefail
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "❌ این اسکریپت باید با دسترسی root اجرا شود."
+    exit 1
+fi
+
+if [ "$#" -ne 1 ]; then
+    echo "استفاده: sudo bash $0 <NEW_CORE_PUBLIC_IP>"
+    exit 1
+fi
+
+NEW_CORE_PUBLIC_IP="$1"
+CORE_WG_PORT=51820
+EDGE_WG_IP="10.77.0.254"   # ⚠️ مطمئن شوید قبلاً به هیچ Edgeِ دیگری داده نشده
+
+if [ ! -f /etc/wireguard/core_public.key ]; then
+    echo "❌ core_public.key اینجا پیدا نشد — مطمئن شوید این همان سروری‌ست که تا الان Core بوده."
+    exit 1
+fi
+CORE_PUBLIC_KEY=$(cat /etc/wireguard/core_public.key)
+
+echo "🔹 ۱) توقف و غیرفعال‌سازیِ نقشِ Control-Plane روی این سرور..."
+systemctl disable --now nvl-edge-sync.timer >/dev/null 2>&1 || true
+if systemctl list-unit-files nvlbot.service >/dev/null 2>&1; then
+    systemctl disable --now nvlbot >/dev/null 2>&1 || true
+    if systemctl is-active --quiet nvlbot; then
+        echo "   ⚠️ nvlbot هنوز فعاله — دستی با «systemctl status nvlbot» بررسی کنید."
+    else
+        echo "   ✅ nvlbot و nvl-edge-sync.timer متوقف/غیرفعال شدند."
+    fi
+else
+    echo "   ℹ️ سرویسِ nvlbot روی این سرور اصلاً نصب نبود — رد شد."
+fi
+
+echo "🔹 ۲) تأییدِ اینکه سرویس‌های Data-Plane (sshd/gost/badvpn/ip-limiter) روشن و فعال می‌مانند..."
+for svc in ssh sshd gost badvpn-udpgw badvpn-udpgw-legacy edge-ip-limiter; do
+    if systemctl list-unit-files "${svc}.service" >/dev/null 2>&1 || systemctl list-unit-files "${svc}.socket" >/dev/null 2>&1; then
+        systemctl enable "$svc" >/dev/null 2>&1 || true
+        if systemctl is-active --quiet "$svc"; then
+            echo "   ✅ ${svc}: فعال (بدون تغییر — کاربرانِ همین سرور همچنان سرویس می‌گیرند)."
+        else
+            echo "   ⚠️ ${svc}: نصب است ولی الان فعال نیست — دستی بررسی کنید («systemctl status ${svc}»)."
+        fi
+    fi
+done
+
+echo "🔹 ۳) بازنشسته‌کردنِ هویتِ WireGuardِ «Core» (یک PrivateKey هرگز نباید روی دو دستگاه فعال باشد)..."
+systemctl stop wg-quick@wg0 >/dev/null 2>&1 || true
+mv /etc/wireguard/wg0.conf "/etc/wireguard/wg0.conf.old_core.$(date +%s)" 2>/dev/null || true
+if [ -f /etc/wireguard/core_private.key ]; then
+    mv /etc/wireguard/core_private.key "/etc/wireguard/core_private.key.retired.$(date +%s)"
+    mv /etc/wireguard/core_public.key "/etc/wireguard/core_public.key.retired.$(date +%s)" 2>/dev/null || true
+fi
+
+echo "🔹 ۴) ساختِ هویتِ تازهٔ Edge و اتصال به Core جدید..."
+if [ ! -f /etc/wireguard/edge_private.key ]; then
+    wg genkey | tee /etc/wireguard/edge_private.key | wg pubkey > /etc/wireguard/edge_public.key
+fi
+EDGE_PRIV=$(cat /etc/wireguard/edge_private.key)
+EDGE_PUB=$(cat /etc/wireguard/edge_public.key)
+echo "   ✅ کلیدِ تازهٔ Edge برای این سرور: ${EDGE_PUB}"
+
+cat > /etc/wireguard/wg0.conf << EOF
+[Interface]
+Address = ${EDGE_WG_IP}/24
+PrivateKey = ${EDGE_PRIV}
+
+[Peer]
+PublicKey = ${CORE_PUBLIC_KEY}
+Endpoint = ${NEW_CORE_PUBLIC_IP}:${CORE_WG_PORT}
+AllowedIPs = 10.77.0.1/32
+PersistentKeepalive = 25
+EOF
+
+systemctl enable wg-quick@wg0 >/dev/null 2>&1
+systemctl restart wg-quick@wg0
+sleep 1
+wg show wg0 || { echo "❌ تونلِ مدیریتی بالا نیومد."; exit 1; }
+
+if ping -c 2 -W 2 10.77.0.1 >/dev/null 2>&1; then
+    echo "   ✅ Core جدید از طریقِ تونلِ مدیریتی جواب داد."
+else
+    echo "   ⚠️ هنوز جواب نداد — روی Core جدید این را بزنید (چون این IP داخلیِ ${EDGE_WG_IP} تازه است):"
+    echo "      bash core_add_edge.sh old-core-as-edge \"${EDGE_PUB}\" ${EDGE_WG_IP}"
+fi
+
+echo ""
+echo "════════════════════════════════════════════════════════════"
+echo "✅ تنزلِ این سرور به Edge کامل شد."
+echo "   • ترافیکِ مشتریانِ همین سرور: بدونِ وقفه ادامه دارد (چون هیچ‌وقت رله نبوده)."
+echo "   • این سرور دیگر ربات/دیتابیسِ اصلی را اجرا نمی‌کند."
+echo "   ⚠️ در صورتِ نیاز، پاک‌سازیِ Mirrorِ کاربرانِ سایرِ Edgeها را جداگانه و دستی برنامه‌ریزی کنید."
+echo "════════════════════════════════════════════════════════════"

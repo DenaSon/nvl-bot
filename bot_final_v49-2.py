@@ -5202,6 +5202,22 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     role = context.user_data.get('role')
     chat_id = update.effective_chat.id
 
+    # 🔍 Phase 2 Marzban admin search — read-only and admin-only.
+    if state == 'MARZBAN_ADMIN_SEARCH':
+        if role != 'admin':
+            context.user_data.pop('state', None)
+            await update.message.reply_text("⛔️ دسترسی غیرمجاز.")
+            return
+        term = text.strip()
+        if len(term) < 2:
+            await update.message.reply_text("❌ حداقل ۲ کاراکتر برای جستجو وارد کنید:")
+            return
+        context.user_data.pop('state', None)
+        context.user_data['mza_search_term'] = term
+        context.user_data['mza_mode'] = 'search'
+        await _show_marzban_users(update.message, context, page=0, mode='search')
+        return
+
     # 🛡 Stateful V2Ray management must re-check ownership on every text continuation.
     _v2_state_target = None
     if state == 'V2_ADD_VOL_INPUT':
@@ -8074,6 +8090,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text("⛔️ <b>کاربر گرامی، ابتدا باید نام برند خود را تعیین کنید (مثلاً: AliVpn).</b>\nلطفاً از منوی اصلی ربات روی دکمه «✏️ تغییر نام برند» کلیک کنید.", parse_mode="HTML")
                 return
 
+    # 🛠 Phase 2 Marzban admin callbacks are strictly admin-only.
+    if d.startswith('mza_') and role != 'admin':
+        await query.answer("⛔️ دسترسی غیرمجاز", show_alert=True)
+        return
+
     # 🛡 Central V2Ray authorization boundary.  Callback data and persisted
     # state only identify a target; ownership is always reloaded from SQLite.
     _v2_target = _v2ray_management_target_from_callback(d, context)
@@ -8085,6 +8106,52 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not _ok_access:
             await query.message.reply_text("⛔️ شما مجاز به مشاهده/مدیریت این اکانت نیستید.")
             return
+
+    # ---------------- Marzban Admin Dashboard (read-only) ----------------
+    if d == 'mza_home':
+        await _show_marzban_admin_dashboard(query, context)
+        return
+    elif d == 'mza_nodes':
+        await _show_marzban_nodes(query, context)
+        return
+    elif d == 'mza_search':
+        context.user_data['state'] = 'MARZBAN_ADMIN_SEARCH'
+        await query.edit_message_text(
+            "🔍 <b>جستجوی کاربر Marzban</b>\n\nبخشی از username را بفرستید:",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🔙 داشبورد', callback_data='mza_home')]])
+        )
+        return
+    elif d == 'mza_noop':
+        return
+    elif d.startswith('mza_filter_'):
+        value = d[len('mza_filter_'):]
+        context.user_data['mza_filter'] = None if value == 'all' else value
+        context.user_data.pop('mza_search_term', None)
+        await _show_marzban_users(query, context, page=0, mode='users')
+        return
+    elif d.startswith('mza_users_'):
+        page = int(d.rsplit('_', 1)[1])
+        context.user_data.pop('mza_search_term', None)
+        await _show_marzban_users(query, context, page=page, mode='users')
+        return
+    elif d.startswith('mza_online_'):
+        page = int(d.rsplit('_', 1)[1])
+        await _show_marzban_users(query, context, page=page, mode='online')
+        return
+    elif d.startswith('mza_searchpage_'):
+        page = int(d.rsplit('_', 1)[1])
+        await _show_marzban_users(query, context, page=page, mode='search')
+        return
+    elif d.startswith('mza_user_'):
+        username = d[len('mza_user_'):]
+        await _show_marzban_user_readonly(query, context, username)
+        return
+    elif d == 'mza_backlist':
+        mode = context.user_data.get('mza_mode', 'users')
+        page = context.user_data.get('mza_page', 0)
+        await _show_marzban_users(query, context, page=page, mode=mode)
+        return
 
     # 🚨 گارد جامع وضعیت فروش سرویس‌ها (جلوگیری از کلیک روی دکمه‌های منقضی‌شده در تمامی مراحل خرید)
     if d.startswith(("bm_", "bu_", "blkc_", "buyfav_", "cm_set_")) or d in ("buy_direct", "buy_bulk_start", "buy_yes", "buy_emergency_yes"):

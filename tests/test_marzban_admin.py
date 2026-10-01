@@ -86,6 +86,41 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             params=None,
         )
 
+    async def test_reset_user_usage_uses_reset_endpoint(self):
+        with patch("v2ray_engine.api_request", new_callable=AsyncMock) as request:
+            request.return_value = (True, {"username": "hamid"})
+            ok, payload = await self.service.reset_user_usage("hamid")
+
+        self.assertTrue(ok)
+        self.assertEqual(payload["username"], "hamid")
+        request.assert_awaited_once_with(
+            "POST",
+            "/api/user/hamid/reset",
+            "https://marzban.example",
+            "admin",
+            "secret",
+            json_data=None,
+            params=None,
+        )
+
+    async def test_subscription_url_is_made_absolute(self):
+        self.service.get_user = AsyncMock(
+            return_value=(True, {"subscription_url": "/sub/token"})
+        )
+        ok, url = await self.service.get_subscription_url("hamid")
+
+        self.assertTrue(ok)
+        self.assertEqual(url, "https://marzban.example/sub/token")
+
+    async def test_subscription_url_rejects_empty_value(self):
+        self.service.get_user = AsyncMock(
+            return_value=(True, {"subscription_url": ""})
+        )
+        ok, error = await self.service.get_subscription_url("hamid")
+
+        self.assertFalse(ok)
+        self.assertIn("empty", error.lower())
+
     async def test_online_users_filters_to_recent_active_users(self):
         now = datetime.now(timezone.utc)
         recent = (now - timedelta(seconds=30)).isoformat()

@@ -80,6 +80,38 @@ class Phase55UserCreationRegressionTests(unittest.TestCase):
         self.assertNotIn("_db_finalize_v2ray_user", create_region)
         self.assertNotIn("INSERT INTO ssh_accounts", create_region)
 
+    def test_jalali_conversion_handles_normal_and_esfand_dates(self):
+        wanted_functions = {
+            "_idiv",
+            "_imod",
+            "_jal_cal",
+            "_gregorian_to_jdn",
+            "_mza_jdn_to_gregorian",
+            "_mza_jalali_to_gregorian",
+        }
+        nodes = []
+        for node in self.tree.body:
+            if isinstance(node, ast.Assign):
+                if any(
+                    isinstance(target, ast.Name) and target.id == "_JALALI_BREAKS"
+                    for target in node.targets
+                ):
+                    nodes.append(node)
+            elif isinstance(node, ast.FunctionDef) and node.name in wanted_functions:
+                nodes.append(node)
+
+        module = ast.Module(body=nodes, type_ignores=[])
+        ast.fix_missing_locations(module)
+        namespace = {}
+        exec(compile(module, str(BOT_PATH), "exec"), namespace)
+
+        convert = namespace["_mza_jalali_to_gregorian"]
+        self.assertEqual(convert(1405, 7, 10), (2026, 10, 2))
+        self.assertEqual(convert(1405, 9, 15), (2026, 12, 6))
+        self.assertEqual(convert(1404, 12, 29), (2026, 3, 20))
+        with self.assertRaises(ValueError):
+            convert(1404, 12, 30)
+
     def test_create_text_states_are_admin_only(self):
         self.assertIn("if state in _MZA_CREATE_TEXT_STATES:", self.source)
         self.assertIn("MZA_CREATE_USERNAME_INPUT", self.source)

@@ -2546,11 +2546,9 @@ async def _calc_account_refund(username: str) -> tuple[float, str]:
         try: base_price = float(str(v2_vol_bp_raw or '4000').replace(",", "").strip())
         except: base_price = 4000.0
         
-        m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
-        m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
-        m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
-        ok, m_data = await v2ray_engine.get_user(m_url, m_user, m_pwd, username)
-        
+        m_admin = await _get_marzban_admin_service()
+        ok, m_data = await m_admin.get_user(username)
+
         if ok and isinstance(m_data, dict):
             used_bytes = m_data.get('used_traffic', 0)
             limit_bytes = m_data.get('data_limit', 0)
@@ -4261,11 +4259,9 @@ async def _show_v2ray_user_detail(update_or_query, username, context, db_res, v2
     
     # 🌟 دریافت اطلاعات مصرف: برای ادمین (روی همه اکانت‌ها) و برای نمایندگان (فقط روی اکانت‌های حجمی)
     if role == 'admin' or is_vol:
-        m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
-        m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
-        m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
-        ok, m_data = await v2ray_engine.get_user(m_url, m_user, m_pwd, username)
-        
+        m_admin = await _get_marzban_admin_service()
+        ok, m_data = await m_admin.get_user(username)
+
         usage_txt = "نامشخص (خطا در ارتباط با سرور)"
         if ok and isinstance(m_data, dict):
             used = m_data.get('used_traffic', 0)
@@ -5179,10 +5175,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚙️ <b>تنظیمات سرور</b>\nیکی از گزینه‌های زیر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML"); return
         elif text == '🛠 مدیریت V2Ray' and role == 'admin':
             await update.message.reply_text("⏳ در حال دریافت اطلاعات از nevel...")
-            m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
-            m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
-            m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
-            ok, stats = await v2ray_engine.get_system_stats(m_url, m_user, m_pwd)
+            m_admin = await _get_marzban_admin_service()
+            ok, stats = await m_admin.get_system_stats()
             if ok:
                 mem = round(stats.get('mem_used', 0) / 1024**2, 1)
                 txt = f"🛠 <b>وضعیت سرور V2Ray</b>\nCPU: {stats.get('cpu_usage',0):.1f}%\nRAM: {mem} MB\nکاربران فعال: {stats.get('users_active',0)}"

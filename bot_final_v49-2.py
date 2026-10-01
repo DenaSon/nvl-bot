@@ -3984,6 +3984,64 @@ async def _get_marzban_admin_service():
     return marzban_admin.MarzbanAdminService(m_url, m_user, m_pwd)
 
 
+def _db_mark_reserved_v2ray_sale(username, agent_id, service_type):
+    """Attach ownership/type to a reserved sale row before remote provisioning.
+
+    This keeps a durable local recovery marker if Marzban accepts the POST but
+    the verify/subscription step becomes uncertain.  Financial settlement still
+    happens only after the normal finalization path succeeds.
+    """
+    if service_type not in ('v2ray', 'v2ray_vol'):
+        raise ValueError("invalid V2Ray sale service type")
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE ssh_accounts SET agent_id=?, service_type=?, conn_mode='v2ray' "
+            "WHERE username=? AND status='⏳ درحال ساخت'",
+            (int(agent_id or 0), service_type, username),
+        )
+
+
+async def _provision_v2ray_sale_user(
+    username,
+    *,
+    data_limit_bytes,
+    expire_timestamp,
+    reset_strategy,
+    user_count=None,
+):
+    """Provision a sale through the verified Phase 5.5 Marzban service layer.
+
+    Returns (ok, result, subscription_url).  If Marzban creation succeeded but
+    verification/subscription retrieval is uncertain, result carries
+    created=True and callers must not blindly retry the POST.
+    """
+    service = await _get_marzban_admin_service()
+    note = f"IP_LIMIT:{int(user_count)}" if user_count else ""
+
+    ok, result = await service.create_user(
+        username,
+        data_limit_bytes=int(data_limit_bytes or 0),
+        expire=int(expire_timestamp or 0),
+        selected_inbound_tags=None,
+        reset_strategy=reset_strategy,
+        status="active",
+        note=note,
+    )
+    if not ok:
+        return False, result, ""
+
+    ok_sub, sub_url = await service.get_subscription_url(username)
+    if not ok_sub:
+        return False, {
+            "stage": "subscription",
+            "created": True,
+            "username": username,
+            "error": sub_url,
+        }, ""
+
+    return True, result, sub_url
+
+
 async def _authorize_v2ray_account(context, username):
     """Re-check V2Ray ownership from SQLite for every privileged read/mutation."""
     if not username:
@@ -12852,16 +12910,40 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reset_strategy = "no_reset"
 
             retries = 0
-            ok, sub_url = False, ""
+            ok, provision_result, sub_url = False, None, ""
             while True:
-                # No Note (unlimited user)
-                ok, sub_url = await v2ray_engine.create_user(m_url, m_user, m_pwd, un, expire_timestamp, data_limit_bytes, reset_strategy, None)
-                if ok: break
-                if "already exists" in str(sub_url).lower() and retries < 50:
+                await asyncio.to_thread(_db_mark_reserved_v2ray_sale, un, ag_id, 'v2ray_vol')
+                ok, provision_result, sub_url = await _provision_v2ray_sale_user(
+                    un,
+                    data_limit_bytes=data_limit_bytes,
+                    expire_timestamp=expire_timestamp,
+                    reset_strategy=reset_strategy,
+                    user_count=None,
+                )
+                if ok:
+                    break
+
+                created_uncertain = (
+                    isinstance(provision_result, dict)
+                    and bool(provision_result.get("created"))
+                )
+                if created_uncertain:
+                    # The reserved local row is intentionally retained as a
+                    # recovery marker.  Never POST the same sale again.
+                    log.error(
+                        "V2Ray volume sale create became uncertain after remote creation: %s",
+                        provision_result,
+                    )
+                    break
+
+                if "already exists" in str(provision_result).lower() and retries < 50:
                     await asyncio.to_thread(_db_cancel_reservation, un)
                     un, c = await asyncio.to_thread(_db_reserve_username, br, c + 1)
+                    if un is None:
+                        break
                     retries += 1
-                else: break
+                else:
+                    break
 
             if ok:
                 cr_db = datetime.now().strftime("%Y-%m-%d")
@@ -12904,8 +12986,29 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try: await query.delete_message()
                 except: pass
             else:
-                await asyncio.to_thread(_db_cancel_reservation, un)
-                await query.message.reply_text(f"❌ خطا در ساخت کاربر NVL V2RAY:\n{sub_url}")
+                created_uncertain = (
+                    isinstance(provision_result, dict)
+                    and bool(provision_result.get("created"))
+                )
+                if not created_uncertain:
+                    await asyncio.to_thread(_db_cancel_reservation, un)
+                    err = provision_result
+                    await query.message.reply_text(f"❌ خطا در ساخت کاربر NVL V2RAY:\n{err}")
+                else:
+                    await query.message.reply_text(
+                        "⚠️ ساخت User در Marzban انجام شده یا محتمل است، اما Verify نهایی کامل نشد.\n"
+                        "برای جلوگیری از ساخت تکراری، درخواست دوباره ارسال نشد و رکورد رزرو محلی برای بازیابی نگه داشته شد.\n"
+                        f"Username: <code>{esc(un)}</code>",
+                        parse_mode="HTML",
+                    )
+                    with contextlib.suppress(Exception):
+                        await _notify_admins(
+                            context.application,
+                            "⚠️ <b>V2Ray sale needs recovery</b>\n"
+                            f"Username: <code>{esc(un)}</code>\n"
+                            f"Type: volume\n"
+                            f"Result: <code>{esc(str(provision_result))}</code>",
+                        )
 
         except Exception as e:
             log.exception("خطا در خرید V2Ray حجمی")
@@ -13006,15 +13109,38 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reset_strategy = "day"
 
             retries = 0
-            ok, sub_url = False, ""
+            ok, provision_result, sub_url = False, None, ""
             while True:
-                ok, sub_url = await v2ray_engine.create_user(m_url, m_user, m_pwd, un, expire_timestamp, data_limit_bytes, reset_strategy, int(u))
-                if ok: break
-                if "already exists" in str(sub_url).lower() and retries < 50:
+                await asyncio.to_thread(_db_mark_reserved_v2ray_sale, un, ag_id, 'v2ray')
+                ok, provision_result, sub_url = await _provision_v2ray_sale_user(
+                    un,
+                    data_limit_bytes=data_limit_bytes,
+                    expire_timestamp=expire_timestamp,
+                    reset_strategy=reset_strategy,
+                    user_count=int(u),
+                )
+                if ok:
+                    break
+
+                created_uncertain = (
+                    isinstance(provision_result, dict)
+                    and bool(provision_result.get("created"))
+                )
+                if created_uncertain:
+                    log.error(
+                        "V2Ray timed sale create became uncertain after remote creation: %s",
+                        provision_result,
+                    )
+                    break
+
+                if "already exists" in str(provision_result).lower() and retries < 50:
                     await asyncio.to_thread(_db_cancel_reservation, un)
                     un, c = await asyncio.to_thread(_db_reserve_username, br, c + 1)
+                    if un is None:
+                        break
                     retries += 1
-                else: break
+                else:
+                    break
 
             if ok:
                 cr_db = datetime.now().strftime("%Y-%m-%d")
@@ -13055,8 +13181,29 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try: await query.delete_message()
                 except: pass
             else:
-                await asyncio.to_thread(_db_cancel_reservation, un)
-                await query.message.reply_text(f"❌ خطا در ساخت کاربر v2panel:\n{sub_url}")
+                created_uncertain = (
+                    isinstance(provision_result, dict)
+                    and bool(provision_result.get("created"))
+                )
+                if not created_uncertain:
+                    await asyncio.to_thread(_db_cancel_reservation, un)
+                    err = provision_result
+                    await query.message.reply_text(f"❌ خطا در ساخت کاربر V2Ray:\n{err}")
+                else:
+                    await query.message.reply_text(
+                        "⚠️ ساخت User در Marzban انجام شده یا محتمل است، اما Verify نهایی کامل نشد.\n"
+                        "برای جلوگیری از ساخت تکراری، درخواست دوباره ارسال نشد و رکورد رزرو محلی برای بازیابی نگه داشته شد.\n"
+                        f"Username: <code>{esc(un)}</code>",
+                        parse_mode="HTML",
+                    )
+                    with contextlib.suppress(Exception):
+                        await _notify_admins(
+                            context.application,
+                            "⚠️ <b>V2Ray sale needs recovery</b>\n"
+                            f"Username: <code>{esc(un)}</code>\n"
+                            f"Type: timed\n"
+                            f"Result: <code>{esc(str(provision_result))}</code>",
+                        )
 
         except Exception as e:
             log.exception("خطا در خرید V2Ray")

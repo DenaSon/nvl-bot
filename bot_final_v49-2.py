@@ -4429,16 +4429,18 @@ async def _show_marzban_admin_dashboard(target, context):
         node_line = f"{connected}/{len(nodes)} متصل"
 
     txt = (
-        "🛠 <b>مدیریت Marzban</b>\n\n"
-        f"🧩 نسخه: <code>{esc(stats.get('version', '?'))}</code>\n"
-        f"🖥 CPU: <b>{cpu:.1f}%</b>\n"
-        f"🧠 RAM: <b>{mem_used}</b> / {mem_total}\n"
-        f"🖧 نودها: <b>{node_line}</b>\n\n"
-        f"👥 کل کاربران: <b>{total}</b>\n"
-        f"🟢 فعال: {active}   🔴 غیرفعال: {disabled}\n"
-        f"⌛ منقضی: {expired}   🟠 محدود: {limited}\n"
-        f"⏸ آن‌هولد: {on_hold}\n\n"
-        "ℹ️ این داشبورد در فاز ۲ فقط خواندنی است."
+        "🛠 <b>مرکز مدیریت Marzban</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        "🖥 <b>وضعیت سیستم</b>\n"
+        f"CPU  <b>{cpu:.1f}%</b>\n"
+        f"RAM  <b>{mem_used}</b> / {mem_total}\n"
+        f"Nodes  <b>{node_line}</b>\n"
+        f"Version  <code>{esc(stats.get('version', '?'))}</code>\n\n"
+        "👥 <b>وضعیت کاربران</b>\n"
+        f"کل  <b>{total}</b>\n"
+        f"🟢 فعال  {active}     🔴 غیرفعال  {disabled}\n"
+        f"⌛ منقضی  {expired}     🟠 محدود  {limited}\n"
+        f"⏸ آن‌هولد  {on_hold}"
     )
     await _mza_render(target, txt, kb)
 
@@ -4568,19 +4570,20 @@ async def _show_marzban_user_readonly(target, context, username):
     inbound_count = sum(len(v or []) for v in inbound_map.values()) if isinstance(inbound_map, dict) else 0
 
     txt = (
-        f"👤 <b>جزئیات کاربر Marzban</b>\n\n"
-        f"Username: <code>{esc(username)}</code>\n"
-        f"وضعیت: {_mza_status_label(user.get('status'))}\n"
-        f"مصرف: <b>{used}</b> / {limit}\n"
-        f"انقضا: {_mza_timestamp(user.get('expire'))}\n"
-        f"آخرین اتصال: {_mza_online_at(user.get('online_at'))}\n"
-        f"پروتکل‌ها: <code>{esc(proxies)}</code>\n"
-        f"Inbounds فعال: <b>{inbound_count}</b>\n"
-        f"نوع محلی: <code>{esc(service_type or '—')}</code>\n"
-        f"مالک: {esc(owner_text)}\n"
-        f"نام مشتری: {esc(customer_name or '—')}\n"
-        f"نام اشتراک: {esc(subscription_name or 'تنظیم نشده')}\n\n"
-        "🔒 این صفحه فقط خواندنی است."
+        f"👤 <b>{esc(username)}</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        f"{_mza_status_label(user.get('status'))}\n"
+        f"📊 مصرف  <b>{used}</b> / {limit}\n"
+        f"📅 انقضا  {_mza_timestamp(user.get('expire'))}\n"
+        f"🕘 آخرین اتصال  {_mza_online_at(user.get('online_at'))}\n\n"
+        "🔌 <b>اتصال</b>\n"
+        f"پروتکل‌ها  <code>{esc(proxies)}</code>\n"
+        f"Inbounds  <b>{inbound_count}</b>\n\n"
+        "🏷 <b>اطلاعات داخلی</b>\n"
+        f"نوع سرویس  <code>{esc(service_type or '—')}</code>\n"
+        f"مالک  {esc(owner_text)}\n"
+        f"نام مشتری  {esc(customer_name or '—')}\n"
+        f"نام اشتراک  {esc(subscription_name or 'تنظیم نشده')}"
     )
     kb = [
         [InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"mza_user_{username}")],
@@ -4596,17 +4599,23 @@ async def _show_marzban_nodes(target, context):
     if not ok or not isinstance(nodes, list):
         return await _mza_render(target, f"❌ خطا در دریافت نودها\n<code>{esc(nodes)}</code>", kb)
 
-    lines = ["🖥 <b>Marzban Nodes</b>", ""]
+    lines = ["🖥 <b>نودهای Marzban</b>", "━━━━━━━━━━━━━━", ""]
     for node in nodes:
         if not isinstance(node, dict):
             continue
         status = str(node.get("status") or "unknown")
         icon = {"connected": "🟢", "connecting": "🟡", "error": "🔴", "disabled": "⚫"}.get(status, "⚪")
+        status_label = {
+            "connected": "متصل",
+            "connecting": "در حال اتصال",
+            "error": "خطا",
+            "disabled": "غیرفعال",
+        }.get(status, status)
         lines.extend([
             f"{icon} <b>{esc(node.get('name', 'Unnamed'))}</b>",
-            f"   <code>{esc(node.get('address', '?'))}:{esc(node.get('port', '?'))}</code>  API:{esc(node.get('api_port', '?'))}",
-            f"   Status: {esc(status)} | Xray: <code>{esc(node.get('xray_version') or '—')}</code>",
-            f"   Usage ratio: {esc(node.get('usage_coefficient', 1))}",
+            f"└ <code>{esc(node.get('address', '?'))}:{esc(node.get('port', '?'))}</code>",
+            f"   API <code>{esc(node.get('api_port', '?'))}</code> · {esc(status_label)}",
+            f"   Xray <code>{esc(node.get('xray_version') or '—')}</code> · Ratio {esc(node.get('usage_coefficient', 1))}",
             "",
         ])
     if len(lines) == 2:

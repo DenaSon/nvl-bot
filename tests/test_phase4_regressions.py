@@ -46,11 +46,10 @@ class Phase4NodeManagementRegressionTests(unittest.TestCase):
         self.assertIn("service.update_node_settings(node_id, **pending)", self.source)
         self.assertNotIn('api_request("PUT", f"/api/node/', self.source)
 
-    def test_phase4_version_tag_is_present(self):
-        self.assertIn(
-            'BOT_VERSION_TAG = "V106-2026-10-02-marzban-node-management"',
-            self.source,
-        )
+    def test_phase4_features_survive_current_version(self):
+        self.assertIn("BOT_VERSION_TAG =", self.source)
+        self.assertIn("mza_nodes", self.source)
+        self.assertIn("mza_node_", self.source)
 
 
 if __name__ == "__main__":

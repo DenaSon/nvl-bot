@@ -232,7 +232,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V109-2026-10-02-ui-ux-navigation-polish"
+BOT_VERSION_TAG = "V110-2026-10-02-modern-v2ray-sales-wizard"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -3982,6 +3982,64 @@ async def _get_marzban_admin_service():
     m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
     m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
     return marzban_admin.MarzbanAdminService(m_url, m_user, m_pwd)
+
+
+def _db_mark_reserved_v2ray_sale(username, agent_id, service_type):
+    """Attach ownership/type to a reserved sale row before remote provisioning.
+
+    This keeps a durable local recovery marker if Marzban accepts the POST but
+    the verify/subscription step becomes uncertain.  Financial settlement still
+    happens only after the normal finalization path succeeds.
+    """
+    if service_type not in ('v2ray', 'v2ray_vol'):
+        raise ValueError("invalid V2Ray sale service type")
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE ssh_accounts SET agent_id=?, service_type=?, conn_mode='v2ray' "
+            "WHERE username=? AND status='⏳ درحال ساخت'",
+            (int(agent_id or 0), service_type, username),
+        )
+
+
+async def _provision_v2ray_sale_user(
+    username,
+    *,
+    data_limit_bytes,
+    expire_timestamp,
+    reset_strategy,
+    user_count=None,
+):
+    """Provision a sale through the verified Phase 5.5 Marzban service layer.
+
+    Returns (ok, result, subscription_url).  If Marzban creation succeeded but
+    verification/subscription retrieval is uncertain, result carries
+    created=True and callers must not blindly retry the POST.
+    """
+    service = await _get_marzban_admin_service()
+    note = f"IP_LIMIT:{int(user_count)}" if user_count else ""
+
+    ok, result = await service.create_user(
+        username,
+        data_limit_bytes=int(data_limit_bytes or 0),
+        expire=int(expire_timestamp or 0),
+        selected_inbound_tags=None,
+        reset_strategy=reset_strategy,
+        status="active",
+        note=note,
+    )
+    if not ok:
+        return False, result, ""
+
+    ok_sub, sub_url = await service.get_subscription_url(username)
+    if not ok_sub:
+        return False, {
+            "stage": "subscription",
+            "created": True,
+            "username": username,
+            "error": sub_url,
+        }, ""
+
+    return True, result, sub_url
 
 
 async def _authorize_v2ray_account(context, username):
@@ -12682,30 +12740,70 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
               [InlineKeyboardButton("↩️ انتخاب سرویس", callback_data="buy_back_start")]]
         await query.edit_message_text("➕ <b>فروش › SSH</b>\n━━━━━━━━━━━━━━\n📅 مدت اشتراک را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
     elif d == "v2ray_buy_menu":
+        # Phase 5.7: one guided V2Ray sales wizard.  Keep the existing
+        # settlement callbacks underneath for compatibility, but do not expose
+        # the old "time-based vs volume-only" product split as the first UX.
         v2_unlimit_en = await asyncio.to_thread(_db_get_setting, 'sell_v2ray_unlimit', '1') == '1'
         v2_vol_en = await asyncio.to_thread(_db_get_setting, 'sell_v2ray_vol', '1') == '1'
         kb = []
-        if v2_unlimit_en:
-            kb.append([InlineKeyboardButton("♾ نامحدود (زمان‌دار)", callback_data="v2r_type_unlimit")])
+
         if v2_vol_en:
-            kb.append([InlineKeyboardButton("📦 حجمی (بدون انقضای زمان)", callback_data="v2r_type_vol")])
+            volume_presets = (10, 15, 20, 30, 50, 100)
+            for i in range(0, len(volume_presets), 2):
+                row = [
+                    InlineKeyboardButton(
+                        f"📦 {volume_presets[i]} گیگ",
+                        callback_data=f"v2ru_vol_{volume_presets[i]}",
+                    )
+                ]
+                if i + 1 < len(volume_presets):
+                    row.append(
+                        InlineKeyboardButton(
+                            f"📦 {volume_presets[i + 1]} گیگ",
+                            callback_data=f"v2ru_vol_{volume_presets[i + 1]}",
+                        )
+                    )
+                kb.append(row)
+            kb.append([InlineKeyboardButton("✏️ حجم دلخواه", callback_data="v2ru_vol_custom")])
+
+        if v2_unlimit_en:
+            kb.append([InlineKeyboardButton("♾ حجم نامحدود", callback_data="v2r_type_unlimit")])
+
         kb.append([InlineKeyboardButton("↩️ انتخاب سرویس", callback_data="buy_back_start")])
 
+        commercial_hint = []
+        if v2_vol_en:
+            commercial_hint.append("حجم مشخص: قیمت‌گذاری فعلی به‌ازای هر گیگ")
+        if v2_unlimit_en:
+            commercial_hint.append("حجم نامحدود: قیمت‌گذاری فعلی بر اساس مدت و تعداد کاربر")
+        hint = "\n".join(f"• {item}" for item in commercial_hint)
+
         await query.edit_message_text(
-            "➕ <b>فروش › V2Ray</b>\n"
+            "➕ <b>فروش › V2Ray › مرحله ۱: حجم</b>\n"
             "━━━━━━━━━━━━━━\n"
-            "نوع پلن را انتخاب کنید:",
+            "حجم اشتراک را انتخاب کنید.\n\n"
+            f"{hint}",
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode="HTML",
         )
 
     elif d == "v2r_type_unlimit":
-        kb = [[InlineKeyboardButton("👤 ۱ کاربره (۱ ماهه)", callback_data="v2ru_1_1"), InlineKeyboardButton("👤 ۱ کاربره (۲ ماهه)", callback_data="v2ru_2_1")],
-              [InlineKeyboardButton("👥 ۲ کاربره (۱ ماهه)", callback_data="v2ru_1_2"), InlineKeyboardButton("👥 ۲ کاربره (۲ ماهه)", callback_data="v2ru_2_2")],
-              [InlineKeyboardButton("✏️ ساخت با مقادیر دلخواه", callback_data="v2ru_custom_users")],
-              [InlineKeyboardButton("↩️ نوع پلن V2Ray", callback_data="v2ray_buy_menu")]]
+        kb = [
+            [
+                InlineKeyboardButton("👤 ۱ کاربر · ۳۰ روز", callback_data="v2ru_1_1"),
+                InlineKeyboardButton("👤 ۱ کاربر · ۶۰ روز", callback_data="v2ru_2_1"),
+            ],
+            [
+                InlineKeyboardButton("👥 ۲ کاربر · ۳۰ روز", callback_data="v2ru_1_2"),
+                InlineKeyboardButton("👥 ۲ کاربر · ۶۰ روز", callback_data="v2ru_2_2"),
+            ],
+            [InlineKeyboardButton("✏️ مدت دلخواه", callback_data="v2ru_custom_users")],
+            [InlineKeyboardButton("↩️ انتخاب حجم", callback_data="v2ray_buy_menu")],
+        ]
         await query.edit_message_text(
-            "➕ <b>فروش › V2Ray › مدت‌دار</b>\n━━━━━━━━━━━━━━\nپلن را انتخاب کنید:",
+            "➕ <b>فروش › V2Ray › حجم نامحدود › مرحله ۲</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            "مدت و تعداد کاربر را انتخاب کنید:",
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode="HTML",
         )
@@ -12812,16 +12910,40 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reset_strategy = "no_reset"
 
             retries = 0
-            ok, sub_url = False, ""
+            ok, provision_result, sub_url = False, None, ""
             while True:
-                # No Note (unlimited user)
-                ok, sub_url = await v2ray_engine.create_user(m_url, m_user, m_pwd, un, expire_timestamp, data_limit_bytes, reset_strategy, None)
-                if ok: break
-                if "already exists" in str(sub_url).lower() and retries < 50:
+                await asyncio.to_thread(_db_mark_reserved_v2ray_sale, un, ag_id, 'v2ray_vol')
+                ok, provision_result, sub_url = await _provision_v2ray_sale_user(
+                    un,
+                    data_limit_bytes=data_limit_bytes,
+                    expire_timestamp=expire_timestamp,
+                    reset_strategy=reset_strategy,
+                    user_count=None,
+                )
+                if ok:
+                    break
+
+                created_uncertain = (
+                    isinstance(provision_result, dict)
+                    and bool(provision_result.get("created"))
+                )
+                if created_uncertain:
+                    # The reserved local row is intentionally retained as a
+                    # recovery marker.  Never POST the same sale again.
+                    log.error(
+                        "V2Ray volume sale create became uncertain after remote creation: %s",
+                        provision_result,
+                    )
+                    break
+
+                if "already exists" in str(provision_result).lower() and retries < 50:
                     await asyncio.to_thread(_db_cancel_reservation, un)
                     un, c = await asyncio.to_thread(_db_reserve_username, br, c + 1)
+                    if un is None:
+                        break
                     retries += 1
-                else: break
+                else:
+                    break
 
             if ok:
                 cr_db = datetime.now().strftime("%Y-%m-%d")
@@ -12864,8 +12986,29 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try: await query.delete_message()
                 except: pass
             else:
-                await asyncio.to_thread(_db_cancel_reservation, un)
-                await query.message.reply_text(f"❌ خطا در ساخت کاربر NVL V2RAY:\n{sub_url}")
+                created_uncertain = (
+                    isinstance(provision_result, dict)
+                    and bool(provision_result.get("created"))
+                )
+                if not created_uncertain:
+                    await asyncio.to_thread(_db_cancel_reservation, un)
+                    err = provision_result
+                    await query.message.reply_text(f"❌ خطا در ساخت کاربر NVL V2RAY:\n{err}")
+                else:
+                    await query.message.reply_text(
+                        "⚠️ ساخت User در Marzban انجام شده یا محتمل است، اما Verify نهایی کامل نشد.\n"
+                        "برای جلوگیری از ساخت تکراری، درخواست دوباره ارسال نشد و رکورد رزرو محلی برای بازیابی نگه داشته شد.\n"
+                        f"Username: <code>{esc(un)}</code>",
+                        parse_mode="HTML",
+                    )
+                    with contextlib.suppress(Exception):
+                        await _notify_admins(
+                            context.application,
+                            "⚠️ <b>V2Ray sale needs recovery</b>\n"
+                            f"Username: <code>{esc(un)}</code>\n"
+                            f"Type: volume\n"
+                            f"Result: <code>{esc(str(provision_result))}</code>",
+                        )
 
         except Exception as e:
             log.exception("خطا در خرید V2Ray حجمی")
@@ -12966,15 +13109,38 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reset_strategy = "day"
 
             retries = 0
-            ok, sub_url = False, ""
+            ok, provision_result, sub_url = False, None, ""
             while True:
-                ok, sub_url = await v2ray_engine.create_user(m_url, m_user, m_pwd, un, expire_timestamp, data_limit_bytes, reset_strategy, int(u))
-                if ok: break
-                if "already exists" in str(sub_url).lower() and retries < 50:
+                await asyncio.to_thread(_db_mark_reserved_v2ray_sale, un, ag_id, 'v2ray')
+                ok, provision_result, sub_url = await _provision_v2ray_sale_user(
+                    un,
+                    data_limit_bytes=data_limit_bytes,
+                    expire_timestamp=expire_timestamp,
+                    reset_strategy=reset_strategy,
+                    user_count=int(u),
+                )
+                if ok:
+                    break
+
+                created_uncertain = (
+                    isinstance(provision_result, dict)
+                    and bool(provision_result.get("created"))
+                )
+                if created_uncertain:
+                    log.error(
+                        "V2Ray timed sale create became uncertain after remote creation: %s",
+                        provision_result,
+                    )
+                    break
+
+                if "already exists" in str(provision_result).lower() and retries < 50:
                     await asyncio.to_thread(_db_cancel_reservation, un)
                     un, c = await asyncio.to_thread(_db_reserve_username, br, c + 1)
+                    if un is None:
+                        break
                     retries += 1
-                else: break
+                else:
+                    break
 
             if ok:
                 cr_db = datetime.now().strftime("%Y-%m-%d")
@@ -13015,8 +13181,29 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try: await query.delete_message()
                 except: pass
             else:
-                await asyncio.to_thread(_db_cancel_reservation, un)
-                await query.message.reply_text(f"❌ خطا در ساخت کاربر v2panel:\n{sub_url}")
+                created_uncertain = (
+                    isinstance(provision_result, dict)
+                    and bool(provision_result.get("created"))
+                )
+                if not created_uncertain:
+                    await asyncio.to_thread(_db_cancel_reservation, un)
+                    err = provision_result
+                    await query.message.reply_text(f"❌ خطا در ساخت کاربر V2Ray:\n{err}")
+                else:
+                    await query.message.reply_text(
+                        "⚠️ ساخت User در Marzban انجام شده یا محتمل است، اما Verify نهایی کامل نشد.\n"
+                        "برای جلوگیری از ساخت تکراری، درخواست دوباره ارسال نشد و رکورد رزرو محلی برای بازیابی نگه داشته شد.\n"
+                        f"Username: <code>{esc(un)}</code>",
+                        parse_mode="HTML",
+                    )
+                    with contextlib.suppress(Exception):
+                        await _notify_admins(
+                            context.application,
+                            "⚠️ <b>V2Ray sale needs recovery</b>\n"
+                            f"Username: <code>{esc(un)}</code>\n"
+                            f"Type: timed\n"
+                            f"Result: <code>{esc(str(provision_result))}</code>",
+                        )
 
         except Exception as e:
             log.exception("خطا در خرید V2Ray")

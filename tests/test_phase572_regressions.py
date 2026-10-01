@@ -48,7 +48,7 @@ class Phase572V2RayVolumeExpiryRegressionTests(unittest.TestCase):
             "context.user_data['v2_vol_expiry_days'] = int(raw_days)",
             self.source,
         )
-        self.assertIn("raw_days not in {"0", "1", "15", "30", "60"}", self.source)
+        self.assertIn('raw_days not in {"0", "1", "15", "30", "60"}', self.source)
 
     def test_marzban_expire_is_zero_only_for_unlimited_time(self):
         self.assertIn(

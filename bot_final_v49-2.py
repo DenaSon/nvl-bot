@@ -3613,6 +3613,7 @@ def _generate_connection_history_chart_buffer(username: str, records: list):
         concurrent += delta
         xs.append(t); ys.append(concurrent)
     peak = max(ys) if ys else 0
+
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 8.5), gridspec_kw={'height_ratios': [2, 1]})
     fig.patch.set_facecolor('#0b1220')
     for ax in (ax1, ax2):
@@ -7213,6 +7214,7 @@ def _prepare_migration_files_locally():
         return False, f"❌ استخراج بلاک‌های Peer از wg0.conf شکست خورد: {out}", None
     with open(os.path.join(tmp_dir, "wg0.conf.peers"), "w") as f:
         f.write(out)
+
     # ۳) دیتابیس ربات — الزامی. با sqlite3 backup API (نه کپی خام فایل) چون دیتابیس ممکن است
     # هم‌زمان در حال نوشته‌شدن باشد (WAL) و کپی مستقیم فایل می‌تواند snapshot ناقص/خراب بدهد.
     db_src = os.path.abspath(DB_PATH)

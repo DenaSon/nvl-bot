@@ -5336,6 +5336,59 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _show_marzban_users(update.message, context, page=0, mode='search')
         return
 
+    if state in ('MZA_SUBNAME_INPUT', 'MZA_RENEW_INPUT', 'MZA_ADDVOL_INPUT'):
+        if role != 'admin':
+            context.user_data.pop('state', None)
+            context.user_data.pop('mza_action_user', None)
+            await update.message.reply_text("⛔️ دسترسی غیرمجاز.")
+            return
+
+        username = context.user_data.get('mza_action_user')
+        if not username:
+            context.user_data.pop('state', None)
+            await update.message.reply_text("❌ عملیات منقضی شده است.")
+            return
+
+        if state == 'MZA_SUBNAME_INPUT':
+            try:
+                normalized = await asyncio.to_thread(_db_set_subscription_name, username, text)
+            except ValueError:
+                await update.message.reply_text("❌ نام اشتراک باید بین ۲ تا ۳۰ کاراکتر باشد.")
+                return
+            except Exception:
+                log.exception("خطا در ذخیره نام اشتراک %s", username)
+                await update.message.reply_text("❌ ذخیره نام اشتراک انجام نشد.")
+                return
+
+            context.user_data.pop('state', None)
+            context.user_data.pop('mza_action_user', None)
+            await update.message.reply_text(f"✅ نام اشتراک به «{esc(normalized)}» تغییر کرد.", parse_mode="HTML")
+            await _show_marzban_user_readonly(update.message, context, username)
+            return
+
+        try:
+            amount = int(text.strip())
+        except (TypeError, ValueError):
+            amount = 0
+
+        if state == 'MZA_RENEW_INPUT':
+            if not (1 <= amount <= 3650):
+                await update.message.reply_text("❌ تعداد روز باید بین ۱ تا ۳۶۵۰ باشد.")
+                return
+            context.user_data.pop('state', None)
+            context.user_data.pop('mza_action_user', None)
+            await _mza_show_renew_confirm(update.message, username, amount)
+            return
+
+        if state == 'MZA_ADDVOL_INPUT':
+            if not (1 <= amount <= 10000):
+                await update.message.reply_text("❌ حجم باید بین ۱ تا ۱۰۰۰۰ گیگابایت باشد.")
+                return
+            context.user_data.pop('state', None)
+            context.user_data.pop('mza_action_user', None)
+            await _mza_show_addvol_confirm(update.message, username, amount)
+            return
+
     # 🛡 Stateful V2Ray management must re-check ownership on every text continuation.
     _v2_state_target = None
     if state == 'V2_ADD_VOL_INPUT':

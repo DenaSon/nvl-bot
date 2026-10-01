@@ -232,7 +232,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V111-2026-10-02-v2ray-1gb-minimum"
+BOT_VERSION_TAG = "V112-2026-10-02-v2ray-volume-expiry"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -7202,9 +7202,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not (1 <= gb <= 100):
             await update.message.reply_text("❌ حجم باید بین 1 تا 100 گیگ باشد. دوباره بفرستید:"); return
         context.user_data['v2_vol_gb'] = gb
-        context.user_data['state'] = 'V2_VOL_CUSTOMER_NAME'
-        kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="v2r_type_vol")]]
-        await update.message.reply_text("👤 <b>مرحله بعد:</b>\nلطفاً نام مشتری (یا یک نشانه برای تشخیص این اکانت) را بفرستید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+        context.user_data['state'] = None
+        await _show_v2_vol_expiry_step(update.message, context, is_edit=False)
         return
     elif state == 'V2_VOL_CUSTOMER_NAME':
         context.user_data['v2_customer_name'] = text.strip()
@@ -9590,9 +9589,48 @@ async def _show_v2_addvol_confirm(message_or_query, context, gb, role, ag_id, is
     else:
         await message_or_query.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
+async def _show_v2_vol_expiry_step(target, context, *, is_edit=False):
+    gb = context.user_data.get('v2_vol_gb')
+    if not gb:
+        msg = "❌ حجم انتخاب‌شده پیدا نشد؛ دوباره از مرحله حجم شروع کنید."
+        if is_edit and hasattr(target, 'edit_text'):
+            await target.edit_text(msg)
+        else:
+            await target.reply_text(msg)
+        return
+
+    kb = [
+        [
+            InlineKeyboardButton("1 روز", callback_data="v2vexp_1"),
+            InlineKeyboardButton("15 روز", callback_data="v2vexp_15"),
+        ],
+        [
+            InlineKeyboardButton("30 روز", callback_data="v2vexp_30"),
+            InlineKeyboardButton("60 روز", callback_data="v2vexp_60"),
+        ],
+        [InlineKeyboardButton("♾ نامحدود زمانی", callback_data="v2vexp_0")],
+        [InlineKeyboardButton("↩️ انتخاب حجم", callback_data="v2ray_buy_menu")],
+    ]
+    txt = (
+        "➕ <b>فروش › V2Ray › مرحله ۲: انقضا</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        f"📦 حجم انتخاب‌شده: <b>{gb} گیگ</b>\n\n"
+        "مدت اعتبار این اشتراک را انتخاب کنید:"
+    )
+    markup = InlineKeyboardMarkup(kb)
+    if is_edit and hasattr(target, 'edit_text'):
+        await target.edit_text(txt, reply_markup=markup, parse_mode="HTML")
+    elif hasattr(target, 'edit_message_text'):
+        await target.edit_message_text(txt, reply_markup=markup, parse_mode="HTML")
+    else:
+        await target.reply_text(txt, reply_markup=markup, parse_mode="HTML")
+
+
 async def _show_v2_vol_confirm(message_or_query, context, gb, role, ag_id, is_edit=False):
     context.user_data['v2_vol_gb'] = gb
     customer_name = context.user_data.get('v2_customer_name', 'ثبت نشده')
+    expiry_days = context.user_data.get('v2_vol_expiry_days')
+    expiry_label = "نامحدود زمانی" if expiry_days == 0 else f"{expiry_days} روز"
     cost_txt = ""
     if role == 'agent':
         ainf = await asyncio.to_thread(_db_get_agent_info, ag_id)
@@ -9601,7 +9639,7 @@ async def _show_v2_vol_confirm(message_or_query, context, gb, role, ag_id, is_ed
         retail_dec = base_price_dec * Decimal(gb)
         cost_txt = f"\n💳 هزینهٔ این خرید: {int(retail_dec):,} تومان"
 
-    txt = f"🪐 <b>تایید ساخت اکانت V2Ray حجمی</b>\n\n👤 نشانه/نام: {esc(customer_name)}\n📦 حجم اکانت: {gb} گیگابایت\n⏳ انقضا: نامحدود (بدون محدودیت زمان)\n👥 تعداد کاربر: نامحدود{cost_txt}\n\nآیا از ساخت این اکانت مطمئن هستید؟"
+    txt = f"🪐 <b>تایید ساخت اکانت V2Ray حجمی</b>\n\n👤 نشانه/نام: {esc(customer_name)}\n📦 حجم اکانت: {gb} گیگابایت\n⏳ انقضا: {expiry_label}\n👥 تعداد کاربر: نامحدود{cost_txt}\n\nآیا از ساخت این اکانت مطمئن هستید؟"
     kb = [
         [InlineKeyboardButton("✅ بله، ساخته شود", callback_data="v2conf_vol_yes")],
         [InlineKeyboardButton("❌ خیر، انصراف", callback_data="v2r_type_vol")]
@@ -12845,9 +12883,27 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("✏️ حجم دلخواه را فقط به‌صورت عدد وارد کنید.\n\nبازه مجاز: 1 تا 100 گیگ", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="v2r_type_vol")]]))
             return
         context.user_data['v2_vol_gb'] = int(val)
+        context.user_data['state'] = None
+        await _show_v2_vol_expiry_step(query, context, is_edit=True)
+        return
+
+    elif d.startswith("v2vexp_"):
+        raw_days = d.split("_", 1)[1]
+        if raw_days not in {"0", "1", "15", "30", "60"}:
+            return await query.edit_message_text("❌ گزینه انقضا نامعتبر است؛ دوباره از مرحله حجم شروع کنید.")
+        context.user_data['v2_vol_expiry_days'] = int(raw_days)
         context.user_data['state'] = 'V2_VOL_CUSTOMER_NAME'
-        kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="v2r_type_vol")]]
-        await query.edit_message_text("👤 <b>مرحله بعد:</b>\nلطفاً نام مشتری (یا یک نشانه برای تشخیص این اکانت) را بفرستید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+        expiry_label = "نامحدود زمانی" if raw_days == "0" else f"{raw_days} روز"
+        kb = [[InlineKeyboardButton("↩️ انتخاب انقضا", callback_data=f"v2ru_vol_{context.user_data.get('v2_vol_gb')}")]]
+        await query.edit_message_text(
+            "➕ <b>فروش › V2Ray › مرحله ۳: نام مشتری</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"📦 حجم: <b>{context.user_data.get('v2_vol_gb')} گیگ</b>\n"
+            f"⏳ انقضا: <b>{expiry_label}</b>\n\n"
+            "نام مشتری یا یک نشانه برای تشخیص این اکانت را بفرستید:",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode="HTML",
+        )
         return
 
     elif d in ("v2conf_vol_yes", "v2_vol_buy_emergency_yes"):
@@ -12855,8 +12911,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['emergency_approved'] = True
         
         gb = context.user_data.get('v2_vol_gb')
-        if not gb:
+        if not gb or 'v2_vol_expiry_days' not in context.user_data:
             return await query.message.reply_text("❌ تراکنش منقضی شده است.")
+        expiry_days = int(context.user_data.get('v2_vol_expiry_days') or 0)
 
         if context.user_data.get('purchase_in_progress'):
             return await query.message.reply_text("⏳ درخواست قبلی هنوز در حال پردازش است...")
@@ -12905,7 +12962,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             un, c = await asyncio.to_thread(_db_reserve_username, br, c_start)
             if un is None: return await query.message.reply_text("❌ خطا در یافتن یوزرنیم آزاد.")
 
-            expire_timestamp = 0 # نامحدود زمانی
+            expire_timestamp = (
+                int((datetime.now() + timedelta(days=expiry_days)).timestamp())
+                if expiry_days > 0
+                else 0
+            )
             data_limit_bytes = int(gb) * 1024**3
             reset_strategy = "no_reset"
 
@@ -12947,7 +13008,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if ok:
                 cr_db = datetime.now().strftime("%Y-%m-%d")
-                exp_db = "نامحدود"
+                exp_db = (
+                    (datetime.now() + timedelta(days=expiry_days)).strftime("%Y-%m-%d")
+                    if expiry_days > 0
+                    else "نامحدود"
+                )
                 await asyncio.to_thread(_db_finalize_v2ray_user, un, "-", exp_db, cr_db, 0, c + 1, br, ag_id, data_limit_bytes, sub_url, None, None)
                 
                 c_name = context.user_data.get('v2_customer_name')
@@ -12977,11 +13042,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     actor = f"نماینده: {esc(ainf[0])}" if (role == 'agent' and ainf) else "ادمین"
                     c_txt = f"\nهزینه: {int(cost):,} تومان" if role == 'agent' else ""
-                    await _notify_super_admin(context.application, f"🆕 <b>ساخت اکانت جدید</b>\nنوع اکانت: V2Ray حجمی\nتوسط: {actor}\nحجم: {gb} گیگابایت{c_txt}", tg_user=update.effective_user)
-                    await asyncio.to_thread(_db_log_activity, ag_id if role=='agent' else 0, un, 'create', 'v2ray_vol', f"{gb} گیگ", cost if role=='agent' else 0)
+                    expiry_txt = "نامحدود زمانی" if expiry_days == 0 else f"{expiry_days} روز"
+                    await _notify_super_admin(context.application, f"🆕 <b>ساخت اکانت جدید</b>\nنوع اکانت: V2Ray حجمی\nتوسط: {actor}\nحجم: {gb} گیگابایت\nانقضا: {expiry_txt}{c_txt}", tg_user=update.effective_user)
+                    await asyncio.to_thread(_db_log_activity, ag_id if role=='agent' else 0, un, 'create', 'v2ray_vol', f"{gb} گیگ - {expiry_txt}", cost if role=='agent' else 0)
                 except: pass
 
-                txt = f"✅ <b>فاکتور سرویس V2Ray حجمی</b>\n\n👤 یوزرنیم: <code>{esc(un)}</code>\n🔗 لینک اتصال:\n<code>{esc(sub_url)}</code>\n\n📦 حجم: {gb} گیگابایت\n📅 انقضا: نامحدود (بدون انقضای زمان)\n👥 تعداد کاربر: نامحدود"
+                expiry_invoice = (
+                    "نامحدود زمانی"
+                    if expiry_days == 0
+                    else f"{expiry_days} روز - {format_db_date_to_jalali(exp_db)}"
+                )
+                txt = f"✅ <b>فاکتور سرویس V2Ray حجمی</b>\n\n👤 یوزرنیم: <code>{esc(un)}</code>\n🔗 لینک اتصال:\n<code>{esc(sub_url)}</code>\n\n📦 حجم: {gb} گیگابایت\n📅 انقضا: {expiry_invoice}\n👥 تعداد کاربر: نامحدود"
                 await context.bot.send_photo(chat_id=query.message.chat_id, photo=qr_buf, caption=txt, parse_mode="HTML")
                 try: await query.delete_message()
                 except: pass

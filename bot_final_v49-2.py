@@ -4447,6 +4447,36 @@ async def _mza_render(target, text, kb):
     else:
         await target.message.reply_text(text, reply_markup=markup, parse_mode="HTML")
 
+async def _mza_show_renew_confirm(target, username, days):
+    days = int(days)
+    txt = (
+        f"📅 <b>تمدید اشتراک</b>\n\n"
+        f"کاربر: <code>{esc(username)}</code>\n"
+        f"مدت تمدید: <b>{days} روز</b>\n\n"
+        "تاریخ انقضا از وضعیت فعلی Marzban دوباره محاسبه می‌شود."
+    )
+    kb = [
+        [InlineKeyboardButton("✅ تایید تمدید", callback_data=f"mza_renewyes_{days}_{username}")],
+        [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_user_{username}")],
+    ]
+    await _mza_render(target, txt, kb)
+
+
+async def _mza_show_addvol_confirm(target, username, gb):
+    gb = int(gb)
+    txt = (
+        f"➕ <b>افزایش حجم</b>\n\n"
+        f"کاربر: <code>{esc(username)}</code>\n"
+        f"حجم اضافه: <b>{gb} GB</b>\n\n"
+        "حجم جدید بر اساس محدودیت فعلی Marzban محاسبه می‌شود."
+    )
+    kb = [
+        [InlineKeyboardButton("✅ تایید افزایش حجم", callback_data=f"mza_addvolyes_{gb}_{username}")],
+        [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_user_{username}")],
+    ]
+    await _mza_render(target, txt, kb)
+
+
 async def _show_marzban_admin_dashboard(target, context):
     service = await _get_marzban_admin_service()
     stats_result, nodes_result = await asyncio.gather(

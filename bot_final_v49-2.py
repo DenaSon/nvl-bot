@@ -12883,7 +12883,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['state'] = 'V2_VOL_CUSTOM_INPUT'
             await query.edit_message_text("✏️ حجم دلخواه را فقط به‌صورت عدد وارد کنید.\n\nبازه مجاز: 1 تا 100 گیگ", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="v2r_type_vol")]]))
             return
-        context.user_data['v2_vol_gb'] = int(val)
+        try:
+            gb = int(val)
+        except ValueError:
+            return await query.edit_message_text("❌ حجم انتخابی نامعتبر است.")
+        if not (1 <= gb <= 100):
+            return await query.edit_message_text("❌ حجم باید بین 1 تا 100 گیگ باشد.")
+        context.user_data['v2_vol_gb'] = gb
         context.user_data['state'] = None
         await _show_v2_vol_expiry_step(query, context, is_edit=True)
         return

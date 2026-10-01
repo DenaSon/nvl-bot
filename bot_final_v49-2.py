@@ -232,7 +232,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V109-2026-10-02-ui-ux-navigation-polish"
+BOT_VERSION_TAG = "V110-2026-10-02-modern-v2ray-sales-wizard"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -12682,30 +12682,70 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
               [InlineKeyboardButton("↩️ انتخاب سرویس", callback_data="buy_back_start")]]
         await query.edit_message_text("➕ <b>فروش › SSH</b>\n━━━━━━━━━━━━━━\n📅 مدت اشتراک را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
     elif d == "v2ray_buy_menu":
+        # Phase 5.7: one guided V2Ray sales wizard.  Keep the existing
+        # settlement callbacks underneath for compatibility, but do not expose
+        # the old "time-based vs volume-only" product split as the first UX.
         v2_unlimit_en = await asyncio.to_thread(_db_get_setting, 'sell_v2ray_unlimit', '1') == '1'
         v2_vol_en = await asyncio.to_thread(_db_get_setting, 'sell_v2ray_vol', '1') == '1'
         kb = []
-        if v2_unlimit_en:
-            kb.append([InlineKeyboardButton("♾ نامحدود (زمان‌دار)", callback_data="v2r_type_unlimit")])
+
         if v2_vol_en:
-            kb.append([InlineKeyboardButton("📦 حجمی (بدون انقضای زمان)", callback_data="v2r_type_vol")])
+            volume_presets = (10, 15, 20, 30, 50, 100)
+            for i in range(0, len(volume_presets), 2):
+                row = [
+                    InlineKeyboardButton(
+                        f"📦 {volume_presets[i]} گیگ",
+                        callback_data=f"v2ru_vol_{volume_presets[i]}",
+                    )
+                ]
+                if i + 1 < len(volume_presets):
+                    row.append(
+                        InlineKeyboardButton(
+                            f"📦 {volume_presets[i + 1]} گیگ",
+                            callback_data=f"v2ru_vol_{volume_presets[i + 1]}",
+                        )
+                    )
+                kb.append(row)
+            kb.append([InlineKeyboardButton("✏️ حجم دلخواه", callback_data="v2ru_vol_custom")])
+
+        if v2_unlimit_en:
+            kb.append([InlineKeyboardButton("♾ حجم نامحدود", callback_data="v2r_type_unlimit")])
+
         kb.append([InlineKeyboardButton("↩️ انتخاب سرویس", callback_data="buy_back_start")])
 
+        commercial_hint = []
+        if v2_vol_en:
+            commercial_hint.append("حجم مشخص: قیمت‌گذاری فعلی به‌ازای هر گیگ")
+        if v2_unlimit_en:
+            commercial_hint.append("حجم نامحدود: قیمت‌گذاری فعلی بر اساس مدت و تعداد کاربر")
+        hint = "\n".join(f"• {item}" for item in commercial_hint)
+
         await query.edit_message_text(
-            "➕ <b>فروش › V2Ray</b>\n"
+            "➕ <b>فروش › V2Ray › مرحله ۱: حجم</b>\n"
             "━━━━━━━━━━━━━━\n"
-            "نوع پلن را انتخاب کنید:",
+            "حجم اشتراک را انتخاب کنید.\n\n"
+            f"{hint}",
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode="HTML",
         )
 
     elif d == "v2r_type_unlimit":
-        kb = [[InlineKeyboardButton("👤 ۱ کاربره (۱ ماهه)", callback_data="v2ru_1_1"), InlineKeyboardButton("👤 ۱ کاربره (۲ ماهه)", callback_data="v2ru_2_1")],
-              [InlineKeyboardButton("👥 ۲ کاربره (۱ ماهه)", callback_data="v2ru_1_2"), InlineKeyboardButton("👥 ۲ کاربره (۲ ماهه)", callback_data="v2ru_2_2")],
-              [InlineKeyboardButton("✏️ ساخت با مقادیر دلخواه", callback_data="v2ru_custom_users")],
-              [InlineKeyboardButton("↩️ نوع پلن V2Ray", callback_data="v2ray_buy_menu")]]
+        kb = [
+            [
+                InlineKeyboardButton("👤 ۱ کاربر · ۳۰ روز", callback_data="v2ru_1_1"),
+                InlineKeyboardButton("👤 ۱ کاربر · ۶۰ روز", callback_data="v2ru_2_1"),
+            ],
+            [
+                InlineKeyboardButton("👥 ۲ کاربر · ۳۰ روز", callback_data="v2ru_1_2"),
+                InlineKeyboardButton("👥 ۲ کاربر · ۶۰ روز", callback_data="v2ru_2_2"),
+            ],
+            [InlineKeyboardButton("✏️ مدت دلخواه", callback_data="v2ru_custom_users")],
+            [InlineKeyboardButton("↩️ انتخاب حجم", callback_data="v2ray_buy_menu")],
+        ]
         await query.edit_message_text(
-            "➕ <b>فروش › V2Ray › مدت‌دار</b>\n━━━━━━━━━━━━━━\nپلن را انتخاب کنید:",
+            "➕ <b>فروش › V2Ray › حجم نامحدود › مرحله ۲</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            "مدت و تعداد کاربر را انتخاب کنید:",
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode="HTML",
         )

@@ -4677,9 +4677,12 @@ def _mza_jdn_to_gregorian(jdn):
 
 def _mza_jalali_to_gregorian(jy, jm, jd):
     jy, jm, jd = int(jy), int(jm), int(jd)
-    if not (1 <= jm <= 12 and 1 <= jd <= 31):
-        raise ValueError("invalid Jalali date")
-    _leap, gy, march = _jal_cal(jy)
+    if not 1 <= jm <= 12:
+        raise ValueError("invalid Jalali month")
+    leap, gy, march = _jal_cal(jy)
+    max_day = 31 if jm <= 6 else 30 if jm <= 11 else (30 if leap == 0 else 29)
+    if not 1 <= jd <= max_day:
+        raise ValueError("invalid Jalali day")
     jdn = (
         _gregorian_to_jdn(gy, 3, march)
         + (jm - 1) * 31
@@ -4687,10 +4690,7 @@ def _mza_jalali_to_gregorian(jy, jm, jd):
         + jd
         - 1
     )
-    result = _mza_jdn_to_gregorian(jdn)
-    if gregorian_to_jalali(*result) != (jy, jm, jd):
-        raise ValueError("invalid Jalali date")
-    return result
+    return _mza_jdn_to_gregorian(jdn)
 
 
 def _mza_parse_exact_expiry_date(value):
@@ -4762,6 +4762,11 @@ def _mza_create_expiry_label(draft):
 
 
 async def _mza_show_create_username(target, context):
+    context.user_data.pop("state", None)
+    context.user_data.pop("mza_action_user", None)
+    context.user_data.pop("mza_action_node", None)
+    context.user_data.pop("mza_node_pending_changes", None)
+    _mza_clear_host_pending(context)
     _mza_clear_create(context)
     context.user_data["mza_create_draft"] = {}
     kb = [
@@ -9817,7 +9822,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         if context.user_data.get("mza_create_busy"):
-            await query.answer("در حال پردازش است…", show_alert=False)
+            await query.message.reply_text("⏳ درخواست ساخت قبلی هنوز در حال پردازش است.")
             return
 
         context.user_data["mza_create_busy"] = True

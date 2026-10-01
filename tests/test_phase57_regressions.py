@@ -13,11 +13,10 @@ class Phase57ModernV2RaySalesRegressionTests(unittest.TestCase):
         end = cls.source.index('    elif d == "v2ru_custom_users":', start)
         cls.sales_entry_region = cls.source[start:end]
 
-    def test_v110_marker_is_present(self):
-        self.assertIn(
-            'BOT_VERSION_TAG = "V110-2026-10-02-modern-v2ray-sales-wizard"',
-            self.source,
-        )
+    def test_phase57_features_survive_current_version(self):
+        self.assertIn("BOT_VERSION_TAG =", self.source)
+        self.assertIn("فروش › V2Ray › مرحله ۱: حجم", self.source)
+        self.assertIn("async def _provision_v2ray_sale_user", self.source)
 
     def test_visible_v2ray_sales_entry_is_one_guided_wizard(self):
         self.assertIn("فروش › V2Ray › مرحله ۱: حجم", self.sales_entry_region)

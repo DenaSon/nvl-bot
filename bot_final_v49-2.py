@@ -232,7 +232,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V110-2026-10-02-modern-v2ray-sales-wizard"
+BOT_VERSION_TAG = "V111-2026-10-02-v2ray-1gb-minimum"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -7199,8 +7199,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not val.isdigit():
             await update.message.reply_text("❌ فقط عدد بفرستید:"); return
         gb = int(val)
-        if not (10 <= gb <= 100):
-            await update.message.reply_text("❌ حجم باید بین 10 تا 100 گیگ باشد. دوباره بفرستید:"); return
+        if not (1 <= gb <= 100):
+            await update.message.reply_text("❌ حجم باید بین 1 تا 100 گیگ باشد. دوباره بفرستید:"); return
         context.user_data['v2_vol_gb'] = gb
         context.user_data['state'] = 'V2_VOL_CUSTOMER_NAME'
         kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="v2r_type_vol")]]
@@ -7213,8 +7213,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     elif state == 'V2_ADD_VOL_INPUT':
         val = fa_to_en_digits(text).strip()
-        if not val.isdigit() or not (10 <= int(val) <= 100):
-            return await update.message.reply_text("❌ فقط عدد بین 10 تا 100 گیگ بفرستید:")
+        if not val.isdigit() or not (1 <= int(val) <= 100):
+            return await update.message.reply_text("❌ فقط عدد بین 1 تا 100 گیگ بفرستید:")
         await _show_v2_addvol_confirm(update.message, context, int(val), role, context.user_data.get('agent_id', 0))
         return
 
@@ -11151,7 +11151,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d.startswith("v2act_addvol_"):
         un = d.split("_", 2)[2]
         context.user_data['v2_vol_un'] = un
-        vols = [10, 20, 30, 40, 50]
+        vols = [1, 5, 10, 20, 30, 40, 50]
         kb = []
         for i in range(0, len(vols), 2):
             row = [InlineKeyboardButton(f"{vols[i]} گیگ", callback_data=f"v2addvol_gb_{vols[i]}")]
@@ -11159,14 +11159,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             kb.append(row)
         kb.append([InlineKeyboardButton("✏️ حجم دلخواه", callback_data="v2addvol_gb_custom")])
         kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data=f"udet_{un}")])
-        await query.edit_message_text(f"➕ <b>افزایش حجم اکانت {esc(un)}</b>\n\nمقدار حجم مورد نظر برای اضافه شدن را انتخاب کنید:\n(بازه مجاز دلخواه: 10 تا 100 گیگ)", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+        await query.edit_message_text(f"➕ <b>افزایش حجم اکانت {esc(un)}</b>\n\nمقدار حجم مورد نظر برای اضافه شدن را انتخاب کنید:\n(بازه مجاز دلخواه: 1 تا 100 گیگ)", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
     elif d.startswith("v2addvol_gb_"):
         val = d.split("_")[2]
         if val == "custom":
             context.user_data['state'] = 'V2_ADD_VOL_INPUT'
             kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data=f"v2act_addvol_{context.user_data.get('v2_vol_un')}")] ]
-            await query.edit_message_text("✏️ حجم دلخواه برای افزایش را به عدد وارد کنید (بین 10 تا 100 گیگ):", reply_markup=InlineKeyboardMarkup(kb))
+            await query.edit_message_text("✏️ حجم دلخواه برای افزایش را به عدد وارد کنید (بین 1 تا 100 گیگ):", reply_markup=InlineKeyboardMarkup(kb))
             return
         gb = int(val)
         await _show_v2_addvol_confirm(query.message, context, gb, role, ag_id, is_edit=True)
@@ -12748,7 +12748,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = []
 
         if v2_vol_en:
-            volume_presets = (10, 15, 20, 30, 50, 100)
+            volume_presets = (1, 5, 10, 20, 50, 100)
             for i in range(0, len(volume_presets), 2):
                 row = [
                     InlineKeyboardButton(
@@ -12821,7 +12821,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("📅 لطفاً تعداد روزهای اعتبار اکانت را وارد کنید (بازه مجاز: ۱ تا ۶۰ روز):", reply_markup=InlineKeyboardMarkup(kb))
         
     elif d == "v2r_type_vol":
-        vols = [10, 15, 20, 25, 30, 35, 40, 45, 50, 100]
+        vols = [1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 100]
         kb = []
         for i in range(0, len(vols), 2):
             row = [InlineKeyboardButton(f"{vols[i]} گیگ", callback_data=f"v2ru_vol_{vols[i]}")]
@@ -12833,7 +12833,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "➕ <b>فروش › V2Ray › حجمی</b>\n"
             "━━━━━━━━━━━━━━\n"
             "📦 حجم موردنظر را انتخاب کنید.\n"
-            "بازه مجاز: 10 تا 100 گیگ",
+            "بازه مجاز: 1 تا 100 گیگ",
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode="HTML",
         )
@@ -12842,7 +12842,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val = d.split("_")[2]
         if val == "custom":
             context.user_data['state'] = 'V2_VOL_CUSTOM_INPUT'
-            await query.edit_message_text("✏️ حجم دلخواه را فقط به‌صورت عدد وارد کنید.\n\nبازه مجاز: 10 تا 100 گیگ", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="v2r_type_vol")]]))
+            await query.edit_message_text("✏️ حجم دلخواه را فقط به‌صورت عدد وارد کنید.\n\nبازه مجاز: 1 تا 100 گیگ", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="v2r_type_vol")]]))
             return
         context.user_data['v2_vol_gb'] = int(val)
         context.user_data['state'] = 'V2_VOL_CUSTOMER_NAME'

@@ -69,7 +69,7 @@ class Phase56NavigationRegressionTests(unittest.TestCase):
         self.assertIn('"umanage_v2ray"', self.source)
         self.assertIn('"umanage_v2ray_vol"', self.source)
         self.assertIn('back_cb = f"agm_det_{agent_filter}" if agent_filter is not None else "users_hub"', self.source)
-        self.assertIn('elif d == "users_hub":', self.source)
+        self.assertIn('elif d == "users_hub" and role in (\'admin\', \'agent\'):', self.source)
 
     def test_user_navigation_callbacks_are_role_guarded(self):
         self.assertIn('d.startswith("umanage_")', self.source)

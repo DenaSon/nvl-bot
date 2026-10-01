@@ -35,7 +35,6 @@ class Phase572V2RayVolumeExpiryRegressionTests(unittest.TestCase):
         )
         self.assertIn("if not (1 <= gb <= 100):", self.source)
         self.assertIn("context.user_data['v2_vol_gb'] = gb", self.source)
-        self.assertIn("context.user_data['v2_vol_gb'] = gb", self.source)
 
     def test_expiry_is_required_before_final_purchase(self):
         self.assertIn(
@@ -48,7 +47,10 @@ class Phase572V2RayVolumeExpiryRegressionTests(unittest.TestCase):
             "context.user_data['v2_vol_expiry_days'] = int(raw_days)",
             self.source,
         )
-        self.assertIn('raw_days not in {"0", "1", "15", "30", "60"}', self.source)
+        self.assertIn(
+            'raw_days not in {"0", "1", "15", "30", "60"}',
+            self.source,
+        )
 
     def test_marzban_expire_is_zero_only_for_unlimited_time(self):
         self.assertIn(
@@ -59,19 +61,25 @@ class Phase572V2RayVolumeExpiryRegressionTests(unittest.TestCase):
 
     def test_local_expire_date_matches_selected_days(self):
         self.assertIn(
-            "(datetime.now() + timedelta(days=expiry_days)).strftime("%Y-%m-%d")",
+            '(datetime.now() + timedelta(days=expiry_days)).strftime("%Y-%m-%d")',
             self.source,
         )
         self.assertIn('else "نامحدود"', self.source)
 
     def test_review_invoice_and_logs_include_expiry(self):
-        self.assertIn('expiry_label = "نامحدود زمانی" if expiry_days == 0 else f"{expiry_days} روز"', self.source)
+        self.assertIn(
+            'expiry_label = "نامحدود زمانی" if expiry_days == 0 else f"{expiry_days} روز"',
+            self.source,
+        )
         self.assertIn("📅 انقضا: {expiry_invoice}", self.source)
         self.assertIn('f"{gb} گیگ - {expiry_txt}"', self.source)
 
     def test_volume_price_formula_is_still_per_gb_only(self):
         self.assertIn("v2_vol_bp = ainf[17]", self.source)
-        self.assertIn("retail_dec = base_price_dec * Decimal(gb)", self.source)
+        self.assertIn(
+            "retail_dec = base_price_dec * Decimal(gb)",
+            self.source,
+        )
 
 
 if __name__ == "__main__":

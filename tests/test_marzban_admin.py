@@ -103,6 +103,58 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             params=None,
         )
 
+    async def test_set_user_status_updates_remote_status(self):
+        with patch("v2ray_engine.api_request", new_callable=AsyncMock) as request:
+            request.return_value = (True, {"username": "hamid", "status": "disabled"})
+            ok, payload = await self.service.set_user_status("hamid", "disabled")
+
+        self.assertTrue(ok)
+        self.assertEqual(payload["status"], "disabled")
+        request.assert_awaited_once_with(
+            "PUT",
+            "/api/user/hamid",
+            "https://marzban.example",
+            "admin",
+            "secret",
+            json_data={"status": "disabled"},
+            params=None,
+        )
+
+    async def test_delete_user_uses_delete_endpoint(self):
+        with patch("v2ray_engine.api_request", new_callable=AsyncMock) as request:
+            request.return_value = (True, None)
+            ok, payload = await self.service.delete_user("hamid")
+
+        self.assertTrue(ok)
+        self.assertIsNone(payload)
+        request.assert_awaited_once_with(
+            "DELETE",
+            "/api/user/hamid",
+            "https://marzban.example",
+            "admin",
+            "secret",
+            json_data=None,
+            params=None,
+        )
+
+    async def test_modify_user_supports_expiry_extension_payload(self):
+        new_expire = 1793577600
+        with patch("v2ray_engine.api_request", new_callable=AsyncMock) as request:
+            request.return_value = (True, {"username": "hamid", "expire": new_expire})
+            ok, payload = await self.service.modify_user("hamid", expire=new_expire)
+
+        self.assertTrue(ok)
+        self.assertEqual(payload["expire"], new_expire)
+        request.assert_awaited_once_with(
+            "PUT",
+            "/api/user/hamid",
+            "https://marzban.example",
+            "admin",
+            "secret",
+            json_data={"expire": new_expire},
+            params=None,
+        )
+
     async def test_subscription_url_is_made_absolute(self):
         self.service.get_user = AsyncMock(
             return_value=(True, {"subscription_url": "/sub/token"})

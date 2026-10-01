@@ -42,6 +42,19 @@ class Phase5InboundHostRegressionTests(unittest.TestCase):
         self.assertGreaterEqual(self.source.count("MZA_HOST_FIELD_INPUT"), 3)
         self.assertIn("_mza_clear_host_pending(context)", self.source)
 
+    def test_node_and_host_confirmation_domains_are_isolated(self):
+        self.assertIn("node_edit_starter =", self.source)
+        self.assertIn("host_edit_starter = d.startswith('mza_hedit_')", self.source)
+        self.assertIn(
+            "if not d.startswith('mza_nedit_confirm_') and not node_edit_starter:",
+            self.source,
+        )
+        self.assertIn(
+            "if not d.startswith('mza_hconfirm_') and not host_edit_starter:",
+            self.source,
+        )
+        self.assertIn("context.user_data.pop('mza_node_pending_changes', None)", self.source)
+
     def test_host_mutations_use_service_layer_and_stale_snapshot(self):
         self.assertIn("service.update_host(", self.source)
         self.assertIn("expected_host=pending.get('expected_host')", self.source)

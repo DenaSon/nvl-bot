@@ -10,11 +10,11 @@ class Phase56NavigationRegressionTests(unittest.TestCase):
     def setUpClass(cls):
         cls.source = BOT_PATH.read_text(encoding="utf-8")
 
-    def test_v109_marker_is_present(self):
-        self.assertIn(
-            'BOT_VERSION_TAG = "V109-2026-10-02-ui-ux-navigation-polish"',
-            self.source,
-        )
+    def test_phase56_features_survive_current_version(self):
+        self.assertIn("BOT_VERSION_TAG =", self.source)
+        self.assertIn("➕ فروش / ساخت اشتراک", self.source)
+        self.assertIn("👥 کاربران", self.source)
+        self.assertIn("🛠 V2Ray / Marzban", self.source)
 
     def test_admin_home_is_domain_based(self):
         for label in (

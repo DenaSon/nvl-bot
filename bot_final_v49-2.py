@@ -4676,20 +4676,32 @@ async def _show_marzban_user_readonly(target, context, username):
         f"نام اشتراک  {esc(subscription_name or 'تنظیم نشده')}"
     )
     status_key = str(user.get("status") or "").lower()
-    toggle_label = "🔴 غیرفعال کردن" if status_key == "active" else "🟢 فعال کردن"
-    kb = [
-        [InlineKeyboardButton(toggle_label, callback_data=f"mza_toggle_{username}"),
-         InlineKeyboardButton("♻️ ریست مصرف", callback_data=f"mza_reset_{username}")],
-        [InlineKeyboardButton("🔗 لینک اشتراک", callback_data=f"mza_link_{username}"),
-         InlineKeyboardButton("📱 QR Code", callback_data=f"mza_qr_{username}")],
-    ]
+    kb = []
+
+    state_row = []
+    if status_key == "active":
+        state_row.append(InlineKeyboardButton("🔴 غیرفعال کردن", callback_data=f"mza_toggle_{username}"))
+    elif status_key == "disabled":
+        state_row.append(InlineKeyboardButton("🟢 فعال کردن", callback_data=f"mza_toggle_{username}"))
+    if status_key in ("active", "limited"):
+        state_row.append(InlineKeyboardButton("♻️ ریست مصرف", callback_data=f"mza_reset_{username}"))
+    if state_row:
+        kb.append(state_row)
+
+    plan_row = []
+    if user.get("expire"):
+        plan_row.append(InlineKeyboardButton("📅 تمدید", callback_data=f"mza_renew_{username}"))
+    if user.get("data_limit"):
+        plan_row.append(InlineKeyboardButton("➕ افزایش حجم", callback_data=f"mza_addvol_{username}"))
+    if plan_row:
+        kb.append(plan_row)
+
     if meta:
         kb.append([InlineKeyboardButton("✏️ نام اشتراک", callback_data=f"mza_subname_{username}")])
-    if user.get("expire"):
-        kb.append([InlineKeyboardButton("📅 تمدید", callback_data=f"mza_renew_{username}")])
-    if user.get("data_limit"):
-        kb.append([InlineKeyboardButton("➕ افزایش حجم", callback_data=f"mza_addvol_{username}")])
+
     kb.extend([
+        [InlineKeyboardButton("🔗 لینک اشتراک", callback_data=f"mza_link_{username}"),
+         InlineKeyboardButton("📱 QR Code", callback_data=f"mza_qr_{username}")],
         [InlineKeyboardButton("🗑 حذف کاربر", callback_data=f"mza_delete_{username}")],
         [InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"mza_user_{username}"),
          InlineKeyboardButton("🔙 بازگشت", callback_data="mza_backlist")],
@@ -8369,6 +8381,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d.startswith('mza_resetyes_'):
         username = d[len('mza_resetyes_'):]
         service = await _get_marzban_admin_service()
+        ok_user, user = await service.get_user(username)
+        if not ok_user or not isinstance(user, dict):
+            await query.edit_message_text("❌ دریافت وضعیت کاربر از Marzban ناموفق بود.")
+            return
+        if str(user.get('status') or '').lower() not in ('active', 'limited'):
+            await query.edit_message_text(
+                "❌ ریست مصرف برای وضعیت فعلی کاربر مجاز نیست.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_user_{username}")]])
+            )
+            return
         ok_reset, err = await service.reset_user_usage(username)
         if not ok_reset:
             log.warning("Marzban dashboard usage reset failed for %s: %r", username, err)

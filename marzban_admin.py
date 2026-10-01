@@ -279,6 +279,15 @@ def _host_payload(host: Dict[str, Any]) -> Dict[str, Any]:
     payload = host_snapshot(host)
     if not payload.get("remark") or not payload.get("address"):
         raise ValueError("Marzban host requires remark and address")
+    # These fields are non-optional in Marzban's ProxyHost model. GET /api/hosts
+    # normally serializes the defaults, but keeping the defaults here makes the
+    # PUT safe even if an older/alternate response omitted them.
+    if payload.get("security") is None:
+        payload["security"] = "inbound_default"
+    if payload.get("alpn") is None:
+        payload["alpn"] = ""
+    if payload.get("fingerprint") is None:
+        payload["fingerprint"] = ""
     return payload
 
 

@@ -4252,7 +4252,7 @@ async def _show_users_panel(update, context, page=0, agent_filter=None):
     
     # 🌟 گرفتن نوع سرویس انتخابی کاربر و تعیین نام برای نمایش در هدر
     manage_type = context.user_data.get('manage_type', 'ssh')
-    if manage_type == "v2ray": srv_name = "V2Ray نامحدود"
+    if manage_type == "v2ray": srv_name = "V2Ray مدت‌دار"
     elif manage_type == "v2ray_vol": srv_name = "V2Ray حجمی"
     else: srv_name = "SSH"
 
@@ -4278,7 +4278,8 @@ async def _show_users_panel(update, context, page=0, agent_filter=None):
     
     if role == 'admin' and agent_filter is None:
         bottom_kb.append([InlineKeyboardButton("📢 پیام همگانی به نمایندگان", callback_data="bcast_menu")])
-    bottom_kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data=back_cb)])
+    bottom_label = "↩️ نماینده" if agent_filter is not None else "↩️ نوع سرویس"
+    bottom_kb.append([InlineKeyboardButton(bottom_label, callback_data=back_cb)])
 
     if not users:
         txt = f"{panel_title}\n\nهیچ کاربری یافت نشد."; kb = bottom_kb
@@ -6912,7 +6913,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '➕ فروش / ساخت اشتراک', '➕ فروش اشتراک', '👥 کاربران', '👥 کاربران من',
         '🤝 نمایندگان', '📊 گزارش‌ها', '💰 مالی و کارت‌ها', '⚙️ تنظیمات',
         '🛠 V2Ray / Marzban', '📦 بکاپ', '💳 شارژ حساب', '💰 کیف پول و حساب',
-        '✏️ نام برند',
+        '✏️ نام برند', '💳 کارت اختصاصی من',
         # Backward-compatible aliases from pre-5.6 keyboards/messages
         '🛒 خرید اشتراک', '👥 مدیریت کاربران', '💼 مدیریت نماینده‌ها', '📊 آمار و لاگ',
         '💳 تنظیمات مالی', '⚙️ تنظیمات سرور', '🛠 مدیریت V2Ray', '📦 دریافت بکاپ',
@@ -6931,7 +6932,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(
                     "⛔️ <b>کاربر گرامی، ابتدا باید نام برند اختصاصی خود را تعیین کنید.</b>\n\n"
                     "جهت استقلال و تفکیک اکانت‌های شما، داشتن یک نام برند اجباری است (مثلاً: <b>AliVpn</b>). "
-                    "لطفاً از منوی پایین روی دکمه «✏️ تغییر نام برند» کلیک کنید.", 
+                    "لطفاً از منوی پایین روی دکمه «✏️ نام برند» کلیک کنید.", 
                     parse_mode="HTML"
                 )
                 return
@@ -10884,7 +10885,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # جستجو و منو
     if d == "usearch":
-        await query.edit_message_text("🔍 نام کاربری (مثال: 0350) را بفرستید:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="uact_back")]]))
+        await query.edit_message_text("👥 کاربران › 🔍 جستجو\n\nنام کاربری (مثال: 0350) را بفرستید:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ لیست کاربران", callback_data="uact_back")]]))
         context.user_data['state'] = 'USER_SEARCH_INPUT'
     #---------------------------------------------------------------------
     elif d == "umanage_ssh":
@@ -12669,7 +12670,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
         cap = (f"🧾 <b>درخواست برداشت وجه جدید</b>\n\n👤 نماینده: {esc(agent_name)} (کد: {ag_id})\n"
                f"💰 مبلغ: {int(amount):,} تومان\n👤 نام صاحب کارت: {esc(full_name)}\n💳 شماره کارت: <code>{esc(card)}</code>\n\n"
-               f"پس از واریز، از پنل «مدیریت نماینده‌ها ← این نماینده ← درخواست‌های برداشت» عکس رسید را برای نماینده ارسال کنید.")
+               f"پس از واریز، از پنل «نمایندگان ← این نماینده ← درخواست‌های برداشت» عکس رسید را برای نماینده ارسال کنید.")
         for admin_chat_id in admin_ids:
             with contextlib.suppress(Exception):
                 await context.bot.send_message(chat_id=admin_chat_id, text=cap, parse_mode="HTML")

@@ -2586,6 +2586,66 @@ async def _calc_account_refund(username: str) -> tuple[float, str]:
         return float(refund), f"بازگشت {rem_days} روز از {total_days} روز: {refund:,.0f} تومان"
     except: return 0.0, "خطا در محاسبه"
 
+
+async def _delete_marzban_user_consistent(username: str):
+    """Delete a Marzban user and keep the NVL local record/wallet consistent.
+
+    The remote delete is the commit point.  If it fails, no local record or
+    balance is changed.  Refund calculation is done before the remote delete
+    because volumetric plans need Marzban usage data.
+    """
+    owner = await asyncio.to_thread(_db_get_user, username)
+    owner_agent_id = owner[5] if owner else 0
+    refund = 0.0
+    refund_desc = ""
+
+    if owner_agent_id:
+        try:
+            refund, refund_desc = await _calc_account_refund(username)
+        except Exception:
+            log.exception("خطا در محاسبه بازپرداخت حذف اکانت V2Ray %s", username)
+
+    service = await _get_marzban_admin_service()
+    ok_del, del_err = await service.delete_user(username)
+    if not ok_del:
+        log.warning("Marzban delete failed for %s: %r", username, del_err)
+        return False, "حذف روی Marzban انجام نشد؛ اطلاعات محلی دست‌نخورده ماند.", ""
+
+    refund_note = ""
+    if owner:
+        try:
+            with db_conn() as conn:
+                if owner_agent_id and refund > 0:
+                    conn.execute(
+                        "UPDATE agents SET balance = balance + ? WHERE id=?",
+                        (refund, owner_agent_id),
+                    )
+                    used_row = conn.execute(
+                        "SELECT emergency_used FROM agents WHERE id=?",
+                        (owner_agent_id,),
+                    ).fetchone()
+                    used_before = (used_row[0] or 0.0) if used_row else 0.0
+                    _apply_emergency_repayment(conn, owner_agent_id, refund)
+                    emergency_repaid = min(used_before, refund) if used_before > 0 else 0.0
+                    refund_note = f"\n💸 {refund_desc}"
+                    if emergency_repaid > 0:
+                        refund_note += (
+                            f"\n🆘 {int(emergency_repaid):,} تومان بدهی شارژ اضطراری نیز تسویه شد."
+                        )
+                conn.execute("DELETE FROM ssh_accounts WHERE username=?", (username,))
+        except Exception:
+            log.exception(
+                "Marzban user %s was deleted remotely but local finalization failed",
+                username,
+            )
+            return False, (
+                "کاربر از Marzban حذف شد، اما نهایی‌سازی دیتابیس محلی ناموفق بود؛ "
+                "لاگ سرور باید بررسی شود."
+            ), ""
+
+    return True, "حذف با موفقیت انجام شد.", refund_note
+
+
 def _db_get_agents_with_telegram():
     """🆕 لیست نمایندگانی که chat_id تلگرام معتبر دارند (telegram_id != 0) — مقصد «پیام همگانی»."""
     with db_conn() as conn:

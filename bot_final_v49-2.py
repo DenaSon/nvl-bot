@@ -232,7 +232,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V104-2026-10-01-marzban-user-management"
+BOT_VERSION_TAG = "V105-2026-10-01-subscription-name-action"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -767,6 +767,19 @@ def init_db():
         # Rendering it into subscription links/profile titles is deferred to the presentation phase.
         try: c.execute("ALTER TABLE ssh_accounts ADD COLUMN subscription_name TEXT DEFAULT NULL")
         except sqlite3.OperationalError: pass
+
+        # Per-Marzban-user presentation preferences.  This is intentionally
+        # independent of ssh_accounts so imported/legacy Marzban users can
+        # also have a display name in NVL.
+        c.execute('''CREATE TABLE IF NOT EXISTS marzban_user_prefs (
+                        username TEXT PRIMARY KEY,
+                        subscription_name TEXT DEFAULT NULL,
+                        updated_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
+        c.execute(
+            "INSERT OR IGNORE INTO marzban_user_prefs (username, subscription_name) "
+            "SELECT username, subscription_name FROM ssh_accounts "
+            "WHERE service_type IN ('v2ray','v2ray_vol') AND subscription_name IS NOT NULL"
+        )
 
         try: c.execute("ALTER TABLE agents ADD COLUMN v2ray_gb_price REAL DEFAULT 3000.0")
         except sqlite3.OperationalError: pass
@@ -2017,8 +2030,17 @@ def _db_get_customer_name(un):
         except Exception: return None
 
 def _db_get_subscription_name(un):
-    """Return the saved display name only for local V2Ray accounts."""
+    """Return the NVL display name for any Marzban user."""
     with db_conn() as conn:
+        row = conn.execute(
+            "SELECT subscription_name FROM marzban_user_prefs WHERE username=?",
+            (un,),
+        ).fetchone()
+        if row and row[0]:
+            return row[0]
+
+        # Backward-compatible fallback for values stored before the preferences
+        # table existed.
         row = conn.execute(
             "SELECT subscription_name FROM ssh_accounts "
             "WHERE username=? AND service_type IN ('v2ray','v2ray_vol')",
@@ -2028,14 +2050,22 @@ def _db_get_subscription_name(un):
 
 def _db_set_subscription_name(un, value):
     normalized = marzban_admin.normalize_subscription_name(value)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with db_conn() as conn:
-        cur = conn.execute(
+        conn.execute(
+            "INSERT INTO marzban_user_prefs (username, subscription_name, updated_at) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(username) DO UPDATE SET "
+            "subscription_name=excluded.subscription_name, updated_at=excluded.updated_at",
+            (un, normalized, now),
+        )
+        # Keep the legacy/local column synchronized when a matching NVL account
+        # exists, but do not require one.
+        conn.execute(
             "UPDATE ssh_accounts SET subscription_name=? "
             "WHERE username=? AND service_type IN ('v2ray','v2ray_vol')",
             (normalized, un),
         )
-        if cur.rowcount != 1:
-            raise KeyError("local V2Ray account not found")
     return normalized
 
 def _db_set_account_host(un, host):
@@ -2651,6 +2681,7 @@ async def _delete_marzban_user_consistent(username: str):
                             f"\n🆘 {int(emergency_repaid):,} تومان بدهی شارژ اضطراری نیز تسویه شد."
                         )
                 conn.execute("DELETE FROM ssh_accounts WHERE username=?", (username,))
+                conn.execute("DELETE FROM marzban_user_prefs WHERE username=?", (username,))
         except Exception:
             log.exception(
                 "Marzban user %s was deleted remotely but local finalization failed",
@@ -4654,17 +4685,17 @@ async def _show_marzban_user_readonly(target, context, username):
     def _local_meta():
         with db_conn() as conn:
             return conn.execute(
-                "SELECT agent_id, customer_name, subscription_name, service_type FROM ssh_accounts "
+                "SELECT agent_id, customer_name, service_type FROM ssh_accounts "
                 "WHERE username=? AND service_type IN ('v2ray','v2ray_vol')",
                 (username,),
             ).fetchone()
     meta = await asyncio.to_thread(_local_meta)
     owner_text = "ثبت محلی ندارد"
     customer_name = None
-    subscription_name = None
+    subscription_name = await asyncio.to_thread(_db_get_subscription_name, username)
     service_type = None
     if meta:
-        owner_id, customer_name, subscription_name, service_type = meta
+        owner_id, customer_name, service_type = meta
         if owner_id:
             info = await asyncio.to_thread(_db_get_agent_info, owner_id)
             owner_text = f"نماینده «{info[0]}»" if info else f"نماینده #{owner_id}"
@@ -4715,8 +4746,12 @@ async def _show_marzban_user_readonly(target, context, username):
     if plan_row:
         kb.append(plan_row)
 
-    if meta:
-        kb.append([InlineKeyboardButton("✏️ نام اشتراک", callback_data=f"mza_subname_{username}")])
+    kb.append([
+        InlineKeyboardButton(
+            "✏️ تغییر نام اشتراک" if subscription_name else "🏷 تعیین نام اشتراک",
+            callback_data=f"mza_subname_{username}",
+        )
+    ])
 
     kb.extend([
         [InlineKeyboardButton("🔗 لینک اشتراک", callback_data=f"mza_link_{username}"),
@@ -8439,18 +8474,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d.startswith('mza_subname_'):
         username = d[len('mza_subname_'):]
-        def _has_local_v2():
-            with db_conn() as conn:
-                return conn.execute(
-                    "SELECT 1 FROM ssh_accounts WHERE username=? "
-                    "AND service_type IN ('v2ray','v2ray_vol')",
-                    (username,),
-                ).fetchone() is not None
-        local = await asyncio.to_thread(_has_local_v2)
-        if not local:
+        service = await _get_marzban_admin_service()
+        ok_user, remote_user = await service.get_user(username)
+        if not ok_user or not isinstance(remote_user, dict):
             await query.edit_message_text(
-                "❌ این کاربر رکورد محلی NVL ندارد و نام اشتراک برای آن قابل ذخیره نیست.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_user_{username}")]])
+                "❌ کاربر در Marzban یافت نشد.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ بازگشت", callback_data="mza_home")]])
             )
             return
         current = await asyncio.to_thread(_db_get_subscription_name, username)
@@ -8472,9 +8501,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         username = d[len('mza_subclear_'):]
         try:
             await asyncio.to_thread(_db_set_subscription_name, username, None)
-        except KeyError:
+        except Exception:
+            log.exception("خطا در حذف نام اشتراک %s", username)
             await query.edit_message_text(
-                "❌ رکورد محلی V2Ray برای این کاربر پیدا نشد.",
+                "❌ حذف نام اشتراک انجام نشد.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_user_{username}")]])
             )
             return

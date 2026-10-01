@@ -232,7 +232,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V106-2026-10-02-marzban-node-management"
+BOT_VERSION_TAG = "V107-2026-10-02-marzban-inbound-host-management"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -4625,8 +4625,9 @@ async def _show_marzban_admin_dashboard(target, context):
     kb = [
         [InlineKeyboardButton("👥 کاربران", callback_data="mza_users_0"),
          InlineKeyboardButton("🟢 آنلاین", callback_data="mza_online_0")],
-        [InlineKeyboardButton("🔍 جستجوی کاربر", callback_data="mza_search"),
-         InlineKeyboardButton("🖥 نودها", callback_data="mza_nodes")],
+        [InlineKeyboardButton("🔍 جستجوی کاربر", callback_data="mza_search")],
+        [InlineKeyboardButton("🖥 نودها", callback_data="mza_nodes"),
+         InlineKeyboardButton("🌐 Inbounds & Hosts", callback_data="mza_inbounds")],
         [InlineKeyboardButton("🔄 بروزرسانی", callback_data="mza_home")],
         [InlineKeyboardButton("🔙 منوی اصلی", callback_data="uact_back_to_menu")],
     ]
@@ -4991,6 +4992,417 @@ async def _show_marzban_node_detail(target, context, node_id):
             InlineKeyboardButton("🔙 نودها", callback_data="mza_nodes"),
         ],
     ])
+    await _mza_render(target, "\n".join(lines), kb)
+
+
+_MZA_HOST_EDIT_TOKENS = {
+    "remark": "remark",
+    "address": "address",
+    "port": "port",
+    "sni": "sni",
+    "host": "host",
+    "path": "path",
+    "sec": "security",
+    "alpn": "alpn",
+    "fp": "fingerprint",
+    "frag": "fragment_setting",
+    "noise": "noise_setting",
+}
+_MZA_HOST_TOGGLE_TOKENS = {
+    "disabled": "is_disabled",
+    "insecure": "allowinsecure",
+    "mux": "mux_enable",
+    "ua": "random_user_agent",
+    "snihost": "use_sni_as_host",
+}
+_MZA_HOST_FIELD_LABELS = {
+    "remark": "Remark",
+    "address": "Address",
+    "port": "Port",
+    "sni": "SNI",
+    "host": "Host",
+    "path": "Path / Service",
+    "security": "Security",
+    "alpn": "ALPN",
+    "fingerprint": "Fingerprint",
+    "allowinsecure": "Allow Insecure",
+    "is_disabled": "Disabled",
+    "mux_enable": "Mux",
+    "fragment_setting": "Fragment",
+    "noise_setting": "Noise",
+    "random_user_agent": "Random User-Agent",
+    "use_sni_as_host": "Use SNI as Host",
+}
+_MZA_HOST_EDIT_HINTS = {
+    "remark": "نام نمایشی جدید را بفرستید.",
+    "address": "IP یا hostname را بدون http/https بفرستید.",
+    "port": "پورت ۱ تا ۶۵۵۳۵ را بفرستید؛ برای استفاده از مقدار Inbound، <code>-</code> بفرستید.",
+    "sni": "SNI جدید را بفرستید؛ برای پاک‌کردن <code>-</code> بفرستید.",
+    "host": "Host header جدید را بفرستید؛ برای پاک‌کردن <code>-</code> بفرستید.",
+    "path": "Path یا service name را بفرستید؛ برای پاک‌کردن <code>-</code> بفرستید.",
+    "security": "یکی از <code>inbound_default</code>، <code>none</code> یا <code>tls</code> را بفرستید.",
+    "alpn": "مثلاً <code>h2</code> یا <code>h2,http/1.1</code>؛ برای خالی <code>-</code> بفرستید.",
+    "fingerprint": "مثلاً <code>chrome</code>، <code>firefox</code> یا <code>randomized</code>؛ برای خالی <code>-</code> بفرستید.",
+    "fragment_setting": "فرمت Marzban مثل <code>10-100,100-200,tlshello</code>؛ برای پاک‌کردن <code>-</code>.",
+    "noise_setting": "فرمت Marzban مثل <code>rand:10-20,100-200</code>؛ برای پاک‌کردن <code>-</code>.",
+}
+
+
+def _mza_flatten_inbounds(payload):
+    rows = []
+    if not isinstance(payload, dict):
+        return rows
+    for protocol, items in payload.items():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            row = dict(item)
+            row.setdefault("protocol", protocol)
+            if row.get("tag"):
+                rows.append(row)
+    rows.sort(key=lambda item: (str(item.get("protocol") or ""), str(item.get("tag") or "")))
+    return rows
+
+
+def _mza_find_inbound(payload, tag):
+    for inbound in _mza_flatten_inbounds(payload):
+        if str(inbound.get("tag") or "") == str(tag or ""):
+            return inbound
+    return None
+
+
+def _mza_inbound_token(tag):
+    return hashlib.sha1(str(tag).encode("utf-8")).hexdigest()[:12]
+
+
+def _mza_host_token(tag, index, host):
+    snapshot = marzban_admin.host_snapshot(host)
+    raw = f"{tag}\0{int(index)}\0{repr(snapshot)}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _mza_bool_text(value):
+    if value is None:
+        return "inherit / unset"
+    return "✅ روشن" if bool(value) else "❌ خاموش"
+
+
+def _mza_host_display(value):
+    if value in (None, ""):
+        return "—"
+    return str(value)
+
+
+def _mza_register_inbound_target(context, tag):
+    token = _mza_inbound_token(tag)
+    targets = context.user_data.setdefault("mza_inbound_targets", {})
+    targets[token] = str(tag)
+    return token
+
+
+def _mza_register_host_target(context, inbound_token, tag, index, host):
+    token = _mza_host_token(tag, index, host)
+    targets = context.user_data.setdefault("mza_host_targets", {})
+    targets[token] = {
+        "tag": str(tag),
+        "index": int(index),
+        "snapshot": marzban_admin.host_snapshot(host),
+        "inbound_token": str(inbound_token),
+    }
+    return token
+
+
+def _mza_clear_host_pending(context):
+    for key in (
+        "mza_host_edit_token",
+        "mza_host_edit_field",
+        "mza_host_pending",
+    ):
+        context.user_data.pop(key, None)
+
+
+async def _mza_load_host_target(context, token):
+    target = (context.user_data.get("mza_host_targets") or {}).get(str(token))
+    if not isinstance(target, dict):
+        return False, None, "این صفحه منقضی شده است؛ لیست Hostها را دوباره باز کنید."
+
+    try:
+        tag = marzban_admin.normalize_inbound_tag(target.get("tag"))
+        index = marzban_admin.normalize_host_index(target.get("index"))
+    except ValueError as exc:
+        return False, None, str(exc)
+
+    service = await _get_marzban_admin_service()
+    ok, hosts_payload = await service.get_hosts()
+    if not ok or not isinstance(hosts_payload, dict):
+        return False, None, "دریافت Public Hostها از Marzban ناموفق بود."
+
+    hosts = hosts_payload.get(tag)
+    if not isinstance(hosts, list) or index >= len(hosts) or not isinstance(hosts[index], dict):
+        return False, None, "Public Host دیگر در این موقعیت وجود ندارد؛ لیست را Refresh کنید."
+
+    current = hosts[index]
+    try:
+        if marzban_admin.host_snapshot(current) != target.get("snapshot"):
+            return False, None, "Public Host از زمان باز شدن صفحه تغییر کرده است؛ لیست را Refresh کنید."
+    except ValueError:
+        return False, None, "پاسخ Public Host معتبر نیست."
+
+    return True, {
+        "tag": tag,
+        "index": index,
+        "host": current,
+        "inbound_token": target.get("inbound_token") or _mza_inbound_token(tag),
+    }, None
+
+
+async def _show_marzban_inbounds(target, context):
+    service = await _get_marzban_admin_service()
+    (ok_inbounds, inbounds_payload), (ok_hosts, hosts_payload) = await asyncio.gather(
+        service.get_inbounds(),
+        service.get_hosts(),
+    )
+    fallback = [
+        [InlineKeyboardButton("🔄 بروزرسانی", callback_data="mza_inbounds")],
+        [InlineKeyboardButton("🔙 داشبورد", callback_data="mza_home")],
+    ]
+    if not ok_inbounds or not isinstance(inbounds_payload, dict):
+        return await _mza_render(
+            target,
+            f"❌ دریافت Inboundها از Marzban ناموفق بود.\n<code>{esc(inbounds_payload)}</code>",
+            fallback,
+        )
+
+    hosts_map = hosts_payload if ok_hosts and isinstance(hosts_payload, dict) else {}
+    inbounds = _mza_flatten_inbounds(inbounds_payload)
+    context.user_data["mza_inbound_targets"] = {}
+    context.user_data.pop("mza_host_targets", None)
+    _mza_clear_host_pending(context)
+
+    total_hosts = sum(len(v) for v in hosts_map.values() if isinstance(v, list))
+    lines = [
+        "🌐 <b>Inbounds & Public Hosts</b>",
+        "━━━━━━━━━━━━━━",
+        f"Inbounds  <b>{len(inbounds)}</b>",
+        f"Public Hosts  <b>{total_hosts}</b>",
+        "",
+        "Inboundها در NVL این فاز فقط خواندنی‌اند؛ Public Hostها از API رسمی Marzban قابل ویرایش‌اند.",
+        "",
+    ]
+    kb = []
+    for inbound in inbounds:
+        tag = str(inbound.get("tag") or "")
+        token = _mza_register_inbound_target(context, tag)
+        protocol = str(inbound.get("protocol") or "?").upper()
+        network = str(inbound.get("network") or "?")
+        tls = str(inbound.get("tls") or "none")
+        port = inbound.get("port", "?")
+        host_count = len(hosts_map.get(tag) or []) if isinstance(hosts_map.get(tag), list) else 0
+        lines.append(
+            f"• <b>{esc(tag)}</b>\n"
+            f"  <code>{esc(protocol)}</code> · {esc(network)} · {esc(tls)} · Port {esc(port)} · Hosts {host_count}"
+        )
+        kb.append([
+            InlineKeyboardButton(
+                f"🔌 {tag[:38]} ({host_count})",
+                callback_data=f"mza_inb_{token}",
+            )
+        ])
+
+    if not inbounds:
+        lines.append("هیچ Inbound قابل مدیریت یافت نشد.")
+
+    kb.extend(fallback)
+    await _mza_render(target, "\n".join(lines), kb)
+
+
+async def _show_marzban_inbound_detail(target, context, inbound_token):
+    tag = (context.user_data.get("mza_inbound_targets") or {}).get(str(inbound_token))
+    if not tag:
+        return await _mza_render(
+            target,
+            "❌ این صفحه منقضی شده است؛ لیست Inboundها را دوباره باز کنید.",
+            [[InlineKeyboardButton("🔙 Inbounds", callback_data="mza_inbounds")]],
+        )
+
+    service = await _get_marzban_admin_service()
+    (ok_inbounds, inbounds_payload), (ok_hosts, hosts_payload) = await asyncio.gather(
+        service.get_inbounds(),
+        service.get_hosts(),
+    )
+    inbound = _mza_find_inbound(inbounds_payload if ok_inbounds else None, tag)
+    if not inbound:
+        return await _mza_render(
+            target,
+            "❌ Inbound دیگر در Marzban وجود ندارد.",
+            [[InlineKeyboardButton("🔙 Inbounds", callback_data="mza_inbounds")]],
+        )
+
+    hosts = []
+    if ok_hosts and isinstance(hosts_payload, dict) and isinstance(hosts_payload.get(tag), list):
+        hosts = hosts_payload.get(tag) or []
+
+    context.user_data["mza_host_targets"] = {}
+    lines = [
+        f"🔌 <b>{esc(tag)}</b>",
+        "━━━━━━━━━━━━━━",
+        f"Protocol  <code>{esc(str(inbound.get('protocol') or '?').upper())}</code>",
+        f"Network  <code>{esc(inbound.get('network') or '?')}</code>",
+        f"TLS  <code>{esc(inbound.get('tls') or 'none')}</code>",
+        f"Port  <code>{esc(inbound.get('port', '?'))}</code>",
+        f"Public Hosts  <b>{len(hosts)}</b>",
+        "",
+        "🧭 <b>مسیر منطقی اتصال</b>",
+        "Client → Public Host → Inbound → Xray / Marzban",
+        "",
+    ]
+    kb = []
+    for index, host in enumerate(hosts):
+        if not isinstance(host, dict):
+            continue
+        token = _mza_register_host_target(context, inbound_token, tag, index, host)
+        disabled = bool(host.get("is_disabled"))
+        icon = "⚫" if disabled else "🟢"
+        remark = str(host.get("remark") or f"Host {index + 1}")
+        address = str(host.get("address") or "?")
+        port = host.get("port")
+        endpoint = address if port in (None, "") else f"{address}:{port}"
+        lines.append(
+            f"{icon} <b>{esc(remark)}</b>\n"
+            f"└ <code>{esc(endpoint)}</code>"
+        )
+        kb.append([
+            InlineKeyboardButton(
+                f"{icon} {remark[:38]}",
+                callback_data=f"mza_host_{token}",
+            )
+        ])
+
+    if not hosts:
+        lines.append("برای این Inbound هیچ Public Host ثبت نشده است.")
+
+    kb.extend([
+        [InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"mza_inb_{inbound_token}")],
+        [InlineKeyboardButton("🔙 Inbounds", callback_data="mza_inbounds")],
+    ])
+    await _mza_render(target, "\n".join(lines), kb)
+
+
+async def _show_marzban_host_detail(target, context, host_token):
+    ok, resolved, error = await _mza_load_host_target(context, host_token)
+    if not ok:
+        return await _mza_render(
+            target,
+            f"❌ {esc(error)}",
+            [[InlineKeyboardButton("🔙 Inbounds", callback_data="mza_inbounds")]],
+        )
+
+    tag = resolved["tag"]
+    index = resolved["index"]
+    host = resolved["host"]
+    inbound_token = resolved["inbound_token"]
+    lines = [
+        f"🌐 <b>{esc(host.get('remark') or f'Host {index + 1}')}</b>",
+        "━━━━━━━━━━━━━━",
+        f"Inbound  <code>{esc(tag)}</code>",
+        f"Index  <code>{index}</code>",
+        f"Status  <b>{'⚫ غیرفعال' if host.get('is_disabled') else '🟢 فعال'}</b>",
+        "",
+        "🔗 <b>Endpoint</b>",
+        f"Address  <code>{esc(_mza_host_display(host.get('address')))}</code>",
+        f"Port  <code>{esc(_mza_host_display(host.get('port')))}</code>",
+        f"SNI  <code>{esc(_mza_host_display(host.get('sni')))}</code>",
+        f"Host  <code>{esc(_mza_host_display(host.get('host')))}</code>",
+        f"Path  <code>{esc(_mza_host_display(host.get('path')))}</code>",
+        "",
+        "🔐 <b>Transport / Security</b>",
+        f"Security  <code>{esc(_mza_host_display(host.get('security')))}</code>",
+        f"ALPN  <code>{esc(_mza_host_display(host.get('alpn')))}</code>",
+        f"Fingerprint  <code>{esc(_mza_host_display(host.get('fingerprint')))}</code>",
+        f"Allow Insecure  {_mza_bool_text(host.get('allowinsecure'))}",
+        f"Mux  {_mza_bool_text(host.get('mux_enable'))}",
+        f"Random UA  {_mza_bool_text(host.get('random_user_agent'))}",
+        f"Use SNI as Host  {_mza_bool_text(host.get('use_sni_as_host'))}",
+        "",
+        "🧩 <b>Advanced</b>",
+        f"Fragment  <code>{esc(_mza_host_display(host.get('fragment_setting')))}</code>",
+        f"Noise  <code>{esc(_mza_host_display(host.get('noise_setting')))}</code>",
+    ]
+
+    disabled_label = "🟢 فعال‌سازی Host" if host.get("is_disabled") else "⚫ غیرفعال‌سازی Host"
+    kb = [
+        [
+            InlineKeyboardButton("✏️ Remark", callback_data=f"mza_hedit_remark_{host_token}"),
+            InlineKeyboardButton("🌐 Address", callback_data=f"mza_hedit_address_{host_token}"),
+        ],
+        [
+            InlineKeyboardButton("🔌 Port", callback_data=f"mza_hedit_port_{host_token}"),
+            InlineKeyboardButton("🔐 SNI", callback_data=f"mza_hedit_sni_{host_token}"),
+        ],
+        [
+            InlineKeyboardButton("🏷 Host", callback_data=f"mza_hedit_host_{host_token}"),
+            InlineKeyboardButton("🛣 Path", callback_data=f"mza_hedit_path_{host_token}"),
+        ],
+        [
+            InlineKeyboardButton("🛡 Security", callback_data=f"mza_hedit_sec_{host_token}"),
+            InlineKeyboardButton("📡 ALPN", callback_data=f"mza_hedit_alpn_{host_token}"),
+        ],
+        [InlineKeyboardButton("🧬 Fingerprint", callback_data=f"mza_hedit_fp_{host_token}")],
+        [
+            InlineKeyboardButton("🧩 Fragment", callback_data=f"mza_hedit_frag_{host_token}"),
+            InlineKeyboardButton("🔊 Noise", callback_data=f"mza_hedit_noise_{host_token}"),
+        ],
+        [InlineKeyboardButton(disabled_label, callback_data=f"mza_htoggle_disabled_{host_token}")],
+        [
+            InlineKeyboardButton("🔓 Allow Insecure", callback_data=f"mza_htoggle_insecure_{host_token}"),
+            InlineKeyboardButton("🔀 Mux", callback_data=f"mza_htoggle_mux_{host_token}"),
+        ],
+        [
+            InlineKeyboardButton("🎭 Random UA", callback_data=f"mza_htoggle_ua_{host_token}"),
+            InlineKeyboardButton("🔁 SNI→Host", callback_data=f"mza_htoggle_snihost_{host_token}"),
+        ],
+        [
+            InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"mza_host_{host_token}"),
+            InlineKeyboardButton("🔙 Inbound", callback_data=f"mza_inb_{inbound_token}"),
+        ],
+    ]
+    await _mza_render(target, "\n".join(lines), kb)
+
+
+async def _mza_show_host_edit_confirm(target, context, host_token, resolved, changes):
+    context.user_data["mza_host_pending"] = {
+        "token": str(host_token),
+        "tag": resolved["tag"],
+        "index": resolved["index"],
+        "expected_host": marzban_admin.host_snapshot(resolved["host"]),
+        "changes": dict(changes),
+        "inbound_token": resolved["inbound_token"],
+    }
+    lines = [
+        "✏️ <b>تایید تغییر Public Host</b>",
+        "",
+        f"Inbound: <code>{esc(resolved['tag'])}</code>",
+        f"Host: <b>{esc(resolved['host'].get('remark') or resolved['index'] + 1)}</b>",
+        "",
+    ]
+    for field, value in changes.items():
+        label = _MZA_HOST_FIELD_LABELS.get(field, field)
+        old = resolved["host"].get(field)
+        new_text = _mza_bool_text(value) if field in marzban_admin.HOST_BOOLEAN_FIELDS else _mza_host_display(value)
+        old_text = _mza_bool_text(old) if field in marzban_admin.HOST_BOOLEAN_FIELDS else _mza_host_display(old)
+        lines.append(
+            f"{esc(label)}: <code>{esc(old_text)}</code> → <code>{esc(new_text)}</code>"
+        )
+    lines.extend([
+        "",
+        "قبل از PUT، وضعیت Host دوباره از Marzban خوانده می‌شود؛ Confirm قدیمی یا stale اعمال نخواهد شد.",
+    ])
+    kb = [
+        [InlineKeyboardButton("✅ اعمال تغییر", callback_data=f"mza_hconfirm_{host_token}")],
+        [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_host_{host_token}")],
+    ]
     await _mza_render(target, "\n".join(lines), kb)
 
 
@@ -5701,6 +6113,52 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data.pop('state', None)
         await _mza_show_node_edit_confirm(update.message, context, node_id, changes)
+        return
+
+    if state == 'MZA_HOST_FIELD_INPUT':
+        if role != 'admin':
+            context.user_data.pop('state', None)
+            _mza_clear_host_pending(context)
+            await update.message.reply_text("⛔️ دسترسی غیرمجاز.")
+            return
+
+        host_token = context.user_data.get('mza_host_edit_token')
+        field = context.user_data.get('mza_host_edit_field')
+        if not host_token or field not in marzban_admin.HOST_MUTABLE_FIELDS:
+            context.user_data.pop('state', None)
+            _mza_clear_host_pending(context)
+            await update.message.reply_text("❌ این عملیات منقضی شده است؛ Public Host را دوباره باز کنید.")
+            return
+
+        try:
+            changes = marzban_admin.normalize_host_changes({field: text})
+        except ValueError as exc:
+            hint = _MZA_HOST_EDIT_HINTS.get(field, "")
+            await update.message.reply_text(
+                f"❌ مقدار نامعتبر است: {esc(exc)}\n{hint}",
+                parse_mode='HTML',
+            )
+            return
+
+        ok_host, resolved, error = await _mza_load_host_target(context, host_token)
+        if not ok_host:
+            context.user_data.pop('state', None)
+            _mza_clear_host_pending(context)
+            await update.message.reply_text(
+                f"❌ {esc(error)}",
+                parse_mode='HTML',
+            )
+            return
+
+        context.user_data.pop('state', None)
+        _mza_clear_host_pending(context)
+        await _mza_show_host_edit_confirm(
+            update.message,
+            context,
+            host_token,
+            resolved,
+            changes,
+        )
         return
 
     # 🛡 Stateful V2Ray management must re-check ownership on every text continuation.
@@ -8583,15 +9041,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # pending input so the next unrelated message cannot mutate a user.
     if d.startswith('mza_'):
         input_state = context.user_data.get('state')
+        node_edit_starter = (
+            d.startswith('mza_nedit_name_')
+            or d.startswith('mza_nedit_address_')
+            or d.startswith('mza_nedit_ports_')
+            or d.startswith('mza_nedit_ratio_')
+        )
+        host_edit_starter = d.startswith('mza_hedit_')
         starters = (
             d == 'mza_search'
             or d.startswith('mza_subname_')
             or d.startswith('mza_renew_custom_')
             or d.startswith('mza_addvol_custom_')
-            or d.startswith('mza_nedit_name_')
-            or d.startswith('mza_nedit_address_')
-            or d.startswith('mza_nedit_ports_')
-            or d.startswith('mza_nedit_ratio_')
+            or node_edit_starter
+            or host_edit_starter
         )
         if not starters and input_state in (
             'MARZBAN_ADMIN_SEARCH',
@@ -8602,17 +9065,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'MZA_NODE_ADDRESS_INPUT',
             'MZA_NODE_PORTS_INPUT',
             'MZA_NODE_RATIO_INPUT',
+            'MZA_HOST_FIELD_INPUT',
         ):
             context.user_data.pop('state', None)
             context.user_data.pop('mza_action_user', None)
             context.user_data.pop('mza_action_node', None)
             context.user_data.pop('mza_node_pending_changes', None)
+            _mza_clear_host_pending(context)
 
-        # A confirmation message can outlive the screen that created it.
-        # Any unrelated Marzban callback invalidates the pending node edit.
-        if not d.startswith('mza_nedit_confirm_') and not starters:
+        # Confirmation messages can outlive the screen that created them.
+        # Only a new edit in the same domain may preserve that domain's pending
+        # state; crossing Node↔Host or entering another Marzban flow invalidates it.
+        if not d.startswith('mza_nedit_confirm_') and not node_edit_starter:
             context.user_data.pop('mza_action_node', None)
             context.user_data.pop('mza_node_pending_changes', None)
+        if not d.startswith('mza_hconfirm_') and not host_edit_starter:
+            _mza_clear_host_pending(context)
 
     # 🛡 Central V2Ray authorization boundary.  Callback data and persisted
     # state only identify a target; ownership is always reloaded from SQLite.
@@ -8636,6 +9104,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d.startswith('mza_node_'):
         node_id = d[len('mza_node_'):]
         await _show_marzban_node_detail(query, context, node_id)
+        return
+    elif d == 'mza_inbounds':
+        await _show_marzban_inbounds(query, context)
+        return
+    elif d.startswith('mza_inb_'):
+        await _show_marzban_inbound_detail(query, context, d[len('mza_inb_'):])
+        return
+    elif d.startswith('mza_host_'):
+        await _show_marzban_host_detail(query, context, d[len('mza_host_'):])
         return
 
     elif d.startswith('mza_ntoggle_'):
@@ -8840,6 +9317,128 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         await _show_marzban_node_detail(query, context, node_id)
+        return
+
+    elif d.startswith('mza_hedit_'):
+        rest = d[len('mza_hedit_'):]
+        try:
+            field_token, host_token = rest.split('_', 1)
+        except ValueError:
+            await query.edit_message_text("❌ درخواست ویرایش Host نامعتبر است.")
+            return
+        field = _MZA_HOST_EDIT_TOKENS.get(field_token)
+        if not field:
+            await query.edit_message_text("❌ فیلد Public Host پشتیبانی نمی‌شود.")
+            return
+
+        ok_host, resolved, error = await _mza_load_host_target(context, host_token)
+        if not ok_host:
+            await query.edit_message_text(
+                f"❌ {esc(error)}",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Inbounds", callback_data="mza_inbounds")]
+                ]),
+            )
+            return
+
+        context.user_data.pop('mza_action_node', None)
+        context.user_data.pop('mza_node_pending_changes', None)
+        _mza_clear_host_pending(context)
+        context.user_data['state'] = 'MZA_HOST_FIELD_INPUT'
+        context.user_data['mza_host_edit_token'] = host_token
+        context.user_data['mza_host_edit_field'] = field
+        current = resolved['host'].get(field)
+        current_text = _mza_bool_text(current) if field in marzban_admin.HOST_BOOLEAN_FIELDS else _mza_host_display(current)
+        hint = _MZA_HOST_EDIT_HINTS.get(field, "مقدار جدید را بفرستید.")
+        await query.edit_message_text(
+            f"✏️ <b>ویرایش {_MZA_HOST_FIELD_LABELS.get(field, field)}</b>\n\n"
+            f"Host: <b>{esc(resolved['host'].get('remark') or resolved['index'] + 1)}</b>\n"
+            f"مقدار فعلی: <code>{esc(current_text)}</code>\n\n"
+            f"{hint}",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_host_{host_token}")]
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_htoggle_'):
+        rest = d[len('mza_htoggle_'):]
+        try:
+            toggle_token, host_token = rest.split('_', 1)
+        except ValueError:
+            await query.edit_message_text("❌ درخواست تغییر Host نامعتبر است.")
+            return
+        field = _MZA_HOST_TOGGLE_TOKENS.get(toggle_token)
+        if not field:
+            await query.edit_message_text("❌ گزینه Public Host پشتیبانی نمی‌شود.")
+            return
+
+        ok_host, resolved, error = await _mza_load_host_target(context, host_token)
+        if not ok_host:
+            await query.edit_message_text(
+                f"❌ {esc(error)}",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Inbounds", callback_data="mza_inbounds")]
+                ]),
+            )
+            return
+
+        changes = marzban_admin.normalize_host_changes({
+            field: not bool(resolved['host'].get(field))
+        })
+        _mza_clear_host_pending(context)
+        await _mza_show_host_edit_confirm(query, context, host_token, resolved, changes)
+        return
+
+    elif d.startswith('mza_hconfirm_'):
+        host_token = d[len('mza_hconfirm_'):]
+        pending = context.user_data.get('mza_host_pending')
+        if (
+            not isinstance(pending, dict)
+            or pending.get('token') != host_token
+            or not isinstance(pending.get('changes'), dict)
+            or not pending.get('changes')
+            or not isinstance(pending.get('expected_host'), dict)
+        ):
+            _mza_clear_host_pending(context)
+            await query.edit_message_text(
+                "❌ این عملیات منقضی شده است؛ Public Host را دوباره باز کنید.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Inbounds", callback_data="mza_inbounds")]
+                ]),
+            )
+            return
+
+        service = await _get_marzban_admin_service()
+        ok_mod, payload = await service.update_host(
+            pending.get('tag'),
+            pending.get('index'),
+            expected_host=pending.get('expected_host'),
+            **pending.get('changes'),
+        )
+        tag = pending.get('tag')
+        _mza_clear_host_pending(context)
+        if not ok_mod:
+            log.warning(
+                "Marzban public host update failed for %s[%s]: %r",
+                tag,
+                pending.get('index'),
+                payload,
+            )
+            await query.edit_message_text(
+                f"❌ تغییر Public Host انجام نشد.\n<code>{esc(payload)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 بارگذاری مجدد", callback_data="mza_inbounds")]
+                ]),
+            )
+            return
+
+        inbound_token = _mza_register_inbound_target(context, tag)
+        await _show_marzban_inbound_detail(query, context, inbound_token)
         return
 
     elif d == 'mza_search':

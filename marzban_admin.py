@@ -47,7 +47,7 @@ def normalize_node_changes(changes: Dict[str, Any], *, allow_status: bool = True
 
     unsupported = set(changes) - NODE_MUTABLE_FIELDS
     if unsupported:
-        raise ValueError(f"unsupported node fields: {\', \'.join(sorted(unsupported))}")
+        raise ValueError("unsupported node fields: " + ", ".join(sorted(unsupported)))
 
     normalized: Dict[str, Any] = {}
     for key, value in changes.items():

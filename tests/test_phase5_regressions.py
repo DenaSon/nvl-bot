@@ -68,11 +68,11 @@ class Phase5InboundHostRegressionTests(unittest.TestCase):
         self.assertNotIn("mza_inbound_delete", self.source)
         self.assertNotIn("mza_inbound_edit", self.source)
 
-    def test_phase5_version_tag_is_present(self):
-        self.assertIn(
-            'BOT_VERSION_TAG = "V107-2026-10-02-marzban-inbound-host-management"',
-            self.source,
-        )
+    def test_phase5_features_survive_current_version(self):
+        self.assertIn("BOT_VERSION_TAG =", self.source)
+        self.assertIn("mza_inbounds", self.source)
+        self.assertIn("mza_host_", self.source)
+        self.assertIn("mza_hedit_", self.source)
 
 
 if __name__ == "__main__":

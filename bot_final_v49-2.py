@@ -4641,7 +4641,7 @@ def _mza_create_draft(context):
 
 
 async def _mza_username_exists(service, username):
-    ok, payload = await service.list_users(limit=50, search=username)
+    ok, payload = await service.list_users(limit=100000, search=username)
     if not ok:
         return None, payload
     users = payload.get("users", []) if isinstance(payload, dict) else payload
@@ -4768,7 +4768,7 @@ async def _mza_show_create_username(target, context):
     context.user_data.pop("mza_node_pending_changes", None)
     _mza_clear_host_pending(context)
     _mza_clear_create(context)
-    context.user_data["mza_create_draft"] = {}
+    context.user_data["mza_create_draft"] = {"started_at": time.time()}
     kb = [
         [InlineKeyboardButton("⚡ ساخت خودکار Username", callback_data="mza_cuname_auto")],
         [InlineKeyboardButton("✏️ وارد کردن Username", callback_data="mza_cuname_manual")],
@@ -9797,7 +9797,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('state', None)
         selected = _mza_create_draft(context).get("selected_inbound_tags")
         if not isinstance(selected, list) or not selected:
-            await query.answer("حداقل یک Inbound را انتخاب کنید.", show_alert=True)
+            await query.message.reply_text("❌ حداقل یک Inbound را انتخاب کنید.")
             await _mza_show_create_inbounds(query, context, manual=True)
             return
         await _mza_show_create_confirm(query, context)
@@ -9809,10 +9809,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d.startswith('mza_create_confirm_'):
         nonce = d[len('mza_create_confirm_'):]
         draft = context.user_data.get("mza_create_draft")
+        draft_age = (
+            time.time() - float(draft.get("started_at") or 0)
+            if isinstance(draft, dict)
+            else float("inf")
+        )
         if (
             not isinstance(draft, dict)
             or not nonce
             or draft.get("confirm_nonce") != nonce
+            or draft_age > 1800
         ):
             await query.edit_message_text(
                 "❌ این تاییدیه منقضی شده است؛ فرآیند ساخت را دوباره بازبینی کنید.",
@@ -9877,11 +9883,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reset_strategy=draft.get("reset_strategy") or "no_reset",
             status=expiry["status"],
             on_hold_expire_duration=expiry.get("on_hold_expire_duration"),
+            note=draft.get("subscription_name") or "",
         )
 
         if not ok_create:
             created_but_unverified = isinstance(result, dict) and bool(result.get("created"))
             if created_but_unverified:
+                unverified_subname = draft.get("subscription_name")
+                if unverified_subname:
+                    try:
+                        await asyncio.to_thread(
+                            _db_set_subscription_name,
+                            username,
+                            unverified_subname,
+                        )
+                    except Exception:
+                        log.exception(
+                            "Marzban user POST succeeded but subscription name save failed for %s",
+                            username,
+                        )
                 _mza_clear_create(context)
                 await query.edit_message_text(
                     "⚠️ <b>درخواست ساخت در Marzban موفق شد، اما Verify نهایی پاسخ معتبر نداد.</b>\n\n"
@@ -9923,7 +9943,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data_label = "نامحدود" if not verified.get("data_limit") else _mza_bytes(verified.get("data_limit"))
         expiry_label = _mza_timestamp(verified.get("expire"))
         if str(verified.get("status") or "") == "on_hold":
-            expiry_label = f"از اولین استفاده · {_mza_create_expiry_label(draft)}"
+            expiry_label = _mza_create_expiry_label(draft)
         saved_subname = subname or "تنظیم نشده"
         _mza_clear_create(context)
 

@@ -80,6 +80,77 @@ class NodeValidationTests(unittest.TestCase):
             )
 
 
+class HostValidationTests(unittest.TestCase):
+    def test_inbound_tag_and_index_are_normalized(self):
+        self.assertEqual(
+            marzban_admin.normalize_inbound_tag(" VLESS TCP REALITY "),
+            "VLESS TCP REALITY",
+        )
+        self.assertEqual(marzban_admin.normalize_host_index("0"), 0)
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_host_index(-1)
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_inbound_tag("")
+
+    def test_host_settings_are_normalized(self):
+        self.assertEqual(
+            marzban_admin.normalize_host_changes({
+                "remark": "  Germany   Edge ",
+                "address": "de.example.com",
+                "port": "443",
+                "sni": "cdn.example.com",
+                "host": "-",
+                "path": "/ws",
+                "security": "TLS",
+                "alpn": "h2,http/1.1",
+                "fingerprint": "Chrome",
+                "allowinsecure": "false",
+                "is_disabled": "true",
+            }),
+            {
+                "remark": "Germany Edge",
+                "address": "de.example.com",
+                "port": 443,
+                "sni": "cdn.example.com",
+                "host": None,
+                "path": "/ws",
+                "security": "tls",
+                "alpn": "h2,http/1.1",
+                "fingerprint": "chrome",
+                "allowinsecure": False,
+                "is_disabled": True,
+            },
+        )
+
+    def test_host_settings_reject_unsafe_values(self):
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_host_changes({"address": "https://example.com"})
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_host_changes({"port": 70000})
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_host_changes({"security": "reality"})
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_host_changes({"alpn": "bogus"})
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_host_changes({"unknown": "x"})
+
+    def test_official_fragment_and_noise_formats_are_validated(self):
+        self.assertEqual(
+            marzban_admin.normalize_host_changes({
+                "fragment_setting": "10-100,100-200,tlshello",
+                "noise_setting": "rand:10-20,100-200",
+            }),
+            {
+                "fragment_setting": "10-100,100-200,tlshello",
+                "noise_setting": "rand:10-20,100-200",
+            },
+        )
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_host_changes({"fragment_setting": "bad"})
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_host_changes({"noise_setting": "bad"})
+
+
 class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.service = marzban_admin.MarzbanAdminService(
@@ -241,6 +312,104 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             "secret",
             json_data=None,
             params=None,
+        )
+
+    async def test_update_host_uses_bulk_hosts_contract_for_target_tag(self):
+        current = {
+            "VLESS TCP REALITY": [
+                {
+                    "remark": "DE",
+                    "address": "de.example.com",
+                    "port": 443,
+                    "sni": None,
+                    "host": None,
+                    "path": None,
+                    "security": "inbound_default",
+                    "alpn": "",
+                    "fingerprint": "",
+                    "allowinsecure": None,
+                    "is_disabled": False,
+                    "mux_enable": None,
+                    "fragment_setting": None,
+                    "noise_setting": None,
+                    "random_user_agent": None,
+                    "use_sni_as_host": None,
+                },
+                {
+                    "remark": "FI",
+                    "address": "fi.example.com",
+                    "port": 443,
+                },
+            ],
+            "VMess WS": [
+                {"remark": "WS", "address": "ws.example.com", "port": 443},
+            ],
+        }
+        self.service.get_hosts = AsyncMock(return_value=(True, current))
+        with patch("v2ray_engine.api_request", new_callable=AsyncMock) as request:
+            request.return_value = (True, {"VLESS TCP REALITY": []})
+            ok, _ = await self.service.update_host(
+                "VLESS TCP REALITY",
+                0,
+                expected_host=current["VLESS TCP REALITY"][0],
+                address="new.example.com",
+                port="8443",
+            )
+
+        self.assertTrue(ok)
+        sent = request.await_args.kwargs["json_data"]
+        self.assertEqual(set(sent), {"VLESS TCP REALITY"})
+        self.assertEqual(sent["VLESS TCP REALITY"][0]["address"], "new.example.com")
+        self.assertEqual(sent["VLESS TCP REALITY"][0]["port"], 8443)
+        self.assertEqual(sent["VLESS TCP REALITY"][1]["remark"], "FI")
+        request.assert_awaited_once()
+        self.assertEqual(request.await_args.args[:2], ("PUT", "/api/hosts"))
+
+    async def test_update_host_rejects_stale_confirmation_without_put(self):
+        expected = {
+            "remark": "DE",
+            "address": "old.example.com",
+            "port": 443,
+        }
+        current = {
+            "VLESS TCP REALITY": [
+                {
+                    "remark": "DE",
+                    "address": "changed-elsewhere.example.com",
+                    "port": 443,
+                }
+            ]
+        }
+        self.service.get_hosts = AsyncMock(return_value=(True, current))
+        with patch("v2ray_engine.api_request", new_callable=AsyncMock) as request:
+            ok, error = await self.service.update_host(
+                "VLESS TCP REALITY",
+                0,
+                expected_host=expected,
+                address="new.example.com",
+            )
+
+        self.assertFalse(ok)
+        self.assertIn("changed since confirmation", error)
+        request.assert_not_awaited()
+
+    async def test_disable_host_routes_through_safe_host_update(self):
+        host = {"remark": "DE", "address": "de.example.com", "port": 443}
+        self.service.update_host = AsyncMock(return_value=(True, {}))
+
+        ok, _ = await self.service.set_host_disabled(
+            "VLESS TCP REALITY",
+            0,
+            True,
+            expected_host=host,
+        )
+
+        self.assertTrue(ok)
+        self.service.update_host.assert_awaited_once_with(
+            "VLESS TCP REALITY",
+            0,
+            expected_host=host,
+            is_disabled=True,
         )
 
     async def test_reset_user_usage_uses_reset_endpoint(self):

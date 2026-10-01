@@ -232,7 +232,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V108-2026-10-02-marzban-user-creation"
+BOT_VERSION_TAG = "V109-2026-10-02-ui-ux-navigation-polish"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -4057,19 +4057,23 @@ PORTAL_DISPLAY_NAME = "NeVeL"  # 🔒 نام ثابت پورتال و مدیری
 
 async def show_main_menu(update_or_query, context):
     role = context.user_data.get('role')
-    
-    # 👑 استخراج دقیق chat_id چه ورودی از نوع پیام متنی باشد چه کلیک روی دکمه شیشه‌ای
+
+    # Phase 5.6 navigation rule:
+    # Home only exposes top-level domains. Sale, user management and
+    # infrastructure drill down inside their own screens.
     chat_id = 0
     if hasattr(update_or_query, 'effective_chat') and update_or_query.effective_chat:
         chat_id = update_or_query.effective_chat.id
     elif hasattr(update_or_query, 'message') and update_or_query.message:
         chat_id = update_or_query.message.chat.id
-        
+
     if role == 'admin':
-        kb = [['🛒 خرید اشتراک', '👥 مدیریت کاربران'], 
-              ['💼 مدیریت نماینده‌ها', '📊 آمار و لاگ'],
-              ['💳 تنظیمات مالی', '⚙️ تنظیمات سرور'], 
-              ['🛠 مدیریت V2Ray', '📦 دریافت بکاپ']]
+        kb = [
+            ['➕ فروش / ساخت اشتراک', '👥 کاربران'],
+            ['🤝 نمایندگان', '📊 گزارش‌ها'],
+            ['💰 مالی و کارت‌ها', '⚙️ تنظیمات'],
+            ['🛠 V2Ray / Marzban', '📦 بکاپ'],
+        ]
         if chat_id == SUPER_ADMIN_ID:
             kb.append(['👑 تنظیمات سوپر ادمین'])
         kb.append(['❌ خروج'])
@@ -4078,24 +4082,33 @@ async def show_main_menu(update_or_query, context):
               ['👑 آمار فروش ادمین']]
         text = "📊 پنل اختصاصی حسابداری\n\nجهت دریافت گزارشات مالی از دکمه‌های زیر استفاده نمایید:"
     else:
-        kb = [['🛒 خرید اشتراک', '👥 مدیریت کاربران'],
-              ['📊 اطلاعات حساب', '💳 شارژ حساب (کارت به کارت)'],
-              ['✏️ تغییر نام برند']]
+        kb = [
+            ['➕ فروش اشتراک', '👥 کاربران من'],
+            ['💰 کیف پول و حساب', '💳 شارژ حساب'],
+            ['✏️ نام برند'],
+        ]
         ag_id = context.user_data.get('agent_id', 0)
         if ag_id and await asyncio.to_thread(_db_get_agent_card_permission, ag_id):
             kb.append(['💳 کارت اختصاصی من'])
         kb.append(['❌ خروج'])
-    
+
     reply_markup = ReplyKeyboardMarkup(kb, resize_keyboard=True)
     if role == 'admin':
-        text = (f"🏛 پورتال و مدیریت {PORTAL_DISPLAY_NAME}\n"
-                f"⚡️ سطح دسترسی: ادمین کل\n\nجهت استفاده، از دکمه‌های زیر استفاده نمایید:")
+        text = (
+            f"🏛 پورتال و مدیریت {PORTAL_DISPLAY_NAME}\n"
+            "━━━━━━━━━━━━━━\n"
+            "فروش، کاربران و زیرساخت از مسیرهای جدا و مشخص مدیریت می‌شوند."
+        )
     elif role != 'accountant':
-        text = "🏛 پنل نماینده\n⚡️ سطح دسترسی: نماینده فروش\n\nجهت استفاده، از دکمه‌های زیر استفاده نمایید:"
-        
-    if hasattr(update_or_query, 'message') and update_or_query.message: 
+        text = (
+            "🏛 پنل نمایندگی\n"
+            "━━━━━━━━━━━━━━\n"
+            "فروش SSH و V2Ray از «➕ فروش اشتراک» انجام می‌شود."
+        )
+
+    if hasattr(update_or_query, 'message') and update_or_query.message:
         await update_or_query.message.reply_text(text, reply_markup=reply_markup)
-    else: 
+    else:
         await update_or_query.effective_message.reply_text(text, reply_markup=reply_markup)
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4136,30 +4149,86 @@ async def _show_buy_start(update, context):
     v2_unlimit_en = await asyncio.to_thread(_db_get_setting, 'sell_v2ray_unlimit', '1') == '1'
     v2_vol_en = await asyncio.to_thread(_db_get_setting, 'sell_v2ray_vol', '1') == '1'
     v2_any = v2_unlimit_en or v2_vol_en
+    role = context.user_data.get('role')
 
     kb = []
     if ssh_en:
+        kb.append([InlineKeyboardButton("🔐 فروش SSH", callback_data="buy_direct")])
+    if v2_any:
+        kb.append([InlineKeyboardButton("🚀 فروش V2Ray", callback_data="v2ray_buy_menu")])
+
+    # Favorites remain shortcuts, but no longer compete with the service
+    # selection as the first interaction.
+    if ssh_en:
         favs = await asyncio.to_thread(_db_get_favs)
         for m, u in favs:
-            kb.append([InlineKeyboardButton(f"⭐ اکانت {m} ماهه {u} کاربره (SSH)", callback_data=f"buyfav_{m}_{u}")])
-        kb.append([InlineKeyboardButton("🔹 سرویس SSH", callback_data="buy_direct")])
-    
-    if v2_any:
-        kb.append([InlineKeyboardButton("🚀 سرویس V2Ray", callback_data="v2ray_buy_menu")])
-        
+            kb.append([
+                InlineKeyboardButton(
+                    f"⭐ SSH سریع · {m} ماه · {u} کاربر",
+                    callback_data=f"buyfav_{m}_{u}",
+                )
+            ])
+
     if bulk_en and ssh_en:
-        kb.append([InlineKeyboardButton("📦 ساخت اکانت عمده (Bulk)", callback_data="buy_bulk_start")])
-        
-    kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="uact_back_to_menu")])
-    
+        kb.append([InlineKeyboardButton("📦 فروش عمده SSH", callback_data="buy_bulk_start")])
+
+    kb.append([InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")])
+
     if not ssh_en and not v2_any and not bulk_en:
-        txt = "⚠️ <b>سیستم موقتاً از دسترس خارج است</b>\n\nفروش تمامی سرویس‌ها جهت تعمیرات و به‌روزرسانی متوقف شده است. لطفاً شکیبا باشید."
+        txt = (
+            "➕ <b>فروش › انتخاب سرویس</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            "⚠️ فروش تمامی سرویس‌ها موقتاً غیرفعال است."
+        )
     else:
-        txt = "لطفاً نوع سرویس مورد نظر خود را انتخاب نمایید:"
-        
-    if update.message: await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
-    else: await update.callback_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
-    context.user_data['state'] = 'BUY_MONTHS'
+        actor_line = (
+            "فروش مستقیم توسط مدیریت؛ عملیات مالی فعلی بدون تغییر باقی می‌ماند."
+            if role == 'admin'
+            else "SSH و V2Ray هر دو از همین مسیر فروش و کیف پول نمایندگی استفاده می‌کنند."
+        )
+        txt = (
+            "➕ <b>فروش › انتخاب سرویس</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"{actor_line}\n\n"
+            "نوع سرویس را انتخاب کنید:"
+        )
+
+    if update.message:
+        await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+    else:
+        await update.callback_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+    context.user_data['state'] = None
+
+
+async def _show_users_hub(target, context):
+    role = context.user_data.get('role')
+    context.user_data.pop('users_agent_filter', None)
+
+    if role == 'agent':
+        title = "👥 <b>کاربران من</b>"
+        subtitle = "سرویس موردنظر را انتخاب کنید."
+        labels = (
+            ("🔐 SSH من", "umanage_ssh"),
+            ("🚀 V2Ray مدت‌دار من", "umanage_v2ray"),
+            ("📦 V2Ray حجمی من", "umanage_v2ray_vol"),
+        )
+    else:
+        title = "👥 <b>کاربران</b>"
+        subtitle = "نمای مدیریت کاربران بر اساس نوع سرویس."
+        labels = (
+            ("🔐 SSH", "umanage_ssh"),
+            ("🚀 V2Ray مدت‌دار", "umanage_v2ray"),
+            ("📦 V2Ray حجمی", "umanage_v2ray_vol"),
+        )
+
+    kb = [[InlineKeyboardButton(label, callback_data=cb)] for label, cb in labels]
+    kb.append([InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")])
+    text = f"{title}\n━━━━━━━━━━━━━━\n{subtitle}"
+
+    if hasattr(target, 'edit_message_text'):
+        await target.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+    else:
+        await target.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
 async def _show_users_panel(update, context, page=0, agent_filter=None):
     context.user_data['user_page'] = page
@@ -4182,21 +4251,21 @@ async def _show_users_panel(update, context, page=0, agent_filter=None):
     if role == 'agent':
         rows = await asyncio.to_thread(_db_get_users_with_agents_by_type, manage_type)
         users = [(u, act, cname) for u, owner, act, cname in rows if owner == ag_id]
-        panel_title = f"👤 لیست اکانت‌های {srv_name} شما"
+        panel_title = f"👥 کاربران من › {srv_name}"
     elif agent_filter is not None:
         rows = await asyncio.to_thread(_db_get_users_with_agents_by_type, manage_type)
         users = [(u, act, cname) for u, owner, act, cname in rows if owner == agent_filter]
         agent_info = await asyncio.to_thread(_db_get_agent_info, agent_filter)
         agent_name = agent_info[0] if agent_info else "؟"
-        panel_title = f"👤 لیست کاربران {srv_name} نمایندهٔ «{esc(agent_name)}»"
+        panel_title = f"🤝 نمایندگان › {esc(agent_name)} › {srv_name}"
     else:
         rows = await asyncio.to_thread(_db_get_users_with_agents_by_type, manage_type)
         agents_map = {a[0]: a[1] for a in await asyncio.to_thread(_db_get_all_agents)}
         users = [(u, agents_map.get(owner, "مستقیم (ادمین)") if owner else "مستقیم (ادمین)", act, cname) for u, owner, act, cname in rows]
-        panel_title = f"👤 لیست تمام کاربران {srv_name} سیستم"
+        panel_title = f"👥 کاربران › {srv_name}"
         show_owner_label = True
         
-    back_cb = f"agm_det_{agent_filter}" if agent_filter is not None else "uact_back_to_menu"
+    back_cb = f"agm_det_{agent_filter}" if agent_filter is not None else "users_hub"
     bottom_kb = [[InlineKeyboardButton("🔍 جستجوی کاربر", callback_data="usearch")]]
     
     if role == 'admin' and agent_filter is None:
@@ -5025,7 +5094,7 @@ async def _show_marzban_admin_dashboard(target, context):
     ok_nodes, nodes = nodes_result
 
     kb = [
-        [InlineKeyboardButton("➕ ساخت کاربر V2Ray", callback_data="mza_create")],
+        [InlineKeyboardButton("➕ ساخت مستقیم User", callback_data="mza_create")],
         [InlineKeyboardButton("👥 کاربران", callback_data="mza_users_0"),
          InlineKeyboardButton("🟢 آنلاین", callback_data="mza_online_0")],
         [InlineKeyboardButton("🔍 جستجوی کاربر", callback_data="mza_search")],
@@ -5063,13 +5132,14 @@ async def _show_marzban_admin_dashboard(target, context):
             node_line += f" · {node_counts['disabled']} غیرفعال"
 
     txt = (
-        "🛠 <b>مرکز مدیریت Marzban</b>\n"
+        "🛠 <b>V2Ray / Marzban</b>\n"
         "━━━━━━━━━━━━━━\n"
         "🖥 <b>وضعیت سیستم</b>\n"
         f"CPU  <b>{cpu:.1f}%</b>\n"
         f"RAM  <b>{mem_used}</b> / {mem_total}\n"
         f"Nodes  <b>{node_line}</b>\n"
         f"Version  <code>{esc(stats.get('version', '?'))}</code>\n\n"
+        "⚙️ <i>ساخت مستقیم User در این بخش، فروش یا فاکتور ثبت نمی‌کند.</i>\n\n"
         "👥 <b>وضعیت کاربران</b>\n"
         f"کل  <b>{total}</b>\n"
         f"🟢 فعال  {active}     🔴 غیرفعال  {disabled}\n"

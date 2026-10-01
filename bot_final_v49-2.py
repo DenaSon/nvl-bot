@@ -8092,7 +8092,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 🛠 Phase 2 Marzban admin callbacks are strictly admin-only.
     if d.startswith('mza_') and role != 'admin':
-        await query.answer("⛔️ دسترسی غیرمجاز", show_alert=True)
+        await query.message.reply_text("⛔️ دسترسی غیرمجاز.")
         return
 
     # 🛡 Central V2Ray authorization boundary.  Callback data and persisted
@@ -8610,34 +8610,48 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         owner = await asyncio.to_thread(_db_get_user, un)
         if not owner: return await query.edit_message_text("❌ این کاربر دیگر وجود ندارد.")
 
-        # First remove the remote account.  Do not refund or delete the local
-        # record if Marzban rejects/fails the operation.
+        owner_agent_id = owner[5]
+        refund = 0.0
+        refund_desc = ""
+
+        # Refund must be calculated while the Marzban user still exists because
+        # volumetric plans need remote used_traffic/data_limit to compute it.
+        if owner_agent_id and owner_agent_id != 0:
+            try:
+                refund, refund_desc = await _calc_account_refund(un)
+            except Exception:
+                log.exception("خطا در محاسبه بازپرداخت حذف اکانت V2Ray %s", un)
+                refund = 0.0
+                refund_desc = ""
+
+        # Remote delete is the commit point.  If Marzban fails, do not touch
+        # local account state or wallet balances.
         m_admin = await _get_marzban_admin_service()
         ok_del, del_err = await m_admin.delete_user(un)
         if not ok_del:
             log.warning("Marzban delete failed for %s: %r", un, del_err)
             return await query.edit_message_text("❌ حذف روی Marzban انجام نشد؛ اکانت و موجودی محلی دست‌نخورده ماند.")
 
-        owner_agent_id = owner[5]
-        refund = 0.0
         refund_note = ""
-        if owner_agent_id and owner_agent_id != 0:
-            try:
-                refund, refund_desc = await _calc_account_refund(un)
-                if refund > 0:
-                    with db_conn() as conn:
-                        conn.execute("UPDATE agents SET balance = balance + ? WHERE id=?", (refund, owner_agent_id))
-                        used_before_row = conn.execute("SELECT emergency_used FROM agents WHERE id=?", (owner_agent_id,)).fetchone()
-                        used_before = (used_before_row[0] or 0.0) if used_before_row else 0.0
-                        _apply_emergency_repayment(conn, owner_agent_id, refund)
-                        emergency_repaid = min(used_before, refund) if used_before > 0 else 0.0
+        emergency_repaid = 0.0
+        try:
+            # Keep refund + local deletion atomic with one SQLite transaction.
+            with db_conn() as conn:
+                if owner_agent_id and owner_agent_id != 0 and refund > 0:
+                    conn.execute("UPDATE agents SET balance = balance + ? WHERE id=?", (refund, owner_agent_id))
+                    used_before_row = conn.execute("SELECT emergency_used FROM agents WHERE id=?", (owner_agent_id,)).fetchone()
+                    used_before = (used_before_row[0] or 0.0) if used_before_row else 0.0
+                    _apply_emergency_repayment(conn, owner_agent_id, refund)
+                    emergency_repaid = min(used_before, refund) if used_before > 0 else 0.0
                     refund_note = f"\n💸 {refund_desc}"
                     if emergency_repaid > 0:
                         refund_note += f"\n🆘 از همین مبلغ، {int(emergency_repaid):,} تومان بدهیِ شارژ اضطراری نماینده نیز پاک شد."
-            except Exception:
-                log.exception("خطا در اعمال بازپرداخت حذف اکانت V2Ray %s", un)
-
-        await asyncio.to_thread(_db_delete_user, un)
+                conn.execute("DELETE FROM ssh_accounts WHERE username=?", (un,))
+        except Exception:
+            log.exception("Marzban user %s was deleted remotely but local finalization failed", un)
+            return await query.edit_message_text(
+                "⚠️ کاربر از Marzban حذف شد، اما نهایی‌سازی دیتابیس محلی ناموفق بود. لطفاً قبل از هر اقدام دیگری لاگ را بررسی کنید."
+            )
 
         await query.edit_message_text(f"✅ اکانت <code>{esc(un)}</code> به‌طور کامل از ربات و nevelv2ray حذف شد.{refund_note}", parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="uact_back")]]))

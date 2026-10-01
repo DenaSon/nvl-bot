@@ -3744,8 +3744,8 @@ async def _ensure_ssh_linux_user_for_renewal(username: str, owner_row, new_exp_d
     if not owner_row:
         return False, "اطلاعات اکانت در دیتابیس پیدا نشد.", "other", False
 
-    host, port = await _acct_host_port(owner_row)
-    if await _os_user_exists(username, host, port):
+    # Active production topology is Edge-as-Relay: Linux SSH users live on Core.
+    if await _os_user_exists(username):
         return True, "", "", False
 
     password = owner_row[0]
@@ -3754,49 +3754,29 @@ async def _ensure_ssh_linux_user_for_renewal(username: str, owner_row, new_exp_d
         return False, "رمز ذخیره‌شدهٔ اکانت خالی است و بازسازی امن ممکن نیست.", "other", False
 
     log.warning(
-        "Self-heal تمدید: Linux user %s روی %s:%s وجود ندارد؛ بازسازی از DB آغاز شد.",
-        username, host, port
+        "Self-heal تمدید: Linux user %s روی Core وجود ندارد؛ بازسازی از DB آغاز شد.",
+        username
     )
 
-    ok_add, err_add, kind_add = await _run_linux_cmd_on_host(
-        host, port, "sudo", "useradd", "-s", "/bin/false", "-e", new_exp_db, username
+    ok_add, err_add, kind_add = await run_cmd(
+        "sudo", "useradd", "-s", "/bin/false", "-e", new_exp_db, username
     )
     if not ok_add:
         # اگر بین check و useradd یک اجرای هم‌زمان کاربر را ساخته باشد، آن را شکست واقعی ندان.
         if "already exists" not in (err_add or "").lower():
             return False, err_add, kind_add, False
 
-    ok_pw, err_pw, kind_pw = await _run_linux_cmd_on_host(
-        host, port, "sudo", "chpasswd", input_data=f"{username}:{password}\n".encode()
+    ok_pw, err_pw, kind_pw = await run_cmd(
+        "sudo", "chpasswd", input_data=f"{username}:{password}\n".encode()
     )
     if not ok_pw:
         # فقط اگر خودمان واقعاً useradd را انجام داده‌ایم Rollback حذف انجام شود؛ در حالت
         # race/already-exists ممکن است user متعلق به اجرای دیگری باشد و نباید حذف شود.
         if ok_add:
-            await _run_linux_cmd_on_host(host, port, "sudo", "userdel", "-f", username)
+            await run_cmd("sudo", "userdel", "-f", username)
         return False, err_pw, kind_pw, False
 
-    await _sync_user_limit_file(username, users_limit, host, port)
-
-    # اگر معماری دوباره به Edge-as-Data-Plane برگشت، Mirror روی Core را فقط وقتی user آنجا
-    # وجود ندارد به‌صورت best-effort بازسازی می‌کنیم. شکست Mirror تمدید primary را fail نمی‌کند.
-    core_public_ip = await asyncio.to_thread(_get_core_public_ip_cached)
-    if core_public_ip and core_public_ip != host:
-        try:
-            core_exists = await _os_user_exists(username, core_public_ip, 22)
-            if not core_exists:
-                core_add, _, _ = await _run_linux_cmd_on_host(
-                    core_public_ip, 22, "sudo", "useradd", "-s", "/bin/false", "-e", new_exp_db, username
-                )
-                if core_add:
-                    core_pw, core_err, _ = await _run_linux_cmd_on_host(
-                        core_public_ip, 22, "sudo", "chpasswd",
-                        input_data=f"{username}:{password}\n".encode()
-                    )
-                    if not core_pw:
-                        log.warning("Self-heal Mirror Core برای %s در chpasswd شکست خورد: %s", username, core_err)
-        except Exception:
-            log.exception("Self-heal Mirror Core برای %s شکست خورد (غیربحرانی).", username)
+    await _sync_user_limit_file(username, users_limit)
 
     log.warning("Self-heal تمدید: Linux user %s با موفقیت از DB بازسازی شد.", username)
     return True, "", "", True
@@ -4681,8 +4661,8 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
         failed_msg = None
         c = c_start - 1  # اولین رزرو با c_start انجام می‌شود، رزروهای بعدی از خروجی رزرو قبلی ادامه می‌یابند
 
-        # 🆕 معماریِ Control-Plane/Data-Plane (بندِ ۲): همهٔ اکانت‌های همین دستهٔ Bulk روی یک Edge
-        # مشخص ساخته می‌شوند (نه پخش‌شده)، تا مدیریتِ بعدیِ این دسته ساده و یکدست بماند.
+        # Edge فقط endpoint عمومی این دسته است؛ Linux userها در توپولوژی Relay روی Core ساخته می‌شوند.
+        # همهٔ اکانت‌های همین دسته یک endpoint مشترک می‌گیرند تا خروجی/مدیریت آن‌ها یکدست بماند.
         target_host = await asyncio.to_thread(_pick_target_host_for_new_account)
         target_port = await asyncio.to_thread(_db_get_host_ssh_port, target_host, 22)
 
@@ -4711,12 +4691,11 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
             os_exp_db = hold_sched.linux_expire_date
             exp_db, cr_db = hold_sched.visible_expire_date, now.strftime("%Y-%m-%d")
 
-            # گام ۲: ساخت کاربر لینوکسی (با همان منطق تلاش مجدد خودکار روی «already exists»)
-            # 🆕 هم روی Edgeِ مقصد (تعیین‌کننده) هم روی Core (Mirror، best-effort)
+            # گام ۲: ساخت کاربر لینوکسی روی Core (endpoint انتخاب‌شده فقط metadata/routing است).
             useradd_retries = 0
             ok_created = False
             while True:
-                ok1, err1, kind1 = await _mirror_linux_cmd(target_host, target_port, "sudo", "useradd", "-s", "/bin/false", "-e", os_exp_db, un)
+                ok1, err1, kind1 = await run_cmd("sudo", "useradd", "-s", "/bin/false", "-e", os_exp_db, un)
                 if ok1:
                     ok_created = True
                     break
@@ -4738,9 +4717,9 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
                 break
 
             # گام ۳: تنظیم پسورد لینوکسی
-            ok2, err2, kind2 = await _mirror_linux_cmd(target_host, target_port, "sudo", "chpasswd", input_data=f"{un}:{pw}\n".encode())
+            ok2, err2, kind2 = await run_cmd("sudo", "chpasswd", input_data=f"{un}:{pw}\n".encode())
             if not ok2:
-                ok_del, err_del, _ = await _mirror_linux_cmd(target_host, target_port, "sudo", "userdel", "-f", un)
+                ok_del, err_del, _ = await run_cmd("sudo", "userdel", "-f", un)
                 await asyncio.to_thread(_db_cancel_reservation, un)
                 if not ok_del:
                     log.error("Rollback ناقص برای %s (bulk): userdel شکست خورد: %s", un, err_del)
@@ -4753,13 +4732,13 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
                 await asyncio.to_thread(_db_set_account_host, un, target_host)  # 🆕 ثبتِ Edgeِ صاحبِ این اکانت
             except Exception:
                 log.exception("خطا در ثبت نهایی اکانت bulk %s در دیتابیس؛ کاربر لینوکسی حذف می‌شود (Rollback).", un)
-                await _mirror_linux_cmd(target_host, target_port, "sudo", "userdel", "-f", un)
+                await run_cmd("sudo", "userdel", "-f", un)
                 await asyncio.to_thread(_db_cancel_reservation, un)
                 failed_msg = "❌ خطا در ثبت نهایی اکانت در دیتابیس."
                 break
 
             log.info("اکانت bulk %s با موفقیت ساخته شد (%d/%d) — نماینده: %s.", un, i + 1, count, ag_id if role == 'agent' else 'ادمین')
-            await _sync_user_limit_file(un, u, target_host, target_port)  # 🆕 فایل سقف اتصال روی Edgeِ واقعی نوشته می‌شود
+            await _sync_user_limit_file(un, u)  # فایل سقف اتصال PAM روی Core نوشته می‌شود
 
             # 🛡️ شمارندهٔ صرفاً‌افزایشیِ «کل فروش تابه‌حال» (مبنای کش‌بک) — مستقل از کسر کیف‌پول
             # زیر ثبت می‌شود تا حتی اگر آن مرحله بعداً خطا داد، این عدد به‌درستی افزایش یافته باشد.
@@ -8892,9 +8871,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         else:
                             fail_count += 1
                     else:
-                        port = await asyncio.to_thread(_db_get_host_ssh_port, host, 22) if host else 22
-                        ok, _err, _kind = await _mirror_linux_cmd(host, port, "sudo", "usermod", "-e", new_exp, un) if host \
-                            else await run_cmd("sudo", "usermod", "-e", new_exp, un)
+                        ok, _err, _kind = await run_cmd(
+                            "sudo", "usermod", "-e", new_exp, un
+                        )
                         if ok:
                             await asyncio.to_thread(_db_extend_user, un, new_exp); ok_count += 1
                         else:
@@ -8923,9 +8902,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if ok: ok_count += 1
                         else: fail_count += 1
                     else:
-                        port = await asyncio.to_thread(_db_get_host_ssh_port, host, 22) if host else 22
-                        ok, _err, _kind = await _mirror_linux_cmd(host, port, "sudo", "usermod", "-L", un) if host \
-                            else await run_cmd("sudo", "usermod", "-L", un)
+                        ok, _err, _kind = await run_cmd(
+                            "sudo", "usermod", "-L", un
+                        )
                         if ok: ok_count += 1
                         else: fail_count += 1
             await asyncio.gather(*[_lock_one(u, host, stype) for u, _exp, _st, host, stype in accounts])
@@ -8953,9 +8932,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if ok: ok_count += 1
                         else: fail_count += 1
                     else:
-                        port = await asyncio.to_thread(_db_get_host_ssh_port, host, 22) if host else 22
-                        ok, _err, _kind = await _mirror_linux_cmd(host, port, "sudo", "usermod", "-U", un) if host \
-                            else await run_cmd("sudo", "usermod", "-U", un)
+                        ok, _err, _kind = await run_cmd(
+                            "sudo", "usermod", "-U", un
+                        )
                         if ok: ok_count += 1
                         else: fail_count += 1
             await asyncio.gather(*[_unlock_one(u, host, stype) for u, host, stype in targets])
@@ -10107,9 +10086,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # بسیار بالاتر است (تا آزادشدن یک یوزرنیم واقعاً خالی).
             MAX_OS_RETRIES = 500
             os_retries = 0
-            # 🆕 معماریِ Control-Plane/Data-Plane (بندِ ۲): Edgeِ مقصدِ همین اکانت یک‌بار انتخاب
-            # می‌شود و کلِ گردش‌کارِ ساخت (چکِ وجود، useradd، chpasswd، Rollback) روی همان انجام
-            # می‌شود — علاوه بر Mirrorِ best-effort روی Core.
+            # endpoint عمومی این اکانت یک‌بار انتخاب می‌شود؛ عملیات Linux در توپولوژی Relay
+            # روی Core انجام می‌شود و target_host فقط برای routing/invoice metadata باقی می‌ماند.
             target_host = await asyncio.to_thread(_pick_target_host_for_new_account)
             target_port = await asyncio.to_thread(_db_get_host_ssh_port, target_host, 22)
             while await _os_user_exists(un, target_host, target_port) and os_retries < MAX_OS_RETRIES:
@@ -10131,7 +10109,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # گام ۲: ساخت کاربر لینوکسی
             useradd_retries = 0
             while True:
-                ok1, err1, kind1 = await _mirror_linux_cmd(target_host, target_port, "sudo", "useradd", "-s", "/bin/false", "-e", os_exp_db, un)
+                ok1, err1, kind1 = await run_cmd("sudo", "useradd", "-s", "/bin/false", "-e", os_exp_db, un)
                 if ok1:
                     break
                 is_duplicate = "already exists" in (err1 or "").lower()
@@ -10150,9 +10128,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             # گام ۳: تنظیم پسورد لینوکسی
-            ok2, err2, kind2 = await _mirror_linux_cmd(target_host, target_port, "sudo", "chpasswd", input_data=f"{un}:{pw}\n".encode())
+            ok2, err2, kind2 = await run_cmd("sudo", "chpasswd", input_data=f"{un}:{pw}\n".encode())
             if not ok2:
-                ok_del, err_del, _ = await _mirror_linux_cmd(target_host, target_port, "sudo", "userdel", "-f", un)  # 🔙 Rollback کاربر لینوکسی
+                ok_del, err_del, _ = await run_cmd("sudo", "userdel", "-f", un)  # 🔙 Rollback کاربر لینوکسی
                 await asyncio.to_thread(_db_cancel_reservation, un)              # 🔙 Rollback رزرو دیتابیس
                 if not ok_del:
                     log.error("Rollback ناقص برای %s: userdel شکست خورد: %s — نیاز به بررسی دستی روی سرور.", un, err_del)
@@ -10165,14 +10143,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.to_thread(_db_set_account_host, un, target_host)  # 🆕 ثبتِ Edgeِ صاحبِ این اکانت
             except Exception:
                 log.exception("خطا در ثبت نهایی اکانت %s در دیتابیس؛ کاربر لینوکسی حذف می‌شود (Rollback).", un)
-                await _mirror_linux_cmd(target_host, target_port, "sudo", "userdel", "-f", un)
+                await run_cmd("sudo", "userdel", "-f", un)
                 await asyncio.to_thread(_db_cancel_reservation, un)
                 await query.message.reply_text("❌ خطا در ثبت نهایی اکانت در دیتابیس. عملیات به‌طور کامل لغو (Rollback) شد؛ سرور تغییری نکرد.")
                 return
 
             # اکانت از این نقطه به بعد کاملاً و به‌صورت پایدار ساخته شده است ✅
             log.info("اکانت %s با موفقیت ساخته شد (نماینده: %s).", un, ag_id if role == 'agent' else 'ادمین')
-            await _sync_user_limit_file(un, u, target_host, target_port)  # 🆕 فایل سقف اتصال روی Edgeِ واقعی نوشته می‌شود
+            await _sync_user_limit_file(un, u)  # فایل سقف اتصال PAM روی Core نوشته می‌شود
             
             try:
                 actor = f"نماینده: {esc(ainf[0])}" if (role == 'agent' and ainf) else "ادمین"
@@ -10291,10 +10269,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 log.exception("خطا در اعمال بازپرداخت حذف اکانت %s", un)
 
-        _dh, _dp = await _acct_host_port(owner)
-        ok, err, kind = await _mirror_linux_cmd(_dh, _dp, "sudo", "userdel", "-f", un)
+        # Linux account lives on Core; owner.host is endpoint/routing metadata only.
+        ok, err, kind = await run_cmd("sudo", "userdel", "-f", un)
         await asyncio.to_thread(_db_delete_user, un)
-        await _remove_user_limit_file(un, _dh, _dp)  # 🆕 پاک‌سازی روی Edgeِ واقعی؛ چون اکانت حذف شده، دیگر نیازی نیست
+        await _remove_user_limit_file(un)  # پاک‌سازی فایل PAM روی Core
         if ok: await query.edit_message_text(f"✅ اکانت {esc(un)} حذف شد. (آمار فروش کسر گردید){refund_note}")
         else:
             extra = _fmt_linux_error("حذف اکانت", err, kind)
@@ -10326,8 +10304,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # اطمینان از وجود واقعی کاربر روی سیستم لینوکس، پیش از تلاش برای قفل/بازکردن آن؛
         # اگر کاربر فقط در دیتابیس وجود دارد ولی روی لینوکس نیست، usermod با خطای مبهم شکست
         # می‌خورد و کاربر گمان می‌کند دکمه اصلاً کار نمی‌کند.
-        _acct_host, _acct_port = await _acct_host_port(cur)
-        if not await _os_user_exists(un, _acct_host, _acct_port):
+        if not await _os_user_exists(un):
             await query.message.reply_text(
                 f"❌ اکانت <code>{esc(un)}</code> در دیتابیس هست اما روی خودِ سرور لینوکس یافت نشد.\n"
                 f"این یعنی اکانت به‌صورت ناقص ساخته شده؛ پیشنهاد می‌شود آن را حذف و دوباره بسازید.",
@@ -10336,7 +10313,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 🔧 ابتدا دستور لینوکسی اجرا و بررسی می‌شود؛ فقط در صورت موفقیتِ قطعی، وضعیت دیتابیس
         # تغییر می‌کند — تا دیتابیس و وضعیت واقعی سرور همیشه هم‌خوان بمانند.
-        ok, err, kind = await _mirror_linux_cmd(_acct_host, _acct_port, "sudo", "usermod", "-L" if will_lock else "-U", un)
+        ok, err, kind = await run_cmd("sudo", "usermod", "-L" if will_lock else "-U", un)
         if not ok:
             await query.message.reply_text(_fmt_linux_error("تغییر وضعیت فعال/غیرفعال", err, kind), parse_mode="HTML")
             return
@@ -10349,7 +10326,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # 🔙 Rollback: چون لینوکس با موفقیت تغییر کرد ولی ثبت آن در دیتابیس شکست خورد،
             # برای هم‌خوان‌ماندن دو طرف، تغییر لینوکس را به حالت قبل برمی‌گردانیم.
             log.exception("ثبت تغییر وضعیت %s در دیتابیس شکست خورد؛ تلاش برای Rollback وضعیت لینوکس...", un)
-            ok_rb, err_rb, _ = await _mirror_linux_cmd(_acct_host, _acct_port, "sudo", "usermod", "-U" if will_lock else "-L", un)
+            ok_rb, err_rb, _ = await run_cmd("sudo", "usermod", "-U" if will_lock else "-L", un)
             if not ok_rb:
                 log.error("Rollback لینوکس برای %s هم شکست خورد: %s — وضعیت دیتابیس و لینوکس ممکن است ناهم‌خوان باشند و نیاز به بررسی دستی دارد.", un, err_rb)
             await query.message.reply_text("❌ خطا در ثبت تغییر وضعیت در دیتابیس. تغییر روی سرور لینوکس نیز بازگردانده شد (Rollback) تا وضعیت دو طرف ناهم‌خوان نماند.")
@@ -10376,8 +10353,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ این کاربر دیگر وجود ندارد."); safe_clear_context(context); return
         if not _can_manage_user(role, ag_id, owner[5]):
             await query.message.reply_text("⛔️ شما مجاز به مدیریت این اکانت نیستید."); safe_clear_context(context); return
-        _pw_host, _pw_port = await _acct_host_port(owner)
-        ok, err, kind = await _mirror_linux_cmd(_pw_host, _pw_port, "sudo", "chpasswd", input_data=f"{un}:{new_pw}\n".encode())
+        ok, err, kind = await run_cmd(
+            "sudo", "chpasswd",
+            input_data=f"{un}:{new_pw}\n".encode()
+        )
         if ok:
             await asyncio.to_thread(_db_update_password, un, new_pw)
             await query.edit_message_text(f"✅ پسورد {esc(un)} تغییر کرد.")
@@ -11562,7 +11541,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             new_exp_db = new_exp_dt.strftime("%Y-%m-%d")
 
-            _exp_host, _exp_port = await _acct_host_port(cur)
+            # Linux lifecycle is Core-local; cur.host remains endpoint/routing metadata.
 
             # 🛠 Self-heal فقط برای تمدید: بعضی اکانت‌های منقضیِ قدیمی بعد از Migration در DB
             # باقی مانده‌اند ولی Linux user آن‌ها بازسازی نشده است. قبل از usermod، در صورت
@@ -11579,14 +11558,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     safe_clear_context(context); return
 
-            ok, err, kind = await _mirror_linux_cmd(_exp_host, _exp_port, "sudo", "usermod", "-e", new_exp_db, un)
+            ok, err, kind = await run_cmd(
+                "sudo", "usermod", "-e", new_exp_db, un
+            )
             if not ok:
                 await query.message.reply_text(_fmt_linux_error("تمدید اکانت" if mode == 'extend' else "کاهش تمدید اکانت", err, kind), parse_mode="HTML")
                 safe_clear_context(context); return
 
             # فعال‌سازی خودکار اکانت در لینوکس (باز کردن قفل)
             if mode == 'extend':
-                await _mirror_linux_cmd(_exp_host, _exp_port, "sudo", "usermod", "-U", un)
+                await run_cmd("sudo", "usermod", "-U", un)
 
             try:
                 if mode == 'extend':
@@ -11598,7 +11579,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await asyncio.to_thread(_db_extend_user, un, new_exp_db)
             except Exception:
                 log.exception("ثبت %s %s در دیتابیس شکست خورد؛ بازگردانی تاریخ انقضا روی لینوکس...", "کاهش تمدید" if mode == 'reduce' else "تمدید", un)
-                await _mirror_linux_cmd(_exp_host, _exp_port, "sudo", "usermod", "-e", old_exp, un)  # 🔙 Rollback
+                await run_cmd("sudo", "usermod", "-e", old_exp, un)  # 🔙 Rollback
                 await query.message.reply_text("❌ خطا در ثبت تغییرات در دیتابیس. تغییر روی سرور لینوکس نیز بازگردانده شد.")
                 safe_clear_context(context); return
 

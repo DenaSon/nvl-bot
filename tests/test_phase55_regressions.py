@@ -72,6 +72,18 @@ class Phase55UserCreationRegressionTests(unittest.TestCase):
         self.assertIn("created_but_unverified", self.source)
         self.assertNotIn('api_request("POST", "/api/user"', self.source)
 
+    def test_confirm_expires_and_never_double_answers_callback(self):
+        self.assertIn("draft_age > 1800", self.source)
+        self.assertIn('"started_at": time.time()', self.source)
+        create_start = self.source.index("elif d.startswith('mza_create_confirm_'):")
+        create_end = self.source.index("elif d == 'mza_nodes':", create_start)
+        create_region = self.source[create_start:create_end]
+        self.assertNotIn("await query.answer(", create_region)
+
+    def test_subscription_name_is_mirrored_to_marzban_note(self):
+        self.assertIn('note=draft.get("subscription_name") or ""', self.source)
+        self.assertIn("unverified_subname = draft.get(\"subscription_name\")", self.source)
+
     def test_subscription_name_is_saved_without_fake_sales_row(self):
         self.assertIn("_db_set_subscription_name, username, subname", self.source)
         create_start = self.source.index("elif d.startswith('mza_create_confirm_'):")

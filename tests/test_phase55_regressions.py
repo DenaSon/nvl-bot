@@ -12,18 +12,12 @@ class Phase55UserCreationRegressionTests(unittest.TestCase):
         cls.source = BOT_PATH.read_text(encoding="utf-8")
         cls.tree = ast.parse(cls.source)
 
-    def test_v108_marker_and_create_action_exist(self):
-        self.assertIn(
-            'BOT_VERSION_TAG = "V108-2026-10-02-marzban-user-creation"',
-            self.source,
-        )
-        create_button = self.source.index(
-            'InlineKeyboardButton("➕ ساخت کاربر V2Ray", callback_data="mza_create")'
-        )
-        users_button = self.source.index(
-            'InlineKeyboardButton("👥 کاربران", callback_data="mza_users_0")'
-        )
+    def test_phase55_features_survive_current_version(self):
+        self.assertIn("BOT_VERSION_TAG =", self.source)
+        create_button = self.source.index('callback_data="mza_create"')
+        users_button = self.source.index('callback_data="mza_users_0"')
         self.assertLess(create_button, users_button)
+        self.assertIn("mza_create_confirm_", self.source)
 
     def test_create_callbacks_remain_behind_admin_guard(self):
         guard = self.source.index("if d.startswith('mza_') and role != 'admin':")

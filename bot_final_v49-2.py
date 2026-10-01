@@ -2017,15 +2017,25 @@ def _db_get_customer_name(un):
         except Exception: return None
 
 def _db_get_subscription_name(un):
-    """User-facing subscription title reserved for the future presentation layer."""
+    """Return the saved display name only for local V2Ray accounts."""
     with db_conn() as conn:
-        row = conn.execute("SELECT subscription_name FROM ssh_accounts WHERE username=?", (un,)).fetchone()
+        row = conn.execute(
+            "SELECT subscription_name FROM ssh_accounts "
+            "WHERE username=? AND service_type IN ('v2ray','v2ray_vol')",
+            (un,),
+        ).fetchone()
         return row[0] if row and row[0] else None
 
 def _db_set_subscription_name(un, value):
     normalized = marzban_admin.normalize_subscription_name(value)
     with db_conn() as conn:
-        conn.execute("UPDATE ssh_accounts SET subscription_name=? WHERE username=?", (normalized, un))
+        cur = conn.execute(
+            "UPDATE ssh_accounts SET subscription_name=? "
+            "WHERE username=? AND service_type IN ('v2ray','v2ray_vol')",
+            (normalized, un),
+        )
+        if cur.rowcount != 1:
+            raise KeyError("local V2Ray account not found")
     return normalized
 
 def _db_set_account_host(un, host):
@@ -2594,8 +2604,16 @@ async def _delete_marzban_user_consistent(username: str):
     balance is changed.  Refund calculation is done before the remote delete
     because volumetric plans need Marzban usage data.
     """
-    owner = await asyncio.to_thread(_db_get_user, username)
-    owner_agent_id = owner[5] if owner else 0
+    def _get_local_v2():
+        with db_conn() as conn:
+            return conn.execute(
+                "SELECT agent_id, service_type FROM ssh_accounts "
+                "WHERE username=? AND service_type IN ('v2ray','v2ray_vol')",
+                (username,),
+            ).fetchone()
+
+    local_v2 = await asyncio.to_thread(_get_local_v2)
+    owner_agent_id = local_v2[0] if local_v2 else 0
     refund = 0.0
     refund_desc = ""
 
@@ -2612,7 +2630,7 @@ async def _delete_marzban_user_consistent(username: str):
         return False, "حذف روی Marzban انجام نشد؛ اطلاعات محلی دست‌نخورده ماند.", ""
 
     refund_note = ""
-    if owner:
+    if local_v2:
         try:
             with db_conn() as conn:
                 if owner_agent_id and refund > 0:
@@ -4636,7 +4654,8 @@ async def _show_marzban_user_readonly(target, context, username):
     def _local_meta():
         with db_conn() as conn:
             return conn.execute(
-                "SELECT agent_id, customer_name, subscription_name, service_type FROM ssh_accounts WHERE username=?",
+                "SELECT agent_id, customer_name, subscription_name, service_type FROM ssh_accounts "
+                "WHERE username=? AND service_type IN ('v2ray','v2ray_vol')",
                 (username,),
             ).fetchone()
     meta = await asyncio.to_thread(_local_meta)
@@ -4735,7 +4754,7 @@ async def _show_marzban_nodes(target, context):
             f"   Xray <code>{esc(node.get('xray_version') or '—')}</code> · Ratio {esc(node.get('usage_coefficient', 1))}",
             "",
         ])
-    if len(lines) == 2:
+    if len(lines) == 3:
         lines.append("هیچ نودی ثبت نشده است.")
     await _mza_render(target, "\n".join(lines), kb)
 

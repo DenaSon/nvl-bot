@@ -8370,17 +8370,28 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not ok_user or not isinstance(user, dict):
             await query.edit_message_text("❌ دریافت وضعیت کاربر از Marzban ناموفق بود.")
             return
-        new_status = 'disabled' if str(user.get('status') or '').lower() == 'active' else 'active'
+        current_status = str(user.get('status') or '').lower()
+        if current_status not in ('active', 'disabled'):
+            await query.edit_message_text(
+                "❌ تغییر مستقیم وضعیت برای حالت فعلی مجاز نیست.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_user_{username}")]])
+            )
+            return
+        new_status = 'disabled' if current_status == 'active' else 'active'
         ok_mod, err = await service.set_user_status(username, new_status)
         if not ok_mod:
             log.warning("Marzban dashboard toggle failed for %s: %r", username, err)
             await query.edit_message_text("❌ تغییر وضعیت انجام نشد.")
             return
-        local = await asyncio.to_thread(_db_get_user, username)
-        if local:
+        def _sync_local_status():
             db_status = "🟢 فعال" if new_status == 'active' else "🔴 غیرفعال"
             with db_conn() as conn:
-                conn.execute("UPDATE ssh_accounts SET status=? WHERE username=?", (db_status, username))
+                conn.execute(
+                    "UPDATE ssh_accounts SET status=? "
+                    "WHERE username=? AND service_type IN ('v2ray','v2ray_vol')",
+                    (db_status, username),
+                )
+        await asyncio.to_thread(_sync_local_status)
         await query.answer("✅ وضعیت بروزرسانی شد")
         await _show_marzban_user_readonly(query, context, username)
         return
@@ -8421,7 +8432,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d.startswith('mza_subname_'):
         username = d[len('mza_subname_'):]
-        local = await asyncio.to_thread(_db_get_user, username)
+        def _has_local_v2():
+            with db_conn() as conn:
+                return conn.execute(
+                    "SELECT 1 FROM ssh_accounts WHERE username=? "
+                    "AND service_type IN ('v2ray','v2ray_vol')",
+                    (username,),
+                ).fetchone() is not None
+        local = await asyncio.to_thread(_has_local_v2)
         if not local:
             await query.edit_message_text(
                 "❌ این کاربر رکورد محلی NVL ندارد و نام اشتراک برای آن قابل ذخیره نیست.",
@@ -8445,7 +8463,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d.startswith('mza_subclear_'):
         username = d[len('mza_subclear_'):]
-        await asyncio.to_thread(_db_set_subscription_name, username, None)
+        try:
+            await asyncio.to_thread(_db_set_subscription_name, username, None)
+        except KeyError:
+            await query.edit_message_text(
+                "❌ رکورد محلی V2Ray برای این کاربر پیدا نشد.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_user_{username}")]])
+            )
+            return
         context.user_data.pop('state', None)
         context.user_data.pop('mza_action_user', None)
         await query.answer("✅ نام اشتراک حذف شد")
@@ -8519,6 +8544,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rest = d[len('mza_renewyes_'):]
         days_text, username = rest.split('_', 1)
         days = int(days_text)
+        if not (1 <= days <= 3650):
+            await query.edit_message_text("❌ مقدار تمدید نامعتبر است.")
+            return
         service = await _get_marzban_admin_service()
         ok_user, user = await service.get_user(username)
         if not ok_user or not isinstance(user, dict):
@@ -8538,14 +8566,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.warning("Marzban dashboard renewal failed for %s: %r", username, err)
             await query.edit_message_text("❌ تمدید انجام نشد.")
             return
-        local = await asyncio.to_thread(_db_get_user, username)
-        if local:
-            new_date = datetime.fromtimestamp(new_expire, tz=timezone.utc).astimezone(IRAN_TZ).strftime("%Y-%m-%d")
-            with db_conn() as conn:
-                conn.execute(
-                    "UPDATE ssh_accounts SET expire_date=?, status='🟢 فعال', hold_active=0 WHERE username=?",
-                    (new_date, username),
-                )
+        new_date = datetime.fromtimestamp(new_expire, tz=timezone.utc).astimezone(IRAN_TZ).strftime("%Y-%m-%d")
+        with db_conn() as conn:
+            conn.execute(
+                "UPDATE ssh_accounts SET expire_date=?, status='🟢 فعال', hold_active=0 "
+                "WHERE username=? AND service_type IN ('v2ray','v2ray_vol')",
+                (new_date, username),
+            )
         await query.answer(f"✅ {days} روز تمدید شد")
         await _show_marzban_user_readonly(query, context, username)
         return
@@ -8588,6 +8615,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rest = d[len('mza_addvolyes_'):]
         gb_text, username = rest.split('_', 1)
         gb = int(gb_text)
+        if not (1 <= gb <= 10000):
+            await query.edit_message_text("❌ مقدار حجم نامعتبر است.")
+            return
         service = await _get_marzban_admin_service()
         ok_user, user = await service.get_user(username)
         if not ok_user or not isinstance(user, dict):
@@ -8606,10 +8636,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.warning("Marzban dashboard add-volume failed for %s: %r", username, err)
             await query.edit_message_text("❌ افزایش حجم انجام نشد.")
             return
-        local = await asyncio.to_thread(_db_get_user, username)
-        if local:
-            with db_conn() as conn:
-                conn.execute("UPDATE ssh_accounts SET data_limit=? WHERE username=?", (new_limit, username))
+        with db_conn() as conn:
+            conn.execute(
+                "UPDATE ssh_accounts SET data_limit=? "
+                "WHERE username=? AND service_type IN ('v2ray','v2ray_vol')",
+                (new_limit, username),
+            )
         await query.answer(f"✅ {gb} گیگ اضافه شد")
         await _show_marzban_user_readonly(query, context, username)
         return

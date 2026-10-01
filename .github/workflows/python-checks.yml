@@ -1,0 +1,33 @@
+name: Python checks
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches:
+      - master
+      - "feature/**"
+
+permissions:
+  contents: read
+
+jobs:
+  syntax-and-unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check aiohttp qrcode
+
+      - name: Compile changed Python modules
+        run: python -m py_compile bot_final_v49-2.py v2ray_engine.py marzban_admin.py
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v

@@ -29,6 +29,48 @@ _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 NODE_MUTABLE_FIELDS = {"name", "address", "port", "api_port", "status", "usage_coefficient"}
 NODE_MUTABLE_STATUSES = {"disabled", "connecting"}
 
+HOST_FIELDS = (
+    "remark",
+    "address",
+    "port",
+    "sni",
+    "host",
+    "path",
+    "security",
+    "alpn",
+    "fingerprint",
+    "allowinsecure",
+    "is_disabled",
+    "mux_enable",
+    "fragment_setting",
+    "noise_setting",
+    "random_user_agent",
+    "use_sni_as_host",
+)
+HOST_MUTABLE_FIELDS = set(HOST_FIELDS)
+HOST_SECURITY_VALUES = {"inbound_default", "none", "tls"}
+HOST_ALPN_VALUES = {"", "h3", "h2", "http/1.1", "h3,h2,http/1.1", "h3,h2", "h2,http/1.1"}
+HOST_FINGERPRINT_VALUES = {
+    "", "chrome", "firefox", "safari", "ios", "android", "edge",
+    "360", "qq", "random", "randomized",
+}
+HOST_BOOLEAN_FIELDS = {
+    "allowinsecure",
+    "is_disabled",
+    "mux_enable",
+    "random_user_agent",
+    "use_sni_as_host",
+}
+_HOST_FRAGMENT_RE = re.compile(
+    r"^((\d{1,4}-\d{1,4})|(\d{1,4})),((\d{1,3}-\d{1,3})|(\d{1,3})),(tlshello|\d|\d-\d)$"
+)
+_HOST_NOISE_RE = re.compile(
+    r"^(rand:(\d{1,4}-\d{1,4}|\d{1,4})|str:.+|hex:.+|base64:.+)"
+    r"(,(\d{1,4}-\d{1,4}|\d{1,4}))?"
+    r"(&(rand:(\d{1,4}-\d{1,4}|\d{1,4})|str:.+|hex:.+|base64:.+)"
+    r"(,(\d{1,4}-\d{1,4}|\d{1,4}))?)*$"
+)
+
 
 def normalize_node_id(value: Any) -> int:
     try:
@@ -89,6 +131,155 @@ def normalize_node_changes(changes: Dict[str, Any], *, allow_status: bool = True
             normalized[key] = status
 
     return normalized
+
+
+def normalize_inbound_tag(value: Any) -> str:
+    """Normalize an exact Marzban inbound tag without changing internal spaces."""
+    raw = _CONTROL_CHARS_RE.sub("", str(value or "")).strip()
+    if not raw or len(raw) > 255:
+        raise ValueError("inbound tag must be between 1 and 255 characters")
+    if "," in raw:
+        raise ValueError("inbound tag cannot contain commas")
+    return raw
+
+
+def normalize_host_index(value: Any) -> int:
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("host index must be an integer")
+    if index < 0:
+        raise ValueError("host index must be zero or greater")
+    return index
+
+
+def _normalize_host_bool(value: Any, field: str) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    raw = str(value).strip().lower()
+    if raw in {"", "-", "none", "null"}:
+        return None
+    if raw in {"1", "true", "yes", "on", "enable", "enabled"}:
+        return True
+    if raw in {"0", "false", "no", "off", "disable", "disabled"}:
+        return False
+    raise ValueError(f"{field} must be true, false, or unset")
+
+
+def normalize_host_changes(changes: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate the official Marzban ProxyHost fields exposed by NVL."""
+    if not changes:
+        raise ValueError("no host changes supplied")
+
+    unsupported = set(changes) - HOST_MUTABLE_FIELDS
+    if unsupported:
+        raise ValueError("unsupported host fields: " + ", ".join(sorted(unsupported)))
+
+    normalized: Dict[str, Any] = {}
+    for key, value in changes.items():
+        if key == "remark":
+            cleaned = _CONTROL_CHARS_RE.sub("", str(value or "")).strip()
+            cleaned = " ".join(cleaned.split())
+            if not cleaned or len(cleaned) > 160:
+                raise ValueError("host remark must be between 1 and 160 characters")
+            normalized[key] = cleaned
+        elif key == "address":
+            cleaned = _CONTROL_CHARS_RE.sub("", str(value or "")).strip()
+            if (
+                not cleaned
+                or len(cleaned) > 255
+                or any(ch.isspace() for ch in cleaned)
+                or "://" in cleaned
+            ):
+                raise ValueError("host address must be a hostname/IP without spaces or URL scheme")
+            normalized[key] = cleaned
+        elif key == "port":
+            if value is None or str(value).strip().lower() in {"", "-", "none", "null"}:
+                normalized[key] = None
+            else:
+                try:
+                    port = int(value)
+                except (TypeError, ValueError):
+                    raise ValueError("host port must be an integer or unset")
+                if not 1 <= port <= 65535:
+                    raise ValueError("host port must be between 1 and 65535")
+                normalized[key] = port
+        elif key in {"sni", "host"}:
+            if value is None or str(value).strip().lower() in {"", "-", "none", "null"}:
+                normalized[key] = None
+            else:
+                cleaned = _CONTROL_CHARS_RE.sub("", str(value)).strip()
+                if (
+                    len(cleaned) > 255
+                    or any(ch.isspace() for ch in cleaned)
+                    or "://" in cleaned
+                ):
+                    raise ValueError(f"{key} must not contain spaces or a URL scheme")
+                normalized[key] = cleaned
+        elif key == "path":
+            if value is None or str(value).strip().lower() in {"", "-", "none", "null"}:
+                normalized[key] = None
+            else:
+                cleaned = _CONTROL_CHARS_RE.sub("", str(value)).strip()
+                if len(cleaned) > 1024:
+                    raise ValueError("host path must be at most 1024 characters")
+                normalized[key] = cleaned
+        elif key == "security":
+            cleaned = str(value or "").strip().lower()
+            if cleaned not in HOST_SECURITY_VALUES:
+                raise ValueError("security must be inbound_default, none, or tls")
+            normalized[key] = cleaned
+        elif key == "alpn":
+            cleaned = str(value or "").strip().lower()
+            if cleaned in {"-", "none", "null"}:
+                cleaned = ""
+            if cleaned not in HOST_ALPN_VALUES:
+                raise ValueError("unsupported ALPN value")
+            normalized[key] = cleaned
+        elif key == "fingerprint":
+            cleaned = str(value or "").strip().lower()
+            if cleaned in {"-", "none", "null"}:
+                cleaned = ""
+            if cleaned not in HOST_FINGERPRINT_VALUES:
+                raise ValueError("unsupported fingerprint value")
+            normalized[key] = cleaned
+        elif key in HOST_BOOLEAN_FIELDS:
+            normalized[key] = _normalize_host_bool(value, key)
+        elif key == "fragment_setting":
+            if value is None or str(value).strip().lower() in {"", "-", "none", "null"}:
+                normalized[key] = None
+            else:
+                cleaned = _CONTROL_CHARS_RE.sub("", str(value)).strip()
+                if not _HOST_FRAGMENT_RE.fullmatch(cleaned):
+                    raise ValueError("invalid Marzban fragment setting")
+                normalized[key] = cleaned
+        elif key == "noise_setting":
+            if value is None or str(value).strip().lower() in {"", "-", "none", "null"}:
+                normalized[key] = None
+            else:
+                cleaned = _CONTROL_CHARS_RE.sub("", str(value)).strip()
+                if len(cleaned) > 2000 or not _HOST_NOISE_RE.fullmatch(cleaned):
+                    raise ValueError("invalid Marzban noise setting")
+                normalized[key] = cleaned
+
+    return normalized
+
+
+def host_snapshot(host: Dict[str, Any]) -> Dict[str, Any]:
+    """Canonical snapshot used to detect stale/replayed host confirmations."""
+    if not isinstance(host, dict):
+        raise ValueError("invalid Marzban host")
+    return {field: host.get(field) for field in HOST_FIELDS}
+
+
+def _host_payload(host: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only fields accepted by Marzban's ProxyHost model."""
+    payload = host_snapshot(host)
+    if not payload.get("remark") or not payload.get("address"):
+        raise ValueError("Marzban host requires remark and address")
+    return payload
 
 
 def can_manage_v2ray_account(role: Optional[str], actor_agent_id: int, owner_agent_id: int) -> bool:
@@ -286,6 +477,76 @@ class MarzbanAdminService:
 
     async def get_hosts(self) -> ApiResult:
         return await self.request("GET", "/api/hosts")
+
+    async def update_host(
+        self,
+        inbound_tag: str,
+        host_index: int,
+        *,
+        expected_host: Optional[Dict[str, Any]] = None,
+        **changes: Any,
+    ) -> ApiResult:
+        """Safely update one Public Host through Marzban's bulk /api/hosts API.
+
+        Marzban Public Hosts have no stable id; they are stored as ordered lists
+        per inbound tag. NVL therefore reloads authoritative state immediately
+        before writing and can reject a stale confirmation by comparing the
+        expected host snapshot at the same index.
+        """
+        tag = normalize_inbound_tag(inbound_tag)
+        index = normalize_host_index(host_index)
+        normalized = normalize_host_changes(changes)
+
+        ok, payload = await self.get_hosts()
+        if not ok:
+            return False, payload
+        if not isinstance(payload, dict):
+            return False, "Invalid Marzban hosts response"
+
+        current_hosts = payload.get(tag)
+        if not isinstance(current_hosts, list):
+            return False, f"Inbound host list not found: {tag}"
+        if index >= len(current_hosts):
+            return False, "Public Host no longer exists"
+
+        current = current_hosts[index]
+        if not isinstance(current, dict):
+            return False, "Invalid Marzban host response"
+
+        if expected_host is not None:
+            try:
+                if host_snapshot(current) != host_snapshot(expected_host):
+                    return False, "Public Host changed since confirmation; reload and try again"
+            except ValueError as exc:
+                return False, str(exc)
+
+        try:
+            replacement = _host_payload({**current, **normalized})
+            tag_hosts = [_host_payload(item) for item in current_hosts]
+        except ValueError as exc:
+            return False, str(exc)
+        tag_hosts[index] = replacement
+
+        return await self.request(
+            "PUT",
+            "/api/hosts",
+            json_data={tag: tag_hosts},
+        )
+
+    async def set_host_disabled(
+        self,
+        inbound_tag: str,
+        host_index: int,
+        disabled: bool,
+        *,
+        expected_host: Optional[Dict[str, Any]] = None,
+    ) -> ApiResult:
+        return await self.update_host(
+            inbound_tag,
+            host_index,
+            expected_host=expected_host,
+            is_disabled=bool(disabled),
+        )
 
     async def modify_user(self, username: str, **changes: Any) -> ApiResult:
         if not changes:

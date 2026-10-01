@@ -4953,7 +4953,7 @@ async def _show_marzban_node_detail(target, context, node_id):
         "━━━━━━━━━━━━━━",
         f"Node ID  <code>{node_id}</code>",
         f"وضعیت  <b>{esc(status_label)}</b>",
-        f"Health  <b>{esc(health_label)}</b>",
+        f"Health (Marzban)  <b>{esc(health_label)}</b>",
         "",
         "🌐 <b>اتصال</b>",
         f"Address  <code>{esc(address)}</code>",

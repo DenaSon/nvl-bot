@@ -4202,6 +4202,14 @@ async def _show_buy_start(update, context):
 
 async def _show_users_hub(target, context):
     role = context.user_data.get('role')
+    if role not in ('admin', 'agent'):
+        text = "⛔️ دسترسی به مدیریت کاربران برای این نقش مجاز نیست."
+        if hasattr(target, 'edit_message_text'):
+            await target.edit_message_text(text)
+        else:
+            await target.reply_text(text)
+        return
+
     context.user_data.pop('users_agent_filter', None)
 
     if role == 'agent':
@@ -9597,8 +9605,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if ainf and not ainf[10]:
             allowed_cbs = ['confirm_logout_yes', 'confirm_logout_no']
             if d not in allowed_cbs:
-                await query.message.reply_text("⛔️ <b>کاربر گرامی، ابتدا باید نام برند خود را تعیین کنید (مثلاً: AliVpn).</b>\nلطفاً از منوی اصلی ربات روی دکمه «✏️ تغییر نام برند» کلیک کنید.", parse_mode="HTML")
+                await query.message.reply_text("⛔️ <b>کاربر گرامی، ابتدا باید نام برند خود را تعیین کنید (مثلاً: AliVpn).</b>\nلطفاً از منوی اصلی ربات روی دکمه «✏️ نام برند» کلیک کنید.", parse_mode="HTML")
                 return
+
+    # Phase 5.6: user-navigation callbacks are not security boundaries by
+    # themselves. Enforce the role here so stale/forged callbacks cannot expose
+    # user lists to the accountant role.
+    if (
+        d == "users_hub"
+        or d.startswith("umanage_")
+    ) and role not in ('admin', 'agent'):
+        await query.message.reply_text("⛔️ دسترسی به مدیریت کاربران برای این نقش مجاز نیست.")
+        return
 
     # 🛠 Marzban admin callbacks are strictly admin-only.
     if d.startswith('mza_') and role != 'admin':
@@ -11241,7 +11259,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d == "uact_back_to_menu":
         await query.delete_message()
         await show_main_menu(query, context)
-    elif d == "users_hub":
+    elif d == "users_hub" and role in ('admin', 'agent'):
         safe_clear_context(context)
         await _show_users_hub(query, context)
     elif d == "uact_back":

@@ -13,7 +13,8 @@ This module intentionally keeps the existing ``(ok, payload)`` contract used by
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 import v2ray_engine
 
@@ -109,21 +110,76 @@ class MarzbanAdminService:
         *,
         offset: int = 0,
         limit: int = 50,
-        username: Optional[str] = None,
+        search: Optional[str] = None,
         status: Optional[str] = None,
+        sort: Optional[str] = None,
     ) -> ApiResult:
+        """List Marzban users using the 0.8.4-compatible query contract."""
         params: Dict[str, Any] = {
             "offset": max(0, int(offset)),
             "limit": max(1, min(int(limit), 100000)),
         }
-        if username:
-            params["username"] = username
+        if search:
+            params["search"] = str(search).strip()
         if status:
             params["status"] = status
+        if sort:
+            params["sort"] = sort
         return await self.request("GET", "/api/users", params=params)
+
+    async def list_online_users(
+        self,
+        *,
+        window_seconds: int = 300,
+        limit: int = 100000,
+    ) -> ApiResult:
+        """Return active users seen online within the recent time window."""
+        ok, payload = await self.list_users(limit=limit)
+        if not ok:
+            return False, payload
+
+        if isinstance(payload, dict):
+            users = payload.get("users", [])
+        elif isinstance(payload, list):
+            users = payload
+        else:
+            users = []
+
+        now = datetime.now(timezone.utc)
+        result: List[Dict[str, Any]] = []
+        for user in users:
+            if not isinstance(user, dict) or user.get("status") != "active":
+                continue
+            raw = user.get("online_at")
+            if not raw:
+                continue
+            try:
+                stamp = str(raw).strip().replace("Z", "+00:00")
+                dt = datetime.fromisoformat(stamp)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                else:
+                    dt = dt.astimezone(timezone.utc)
+                age = (now - dt).total_seconds()
+                if 0 <= age <= max(1, int(window_seconds)):
+                    result.append(user)
+            except (TypeError, ValueError):
+                continue
+
+        result.sort(key=lambda item: str(item.get("online_at") or ""), reverse=True)
+        return True, {"users": result, "total": len(result)}
 
     async def get_system_stats(self) -> ApiResult:
         return await self.request("GET", "/api/system")
+
+    async def get_nodes(self) -> ApiResult:
+        return await self.request("GET", "/api/nodes")
+
+    async def get_inbounds(self) -> ApiResult:
+        return await self.request("GET", "/api/inbounds")
+
+    async def get_hosts(self) -> ApiResult:
+        return await self.request("GET", "/api/hosts")
 
     async def modify_user(self, username: str, **changes: Any) -> ApiResult:
         if not changes:

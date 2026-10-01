@@ -232,7 +232,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V102-2026-07-26-edge-permitrootlogin-fix"
+BOT_VERSION_TAG = "V103-2026-10-01-marzban-admin-phase2"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -4323,6 +4323,296 @@ async def _show_v2ray_user_detail(update_or_query, username, context, db_res, v2
     else:
         await update_or_query.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
+# ==========================================
+# 🛠 Marzban Admin Dashboard — Phase 2 (read-only)
+# ==========================================
+_MARZBAN_ADMIN_PAGE_SIZE = 8
+_MARZBAN_ONLINE_WINDOW_SECONDS = 300
+_MARZBAN_STATUS_LABELS = {
+    "active": "🟢 فعال",
+    "disabled": "🔴 غیرفعال",
+    "expired": "⌛ منقضی",
+    "limited": "🟠 محدود",
+    "on_hold": "⏸ آن‌هولد",
+}
+
+def _mza_status_label(status):
+    return _MARZBAN_STATUS_LABELS.get(str(status or "").lower(), f"⚪ {status or 'نامشخص'}")
+
+def _mza_bytes(value):
+    try:
+        n = float(value or 0)
+    except (TypeError, ValueError):
+        n = 0.0
+    if n <= 0:
+        return "0 B"
+    units = ("B", "KB", "MB", "GB", "TB")
+    i = 0
+    while n >= 1024 and i < len(units) - 1:
+        n /= 1024.0
+        i += 1
+    return f"{n:.1f} {units[i]}"
+
+def _mza_timestamp(value, unlimited_text="نامحدود"):
+    if value in (None, "", 0, "0"):
+        return unlimited_text
+    try:
+        dt = datetime.fromtimestamp(int(value), tz=timezone.utc).astimezone(IRAN_TZ)
+        return fmt_jalali_datetime(dt, with_weekday=False)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return "نامشخص"
+
+def _mza_online_at(value):
+    if not value:
+        return "ثبت نشده"
+    try:
+        raw = str(value).strip().replace("Z", "+00:00")
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return fmt_jalali_datetime(dt.astimezone(IRAN_TZ), with_weekday=False)
+    except (TypeError, ValueError):
+        return "نامشخص"
+
+async def _mza_render(target, text, kb):
+    markup = InlineKeyboardMarkup(kb)
+    if hasattr(target, "edit_message_text"):
+        try:
+            await target.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
+        except BadRequest as exc:
+            if "Message is not modified" not in str(exc):
+                raise
+    elif hasattr(target, "reply_text"):
+        await target.reply_text(text, reply_markup=markup, parse_mode="HTML")
+    else:
+        await target.message.reply_text(text, reply_markup=markup, parse_mode="HTML")
+
+async def _show_marzban_admin_dashboard(target, context):
+    service = await _get_marzban_admin_service()
+    stats_result, nodes_result = await asyncio.gather(
+        service.get_system_stats(),
+        service.get_nodes(),
+    )
+    ok_stats, stats = stats_result
+    ok_nodes, nodes = nodes_result
+
+    kb = [
+        [InlineKeyboardButton("👥 کاربران", callback_data="mza_users_0"),
+         InlineKeyboardButton("🟢 آنلاین", callback_data="mza_online_0")],
+        [InlineKeyboardButton("🔍 جستجوی کاربر", callback_data="mza_search"),
+         InlineKeyboardButton("🖥 نودها", callback_data="mza_nodes")],
+        [InlineKeyboardButton("🔄 بروزرسانی", callback_data="mza_home")],
+        [InlineKeyboardButton("🔙 منوی اصلی", callback_data="uact_back_to_menu")],
+    ]
+
+    if not ok_stats or not isinstance(stats, dict):
+        err = esc(stats)
+        return await _mza_render(
+            target,
+            f"🛠 <b>مدیریت Marzban</b>\n\n❌ دریافت وضعیت سیستم ناموفق بود.\n<code>{err}</code>",
+            kb,
+        )
+
+    mem_used = _mza_bytes(stats.get("mem_used", 0))
+    mem_total = _mza_bytes(stats.get("mem_total", 0))
+    cpu = float(stats.get("cpu_usage", 0) or 0)
+    total = int(stats.get("total_user", 0) or 0)
+    active = int(stats.get("users_active", 0) or 0)
+    disabled = int(stats.get("users_disabled", 0) or 0)
+    expired = int(stats.get("users_expired", 0) or 0)
+    limited = int(stats.get("users_limited", 0) or 0)
+    on_hold = int(stats.get("users_on_hold", 0) or 0)
+
+    node_line = "نامشخص"
+    if ok_nodes and isinstance(nodes, list):
+        connected = sum(1 for n in nodes if isinstance(n, dict) and n.get("status") == "connected")
+        node_line = f"{connected}/{len(nodes)} متصل"
+
+    txt = (
+        "🛠 <b>مدیریت Marzban</b>\n\n"
+        f"🧩 نسخه: <code>{esc(stats.get('version', '?'))}</code>\n"
+        f"🖥 CPU: <b>{cpu:.1f}%</b>\n"
+        f"🧠 RAM: <b>{mem_used}</b> / {mem_total}\n"
+        f"🖧 نودها: <b>{node_line}</b>\n\n"
+        f"👥 کل کاربران: <b>{total}</b>\n"
+        f"🟢 فعال: {active}   🔴 غیرفعال: {disabled}\n"
+        f"⌛ منقضی: {expired}   🟠 محدود: {limited}\n"
+        f"⏸ آن‌هولد: {on_hold}\n\n"
+        "ℹ️ این داشبورد در فاز ۲ فقط خواندنی است."
+    )
+    await _mza_render(target, txt, kb)
+
+async def _show_marzban_users(target, context, page=0, mode="users"):
+    page = max(0, int(page or 0))
+    service = await _get_marzban_admin_service()
+    status_filter = context.user_data.get("mza_filter")
+    search_term = context.user_data.get("mza_search_term")
+
+    if mode == "online":
+        ok, payload = await service.list_online_users(window_seconds=_MARZBAN_ONLINE_WINDOW_SECONDS)
+        if ok and isinstance(payload, dict):
+            all_users = payload.get("users", []) or []
+            total = int(payload.get("total", len(all_users)) or 0)
+            start = page * _MARZBAN_ADMIN_PAGE_SIZE
+            users = all_users[start:start + _MARZBAN_ADMIN_PAGE_SIZE]
+        else:
+            users, total = [], 0
+    else:
+        search = search_term if mode == "search" else None
+        status = status_filter if mode == "users" else None
+        ok, payload = await service.list_users(
+            offset=page * _MARZBAN_ADMIN_PAGE_SIZE,
+            limit=_MARZBAN_ADMIN_PAGE_SIZE,
+            search=search,
+            status=status,
+        )
+        if ok and isinstance(payload, dict):
+            users = payload.get("users", []) or []
+            total = int(payload.get("total", len(users)) or 0)
+        elif ok and isinstance(payload, list):
+            users, total = payload, len(payload)
+        else:
+            users, total = [], 0
+
+    if not ok:
+        err = esc(payload)
+        kb = [[InlineKeyboardButton("🔙 داشبورد", callback_data="mza_home")]]
+        return await _mza_render(target, f"❌ خطا در دریافت کاربران\n<code>{err}</code>", kb)
+
+    pages = max(1, (total + _MARZBAN_ADMIN_PAGE_SIZE - 1) // _MARZBAN_ADMIN_PAGE_SIZE)
+    if page >= pages:
+        page = pages - 1
+
+    if mode == "online":
+        title = f"🟢 <b>کاربران آنلاین ۵ دقیقه اخیر</b> — {total} نفر"
+        page_prefix = "mza_online_"
+    elif mode == "search":
+        title = f"🔍 <b>نتایج جستجو:</b> <code>{esc(search_term or '')}</code> — {total} نتیجه"
+        page_prefix = "mza_searchpage_"
+    else:
+        label = _mza_status_label(status_filter) if status_filter else "همه"
+        title = f"👥 <b>کاربران Marzban</b> — فیلتر: {label} — {total} نفر"
+        page_prefix = "mza_users_"
+
+    lines = [title, ""]
+    kb = []
+    for user in users:
+        if not isinstance(user, dict):
+            continue
+        username = str(user.get("username") or "")
+        if not username:
+            continue
+        status = _mza_status_label(user.get("status"))
+        used = _mza_bytes(user.get("used_traffic", 0))
+        limit = _mza_bytes(user.get("data_limit", 0)) if user.get("data_limit") else "نامحدود"
+        lines.append(f"• <code>{esc(username)}</code> — {status} — {used}/{limit}")
+        kb.append([InlineKeyboardButton(f"{status.split()[0]} {username}", callback_data=f"mza_user_{username}")])
+
+    if not users:
+        lines.append("موردی پیدا نشد.")
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"{page_prefix}{page-1}"))
+    nav.append(InlineKeyboardButton(f"{page+1}/{pages}", callback_data="mza_noop"))
+    if page + 1 < pages:
+        nav.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"{page_prefix}{page+1}"))
+    kb.append(nav)
+
+    if mode == "users":
+        kb.extend([
+            [InlineKeyboardButton("همه", callback_data="mza_filter_all"),
+             InlineKeyboardButton("🟢 فعال", callback_data="mza_filter_active"),
+             InlineKeyboardButton("🔴 غیرفعال", callback_data="mza_filter_disabled")],
+            [InlineKeyboardButton("⌛ منقضی", callback_data="mza_filter_expired"),
+             InlineKeyboardButton("🟠 محدود", callback_data="mza_filter_limited"),
+             InlineKeyboardButton("⏸ آن‌هولد", callback_data="mza_filter_on_hold")],
+        ])
+    kb.append([InlineKeyboardButton("🔙 داشبورد", callback_data="mza_home")])
+
+    context.user_data["mza_mode"] = mode
+    context.user_data["mza_page"] = page
+    await _mza_render(target, "\n".join(lines), kb)
+
+async def _show_marzban_user_readonly(target, context, username):
+    service = await _get_marzban_admin_service()
+    ok, user = await service.get_user(username)
+    if not ok or not isinstance(user, dict):
+        kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="mza_backlist")]]
+        return await _mza_render(target, f"❌ کاربر یافت نشد یا API پاسخ معتبر نداد.\n<code>{esc(user)}</code>", kb)
+
+    def _local_meta():
+        with db_conn() as conn:
+            return conn.execute(
+                "SELECT agent_id, customer_name, subscription_name, service_type FROM ssh_accounts WHERE username=?",
+                (username,),
+            ).fetchone()
+    meta = await asyncio.to_thread(_local_meta)
+    owner_text = "ثبت محلی ندارد"
+    customer_name = None
+    subscription_name = None
+    service_type = None
+    if meta:
+        owner_id, customer_name, subscription_name, service_type = meta
+        if owner_id:
+            info = await asyncio.to_thread(_db_get_agent_info, owner_id)
+            owner_text = f"نماینده «{info[0]}»" if info else f"نماینده #{owner_id}"
+        else:
+            owner_text = "مستقیم (ادمین)"
+
+    used = _mza_bytes(user.get("used_traffic", 0))
+    data_limit = user.get("data_limit", 0)
+    limit = _mza_bytes(data_limit) if data_limit else "نامحدود"
+    proxies = ", ".join(sorted((user.get("proxies") or {}).keys())) or "—"
+    inbound_map = user.get("inbounds") or {}
+    inbound_count = sum(len(v or []) for v in inbound_map.values()) if isinstance(inbound_map, dict) else 0
+
+    txt = (
+        f"👤 <b>جزئیات کاربر Marzban</b>\n\n"
+        f"Username: <code>{esc(username)}</code>\n"
+        f"وضعیت: {_mza_status_label(user.get('status'))}\n"
+        f"مصرف: <b>{used}</b> / {limit}\n"
+        f"انقضا: {_mza_timestamp(user.get('expire'))}\n"
+        f"آخرین اتصال: {_mza_online_at(user.get('online_at'))}\n"
+        f"پروتکل‌ها: <code>{esc(proxies)}</code>\n"
+        f"Inbounds فعال: <b>{inbound_count}</b>\n"
+        f"نوع محلی: <code>{esc(service_type or '—')}</code>\n"
+        f"مالک: {esc(owner_text)}\n"
+        f"نام مشتری: {esc(customer_name or '—')}\n"
+        f"نام اشتراک: {esc(subscription_name or 'تنظیم نشده')}\n\n"
+        "🔒 این صفحه فقط خواندنی است."
+    )
+    kb = [
+        [InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"mza_user_{username}")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="mza_backlist")],
+    ]
+    await _mza_render(target, txt, kb)
+
+async def _show_marzban_nodes(target, context):
+    service = await _get_marzban_admin_service()
+    ok, nodes = await service.get_nodes()
+    kb = [[InlineKeyboardButton("🔄 بروزرسانی", callback_data="mza_nodes")],
+          [InlineKeyboardButton("🔙 داشبورد", callback_data="mza_home")]]
+    if not ok or not isinstance(nodes, list):
+        return await _mza_render(target, f"❌ خطا در دریافت نودها\n<code>{esc(nodes)}</code>", kb)
+
+    lines = ["🖥 <b>Marzban Nodes</b>", ""]
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        status = str(node.get("status") or "unknown")
+        icon = {"connected": "🟢", "connecting": "🟡", "error": "🔴", "disabled": "⚫"}.get(status, "⚪")
+        lines.extend([
+            f"{icon} <b>{esc(node.get('name', 'Unnamed'))}</b>",
+            f"   <code>{esc(node.get('address', '?'))}:{esc(node.get('port', '?'))}</code>  API:{esc(node.get('api_port', '?'))}",
+            f"   Status: {esc(status)} | Xray: <code>{esc(node.get('xray_version') or '—')}</code>",
+            f"   Usage ratio: {esc(node.get('usage_coefficient', 1))}",
+            "",
+        ])
+    if len(lines) == 2:
+        lines.append("هیچ نودی ثبت نشده است.")
+    await _mza_render(target, "\n".join(lines), kb)
+
 #----------------------------------------------------------
 
 async def _show_user_detail(update_or_query, username, context):
@@ -4916,6 +5206,22 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     role = context.user_data.get('role')
     chat_id = update.effective_chat.id
 
+    # 🔍 Phase 2 Marzban admin search — read-only and admin-only.
+    if state == 'MARZBAN_ADMIN_SEARCH':
+        if role != 'admin':
+            context.user_data.pop('state', None)
+            await update.message.reply_text("⛔️ دسترسی غیرمجاز.")
+            return
+        term = text.strip()
+        if len(term) < 2:
+            await update.message.reply_text("❌ حداقل ۲ کاراکتر برای جستجو وارد کنید:")
+            return
+        context.user_data.pop('state', None)
+        context.user_data['mza_search_term'] = term
+        context.user_data['mza_mode'] = 'search'
+        await _show_marzban_users(update.message, context, page=0, mode='search')
+        return
+
     # 🛡 Stateful V2Ray management must re-check ownership on every text continuation.
     _v2_state_target = None
     if state == 'V2_ADD_VOL_INPUT':
@@ -5174,15 +5480,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             kb = _build_server_settings_kb()
             await update.message.reply_text("⚙️ <b>تنظیمات سرور</b>\nیکی از گزینه‌های زیر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML"); return
         elif text == '🛠 مدیریت V2Ray' and role == 'admin':
-            await update.message.reply_text("⏳ در حال دریافت اطلاعات از nevel...")
-            m_admin = await _get_marzban_admin_service()
-            ok, stats = await m_admin.get_system_stats()
-            if ok:
-                mem = round(stats.get('mem_used', 0) / 1024**2, 1)
-                txt = f"🛠 <b>وضعیت سرور V2Ray</b>\nCPU: {stats.get('cpu_usage',0):.1f}%\nRAM: {mem} MB\nکاربران فعال: {stats.get('users_active',0)}"
-                await update.message.reply_text(txt, parse_mode="HTML")
-            else:
-                await update.message.reply_text(f"❌ خطا در اتصال به nevel: {stats}")
+            await _show_marzban_admin_dashboard(update.message, context)
             return
         elif text == '⚙️ تغییر نام برند' and role == 'admin':
             await update.message.reply_text("✍️ لطفاً نام برند جدید خود را وارد نمایید:"); context.user_data['state'] = 'BRAND_INPUT'; return
@@ -7795,6 +8093,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text("⛔️ <b>کاربر گرامی، ابتدا باید نام برند خود را تعیین کنید (مثلاً: AliVpn).</b>\nلطفاً از منوی اصلی ربات روی دکمه «✏️ تغییر نام برند» کلیک کنید.", parse_mode="HTML")
                 return
 
+    # 🛠 Phase 2 Marzban admin callbacks are strictly admin-only.
+    if d.startswith('mza_') and role != 'admin':
+        await query.message.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+    if d.startswith('mza_') and d != 'mza_search' and context.user_data.get('state') == 'MARZBAN_ADMIN_SEARCH':
+        context.user_data.pop('state', None)
+
     # 🛡 Central V2Ray authorization boundary.  Callback data and persisted
     # state only identify a target; ownership is always reloaded from SQLite.
     _v2_target = _v2ray_management_target_from_callback(d, context)
@@ -7806,6 +8111,52 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not _ok_access:
             await query.message.reply_text("⛔️ شما مجاز به مشاهده/مدیریت این اکانت نیستید.")
             return
+
+    # ---------------- Marzban Admin Dashboard (read-only) ----------------
+    if d == 'mza_home':
+        await _show_marzban_admin_dashboard(query, context)
+        return
+    elif d == 'mza_nodes':
+        await _show_marzban_nodes(query, context)
+        return
+    elif d == 'mza_search':
+        context.user_data['state'] = 'MARZBAN_ADMIN_SEARCH'
+        await query.edit_message_text(
+            "🔍 <b>جستجوی کاربر Marzban</b>\n\nبخشی از username را بفرستید:",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🔙 داشبورد', callback_data='mza_home')]])
+        )
+        return
+    elif d == 'mza_noop':
+        return
+    elif d.startswith('mza_filter_'):
+        value = d[len('mza_filter_'):]
+        context.user_data['mza_filter'] = None if value == 'all' else value
+        context.user_data.pop('mza_search_term', None)
+        await _show_marzban_users(query, context, page=0, mode='users')
+        return
+    elif d.startswith('mza_users_'):
+        page = int(d.rsplit('_', 1)[1])
+        context.user_data.pop('mza_search_term', None)
+        await _show_marzban_users(query, context, page=page, mode='users')
+        return
+    elif d.startswith('mza_online_'):
+        page = int(d.rsplit('_', 1)[1])
+        await _show_marzban_users(query, context, page=page, mode='online')
+        return
+    elif d.startswith('mza_searchpage_'):
+        page = int(d.rsplit('_', 1)[1])
+        await _show_marzban_users(query, context, page=page, mode='search')
+        return
+    elif d.startswith('mza_user_'):
+        username = d[len('mza_user_'):]
+        await _show_marzban_user_readonly(query, context, username)
+        return
+    elif d == 'mza_backlist':
+        mode = context.user_data.get('mza_mode', 'users')
+        page = context.user_data.get('mza_page', 0)
+        await _show_marzban_users(query, context, page=page, mode=mode)
+        return
 
     # 🚨 گارد جامع وضعیت فروش سرویس‌ها (جلوگیری از کلیک روی دکمه‌های منقضی‌شده در تمامی مراحل خرید)
     if d.startswith(("bm_", "bu_", "blkc_", "buyfav_", "cm_set_")) or d in ("buy_direct", "buy_bulk_start", "buy_yes", "buy_emergency_yes"):
@@ -8264,34 +8615,48 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         owner = await asyncio.to_thread(_db_get_user, un)
         if not owner: return await query.edit_message_text("❌ این کاربر دیگر وجود ندارد.")
 
-        # First remove the remote account.  Do not refund or delete the local
-        # record if Marzban rejects/fails the operation.
+        owner_agent_id = owner[5]
+        refund = 0.0
+        refund_desc = ""
+
+        # Refund must be calculated while the Marzban user still exists because
+        # volumetric plans need remote used_traffic/data_limit to compute it.
+        if owner_agent_id and owner_agent_id != 0:
+            try:
+                refund, refund_desc = await _calc_account_refund(un)
+            except Exception:
+                log.exception("خطا در محاسبه بازپرداخت حذف اکانت V2Ray %s", un)
+                refund = 0.0
+                refund_desc = ""
+
+        # Remote delete is the commit point.  If Marzban fails, do not touch
+        # local account state or wallet balances.
         m_admin = await _get_marzban_admin_service()
         ok_del, del_err = await m_admin.delete_user(un)
         if not ok_del:
             log.warning("Marzban delete failed for %s: %r", un, del_err)
             return await query.edit_message_text("❌ حذف روی Marzban انجام نشد؛ اکانت و موجودی محلی دست‌نخورده ماند.")
 
-        owner_agent_id = owner[5]
-        refund = 0.0
         refund_note = ""
-        if owner_agent_id and owner_agent_id != 0:
-            try:
-                refund, refund_desc = await _calc_account_refund(un)
-                if refund > 0:
-                    with db_conn() as conn:
-                        conn.execute("UPDATE agents SET balance = balance + ? WHERE id=?", (refund, owner_agent_id))
-                        used_before_row = conn.execute("SELECT emergency_used FROM agents WHERE id=?", (owner_agent_id,)).fetchone()
-                        used_before = (used_before_row[0] or 0.0) if used_before_row else 0.0
-                        _apply_emergency_repayment(conn, owner_agent_id, refund)
-                        emergency_repaid = min(used_before, refund) if used_before > 0 else 0.0
+        emergency_repaid = 0.0
+        try:
+            # Keep refund + local deletion atomic with one SQLite transaction.
+            with db_conn() as conn:
+                if owner_agent_id and owner_agent_id != 0 and refund > 0:
+                    conn.execute("UPDATE agents SET balance = balance + ? WHERE id=?", (refund, owner_agent_id))
+                    used_before_row = conn.execute("SELECT emergency_used FROM agents WHERE id=?", (owner_agent_id,)).fetchone()
+                    used_before = (used_before_row[0] or 0.0) if used_before_row else 0.0
+                    _apply_emergency_repayment(conn, owner_agent_id, refund)
+                    emergency_repaid = min(used_before, refund) if used_before > 0 else 0.0
                     refund_note = f"\n💸 {refund_desc}"
                     if emergency_repaid > 0:
                         refund_note += f"\n🆘 از همین مبلغ، {int(emergency_repaid):,} تومان بدهیِ شارژ اضطراری نماینده نیز پاک شد."
-            except Exception:
-                log.exception("خطا در اعمال بازپرداخت حذف اکانت V2Ray %s", un)
-
-        await asyncio.to_thread(_db_delete_user, un)
+                conn.execute("DELETE FROM ssh_accounts WHERE username=?", (un,))
+        except Exception:
+            log.exception("Marzban user %s was deleted remotely but local finalization failed", un)
+            return await query.edit_message_text(
+                "⚠️ کاربر از Marzban حذف شد، اما نهایی‌سازی دیتابیس محلی ناموفق بود. لطفاً قبل از هر اقدام دیگری لاگ را بررسی کنید."
+            )
 
         await query.edit_message_text(f"✅ اکانت <code>{esc(un)}</code> به‌طور کامل از ربات و nevelv2ray حذف شد.{refund_note}", parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="uact_back")]]))

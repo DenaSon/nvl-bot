@@ -191,5 +191,22 @@ class MarzbanAdminService:
             return False, f"Unsupported user status: {status}"
         return await self.modify_user(username, status=status)
 
+    async def reset_user_usage(self, username: str) -> ApiResult:
+        return await self.request("POST", f"/api/user/{username}/reset")
+
+    async def get_subscription_url(self, username: str) -> ApiResult:
+        ok, payload = await self.get_user(username)
+        if not ok:
+            return False, payload
+        if not isinstance(payload, dict):
+            return False, "Invalid Marzban user response"
+
+        sub_url = str(payload.get("subscription_url") or "").strip()
+        if not sub_url:
+            return False, "Subscription URL is empty"
+        if sub_url.startswith("/"):
+            sub_url = f"{self.url}{sub_url}"
+        return True, sub_url
+
     async def delete_user(self, username: str) -> ApiResult:
         return await self.request("DELETE", f"/api/user/{username}")

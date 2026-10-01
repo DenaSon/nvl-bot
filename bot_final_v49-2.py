@@ -4645,10 +4645,25 @@ async def _show_marzban_user_readonly(target, context, username):
         f"نام مشتری  {esc(customer_name or '—')}\n"
         f"نام اشتراک  {esc(subscription_name or 'تنظیم نشده')}"
     )
+    status_key = str(user.get("status") or "").lower()
+    toggle_label = "🔴 غیرفعال کردن" if status_key == "active" else "🟢 فعال کردن"
     kb = [
-        [InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"mza_user_{username}")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="mza_backlist")],
+        [InlineKeyboardButton(toggle_label, callback_data=f"mza_toggle_{username}"),
+         InlineKeyboardButton("♻️ ریست مصرف", callback_data=f"mza_reset_{username}")],
+        [InlineKeyboardButton("🔗 لینک اشتراک", callback_data=f"mza_link_{username}"),
+         InlineKeyboardButton("📱 QR Code", callback_data=f"mza_qr_{username}")],
     ]
+    if meta:
+        kb.append([InlineKeyboardButton("✏️ نام اشتراک", callback_data=f"mza_subname_{username}")])
+    if user.get("expire"):
+        kb.append([InlineKeyboardButton("📅 تمدید", callback_data=f"mza_renew_{username}")])
+    if user.get("data_limit"):
+        kb.append([InlineKeyboardButton("➕ افزایش حجم", callback_data=f"mza_addvol_{username}")])
+    kb.extend([
+        [InlineKeyboardButton("🗑 حذف کاربر", callback_data=f"mza_delete_{username}")],
+        [InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"mza_user_{username}"),
+         InlineKeyboardButton("🔙 بازگشت", callback_data="mza_backlist")],
+    ])
     await _mza_render(target, txt, kb)
 
 async def _show_marzban_nodes(target, context):

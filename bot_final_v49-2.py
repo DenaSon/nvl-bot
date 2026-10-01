@@ -2660,6 +2660,7 @@ async def _delete_marzban_user_consistent(username: str):
         return False, "حذف روی Marzban انجام نشد؛ اطلاعات محلی دست‌نخورده ماند.", ""
 
     refund_note = ""
+    local_finalize_error = None
     if local_v2:
         try:
             with db_conn() as conn:
@@ -2681,16 +2682,31 @@ async def _delete_marzban_user_consistent(username: str):
                             f"\n🆘 {int(emergency_repaid):,} تومان بدهی شارژ اضطراری نیز تسویه شد."
                         )
                 conn.execute("DELETE FROM ssh_accounts WHERE username=?", (username,))
-                conn.execute("DELETE FROM marzban_user_prefs WHERE username=?", (username,))
         except Exception:
             log.exception(
                 "Marzban user %s was deleted remotely but local finalization failed",
                 username,
             )
-            return False, (
+            local_finalize_error = (
                 "کاربر از Marzban حذف شد، اما نهایی‌سازی دیتابیس محلی ناموفق بود؛ "
                 "لاگ سرور باید بررسی شود."
-            ), ""
+            )
+
+    # Presentation preferences belong to the remote Marzban identity, not only
+    # to NVL-local V2Ray rows. Always remove them after a successful remote
+    # delete so imported/legacy users cannot leave stale names behind.
+    try:
+        with db_conn() as conn:
+            conn.execute("DELETE FROM marzban_user_prefs WHERE username=?", (username,))
+    except Exception:
+        log.exception("Failed to clean Marzban presentation preferences for %s", username)
+        return False, (
+            "کاربر از Marzban حذف شد، اما پاک‌سازی تنظیمات نمایشی محلی ناموفق بود؛ "
+            "لاگ سرور باید بررسی شود."
+        ), ""
+
+    if local_finalize_error:
+        return False, local_finalize_error, ""
 
     return True, "حذف با موفقیت انجام شد.", refund_note
 

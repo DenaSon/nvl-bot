@@ -92,6 +92,7 @@ import json
 import aiohttp
 import qrcode
 import v2ray_engine
+import marzban_admin
 import secrets
 
 import base64
@@ -759,6 +760,12 @@ def init_db():
         except sqlite3.OperationalError: pass
         
         try: c.execute("ALTER TABLE ssh_accounts ADD COLUMN sub_url TEXT DEFAULT NULL")
+        except sqlite3.OperationalError: pass
+
+        # 🆕 Phase 1 Marzban Admin foundation: end-user-facing subscription title.
+        # This is intentionally separate from customer_name (internal reseller/admin label).
+        # Rendering it into subscription links/profile titles is deferred to the presentation phase.
+        try: c.execute("ALTER TABLE ssh_accounts ADD COLUMN subscription_name TEXT DEFAULT NULL")
         except sqlite3.OperationalError: pass
 
         try: c.execute("ALTER TABLE agents ADD COLUMN v2ray_gb_price REAL DEFAULT 3000.0")
@@ -2008,6 +2015,19 @@ def _db_get_customer_name(un):
             row = conn.execute("SELECT customer_name FROM ssh_accounts WHERE username=?", (un,)).fetchone()
             return row[0] if row and row[0] else None
         except Exception: return None
+
+def _db_get_subscription_name(un):
+    """User-facing subscription title reserved for the future presentation layer."""
+    with db_conn() as conn:
+        row = conn.execute("SELECT subscription_name FROM ssh_accounts WHERE username=?", (un,)).fetchone()
+        return row[0] if row and row[0] else None
+
+def _db_set_subscription_name(un, value):
+    normalized = marzban_admin.normalize_subscription_name(value)
+    with db_conn() as conn:
+        conn.execute("UPDATE ssh_accounts SET subscription_name=? WHERE username=?", (normalized, un))
+    return normalized
+
 def _db_set_account_host(un, host):
     with db_conn() as conn: conn.execute("UPDATE ssh_accounts SET host=? WHERE username=?", (host, un))
 def _db_set_hosts_bulk(usernames, host):
@@ -2526,11 +2546,9 @@ async def _calc_account_refund(username: str) -> tuple[float, str]:
         try: base_price = float(str(v2_vol_bp_raw or '4000').replace(",", "").strip())
         except: base_price = 4000.0
         
-        m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
-        m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
-        m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
-        ok, m_data = await v2ray_engine.get_user(m_url, m_user, m_pwd, username)
-        
+        m_admin = await _get_marzban_admin_service()
+        ok, m_data = await m_admin.get_user(username)
+
         if ok and isinstance(m_data, dict):
             used_bytes = m_data.get('used_traffic', 0)
             limit_bytes = m_data.get('data_limit', 0)
@@ -3829,8 +3847,81 @@ def safe_clear_context(context):
 def is_auth(context): return context.user_data.get('logged_in', False)
 
 def _can_manage_user(role, ag_id, owner_agent_id):
-    """کنترل دسترسی: ادمین به همه اکانت‌ها و هر نماینده فقط به اکانت‌های خودش دسترسی مدیریتی دارد."""
-    return role == 'admin' or (role == 'agent' and owner_agent_id == ag_id)
+    """کنترل دسترسی مرکزی: ادمین همه؛ نماینده فقط رکوردهای متعلق به agent_id خودش."""
+    return marzban_admin.can_manage_v2ray_account(role, ag_id, owner_agent_id)
+
+
+async def _get_marzban_admin_service():
+    """Build the Telegram-agnostic Marzban admin facade from the current DB settings."""
+    m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
+    m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
+    m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
+    return marzban_admin.MarzbanAdminService(m_url, m_user, m_pwd)
+
+
+async def _authorize_v2ray_account(context, username):
+    """Re-check V2Ray ownership from SQLite for every privileged read/mutation."""
+    if not username:
+        return False, None, "expired"
+
+    def _lookup():
+        with db_conn() as conn:
+            return conn.execute(
+                "SELECT agent_id, service_type FROM ssh_accounts WHERE username=?",
+                (username,),
+            ).fetchone()
+
+    row = await asyncio.to_thread(_lookup)
+    if not row:
+        return False, None, "missing"
+
+    owner_agent_id, service_type = row
+    if service_type not in ('v2ray', 'v2ray_vol'):
+        return False, row, "not_v2ray"
+
+    role = context.user_data.get('role')
+    actor_agent_id = context.user_data.get('agent_id', 0)
+    if not _can_manage_user(role, actor_agent_id, owner_agent_id):
+        return False, row, "forbidden"
+
+    return True, row, None
+
+
+def _v2ray_management_target_from_callback(data, context):
+    """Resolve the authoritative account target for all existing V2Ray management callbacks.
+
+    None means this is not a V2Ray management callback.  An empty string means
+    it is a management continuation whose state has expired.
+    """
+    direct_prefixes = (
+        "v2act_sub_",
+        "v2act_tg_",
+        "v2act_rn_",
+        "v2act_rd_",
+        "v2rnd_custom_",
+        "v2rdd_custom_",
+        "v2act_ul_",
+        "v2act_lim_",
+        "v2act_addvol_",
+        "v2act_decvol_",
+        "v2act_dl_",
+        "v2delyes_",
+    )
+    for prefix in direct_prefixes:
+        if data.startswith(prefix):
+            return data[len(prefix):]
+
+    if data.startswith("v2rn_") or data in ("v2rnyes", "v2rn_emergency_yes"):
+        return context.user_data.get('v2_renew_un') or ""
+
+    if data.startswith("v2addvol_gb_") or data in ("v2addvol_conf_yes", "v2addvol_emergency_yes"):
+        return context.user_data.get('v2_vol_un') or ""
+
+    if data == "v2decvol_conf_yes":
+        return context.user_data.get('v2_vol_un') or ""
+
+    return None
+
 
 async def require_login(update):
     text = "⛔️ <b>سیستم قفل است.</b>\n\n👤 لطفاً نام کاربری (Username) خود را بفرستید:"
@@ -4168,11 +4259,9 @@ async def _show_v2ray_user_detail(update_or_query, username, context, db_res, v2
     
     # 🌟 دریافت اطلاعات مصرف: برای ادمین (روی همه اکانت‌ها) و برای نمایندگان (فقط روی اکانت‌های حجمی)
     if role == 'admin' or is_vol:
-        m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
-        m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
-        m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
-        ok, m_data = await v2ray_engine.get_user(m_url, m_user, m_pwd, username)
-        
+        m_admin = await _get_marzban_admin_service()
+        ok, m_data = await m_admin.get_user(username)
+
         usage_txt = "نامشخص (خطا در ارتباط با سرور)"
         if ok and isinstance(m_data, dict):
             used = m_data.get('used_traffic', 0)
@@ -4245,20 +4334,24 @@ async def _show_user_detail(update_or_query, username, context):
         else: await target.message.reply_text(msg)
         return
     p, exp, crt, lim, st, owner_aid, acc_host, acc_conn_mode = res
-    # 🌟 روتینگ هوشمند: هدایت به پنل V2Ray در صورت نیاز
-    with db_conn() as conn:
-        stype_row = conn.execute("SELECT service_type, data_limit, sub_url FROM ssh_accounts WHERE username=?", (username,)).fetchone()
-    if stype_row and stype_row[0] in ('v2ray', 'v2ray_vol'):
-        return await _show_v2ray_user_detail(update_or_query, username, context, res, stype_row)
-    
-    acc_conn_mode = acc_conn_mode or 'direct'
     target = update_or_query.callback_query if hasattr(update_or_query, 'callback_query') and update_or_query.callback_query else update_or_query
     role, ag_id = context.user_data.get('role'), context.user_data.get('agent_id', 0)
+
+    # 🛡 Authorization must run BEFORE routing to the V2Ray detail renderer.
+    # Previously the V2Ray branch returned early and skipped the ownership check.
     if not _can_manage_user(role, ag_id, owner_aid):
         msg = "⛔️ شما مجاز به مشاهده/مدیریت این اکانت نیستید."
         if hasattr(target, 'edit_message_text'): await target.edit_message_text(msg)
         else: await target.message.reply_text(msg)
         return
+
+    # 🌟 روتینگ هوشمند: هدایت به پنل V2Ray در صورت نیاز
+    with db_conn() as conn:
+        stype_row = conn.execute("SELECT service_type, data_limit, sub_url FROM ssh_accounts WHERE username=?", (username,)).fetchone()
+    if stype_row and stype_row[0] in ('v2ray', 'v2ray_vol'):
+        return await _show_v2ray_user_detail(update_or_query, username, context, res, stype_row)
+
+    acc_conn_mode = acc_conn_mode or 'direct'
     rem_str = get_remaining_days(exp)
     owner_label = "مستقیم (ادمین)"
     if owner_aid:
@@ -4823,6 +4916,24 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     role = context.user_data.get('role')
     chat_id = update.effective_chat.id
 
+    # 🛡 Stateful V2Ray management must re-check ownership on every text continuation.
+    _v2_state_target = None
+    if state == 'V2_ADD_VOL_INPUT':
+        _v2_state_target = context.user_data.get('v2_vol_un')
+    elif state == 'V2_RENEW_DAYS_INPUT':
+        _v2_state_target = context.user_data.get('v2_renew_un')
+    elif state == 'V2_DEC_VOL_INPUT':
+        _v2_state_target = context.user_data.get('v2_vol_un')
+
+    if state in ('V2_ADD_VOL_INPUT', 'V2_RENEW_DAYS_INPUT', 'V2_DEC_VOL_INPUT'):
+        _ok_access, _meta, _reason = await _authorize_v2ray_account(context, _v2_state_target)
+        if not _ok_access:
+            safe_clear_context(context)
+            await update.message.reply_text(
+                "⛔️ دسترسی این عملیات منقضی شده یا شما مجاز به مدیریت این اکانت نیستید."
+            )
+            return
+
     # --- دستور مخفی ادمین برای فعال‌سازی همه اینباندها (از جمله REALITY) برای کاربران V2Ray فعلی ---
     if text == 'v2ray_upgrade_inbounds' and role == 'admin':
         await update.message.reply_text("⏳ در حال ارتقای اینباندهای V2Ray (این عملیات ممکن است چند دقیقه طول بکشد)...")
@@ -5064,10 +5175,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚙️ <b>تنظیمات سرور</b>\nیکی از گزینه‌های زیر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML"); return
         elif text == '🛠 مدیریت V2Ray' and role == 'admin':
             await update.message.reply_text("⏳ در حال دریافت اطلاعات از nevel...")
-            m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
-            m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
-            m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
-            ok, stats = await v2ray_engine.get_system_stats(m_url, m_user, m_pwd)
+            m_admin = await _get_marzban_admin_service()
+            ok, stats = await m_admin.get_system_stats()
             if ok:
                 mem = round(stats.get('mem_used', 0) / 1024**2, 1)
                 txt = f"🛠 <b>وضعیت سرور V2Ray</b>\nCPU: {stats.get('cpu_usage',0):.1f}%\nRAM: {mem} MB\nکاربران فعال: {stats.get('users_active',0)}"
@@ -7685,6 +7794,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if d not in allowed_cbs:
                 await query.message.reply_text("⛔️ <b>کاربر گرامی، ابتدا باید نام برند خود را تعیین کنید (مثلاً: AliVpn).</b>\nلطفاً از منوی اصلی ربات روی دکمه «✏️ تغییر نام برند» کلیک کنید.", parse_mode="HTML")
                 return
+
+    # 🛡 Central V2Ray authorization boundary.  Callback data and persisted
+    # state only identify a target; ownership is always reloaded from SQLite.
+    _v2_target = _v2ray_management_target_from_callback(d, context)
+    if _v2_target is not None:
+        if not _v2_target:
+            await query.message.reply_text("❌ تراکنش منقضی شده است؛ دوباره از صفحه اکانت شروع کنید.")
+            return
+        _ok_access, _meta, _reason = await _authorize_v2ray_account(context, _v2_target)
+        if not _ok_access:
+            await query.message.reply_text("⛔️ شما مجاز به مشاهده/مدیریت این اکانت نیستید.")
+            return
+
     # 🚨 گارد جامع وضعیت فروش سرویس‌ها (جلوگیری از کلیک روی دکمه‌های منقضی‌شده در تمامی مراحل خرید)
     if d.startswith(("bm_", "bu_", "blkc_", "buyfav_", "cm_set_")) or d in ("buy_direct", "buy_bulk_start", "buy_yes", "buy_emergency_yes"):
         ssh_en = await asyncio.to_thread(_db_get_setting, 'sell_ssh', '1') == '1'
@@ -7813,10 +7935,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         will_lock = (cur[4] == "🟢 فعال")
         new_status = 'disabled' if will_lock else 'active'
         db_status = "🔴 غیرفعال" if will_lock else "🟢 فعال"
-        m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
-        m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
-        m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
-        await v2ray_engine.modify_user(m_url, m_user, m_pwd, un, status=new_status)
+        m_admin = await _get_marzban_admin_service()
+        ok_mod, mod_err = await m_admin.set_user_status(un, new_status)
+        if not ok_mod:
+            log.warning("Marzban status change failed for %s: %r", un, mod_err)
+            return await query.edit_message_text("❌ تغییر وضعیت روی Marzban انجام نشد؛ دیتابیس محلی دست‌نخورده ماند.")
         with db_conn() as conn: conn.execute("UPDATE ssh_accounts SET status=? WHERE username=?", (db_status, un))
         await query.answer("✅ وضعیت تغییر کرد")
         await _show_user_detail(update, un, context)
@@ -7910,19 +8033,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             new_exp_db = new_exp_dt.strftime("%Y-%m-%d")
             
-            m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
-            m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
-            m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
-            
+            m_admin = await _get_marzban_admin_service()
+
             # اگر اکانت قبلاً منقضی/آفلاین بوده، با تمدید دوباره فعال می‌شود.
             new_status = 'active' if mode == 'extend' else None
-            
+
             kwargs = {'expire': int(new_exp_dt.timestamp())}
             if new_status:
                 kwargs['status'] = new_status
-                
-            await v2ray_engine.modify_user(m_url, m_user, m_pwd, un, **kwargs)
-            
+
+            ok_mod, mod_err = await m_admin.modify_user(un, **kwargs)
+            if not ok_mod:
+                log.warning("Marzban renewal/reduction failed for %s: %r", un, mod_err)
+                return await query.edit_message_text("❌ تغییر زمان روی Marzban انجام نشد؛ هیچ تغییر محلی/مالی اعمال نشد.")
+
             db_status_update = ", status='🟢 فعال'" if mode == 'extend' else ""
             with db_conn() as conn: 
                 conn.execute(f"UPDATE ssh_accounts SET expire_date=?{db_status_update} WHERE username=?", (new_exp_db, un))
@@ -7963,10 +8087,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = await asyncio.to_thread(_db_get_user, un)
         new_limit = 2 if cur[3] == 1 else 1
         new_gb = 20 if new_limit == 2 else 10
-        m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
-        m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
-        m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
-        await v2ray_engine.modify_user(m_url, m_user, m_pwd, un, note=f"IP_LIMIT:{new_limit}", data_limit=new_gb*1024**3)
+        m_admin = await _get_marzban_admin_service()
+        ok_mod, mod_err = await m_admin.modify_user(un, note=f"IP_LIMIT:{new_limit}", data_limit=new_gb*1024**3)
+        if not ok_mod:
+            log.warning("Marzban user-limit change failed for %s: %r", un, mod_err)
+            return await query.edit_message_text("❌ تغییر تعداد کاربر روی Marzban انجام نشد؛ دیتابیس محلی دست‌نخورده ماند.")
         with db_conn() as conn: conn.execute("UPDATE ssh_accounts SET users_limit=?, data_limit=? WHERE username=?", (new_limit, new_gb*1024**3, un))
         await query.answer(f"✅ تبدیل به {new_limit} کاربره شد (سقف {new_gb} گیگ)")
         await _show_user_detail(update, un, context)
@@ -7978,10 +8103,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur_limit_bytes = row[0] if row and row[0] else 10*1024**3
         new_gb = 20 if cur_limit_bytes == 10*1024**3 else 10
         new_limit_bytes = new_gb * 1024**3
-        m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
-        m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
-        m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
-        await v2ray_engine.modify_user(m_url, m_user, m_pwd, un, data_limit=new_limit_bytes)
+        m_admin = await _get_marzban_admin_service()
+        ok_mod, mod_err = await m_admin.modify_user(un, data_limit=new_limit_bytes)
+        if not ok_mod:
+            log.warning("Marzban daily-limit change failed for %s: %r", un, mod_err)
+            return await query.edit_message_text("❌ تغییر لیمیت روی Marzban انجام نشد؛ دیتابیس محلی دست‌نخورده ماند.")
         with db_conn() as conn: conn.execute("UPDATE ssh_accounts SET data_limit=? WHERE username=?", (new_limit_bytes, un))
         await query.answer(f"✅ محدودیت روزانه به {new_gb} گیگ تغییر کرد")
         await _show_user_detail(update, un, context)
@@ -8048,21 +8174,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return await query.edit_message_text(f"❌ <b>موجودی ناکافی!</b>\n\n💰 موجودی: {int(ainf[2]):,} تومان\n💳 هزینه: {int(cost):,} تومان{extra}", parse_mode="HTML")
 
             await query.edit_message_text("⏳ در حال اعمال در NVL V2RAY...")
-            m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
-            m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
-            m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
-            
-            ok_get, m_data = await v2ray_engine.get_user(m_url, m_user, m_pwd, un)
+            m_admin = await _get_marzban_admin_service()
+
+            ok_get, m_data = await m_admin.get_user(un)
             if not ok_get or not isinstance(m_data, dict):
                 return await query.edit_message_text("❌ خطا در ارتباط با سرور V2Ray.")
-            
+
             cur_limit_bytes = m_data.get('data_limit', 0)
             add_bytes = int(gb) * 1024**3
             new_limit_bytes = cur_limit_bytes + add_bytes
-            
-            ok_mod, _ = await v2ray_engine.modify_user(m_url, m_user, m_pwd, un, data_limit=new_limit_bytes)
+
+            ok_mod, mod_err = await m_admin.modify_user(un, data_limit=new_limit_bytes)
             if not ok_mod:
-                return await query.edit_message_text("❌ خطا در اعمال حجم روی سرور.")
+                log.warning("Marzban add-volume failed for %s: %r", un, mod_err)
+                return await query.edit_message_text("❌ خطا در اعمال حجم روی سرور؛ تغییر مالی/محلی انجام نشد.")
             
             with db_conn() as conn:
                 conn.execute("UPDATE ssh_accounts SET data_limit=? WHERE username=?", (new_limit_bytes, un))
@@ -8107,21 +8232,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not un or not gb: return await query.message.reply_text("❌ تراکنش منقضی شده است.")
         
         await query.edit_message_text("⏳ در حال اعمال در NVL V2RAY...")
-        m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
-        m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
-        m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
-        
-        ok_get, m_data = await v2ray_engine.get_user(m_url, m_user, m_pwd, un)
+        m_admin = await _get_marzban_admin_service()
+
+        ok_get, m_data = await m_admin.get_user(un)
         if not ok_get or not isinstance(m_data, dict):
             return await query.edit_message_text("❌ خطا در ارتباط با سرور V2Ray.")
-            
+
         cur_limit_bytes = m_data.get('data_limit', 0)
         dec_bytes = int(gb) * 1024**3
         new_limit_bytes = max(0, cur_limit_bytes - dec_bytes)
-        
-        ok_mod, _ = await v2ray_engine.modify_user(m_url, m_user, m_pwd, un, data_limit=new_limit_bytes)
+
+        ok_mod, mod_err = await m_admin.modify_user(un, data_limit=new_limit_bytes)
         if not ok_mod:
-            return await query.edit_message_text("❌ خطا در کاهش حجم روی سرور.")
+            log.warning("Marzban decrease-volume failed for %s: %r", un, mod_err)
+            return await query.edit_message_text("❌ خطا در کاهش حجم روی سرور؛ دیتابیس محلی دست‌نخورده ماند.")
             
         with db_conn() as conn:
             conn.execute("UPDATE ssh_accounts SET data_limit=? WHERE username=?", (new_limit_bytes, un))
@@ -8139,7 +8263,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         un = d.split("_", 1)[1]
         owner = await asyncio.to_thread(_db_get_user, un)
         if not owner: return await query.edit_message_text("❌ این کاربر دیگر وجود ندارد.")
-        
+
+        # First remove the remote account.  Do not refund or delete the local
+        # record if Marzban rejects/fails the operation.
+        m_admin = await _get_marzban_admin_service()
+        ok_del, del_err = await m_admin.delete_user(un)
+        if not ok_del:
+            log.warning("Marzban delete failed for %s: %r", un, del_err)
+            return await query.edit_message_text("❌ حذف روی Marzban انجام نشد؛ اکانت و موجودی محلی دست‌نخورده ماند.")
+
         owner_agent_id = owner[5]
         refund = 0.0
         refund_note = ""
@@ -8159,13 +8291,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 log.exception("خطا در اعمال بازپرداخت حذف اکانت V2Ray %s", un)
 
-        m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
-        m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
-        m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
-        
-        await v2ray_engine.delete_user(m_url, m_user, m_pwd, un)
         await asyncio.to_thread(_db_delete_user, un)
-        
+
         await query.edit_message_text(f"✅ اکانت <code>{esc(un)}</code> به‌طور کامل از ربات و nevelv2ray حذف شد.{refund_note}", parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="uact_back")]]))
     #---------------------------------------------------------------------

@@ -3,49 +3,102 @@ import qrcode
 import io
 import time
 import logging
+import json
 
 log = logging.getLogger("V2RayEngine")
 
-_MARZBAN_TOKEN = None
-_MARZBAN_TOKEN_EXPIRE = 0
+# Tokens are cached per Marzban backend/admin identity.  The previous single
+# process-global token was unsafe as soon as NVL talked to more than one
+# Marzban backend or admin account.
+_MARZBAN_TOKEN_CACHE = {}
+
+
+def _token_cache_key(url, user):
+    return ((url or "").strip().rstrip("/"), (user or "").strip())
+
+
+def clear_token_cache(url=None, user=None):
+    """Clear one backend/admin token or the complete token cache."""
+    if url is None and user is None:
+        _MARZBAN_TOKEN_CACHE.clear()
+        return
+    _MARZBAN_TOKEN_CACHE.pop(_token_cache_key(url, user), None)
+
 
 async def get_token(url, user, pwd, force_refresh=False):
-    global _MARZBAN_TOKEN, _MARZBAN_TOKEN_EXPIRE
-    if not force_refresh and _MARZBAN_TOKEN and time.time() < _MARZBAN_TOKEN_EXPIRE:
-        return _MARZBAN_TOKEN
+    key = _token_cache_key(url, user)
+    now = time.time()
 
-    token_url = f"{url.rstrip('/')}/api/admin/token"
+    if force_refresh:
+        _MARZBAN_TOKEN_CACHE.pop(key, None)
+    else:
+        cached = _MARZBAN_TOKEN_CACHE.get(key)
+        if cached and cached[0] and now < cached[1]:
+            return cached[0]
+
+    token_url = f"{key[0]}/api/admin/token"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(token_url, data={"username": user, "password": pwd, "grant_type": "password"}, timeout=10) as resp:
+            async with session.post(
+                token_url,
+                data={"username": user, "password": pwd, "grant_type": "password"},
+                timeout=10,
+            ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    _MARZBAN_TOKEN = data.get('access_token')
-                    _MARZBAN_TOKEN_EXPIRE = time.time() + 1800
-                    return _MARZBAN_TOKEN
+                    token = data.get("access_token")
+                    if token:
+                        _MARZBAN_TOKEN_CACHE[key] = (token, now + 1800)
+                    return token
                 return None
     except Exception as e:
-        log.error(f"Marzban Auth Error: {e}")
+        log.error("Marzban Auth Error: %s", e)
         return None
 
-async def api_request(method, endpoint, url, user, pwd, json_data=None):
-    token = await get_token(url, user, pwd)
-    if not token: return False, "Marzban Auth Failed"
 
-    full_url = f"{url.rstrip('/')}{endpoint}"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+async def _response_payload(resp):
+    """Decode JSON when possible and safely handle empty/204 responses."""
+    text = await resp.text()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        return text
+
+
+async def api_request(method, endpoint, url, user, pwd, json_data=None, params=None):
+    full_url = f"{(url or '').strip().rstrip('/')}{endpoint}"
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.request(method, full_url, headers=headers, json=json_data, timeout=15) as resp:
-                if resp.status in [200, 201]: return True, await resp.json()
-                elif resp.status == 401:
-                    token = await get_token(url, user, pwd, force_refresh=True)
-                    headers["Authorization"] = f"Bearer {token}"
-                    async with session.request(method, full_url, headers=headers, json=json_data, timeout=15) as r_resp:
-                        if r_resp.status in [200, 201]: return True, await r_resp.json()
-                        return False, await r_resp.text()
-                return False, await resp.text()
+            for attempt in range(2):
+                token = await get_token(url, user, pwd, force_refresh=(attempt == 1))
+                if not token:
+                    return False, "Marzban Auth Failed"
+
+                headers = {
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                }
+
+                async with session.request(
+                    method,
+                    full_url,
+                    headers=headers,
+                    json=json_data,
+                    params=params,
+                    timeout=15,
+                ) as resp:
+                    payload = await _response_payload(resp)
+                    if 200 <= resp.status < 300:
+                        return True, payload
+                    if resp.status == 401 and attempt == 0:
+                        continue
+                    return False, payload
+
+        return False, "Marzban request failed"
     except Exception as e:
         return False, f"Network Error: {e}"
 

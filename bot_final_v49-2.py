@@ -8421,11 +8421,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_user_{username}")]])
             )
             return
-        ok_reset, err = await service.reset_user_usage(username)
+        ok_reset, reset_data = await service.reset_user_usage(username)
         if not ok_reset:
-            log.warning("Marzban dashboard usage reset failed for %s: %r", username, err)
+            log.warning("Marzban dashboard usage reset failed for %s: %r", username, reset_data)
             await query.edit_message_text("❌ ریست مصرف انجام نشد.")
             return
+        if isinstance(reset_data, dict) and str(reset_data.get('status') or '').lower() == 'active':
+            with db_conn() as conn:
+                conn.execute(
+                    "UPDATE ssh_accounts SET status='🟢 فعال' "
+                    "WHERE username=? AND service_type IN ('v2ray','v2ray_vol')",
+                    (username,),
+                )
         await query.answer("✅ مصرف ریست شد")
         await _show_marzban_user_readonly(query, context, username)
         return
@@ -8561,18 +8568,32 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         base_ts = max(int(time.time()), current_expire)
         new_expire = base_ts + (days * 86400)
-        ok_mod, err = await service.modify_user(username, expire=new_expire, status='active')
+        ok_mod, updated = await service.modify_user(username, expire=new_expire)
         if not ok_mod:
-            log.warning("Marzban dashboard renewal failed for %s: %r", username, err)
+            log.warning("Marzban dashboard renewal failed for %s: %r", username, updated)
             await query.edit_message_text("❌ تمدید انجام نشد.")
             return
         new_date = datetime.fromtimestamp(new_expire, tz=timezone.utc).astimezone(IRAN_TZ).strftime("%Y-%m-%d")
+        remote_status = str(updated.get('status') or '').lower() if isinstance(updated, dict) else ''
         with db_conn() as conn:
-            conn.execute(
-                "UPDATE ssh_accounts SET expire_date=?, status='🟢 فعال', hold_active=0 "
-                "WHERE username=? AND service_type IN ('v2ray','v2ray_vol')",
-                (new_date, username),
-            )
+            if remote_status == 'active':
+                conn.execute(
+                    "UPDATE ssh_accounts SET expire_date=?, status='🟢 فعال', hold_active=0 "
+                    "WHERE username=? AND service_type IN ('v2ray','v2ray_vol')",
+                    (new_date, username),
+                )
+            elif remote_status == 'disabled':
+                conn.execute(
+                    "UPDATE ssh_accounts SET expire_date=?, status='🔴 غیرفعال', hold_active=0 "
+                    "WHERE username=? AND service_type IN ('v2ray','v2ray_vol')",
+                    (new_date, username),
+                )
+            else:
+                conn.execute(
+                    "UPDATE ssh_accounts SET expire_date=?, hold_active=0 "
+                    "WHERE username=? AND service_type IN ('v2ray','v2ray_vol')",
+                    (new_date, username),
+                )
         await query.answer(f"✅ {days} روز تمدید شد")
         await _show_marzban_user_readonly(query, context, username)
         return
@@ -8631,17 +8652,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         new_limit = current_limit + (gb * 1024**3)
-        ok_mod, err = await service.modify_user(username, data_limit=new_limit)
+        ok_mod, updated = await service.modify_user(username, data_limit=new_limit)
         if not ok_mod:
-            log.warning("Marzban dashboard add-volume failed for %s: %r", username, err)
+            log.warning("Marzban dashboard add-volume failed for %s: %r", username, updated)
             await query.edit_message_text("❌ افزایش حجم انجام نشد.")
             return
+        remote_status = str(updated.get('status') or '').lower() if isinstance(updated, dict) else ''
         with db_conn() as conn:
-            conn.execute(
-                "UPDATE ssh_accounts SET data_limit=? "
-                "WHERE username=? AND service_type IN ('v2ray','v2ray_vol')",
-                (new_limit, username),
-            )
+            if remote_status == 'active':
+                conn.execute(
+                    "UPDATE ssh_accounts SET data_limit=?, status='🟢 فعال' "
+                    "WHERE username=? AND service_type IN ('v2ray','v2ray_vol')",
+                    (new_limit, username),
+                )
+            else:
+                conn.execute(
+                    "UPDATE ssh_accounts SET data_limit=? "
+                    "WHERE username=? AND service_type IN ('v2ray','v2ray_vol')",
+                    (new_limit, username),
+                )
         await query.answer(f"✅ {gb} گیگ اضافه شد")
         await _show_marzban_user_readonly(query, context, username)
         return

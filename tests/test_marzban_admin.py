@@ -151,6 +151,47 @@ class HostValidationTests(unittest.TestCase):
             marzban_admin.normalize_host_changes({"noise_setting": "bad"})
 
 
+
+class UserCreateValidationTests(unittest.TestCase):
+    def test_username_uses_safe_nvl_subset(self):
+        self.assertEqual(
+            marzban_admin.normalize_user_create_username(" Lumixo_01 "),
+            "Lumixo_01",
+        )
+        for value in ("ab", "name with space", "user@example.com", "x" * 33):
+            with self.assertRaises(ValueError):
+                marzban_admin.normalize_user_create_username(value)
+
+    def test_dynamic_inbounds_group_all_supported_protocols(self):
+        payload = {
+            "vless": [
+                {"tag": "VLESS Reality", "protocol": "vless"},
+                {"tag": "VLESS HTTP", "protocol": "vless"},
+            ],
+            "vmess": [{"tag": "VMess WS", "protocol": "vmess"}],
+            "other": [{"tag": "Ignored", "protocol": "socks"}],
+        }
+        self.assertEqual(
+            marzban_admin.build_user_inbounds(payload),
+            {
+                "vless": ["VLESS Reality", "VLESS HTTP"],
+                "vmess": ["VMess WS"],
+            },
+        )
+
+    def test_selected_inbounds_are_revalidated_against_current_config(self):
+        payload = {
+            "vless": [{"tag": "A", "protocol": "vless"}],
+            "trojan": [{"tag": "B", "protocol": "trojan"}],
+        }
+        self.assertEqual(
+            marzban_admin.build_user_inbounds(payload, ["B"]),
+            {"trojan": ["B"]},
+        )
+        with self.assertRaises(ValueError):
+            marzban_admin.build_user_inbounds(payload, ["Removed Tag"])
+
+
 class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.service = marzban_admin.MarzbanAdminService(
@@ -313,6 +354,111 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             json_data=None,
             params=None,
         )
+
+    async def test_create_user_posts_dynamic_inbounds_and_verifies(self):
+        current_inbounds = {
+            "vless": [
+                {"tag": "VLESS Reality", "protocol": "vless"},
+                {"tag": "VLESS HTTP", "protocol": "vless"},
+            ],
+            "vmess": [{"tag": "VMess WS", "protocol": "vmess"}],
+        }
+        self.service.get_inbounds = AsyncMock(return_value=(True, current_inbounds))
+        self.service.get_user = AsyncMock(return_value=(
+            True,
+            {
+                "username": "nvl_demo01",
+                "status": "active",
+                "data_limit": 5 * 1024**3,
+                "expire": 1234567890,
+            },
+        ))
+        self.service.request = AsyncMock(return_value=(True, {"username": "nvl_demo01"}))
+
+        ok, user = await self.service.create_user(
+            "nvl_demo01",
+            data_limit_bytes=5 * 1024**3,
+            expire=1234567890,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(user["username"], "nvl_demo01")
+        self.service.request.assert_awaited_once()
+        args = self.service.request.await_args
+        self.assertEqual(args.args[:2], ("POST", "/api/user"))
+        payload = args.kwargs["json_data"]
+        self.assertEqual(payload["data_limit"], 5 * 1024**3)
+        self.assertEqual(payload["data_limit_reset_strategy"], "no_reset")
+        self.assertEqual(
+            payload["inbounds"],
+            {
+                "vless": ["VLESS Reality", "VLESS HTTP"],
+                "vmess": ["VMess WS"],
+            },
+        )
+        self.assertEqual(set(payload["proxies"]), {"vless", "vmess"})
+        self.service.get_user.assert_awaited_once_with("nvl_demo01")
+
+    async def test_create_on_hold_uses_duration_and_zero_absolute_expire(self):
+        self.service.get_inbounds = AsyncMock(return_value=(
+            True,
+            {"vless": [{"tag": "VLESS Reality", "protocol": "vless"}]},
+        ))
+        self.service.get_user = AsyncMock(return_value=(
+            True,
+            {"username": "holduser", "status": "on_hold"},
+        ))
+        self.service.request = AsyncMock(return_value=(True, {"username": "holduser"}))
+
+        ok, _ = await self.service.create_user(
+            "holduser",
+            data_limit_bytes=0,
+            expire=0,
+            status="on_hold",
+            on_hold_expire_duration=30 * 86400,
+        )
+
+        self.assertTrue(ok)
+        payload = self.service.request.await_args.kwargs["json_data"]
+        self.assertEqual(payload["status"], "on_hold")
+        self.assertEqual(payload["expire"], 0)
+        self.assertEqual(payload["on_hold_expire_duration"], 30 * 86400)
+
+    async def test_create_user_reports_post_success_verify_failure_without_retry(self):
+        self.service.get_inbounds = AsyncMock(return_value=(
+            True,
+            {"vless": [{"tag": "VLESS Reality", "protocol": "vless"}]},
+        ))
+        self.service.get_user = AsyncMock(return_value=(False, "temporary verify error"))
+        self.service.request = AsyncMock(return_value=(True, {"username": "nvl_demo02"}))
+
+        ok, result = await self.service.create_user(
+            "nvl_demo02",
+            data_limit_bytes=1024**3,
+            expire=0,
+        )
+
+        self.assertFalse(ok)
+        self.assertTrue(result["created"])
+        self.assertEqual(result["stage"], "verify")
+        self.service.request.assert_awaited_once()
+
+    async def test_create_user_rejects_removed_selected_inbound_before_post(self):
+        self.service.get_inbounds = AsyncMock(return_value=(
+            True,
+            {"vless": [{"tag": "Current", "protocol": "vless"}]},
+        ))
+        self.service.request = AsyncMock()
+
+        ok, error = await self.service.create_user(
+            "nvl_demo03",
+            data_limit_bytes=1024**3,
+            selected_inbound_tags=["Old Removed Tag"],
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("no longer exists", str(error))
+        self.service.request.assert_not_awaited()
 
     async def test_update_host_uses_bulk_hosts_contract_for_target_tag(self):
         current = {

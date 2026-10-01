@@ -7935,10 +7935,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         will_lock = (cur[4] == "🟢 فعال")
         new_status = 'disabled' if will_lock else 'active'
         db_status = "🔴 غیرفعال" if will_lock else "🟢 فعال"
-        m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
-        m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
-        m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
-        await v2ray_engine.modify_user(m_url, m_user, m_pwd, un, status=new_status)
+        m_admin = await _get_marzban_admin_service()
+        ok_mod, mod_err = await m_admin.set_user_status(un, new_status)
+        if not ok_mod:
+            log.warning("Marzban status change failed for %s: %r", un, mod_err)
+            return await query.edit_message_text("❌ تغییر وضعیت روی Marzban انجام نشد؛ دیتابیس محلی دست‌نخورده ماند.")
         with db_conn() as conn: conn.execute("UPDATE ssh_accounts SET status=? WHERE username=?", (db_status, un))
         await query.answer("✅ وضعیت تغییر کرد")
         await _show_user_detail(update, un, context)
@@ -8032,19 +8033,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             new_exp_db = new_exp_dt.strftime("%Y-%m-%d")
             
-            m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
-            m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
-            m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
-            
+            m_admin = await _get_marzban_admin_service()
+
             # اگر اکانت قبلاً منقضی/آفلاین بوده، با تمدید دوباره فعال می‌شود.
             new_status = 'active' if mode == 'extend' else None
-            
+
             kwargs = {'expire': int(new_exp_dt.timestamp())}
             if new_status:
                 kwargs['status'] = new_status
-                
-            await v2ray_engine.modify_user(m_url, m_user, m_pwd, un, **kwargs)
-            
+
+            ok_mod, mod_err = await m_admin.modify_user(un, **kwargs)
+            if not ok_mod:
+                log.warning("Marzban renewal/reduction failed for %s: %r", un, mod_err)
+                return await query.edit_message_text("❌ تغییر زمان روی Marzban انجام نشد؛ هیچ تغییر محلی/مالی اعمال نشد.")
+
             db_status_update = ", status='🟢 فعال'" if mode == 'extend' else ""
             with db_conn() as conn: 
                 conn.execute(f"UPDATE ssh_accounts SET expire_date=?{db_status_update} WHERE username=?", (new_exp_db, un))
@@ -8085,10 +8087,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = await asyncio.to_thread(_db_get_user, un)
         new_limit = 2 if cur[3] == 1 else 1
         new_gb = 20 if new_limit == 2 else 10
-        m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
-        m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
-        m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
-        await v2ray_engine.modify_user(m_url, m_user, m_pwd, un, note=f"IP_LIMIT:{new_limit}", data_limit=new_gb*1024**3)
+        m_admin = await _get_marzban_admin_service()
+        ok_mod, mod_err = await m_admin.modify_user(un, note=f"IP_LIMIT:{new_limit}", data_limit=new_gb*1024**3)
+        if not ok_mod:
+            log.warning("Marzban user-limit change failed for %s: %r", un, mod_err)
+            return await query.edit_message_text("❌ تغییر تعداد کاربر روی Marzban انجام نشد؛ دیتابیس محلی دست‌نخورده ماند.")
         with db_conn() as conn: conn.execute("UPDATE ssh_accounts SET users_limit=?, data_limit=? WHERE username=?", (new_limit, new_gb*1024**3, un))
         await query.answer(f"✅ تبدیل به {new_limit} کاربره شد (سقف {new_gb} گیگ)")
         await _show_user_detail(update, un, context)
@@ -8100,10 +8103,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur_limit_bytes = row[0] if row and row[0] else 10*1024**3
         new_gb = 20 if cur_limit_bytes == 10*1024**3 else 10
         new_limit_bytes = new_gb * 1024**3
-        m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
-        m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
-        m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
-        await v2ray_engine.modify_user(m_url, m_user, m_pwd, un, data_limit=new_limit_bytes)
+        m_admin = await _get_marzban_admin_service()
+        ok_mod, mod_err = await m_admin.modify_user(un, data_limit=new_limit_bytes)
+        if not ok_mod:
+            log.warning("Marzban daily-limit change failed for %s: %r", un, mod_err)
+            return await query.edit_message_text("❌ تغییر لیمیت روی Marzban انجام نشد؛ دیتابیس محلی دست‌نخورده ماند.")
         with db_conn() as conn: conn.execute("UPDATE ssh_accounts SET data_limit=? WHERE username=?", (new_limit_bytes, un))
         await query.answer(f"✅ محدودیت روزانه به {new_gb} گیگ تغییر کرد")
         await _show_user_detail(update, un, context)
@@ -8170,21 +8174,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return await query.edit_message_text(f"❌ <b>موجودی ناکافی!</b>\n\n💰 موجودی: {int(ainf[2]):,} تومان\n💳 هزینه: {int(cost):,} تومان{extra}", parse_mode="HTML")
 
             await query.edit_message_text("⏳ در حال اعمال در NVL V2RAY...")
-            m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
-            m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
-            m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
-            
-            ok_get, m_data = await v2ray_engine.get_user(m_url, m_user, m_pwd, un)
+            m_admin = await _get_marzban_admin_service()
+
+            ok_get, m_data = await m_admin.get_user(un)
             if not ok_get or not isinstance(m_data, dict):
                 return await query.edit_message_text("❌ خطا در ارتباط با سرور V2Ray.")
-            
+
             cur_limit_bytes = m_data.get('data_limit', 0)
             add_bytes = int(gb) * 1024**3
             new_limit_bytes = cur_limit_bytes + add_bytes
-            
-            ok_mod, _ = await v2ray_engine.modify_user(m_url, m_user, m_pwd, un, data_limit=new_limit_bytes)
+
+            ok_mod, mod_err = await m_admin.modify_user(un, data_limit=new_limit_bytes)
             if not ok_mod:
-                return await query.edit_message_text("❌ خطا در اعمال حجم روی سرور.")
+                log.warning("Marzban add-volume failed for %s: %r", un, mod_err)
+                return await query.edit_message_text("❌ خطا در اعمال حجم روی سرور؛ تغییر مالی/محلی انجام نشد.")
             
             with db_conn() as conn:
                 conn.execute("UPDATE ssh_accounts SET data_limit=? WHERE username=?", (new_limit_bytes, un))
@@ -8229,21 +8232,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not un or not gb: return await query.message.reply_text("❌ تراکنش منقضی شده است.")
         
         await query.edit_message_text("⏳ در حال اعمال در NVL V2RAY...")
-        m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
-        m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
-        m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
-        
-        ok_get, m_data = await v2ray_engine.get_user(m_url, m_user, m_pwd, un)
+        m_admin = await _get_marzban_admin_service()
+
+        ok_get, m_data = await m_admin.get_user(un)
         if not ok_get or not isinstance(m_data, dict):
             return await query.edit_message_text("❌ خطا در ارتباط با سرور V2Ray.")
-            
+
         cur_limit_bytes = m_data.get('data_limit', 0)
         dec_bytes = int(gb) * 1024**3
         new_limit_bytes = max(0, cur_limit_bytes - dec_bytes)
-        
-        ok_mod, _ = await v2ray_engine.modify_user(m_url, m_user, m_pwd, un, data_limit=new_limit_bytes)
+
+        ok_mod, mod_err = await m_admin.modify_user(un, data_limit=new_limit_bytes)
         if not ok_mod:
-            return await query.edit_message_text("❌ خطا در کاهش حجم روی سرور.")
+            log.warning("Marzban decrease-volume failed for %s: %r", un, mod_err)
+            return await query.edit_message_text("❌ خطا در کاهش حجم روی سرور؛ دیتابیس محلی دست‌نخورده ماند.")
             
         with db_conn() as conn:
             conn.execute("UPDATE ssh_accounts SET data_limit=? WHERE username=?", (new_limit_bytes, un))
@@ -8261,7 +8263,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         un = d.split("_", 1)[1]
         owner = await asyncio.to_thread(_db_get_user, un)
         if not owner: return await query.edit_message_text("❌ این کاربر دیگر وجود ندارد.")
-        
+
+        # First remove the remote account.  Do not refund or delete the local
+        # record if Marzban rejects/fails the operation.
+        m_admin = await _get_marzban_admin_service()
+        ok_del, del_err = await m_admin.delete_user(un)
+        if not ok_del:
+            log.warning("Marzban delete failed for %s: %r", un, del_err)
+            return await query.edit_message_text("❌ حذف روی Marzban انجام نشد؛ اکانت و موجودی محلی دست‌نخورده ماند.")
+
         owner_agent_id = owner[5]
         refund = 0.0
         refund_note = ""
@@ -8281,13 +8291,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 log.exception("خطا در اعمال بازپرداخت حذف اکانت V2Ray %s", un)
 
-        m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
-        m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
-        m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
-        
-        await v2ray_engine.delete_user(m_url, m_user, m_pwd, un)
         await asyncio.to_thread(_db_delete_user, un)
-        
+
         await query.edit_message_text(f"✅ اکانت <code>{esc(un)}</code> به‌طور کامل از ربات و nevelv2ray حذف شد.{refund_note}", parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="uact_back")]]))
     #---------------------------------------------------------------------

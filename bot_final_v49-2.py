@@ -4377,7 +4377,11 @@ def _mza_online_at(value):
 async def _mza_render(target, text, kb):
     markup = InlineKeyboardMarkup(kb)
     if hasattr(target, "edit_message_text"):
-        await target.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
+        try:
+            await target.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
+        except BadRequest as exc:
+            if "Message is not modified" not in str(exc):
+                raise
     elif hasattr(target, "reply_text"):
         await target.reply_text(text, reply_markup=markup, parse_mode="HTML")
     else:
@@ -5476,7 +5480,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             kb = _build_server_settings_kb()
             await update.message.reply_text("⚙️ <b>تنظیمات سرور</b>\nیکی از گزینه‌های زیر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML"); return
         elif text == '🛠 مدیریت V2Ray' and role == 'admin':
-            await update.message.reply_text("⏳ در حال بارگذاری داشبورد Marzban...")
             await _show_marzban_admin_dashboard(update.message, context)
             return
         elif text == '⚙️ تغییر نام برند' and role == 'admin':
@@ -8094,6 +8097,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d.startswith('mza_') and role != 'admin':
         await query.message.reply_text("⛔️ دسترسی غیرمجاز.")
         return
+    if d.startswith('mza_') and d != 'mza_search' and context.user_data.get('state') == 'MARZBAN_ADMIN_SEARCH':
+        context.user_data.pop('state', None)
 
     # 🛡 Central V2Ray authorization boundary.  Callback data and persisted
     # state only identify a target; ownership is always reloaded from SQLite.

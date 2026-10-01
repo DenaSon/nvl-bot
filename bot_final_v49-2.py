@@ -9041,16 +9041,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # pending input so the next unrelated message cannot mutate a user.
     if d.startswith('mza_'):
         input_state = context.user_data.get('state')
+        node_edit_starter = (
+            d.startswith('mza_nedit_name_')
+            or d.startswith('mza_nedit_address_')
+            or d.startswith('mza_nedit_ports_')
+            or d.startswith('mza_nedit_ratio_')
+        )
+        host_edit_starter = d.startswith('mza_hedit_')
         starters = (
             d == 'mza_search'
             or d.startswith('mza_subname_')
             or d.startswith('mza_renew_custom_')
             or d.startswith('mza_addvol_custom_')
-            or d.startswith('mza_nedit_name_')
-            or d.startswith('mza_nedit_address_')
-            or d.startswith('mza_nedit_ports_')
-            or d.startswith('mza_nedit_ratio_')
-            or d.startswith('mza_hedit_')
+            or node_edit_starter
+            or host_edit_starter
         )
         if not starters and input_state in (
             'MARZBAN_ADMIN_SEARCH',
@@ -9070,11 +9074,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _mza_clear_host_pending(context)
 
         # Confirmation messages can outlive the screen that created them.
-        # Unrelated Marzban callbacks invalidate pending Node/Host edits.
-        if not d.startswith('mza_nedit_confirm_') and not starters:
+        # Only a new edit in the same domain may preserve that domain's pending
+        # state; crossing Node↔Host or entering another Marzban flow invalidates it.
+        if not d.startswith('mza_nedit_confirm_') and not node_edit_starter:
             context.user_data.pop('mza_action_node', None)
             context.user_data.pop('mza_node_pending_changes', None)
-        if not d.startswith('mza_hconfirm_') and not starters:
+        if not d.startswith('mza_hconfirm_') and not host_edit_starter:
             _mza_clear_host_pending(context)
 
     # 🛡 Central V2Ray authorization boundary.  Callback data and persisted
@@ -9337,6 +9342,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        context.user_data.pop('mza_action_node', None)
+        context.user_data.pop('mza_node_pending_changes', None)
         _mza_clear_host_pending(context)
         context.user_data['state'] = 'MZA_HOST_FIELD_INPUT'
         context.user_data['mza_host_edit_token'] = host_token

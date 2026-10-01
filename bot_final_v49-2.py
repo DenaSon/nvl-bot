@@ -6413,6 +6413,93 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _show_marzban_users(update.message, context, page=0, mode='search')
         return
 
+    if state in _MZA_CREATE_TEXT_STATES:
+        if role != 'admin':
+            _mza_clear_create(context)
+            await update.message.reply_text("⛔️ دسترسی غیرمجاز.")
+            return
+
+        draft = _mza_create_draft(context)
+
+        if state == 'MZA_CREATE_USERNAME_INPUT':
+            try:
+                username = marzban_admin.normalize_user_create_username(text)
+            except ValueError:
+                await update.message.reply_text(
+                    "❌ Username نامعتبر است. فقط A-Z، a-z، 0-9، _ و - با طول ۳ تا ۳۲ کاراکتر مجاز است."
+                )
+                return
+
+            service = await _get_marzban_admin_service()
+            exists, error = await _mza_username_exists(service, username)
+            if exists is None:
+                await update.message.reply_text(
+                    f"❌ بررسی Username در Marzban ناموفق بود: <code>{esc(error)}</code>",
+                    parse_mode='HTML',
+                )
+                return
+            if exists:
+                await update.message.reply_text("❌ این Username از قبل در Marzban وجود دارد. یک مقدار دیگر بفرستید.")
+                return
+
+            draft["username"] = username
+            context.user_data.pop('state', None)
+            await _mza_show_create_subname(update.message, context)
+            return
+
+        if state == 'MZA_CREATE_SUBNAME_INPUT':
+            try:
+                draft["subscription_name"] = marzban_admin.normalize_subscription_name(text)
+            except ValueError:
+                await update.message.reply_text("❌ نام اشتراک باید بین ۲ تا ۳۰ کاراکتر باشد.")
+                return
+            context.user_data.pop('state', None)
+            await _mza_show_create_volume(update.message, context)
+            return
+
+        if state == 'MZA_CREATE_VOLUME_INPUT':
+            raw = fa_to_en_digits(text).strip()
+            if not raw.isdigit() or not (1 <= int(raw) <= 10000):
+                await update.message.reply_text("❌ حجم را به GB و بین ۱ تا ۱۰۰۰۰ وارد کنید.")
+                return
+            draft["data_limit_bytes"] = int(raw) * 1024**3
+            context.user_data.pop('state', None)
+            await _mza_show_create_expiry(update.message, context)
+            return
+
+        if state == 'MZA_CREATE_DAYS_INPUT':
+            raw = fa_to_en_digits(text).strip()
+            if not raw.isdigit() or not (1 <= int(raw) <= 3650):
+                await update.message.reply_text("❌ تعداد روز باید بین ۱ تا ۳۶۵۰ باشد.")
+                return
+            draft["expiry_mode"] = "days"
+            draft["expiry_days"] = int(raw)
+            draft.pop("expire_timestamp", None)
+            draft.pop("expire_display", None)
+            context.user_data.pop('state', None)
+            await _mza_show_create_activation(update.message, context)
+            return
+
+        if state == 'MZA_CREATE_DATE_INPUT':
+            try:
+                timestamp, display = _mza_parse_exact_expiry_date(text)
+            except (ValueError, OverflowError):
+                await update.message.reply_text(
+                    "❌ تاریخ معتبر آینده وارد کنید.\n"
+                    "مثال شمسی: <code>1405/09/15</code>\n"
+                    "مثال میلادی: <code>2026-12-06</code>",
+                    parse_mode='HTML',
+                )
+                return
+            draft["expiry_mode"] = "exact"
+            draft["expire_timestamp"] = timestamp
+            draft["expire_display"] = display
+            draft["start_mode"] = "now"
+            draft.pop("expiry_days", None)
+            context.user_data.pop('state', None)
+            await _mza_show_create_reset(update.message, context)
+            return
+
     if state in ('MZA_SUBNAME_INPUT', 'MZA_RENEW_INPUT', 'MZA_ADDVOL_INPUT'):
         if role != 'admin':
             context.user_data.pop('state', None)

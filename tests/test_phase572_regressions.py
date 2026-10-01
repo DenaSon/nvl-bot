@@ -33,7 +33,8 @@ class Phase572V2RayVolumeExpiryRegressionTests(unittest.TestCase):
             self.source.count("_show_v2_vol_expiry_step("),
             4,
         )
-        self.assertIn("context.user_data['v2_vol_gb'] = int(val)", self.source)
+        self.assertIn("if not (1 <= gb <= 100):", self.source)
+        self.assertIn("context.user_data['v2_vol_gb'] = gb", self.source)
         self.assertIn("context.user_data['v2_vol_gb'] = gb", self.source)
 
     def test_expiry_is_required_before_final_purchase(self):

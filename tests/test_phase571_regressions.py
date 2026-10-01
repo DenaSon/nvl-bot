@@ -10,11 +10,10 @@ class Phase571V2RayOneGbMinimumRegressionTests(unittest.TestCase):
     def setUpClass(cls):
         cls.source = BOT_PATH.read_text(encoding="utf-8")
 
-    def test_v111_marker_is_present(self):
-        self.assertIn(
-            'BOT_VERSION_TAG = "V111-2026-10-02-v2ray-1gb-minimum"',
-            self.source,
-        )
+    def test_phase571_features_survive_current_version(self):
+        self.assertIn("BOT_VERSION_TAG =", self.source)
+        self.assertIn("volume_presets = (1, 5, 10, 20, 50, 100)", self.source)
+        self.assertIn("if not (1 <= gb <= 100):", self.source)
 
     def test_new_sales_wizard_starts_at_one_gb(self):
         self.assertIn(

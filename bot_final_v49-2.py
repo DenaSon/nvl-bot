@@ -232,7 +232,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V103-2026-10-01-marzban-admin-phase2"
+BOT_VERSION_TAG = "V104-2026-10-01-marzban-user-management"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -8260,12 +8260,29 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text("⛔️ <b>کاربر گرامی، ابتدا باید نام برند خود را تعیین کنید (مثلاً: AliVpn).</b>\nلطفاً از منوی اصلی ربات روی دکمه «✏️ تغییر نام برند» کلیک کنید.", parse_mode="HTML")
                 return
 
-    # 🛠 Phase 2 Marzban admin callbacks are strictly admin-only.
+    # 🛠 Marzban admin callbacks are strictly admin-only.
     if d.startswith('mza_') and role != 'admin':
         await query.message.reply_text("⛔️ دسترسی غیرمجاز.")
         return
-    if d.startswith('mza_') and d != 'mza_search' and context.user_data.get('state') == 'MARZBAN_ADMIN_SEARCH':
-        context.user_data.pop('state', None)
+
+    # Leaving a text-input screen through an inline button must cancel that
+    # pending input so the next unrelated message cannot mutate a user.
+    if d.startswith('mza_'):
+        input_state = context.user_data.get('state')
+        starters = (
+            d == 'mza_search'
+            or d.startswith('mza_subname_')
+            or d.startswith('mza_renew_custom_')
+            or d.startswith('mza_addvol_custom_')
+        )
+        if not starters and input_state in (
+            'MARZBAN_ADMIN_SEARCH',
+            'MZA_SUBNAME_INPUT',
+            'MZA_RENEW_INPUT',
+            'MZA_ADDVOL_INPUT',
+        ):
+            context.user_data.pop('state', None)
+            context.user_data.pop('mza_action_user', None)
 
     # 🛡 Central V2Ray authorization boundary.  Callback data and persisted
     # state only identify a target; ownership is always reloaded from SQLite.
@@ -9051,53 +9068,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d.startswith("v2delyes_"):
         un = d.split("_", 1)[1]
         owner = await asyncio.to_thread(_db_get_user, un)
-        if not owner: return await query.edit_message_text("❌ این کاربر دیگر وجود ندارد.")
+        if not owner:
+            return await query.edit_message_text("❌ این کاربر دیگر وجود ندارد.")
 
-        owner_agent_id = owner[5]
-        refund = 0.0
-        refund_desc = ""
-
-        # Refund must be calculated while the Marzban user still exists because
-        # volumetric plans need remote used_traffic/data_limit to compute it.
-        if owner_agent_id and owner_agent_id != 0:
-            try:
-                refund, refund_desc = await _calc_account_refund(un)
-            except Exception:
-                log.exception("خطا در محاسبه بازپرداخت حذف اکانت V2Ray %s", un)
-                refund = 0.0
-                refund_desc = ""
-
-        # Remote delete is the commit point.  If Marzban fails, do not touch
-        # local account state or wallet balances.
-        m_admin = await _get_marzban_admin_service()
-        ok_del, del_err = await m_admin.delete_user(un)
+        ok_del, msg, refund_note = await _delete_marzban_user_consistent(un)
         if not ok_del:
-            log.warning("Marzban delete failed for %s: %r", un, del_err)
-            return await query.edit_message_text("❌ حذف روی Marzban انجام نشد؛ اکانت و موجودی محلی دست‌نخورده ماند.")
-
-        refund_note = ""
-        emergency_repaid = 0.0
-        try:
-            # Keep refund + local deletion atomic with one SQLite transaction.
-            with db_conn() as conn:
-                if owner_agent_id and owner_agent_id != 0 and refund > 0:
-                    conn.execute("UPDATE agents SET balance = balance + ? WHERE id=?", (refund, owner_agent_id))
-                    used_before_row = conn.execute("SELECT emergency_used FROM agents WHERE id=?", (owner_agent_id,)).fetchone()
-                    used_before = (used_before_row[0] or 0.0) if used_before_row else 0.0
-                    _apply_emergency_repayment(conn, owner_agent_id, refund)
-                    emergency_repaid = min(used_before, refund) if used_before > 0 else 0.0
-                    refund_note = f"\n💸 {refund_desc}"
-                    if emergency_repaid > 0:
-                        refund_note += f"\n🆘 از همین مبلغ، {int(emergency_repaid):,} تومان بدهیِ شارژ اضطراری نماینده نیز پاک شد."
-                conn.execute("DELETE FROM ssh_accounts WHERE username=?", (un,))
-        except Exception:
-            log.exception("Marzban user %s was deleted remotely but local finalization failed", un)
             return await query.edit_message_text(
-                "⚠️ کاربر از Marzban حذف شد، اما نهایی‌سازی دیتابیس محلی ناموفق بود. لطفاً قبل از هر اقدام دیگری لاگ را بررسی کنید."
+                f"⚠️ {esc(msg)}",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data=f"udet_{un}")]])
             )
 
-        await query.edit_message_text(f"✅ اکانت <code>{esc(un)}</code> به‌طور کامل از ربات و nevelv2ray حذف شد.{refund_note}", parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="uact_back")]]))
+        await query.edit_message_text(
+            f"✅ اکانت <code>{esc(un)}</code> به‌طور کامل حذف شد.{refund_note}",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="uact_back")]])
+        )
     #---------------------------------------------------------------------
     elif d == "uact_back_to_menu": await query.delete_message(); await show_main_menu(query, context)
     elif d == "uact_back": await _show_users_panel(update, context, page=context.user_data.get('user_page', 0))

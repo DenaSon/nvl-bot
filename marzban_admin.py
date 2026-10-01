@@ -26,6 +26,10 @@ SUBSCRIPTION_NAME_MIN_LENGTH = 2
 SUBSCRIPTION_NAME_MAX_LENGTH = 30
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 
+MARZBAN_USER_PROTOCOLS = {"vless", "vmess", "trojan", "shadowsocks"}
+MARZBAN_RESET_STRATEGIES = {"no_reset", "day", "week", "month", "year"}
+_USER_CREATE_USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
+
 NODE_MUTABLE_FIELDS = {"name", "address", "port", "api_port", "status", "usage_coefficient"}
 NODE_MUTABLE_STATUSES = {"disabled", "connecting"}
 
@@ -334,6 +338,107 @@ def normalize_subscription_name(value: Optional[str]) -> Optional[str]:
     return cleaned
 
 
+
+def normalize_user_create_username(value: Any) -> str:
+    """Validate the conservative NVL subset of Marzban usernames."""
+    username = _CONTROL_CHARS_RE.sub("", str(value or "")).strip()
+    if not _USER_CREATE_USERNAME_RE.fullmatch(username):
+        raise ValueError(
+            "username must be 3-32 characters using only A-Z, a-z, 0-9, _ or -"
+        )
+    return username
+
+
+def normalize_user_data_limit_bytes(value: Any) -> int:
+    try:
+        amount = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("data limit must be an integer number of bytes")
+    if amount < 0:
+        raise ValueError("data limit cannot be negative")
+    if amount > 100 * 1024**4:
+        raise ValueError("data limit is unreasonably large")
+    return amount
+
+
+def normalize_user_expire_timestamp(value: Any) -> int:
+    try:
+        expire = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("expire must be a unix timestamp")
+    if expire < 0:
+        raise ValueError("expire cannot be negative")
+    return expire
+
+
+def normalize_on_hold_duration(value: Any) -> int:
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("on-hold duration must be an integer number of seconds")
+    if not 1 <= seconds <= 10 * 3650 * 86400:
+        raise ValueError("on-hold duration is out of range")
+    return seconds
+
+
+def flatten_marzban_inbounds(payload: Any) -> List[Dict[str, str]]:
+    """Return supported inbound tag/protocol pairs from Marzban."""
+    rows: List[Dict[str, str]] = []
+    if not isinstance(payload, dict):
+        return rows
+
+    seen = set()
+    for group_protocol, items in payload.items():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            tag = str(item.get("tag") or "").strip()
+            protocol = str(item.get("protocol") or group_protocol or "").strip().lower()
+            if not tag or protocol not in MARZBAN_USER_PROTOCOLS:
+                continue
+            key = (protocol, tag)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({"protocol": protocol, "tag": tag})
+    return rows
+
+
+def build_user_inbounds(
+    payload: Any,
+    selected_tags: Optional[List[str]] = None,
+) -> Dict[str, List[str]]:
+    """Build UserCreate.inbounds from current authoritative Marzban config."""
+    rows = flatten_marzban_inbounds(payload)
+    available = {row["tag"]: row["protocol"] for row in rows}
+    if not available:
+        raise ValueError("Marzban has no supported inbounds")
+
+    if selected_tags is None:
+        wanted = [row["tag"] for row in rows]
+    else:
+        wanted = []
+        seen = set()
+        for raw in selected_tags:
+            tag = str(raw or "").strip()
+            if not tag or tag in seen:
+                continue
+            if tag not in available:
+                raise ValueError(f"inbound no longer exists: {tag}")
+            seen.add(tag)
+            wanted.append(tag)
+        if not wanted:
+            raise ValueError("at least one inbound must be selected")
+
+    grouped: Dict[str, List[str]] = {}
+    for tag in wanted:
+        protocol = available[tag]
+        grouped.setdefault(protocol, []).append(tag)
+    return grouped
+
+
 class MarzbanAdminService:
     """Small, Telegram-agnostic facade around the Marzban REST API."""
 
@@ -369,6 +474,96 @@ class MarzbanAdminService:
 
     async def get_user(self, username: str) -> ApiResult:
         return await self.request("GET", f"/api/user/{username}")
+
+    async def create_user(
+        self,
+        username: str,
+        *,
+        data_limit_bytes: int,
+        expire: int = 0,
+        selected_inbound_tags: Optional[List[str]] = None,
+        reset_strategy: str = "no_reset",
+        status: str = "active",
+        on_hold_expire_duration: Optional[int] = None,
+        note: str = "",
+    ) -> ApiResult:
+        """Create a Marzban user and verify it with an authoritative GET.
+
+        If the POST succeeds but verification fails, the structured failure
+        includes created=True so callers must not blindly retry the POST.
+        """
+        try:
+            username = normalize_user_create_username(username)
+            data_limit_bytes = normalize_user_data_limit_bytes(data_limit_bytes)
+            expire = normalize_user_expire_timestamp(expire)
+        except ValueError as exc:
+            return False, str(exc)
+
+        reset_strategy = str(reset_strategy or "").strip().lower()
+        if reset_strategy not in MARZBAN_RESET_STRATEGIES:
+            return False, f"unsupported reset strategy: {reset_strategy}"
+
+        status = str(status or "active").strip().lower()
+        if status not in {"active", "on_hold"}:
+            return False, f"unsupported create status: {status}"
+
+        if status == "on_hold":
+            try:
+                hold_seconds = normalize_on_hold_duration(on_hold_expire_duration)
+            except ValueError as exc:
+                return False, str(exc)
+            if expire:
+                return False, "on-hold users cannot have an absolute expire timestamp"
+        else:
+            hold_seconds = None
+
+        note = _CONTROL_CHARS_RE.sub("", str(note or "")).strip()
+        if len(note) > 500:
+            return False, "note cannot exceed 500 characters"
+
+        ok_inbounds, inbound_payload = await self.get_inbounds()
+        if not ok_inbounds:
+            return False, inbound_payload
+        try:
+            inbounds = build_user_inbounds(inbound_payload, selected_inbound_tags)
+        except ValueError as exc:
+            return False, str(exc)
+
+        proxies = {protocol: {} for protocol in inbounds}
+        payload: Dict[str, Any] = {
+            "username": username,
+            "proxies": proxies,
+            "inbounds": inbounds,
+            "data_limit": data_limit_bytes,
+            "data_limit_reset_strategy": reset_strategy,
+            "status": status,
+            "expire": 0 if status == "on_hold" else expire,
+            "note": note,
+        }
+        if status == "on_hold":
+            payload["on_hold_expire_duration"] = hold_seconds
+
+        ok_create, created = await self.request("POST", "/api/user", json_data=payload)
+        if not ok_create:
+            return False, created
+
+        ok_verify, verified = await self.get_user(username)
+        if not ok_verify or not isinstance(verified, dict):
+            return False, {
+                "stage": "verify",
+                "created": True,
+                "username": username,
+                "error": verified,
+            }
+        if str(verified.get("username") or "") != username:
+            return False, {
+                "stage": "verify",
+                "created": True,
+                "username": username,
+                "error": "Marzban returned a different username",
+            }
+
+        return True, verified
 
     async def list_users(
         self,

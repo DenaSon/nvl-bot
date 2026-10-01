@@ -148,20 +148,26 @@ This is a functional monolith. It works, but large callback/text handlers and st
 
 ### Create
 
+In the active relay topology, endpoint selection and Linux execution are separate concepts:
+
 ```
 Telegram action
     -> reserve username atomically in SQLite
-    -> choose host
-    -> useradd
-    -> chpasswd
+    -> choose endpoint host (Edge/routing metadata)
+    -> Core-local useradd
+    -> Core-local chpasswd
     -> finalize DB row
-    -> set host
-    -> write users_limit
+    -> store endpoint host in ssh_accounts.host
+    -> write users_limit on Core
     -> wallet / commission
     -> invoice
 ```
 
+`ssh_accounts.host` must not be treated as the authoritative Linux execution host in the current topology. Normal SSH lifecycle operations execute on Core; the stored host remains endpoint/routing metadata.
+
 There are explicit rollback paths for user creation and DB reservation.
+
+The Core-local lifecycle correction was production E2E-validated on 2026-10-01 for single create, bulk create, disable/enable, password change, renewal, delete, and PAM limit sync/cleanup. See `docs/SSH_LIFECYCLE_E2E_2026-10-01.md`.
 
 ### Hidden Hold
 
@@ -376,15 +382,14 @@ Automated failover should not yet be treated as fully production-safe.
 
 ## 12. Source-of-truth status
 
-GitHub currently contains the sanitized codebase and audit documentation.
+GitHub contains the sanitized codebase and audit documentation.
 
-Production still differs from GitHub in runtime configuration and some manually applied hotfix details.
+The SSH lifecycle behavior was synchronized with the verified production Core-local relay model on 2026-10-01:
 
-Current GitHub head at the time of this map:
+- source fix commit: `cdc84a9d391f18bf0ac536be21dd3b23f3cccf17`
+- verification record: `docs/SSH_LIFECYCLE_E2E_2026-10-01.md`
 
-`7ecfe231a82df33380fa1eef995a6a113587f9cc`
-
-The production runtime should not yet be blindly replaced from GitHub until environment/secrets migration and controlled deployment validation are completed.
+Production can still differ from GitHub in runtime configuration and production-only hotfix details, including access-control changes. The repository must therefore not be blindly deployed over production until an explicit convergence review is completed.
 
 ## 13. Current risk map
 

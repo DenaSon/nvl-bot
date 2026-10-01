@@ -232,7 +232,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V107-2026-10-02-marzban-inbound-host-management"
+BOT_VERSION_TAG = "V108-2026-10-02-marzban-user-creation"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -4613,6 +4613,403 @@ async def _mza_show_node_edit_confirm(target, context, node_id, changes):
     await _mza_render(target, "\n".join(lines), kb)
 
 
+
+_MZA_CREATE_TEXT_STATES = {
+    "MZA_CREATE_USERNAME_INPUT",
+    "MZA_CREATE_SUBNAME_INPUT",
+    "MZA_CREATE_VOLUME_INPUT",
+    "MZA_CREATE_DAYS_INPUT",
+    "MZA_CREATE_DATE_INPUT",
+}
+
+
+def _mza_clear_create(context, *, keep_draft=False):
+    if context.user_data.get("state") in _MZA_CREATE_TEXT_STATES:
+        context.user_data.pop("state", None)
+    context.user_data.pop("mza_create_busy", None)
+    context.user_data.pop("mza_create_inbound_tokens", None)
+    if not keep_draft:
+        context.user_data.pop("mza_create_draft", None)
+
+
+def _mza_create_draft(context):
+    draft = context.user_data.get("mza_create_draft")
+    if not isinstance(draft, dict):
+        draft = {}
+        context.user_data["mza_create_draft"] = draft
+    return draft
+
+
+async def _mza_username_exists(service, username):
+    ok, payload = await service.list_users(limit=50, search=username)
+    if not ok:
+        return None, payload
+    users = payload.get("users", []) if isinstance(payload, dict) else payload
+    if not isinstance(users, list):
+        return None, "Invalid Marzban users response"
+    exact = any(
+        isinstance(item, dict) and str(item.get("username") or "") == username
+        for item in users
+    )
+    return exact, None
+
+
+async def _mza_generate_unique_username(service):
+    for _ in range(8):
+        candidate = "nvl" + secrets.token_hex(4)
+        exists, error = await _mza_username_exists(service, candidate)
+        if exists is None:
+            return False, error
+        if not exists:
+            return True, candidate
+    return False, "Could not generate an unused username"
+
+
+def _mza_jdn_to_gregorian(jdn):
+    j = 4 * int(jdn) + 139361631
+    j = j + _idiv(_idiv(4 * int(jdn) + 183187720, 146097) * 3, 4) * 4 - 3908
+    i = _idiv(_imod(j, 1461), 4) * 5 + 308
+    gd = _idiv(_imod(i, 153), 5) + 1
+    gm = _imod(_idiv(i, 153), 12) + 1
+    gy = _idiv(j, 1461) - 100100 + _idiv(8 - gm, 6)
+    return gy, gm, gd
+
+
+def _mza_jalali_to_gregorian(jy, jm, jd):
+    jy, jm, jd = int(jy), int(jm), int(jd)
+    if not (1 <= jm <= 12 and 1 <= jd <= 31):
+        raise ValueError("invalid Jalali date")
+    _leap, gy, march = _jal_cal(jy)
+    jdn = (
+        _gregorian_to_jdn(gy, 3, march)
+        + (jm - 1) * 31
+        - _idiv(jm, 7) * (jm - 7)
+        + jd
+        - 1
+    )
+    result = _mza_jdn_to_gregorian(jdn)
+    if gregorian_to_jalali(*result) != (jy, jm, jd):
+        raise ValueError("invalid Jalali date")
+    return result
+
+
+def _mza_parse_exact_expiry_date(value):
+    raw = fa_to_en_digits(str(value or "")).strip()
+    raw = raw.replace(".", "/").replace("-", "/")
+    parts = [part for part in raw.split("/") if part]
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        raise ValueError("date must be YYYY/MM/DD")
+
+    year, month, day = map(int, parts)
+    if 1300 <= year <= 1599:
+        gy, gm, gd = _mza_jalali_to_gregorian(year, month, day)
+        display = f"{year:04d}/{month:02d}/{day:02d} شمسی"
+    else:
+        dt = datetime(year, month, day)
+        gy, gm, gd = dt.year, dt.month, dt.day
+        display = f"{gy:04d}-{gm:02d}-{gd:02d}"
+
+    expiry = datetime(gy, gm, gd, 23, 59, 59, tzinfo=IRAN_TZ)
+    if expiry <= datetime.now(IRAN_TZ):
+        raise ValueError("expiry date must be in the future")
+    return int(expiry.timestamp()), display
+
+
+def _mza_create_expiry_params(draft):
+    mode = draft.get("expiry_mode")
+    if mode == "days":
+        days = int(draft.get("expiry_days") or 0)
+        if days <= 0:
+            raise ValueError("expiry days missing")
+        if draft.get("start_mode") == "first_use":
+            return {
+                "status": "on_hold",
+                "expire": 0,
+                "on_hold_expire_duration": days * 86400,
+            }
+        return {
+            "status": "active",
+            "expire": int((datetime.now(timezone.utc) + timedelta(days=days)).timestamp()),
+            "on_hold_expire_duration": None,
+        }
+    if mode == "exact":
+        expire = int(draft.get("expire_timestamp") or 0)
+        if expire <= int(datetime.now(timezone.utc).timestamp()):
+            raise ValueError("exact expiry is missing or expired")
+        return {
+            "status": "active",
+            "expire": expire,
+            "on_hold_expire_duration": None,
+        }
+    if mode == "unlimited":
+        return {
+            "status": "active",
+            "expire": 0,
+            "on_hold_expire_duration": None,
+        }
+    raise ValueError("expiry selection missing")
+
+
+def _mza_create_expiry_label(draft):
+    mode = draft.get("expiry_mode")
+    if mode == "days":
+        days = int(draft.get("expiry_days") or 0)
+        suffix = " · از اولین استفاده" if draft.get("start_mode") == "first_use" else " · از همین الان"
+        return f"{days} روز{suffix}"
+    if mode == "exact":
+        return str(draft.get("expire_display") or "تاریخ مشخص")
+    return "بدون انقضا"
+
+
+async def _mza_show_create_username(target, context):
+    _mza_clear_create(context)
+    context.user_data["mza_create_draft"] = {}
+    kb = [
+        [InlineKeyboardButton("⚡ ساخت خودکار Username", callback_data="mza_cuname_auto")],
+        [InlineKeyboardButton("✏️ وارد کردن Username", callback_data="mza_cuname_manual")],
+        [InlineKeyboardButton("↩️ داشبورد", callback_data="mza_home")],
+    ]
+    await _mza_render(
+        target,
+        "➕ <b>ساخت کاربر V2Ray</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        "<b>مرحله ۱ از ۷ — Username</b>\n\n"
+        "یک Username امن به‌صورت خودکار بسازید یا مقدار دلخواه وارد کنید.\n"
+        "فرمت NVL: <code>A-Z a-z 0-9 _ -</code> · طول ۳ تا ۳۲ کاراکتر.",
+        kb,
+    )
+
+
+async def _mza_show_create_subname(target, context):
+    draft = _mza_create_draft(context)
+    kb = [
+        [InlineKeyboardButton("🏷 تعیین نام اشتراک", callback_data="mza_csub_set")],
+        [InlineKeyboardButton("⏭ بدون نام نمایشی", callback_data="mza_csub_skip")],
+        [InlineKeyboardButton("↩️ شروع مجدد", callback_data="mza_create")],
+    ]
+    await _mza_render(
+        target,
+        "➕ <b>ساخت کاربر V2Ray</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        "<b>مرحله ۲ از ۷ — نام اشتراک</b>\n\n"
+        f"Username: <code>{esc(draft.get('username') or '—')}</code>\n\n"
+        "این نام فقط برای نمایش و مدیریت داخل NVL ذخیره می‌شود و Username واقعی Marzban را تغییر نمی‌دهد.",
+        kb,
+    )
+
+
+async def _mza_show_create_volume(target, context):
+    draft = _mza_create_draft(context)
+    kb = [
+        [
+            InlineKeyboardButton("1 GB", callback_data="mza_cvol_1"),
+            InlineKeyboardButton("5 GB", callback_data="mza_cvol_5"),
+        ],
+        [
+            InlineKeyboardButton("15 GB", callback_data="mza_cvol_15"),
+            InlineKeyboardButton("20 GB", callback_data="mza_cvol_20"),
+        ],
+        [InlineKeyboardButton("✏️ حجم دلخواه", callback_data="mza_cvol_custom")],
+        [InlineKeyboardButton("♾ حجم نامحدود", callback_data="mza_cvol_unlimited")],
+        [InlineKeyboardButton("↩️ نام اشتراک", callback_data="mza_cback_sub")],
+    ]
+    subname = draft.get("subscription_name") or "تنظیم نشده"
+    await _mza_render(
+        target,
+        "📦 <b>حجم اشتراک</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        "<b>مرحله ۳ از ۷</b>\n\n"
+        f"Username: <code>{esc(draft.get('username') or '—')}</code>\n"
+        f"نام اشتراک: <b>{esc(subname)}</b>\n\n"
+        "حجم کل اکانت را انتخاب کنید.",
+        kb,
+    )
+
+
+async def _mza_show_create_expiry(target, context):
+    kb = [
+        [
+            InlineKeyboardButton("7 روز", callback_data="mza_cexp_7"),
+            InlineKeyboardButton("30 روز", callback_data="mza_cexp_30"),
+        ],
+        [
+            InlineKeyboardButton("60 روز", callback_data="mza_cexp_60"),
+            InlineKeyboardButton("90 روز", callback_data="mza_cexp_90"),
+        ],
+        [InlineKeyboardButton("✏️ تعداد روز دلخواه", callback_data="mza_cexp_days")],
+        [InlineKeyboardButton("📆 تاریخ انقضای مشخص", callback_data="mza_cexp_date")],
+        [InlineKeyboardButton("♾ بدون انقضا", callback_data="mza_cexp_unlimited")],
+        [InlineKeyboardButton("↩️ حجم", callback_data="mza_cback_volume")],
+    ]
+    await _mza_render(
+        target,
+        "📅 <b>زمان انقضا</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        "<b>مرحله ۴ از ۷</b>\n\n"
+        "می‌توانید مدت را به روز، یک تاریخ دقیق یا بدون انقضا تعیین کنید.",
+        kb,
+    )
+
+
+async def _mza_show_create_activation(target, context):
+    draft = _mza_create_draft(context)
+    days = int(draft.get("expiry_days") or 0)
+    kb = [
+        [InlineKeyboardButton("▶️ از همین الان", callback_data="mza_cstart_now")],
+        [InlineKeyboardButton("🔌 از اولین استفاده", callback_data="mza_cstart_first")],
+        [InlineKeyboardButton("↩️ انقضا", callback_data="mza_cback_expiry")],
+    ]
+    await _mza_render(
+        target,
+        "⏱ <b>شروع اعتبار</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        f"مدت: <b>{days} روز</b>\n\n"
+        "در حالت «اولین استفاده»، User با وضعیت <code>on_hold</code> ساخته می‌شود و شمارش مدت پس از اولین استفاده آغاز می‌شود.",
+        kb,
+    )
+
+
+async def _mza_show_create_reset(target, context):
+    kb = [
+        [InlineKeyboardButton("✅ بدون ریست (پیشنهادی)", callback_data="mza_creset_no_reset")],
+        [
+            InlineKeyboardButton("روزانه", callback_data="mza_creset_day"),
+            InlineKeyboardButton("هفتگی", callback_data="mza_creset_week"),
+        ],
+        [
+            InlineKeyboardButton("ماهانه", callback_data="mza_creset_month"),
+            InlineKeyboardButton("سالانه", callback_data="mza_creset_year"),
+        ],
+        [InlineKeyboardButton("↩️ انقضا", callback_data="mza_cback_expiry")],
+    ]
+    await _mza_render(
+        target,
+        "♻️ <b>Reset Strategy</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        "<b>مرحله ۵ از ۷</b>\n\n"
+        "برای پلن‌های حجمی معمولی <code>no_reset</code> انتخاب استاندارد است.",
+        kb,
+    )
+
+
+async def _mza_show_create_inbounds(target, context, *, manual=False):
+    service = await _get_marzban_admin_service()
+    ok, payload = await service.get_inbounds()
+    if not ok:
+        return await _mza_render(
+            target,
+            f"❌ دریافت Inboundها ناموفق بود.\n<code>{esc(payload)}</code>",
+            [[InlineKeyboardButton("↩️ تلاش مجدد", callback_data="mza_cinb_stage")]],
+        )
+
+    rows = marzban_admin.flatten_marzban_inbounds(payload)
+    if not rows:
+        return await _mza_render(
+            target,
+            "❌ هیچ Inbound پشتیبانی‌شده‌ای در Marzban فعال نیست.",
+            [[InlineKeyboardButton("↩️ داشبورد", callback_data="mza_home")]],
+        )
+
+    draft = _mza_create_draft(context)
+    if not manual:
+        lines = [
+            "🔌 <b>Inboundها</b>",
+            "━━━━━━━━━━━━━━",
+            "<b>مرحله ۶ از ۷</b>",
+            "",
+            f"Marzban در حال حاضر <b>{len(rows)}</b> Inbound پشتیبانی‌شده دارد.",
+            "پیشنهاد: همه Inboundهای فعال را استفاده کنید تا تنظیمات User با config واقعی سرور هماهنگ بماند.",
+        ]
+        kb = [
+            [InlineKeyboardButton("✅ همه Inboundهای فعال", callback_data="mza_cinb_all")],
+            [InlineKeyboardButton("⚙️ انتخاب دستی", callback_data="mza_cinb_manual")],
+            [InlineKeyboardButton("↩️ Reset Strategy", callback_data="mza_cback_reset")],
+        ]
+        return await _mza_render(target, "\n".join(lines), kb)
+
+    current = draft.get("selected_inbound_tags")
+    if not isinstance(current, list):
+        current = [row["tag"] for row in rows]
+        draft["selected_inbound_tags"] = current
+
+    available_tags = [row["tag"] for row in rows]
+    current = [tag for tag in current if tag in available_tags]
+    draft["selected_inbound_tags"] = current
+
+    tokens = {}
+    lines = [
+        "⚙️ <b>انتخاب دستی Inbound</b>",
+        "━━━━━━━━━━━━━━",
+        "حداقل یک Inbound باید انتخاب شود.",
+        "",
+    ]
+    kb = []
+    for row in rows:
+        tag = row["tag"]
+        token = hashlib.sha1(tag.encode("utf-8")).hexdigest()[:10]
+        tokens[token] = tag
+        selected = tag in current
+        icon = "✅" if selected else "⬜️"
+        lines.append(f"{icon} <code>{esc(row['protocol'])}</code> · {esc(tag)}")
+        kb.append([
+            InlineKeyboardButton(
+                f"{icon} {tag[:42]}",
+                callback_data=f"mza_cinbt_{token}",
+            )
+        ])
+
+    context.user_data["mza_create_inbound_tokens"] = tokens
+    kb.extend([
+        [InlineKeyboardButton("✅ ادامه", callback_data="mza_cinb_done")],
+        [InlineKeyboardButton("↩️ حالت ساده", callback_data="mza_cinb_stage")],
+    ])
+    await _mza_render(target, "\n".join(lines), kb)
+
+
+async def _mza_show_create_confirm(target, context):
+    draft = _mza_create_draft(context)
+    try:
+        expiry = _mza_create_expiry_params(draft)
+        username = marzban_admin.normalize_user_create_username(draft.get("username"))
+        data_limit = marzban_admin.normalize_user_data_limit_bytes(draft.get("data_limit_bytes"))
+    except (ValueError, TypeError) as exc:
+        return await _mza_render(
+            target,
+            f"❌ اطلاعات ساخت ناقص یا نامعتبر است: <code>{esc(exc)}</code>",
+            [[InlineKeyboardButton("↩️ شروع مجدد", callback_data="mza_create")]],
+        )
+
+    nonce = secrets.token_hex(4)
+    draft["confirm_nonce"] = nonce
+    data_label = "نامحدود" if data_limit == 0 else _mza_bytes(data_limit)
+    selected = draft.get("selected_inbound_tags")
+    inbounds_label = "همه Inboundهای فعال" if selected is None else f"{len(selected)} Inbound انتخابی"
+    reset_strategy = draft.get("reset_strategy") or "no_reset"
+    subname = draft.get("subscription_name") or "تنظیم نشده"
+
+    lines = [
+        "🚀 <b>تایید ساخت کاربر V2Ray</b>",
+        "━━━━━━━━━━━━━━",
+        "<b>مرحله ۷ از ۷</b>",
+        "",
+        f"Username  <code>{esc(username)}</code>",
+        f"نام اشتراک NVL  <b>{esc(subname)}</b>",
+        f"حجم  <b>{esc(data_label)}</b>",
+        f"انقضا  <b>{esc(_mza_create_expiry_label(draft))}</b>",
+        f"Status  <code>{esc(expiry['status'])}</code>",
+        f"Reset  <code>{esc(reset_strategy)}</code>",
+        f"Inbounds  <b>{esc(inbounds_label)}</b>",
+        "",
+        "در لحظه Confirm، Inboundها دوباره از Marzban خوانده و اعتبارسنجی می‌شوند.",
+    ]
+    kb = [
+        [InlineKeyboardButton("✅ ساخت کاربر", callback_data=f"mza_create_confirm_{nonce}")],
+        [InlineKeyboardButton("⚙️ Inboundها", callback_data="mza_cinb_stage")],
+        [InlineKeyboardButton("❌ انصراف", callback_data="mza_create_cancel")],
+    ]
+    await _mza_render(target, "\n".join(lines), kb)
+
+
 async def _show_marzban_admin_dashboard(target, context):
     service = await _get_marzban_admin_service()
     stats_result, nodes_result = await asyncio.gather(
@@ -4623,6 +5020,7 @@ async def _show_marzban_admin_dashboard(target, context):
     ok_nodes, nodes = nodes_result
 
     kb = [
+        [InlineKeyboardButton("➕ ساخت کاربر V2Ray", callback_data="mza_create")],
         [InlineKeyboardButton("👥 کاربران", callback_data="mza_users_0"),
          InlineKeyboardButton("🟢 آنلاین", callback_data="mza_online_0")],
         [InlineKeyboardButton("🔍 جستجوی کاربر", callback_data="mza_search")],

@@ -34,6 +34,52 @@ class SubscriptionNameTests(unittest.TestCase):
             marzban_admin.normalize_subscription_name("x" * 31)
 
 
+class NodeValidationTests(unittest.TestCase):
+    def test_node_id_must_be_positive(self):
+        self.assertEqual(marzban_admin.normalize_node_id("7"), 7)
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_node_id(0)
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_node_id("nope")
+
+    def test_node_settings_are_normalized(self):
+        self.assertEqual(
+            marzban_admin.normalize_node_changes({
+                "name": "  DE   Node ",
+                "address": "node.example.com",
+                "port": "62050",
+                "api_port": 62051,
+                "usage_coefficient": "1.5",
+            }),
+            {
+                "name": "DE Node",
+                "address": "node.example.com",
+                "port": 62050,
+                "api_port": 62051,
+                "usage_coefficient": 1.5,
+            },
+        )
+
+    def test_node_settings_reject_unsafe_values(self):
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_node_changes({"address": "https://node.example.com"})
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_node_changes({"port": 70000})
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_node_changes({"usage_coefficient": 0})
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_node_changes({"status": "connected"})
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_node_changes({"unknown": "x"})
+
+    def test_settings_update_cannot_directly_mutate_status(self):
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_node_changes(
+                {"status": "disabled"},
+                allow_status=False,
+            )
+
+
 class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.service = marzban_admin.MarzbanAdminService(
@@ -79,6 +125,117 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         request.assert_awaited_once_with(
             "GET",
             "/api/nodes",
+            "https://marzban.example",
+            "admin",
+            "secret",
+            json_data=None,
+            params=None,
+        )
+
+    async def test_get_node_uses_detail_endpoint(self):
+        with patch("v2ray_engine.api_request", new_callable=AsyncMock) as request:
+            request.return_value = (True, {"id": 4, "status": "connected"})
+            ok, payload = await self.service.get_node(4)
+
+        self.assertTrue(ok)
+        self.assertEqual(payload["id"], 4)
+        request.assert_awaited_once_with(
+            "GET",
+            "/api/node/4",
+            "https://marzban.example",
+            "admin",
+            "secret",
+            json_data=None,
+            params=None,
+        )
+
+    async def test_disable_node_uses_node_modify_endpoint(self):
+        with patch("v2ray_engine.api_request", new_callable=AsyncMock) as request:
+            request.return_value = (True, {"id": 4, "status": "disabled"})
+            ok, payload = await self.service.set_node_enabled(4, False)
+
+        self.assertTrue(ok)
+        self.assertEqual(payload["status"], "disabled")
+        request.assert_awaited_once_with(
+            "PUT",
+            "/api/node/4",
+            "https://marzban.example",
+            "admin",
+            "secret",
+            json_data={"status": "disabled"},
+            params=None,
+        )
+
+    async def test_enable_node_uses_connecting_state(self):
+        with patch("v2ray_engine.api_request", new_callable=AsyncMock) as request:
+            request.return_value = (True, {"id": 4, "status": "connecting"})
+            ok, payload = await self.service.set_node_enabled(4, True)
+
+        self.assertTrue(ok)
+        self.assertEqual(payload["status"], "connecting")
+        request.assert_awaited_once_with(
+            "PUT",
+            "/api/node/4",
+            "https://marzban.example",
+            "admin",
+            "secret",
+            json_data={"status": "connecting"},
+            params=None,
+        )
+
+    async def test_settings_edit_preserves_disabled_node(self):
+        self.service.get_node = AsyncMock(
+            return_value=(True, {"id": 4, "status": "disabled"})
+        )
+        with patch("v2ray_engine.api_request", new_callable=AsyncMock) as request:
+            request.return_value = (
+                True,
+                {"id": 4, "status": "disabled", "usage_coefficient": 2.0},
+            )
+            ok, payload = await self.service.update_node_settings(
+                4,
+                usage_coefficient=2,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(payload["status"], "disabled")
+        request.assert_awaited_once_with(
+            "PUT",
+            "/api/node/4",
+            "https://marzban.example",
+            "admin",
+            "secret",
+            json_data={"usage_coefficient": 2.0, "status": "disabled"},
+            params=None,
+        )
+
+    async def test_reconnect_node_uses_reconnect_endpoint(self):
+        with patch("v2ray_engine.api_request", new_callable=AsyncMock) as request:
+            request.return_value = (True, {"detail": "Reconnection task scheduled"})
+            ok, payload = await self.service.reconnect_node(4)
+
+        self.assertTrue(ok)
+        self.assertIn("Reconnection", payload["detail"])
+        request.assert_awaited_once_with(
+            "POST",
+            "/api/node/4/reconnect",
+            "https://marzban.example",
+            "admin",
+            "secret",
+            json_data=None,
+            params=None,
+        )
+
+    async def test_node_usage_uses_usage_endpoint(self):
+        with patch("v2ray_engine.api_request", new_callable=AsyncMock) as request:
+            request.return_value = (True, {"usages": []})
+            ok, payload = await self.service.get_nodes_usage()
+
+        self.assertTrue(ok)
+        self.assertEqual(payload["usages"], [])
+        request.assert_awaited_once_with(
+            "GET",
+            "/api/nodes/usage",
             "https://marzban.example",
             "admin",
             "secret",

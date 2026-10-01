@@ -232,7 +232,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V105-2026-10-01-subscription-name-action"
+BOT_VERSION_TAG = "V106-2026-10-02-marzban-node-management"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -4542,6 +4542,77 @@ async def _mza_show_addvol_confirm(target, username, gb):
     await _mza_render(target, txt, kb)
 
 
+
+def _mza_node_status_meta(status):
+    key = str(status or "unknown").lower()
+    mapping = {
+        "connected": ("🟢", "متصل", "سالم"),
+        "connecting": ("🟡", "در حال اتصال", "در حال اتصال"),
+        "error": ("🔴", "خطا", "ناسالم"),
+        "disabled": ("⚫", "غیرفعال", "غیرفعال"),
+    }
+    return mapping.get(key, ("⚪", key or "نامشخص", "نامشخص"))
+
+
+def _mza_node_counts(nodes):
+    counts = {"connected": 0, "connecting": 0, "error": 0, "disabled": 0, "unknown": 0}
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        key = str(node.get("status") or "unknown").lower()
+        counts[key if key in counts else "unknown"] += 1
+    return counts
+
+
+def _mza_find_node_usage(payload, node_id, node_name):
+    if not isinstance(payload, dict):
+        return None
+    usages = payload.get("usages") or []
+    for item in usages:
+        if not isinstance(item, dict):
+            continue
+        raw_id = item.get("node_id")
+        try:
+            if raw_id is not None and int(raw_id) == int(node_id):
+                return item
+        except (TypeError, ValueError):
+            pass
+        if raw_id is None and str(item.get("node_name") or "") == str(node_name or ""):
+            return item
+    return None
+
+
+async def _mza_show_node_edit_confirm(target, context, node_id, changes):
+    node_id = int(node_id)
+    labels = {
+        "name": "نام",
+        "address": "آدرس",
+        "port": "Port",
+        "api_port": "API Port",
+        "usage_coefficient": "Usage Ratio",
+    }
+    context.user_data["mza_action_node"] = node_id
+    context.user_data["mza_node_pending_changes"] = dict(changes)
+
+    lines = [
+        "✏️ <b>تایید تغییر تنظیمات نود</b>",
+        "",
+        f"Node ID: <code>{node_id}</code>",
+        "",
+    ]
+    for key, value in changes.items():
+        lines.append(f"{esc(labels.get(key, key))}: <code>{esc(value)}</code>")
+    lines.extend([
+        "",
+        "پس از اعمال تنظیمات، Marzban ممکن است نود فعال را برای اتصال مجدد وارد وضعیت connecting کند.",
+    ])
+    kb = [
+        [InlineKeyboardButton("✅ اعمال تغییرات", callback_data=f"mza_nedit_confirm_{node_id}")],
+        [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_node_{node_id}")],
+    ]
+    await _mza_render(target, "\n".join(lines), kb)
+
+
 async def _show_marzban_admin_dashboard(target, context):
     service = await _get_marzban_admin_service()
     stats_result, nodes_result = await asyncio.gather(
@@ -4580,8 +4651,12 @@ async def _show_marzban_admin_dashboard(target, context):
 
     node_line = "نامشخص"
     if ok_nodes and isinstance(nodes, list):
-        connected = sum(1 for n in nodes if isinstance(n, dict) and n.get("status") == "connected")
-        node_line = f"{connected}/{len(nodes)} متصل"
+        node_counts = _mza_node_counts(nodes)
+        node_line = f"{node_counts['connected']}/{len(nodes)} سالم"
+        if node_counts["error"]:
+            node_line += f" · {node_counts['error']} خطا"
+        if node_counts["disabled"]:
+            node_line += f" · {node_counts['disabled']} غیرفعال"
 
     txt = (
         "🛠 <b>مرکز مدیریت Marzban</b>\n"
@@ -4781,33 +4856,143 @@ async def _show_marzban_user_readonly(target, context, username):
 async def _show_marzban_nodes(target, context):
     service = await _get_marzban_admin_service()
     ok, nodes = await service.get_nodes()
-    kb = [[InlineKeyboardButton("🔄 بروزرسانی", callback_data="mza_nodes")],
-          [InlineKeyboardButton("🔙 داشبورد", callback_data="mza_home")]]
+    fallback_kb = [
+        [InlineKeyboardButton("🔄 بروزرسانی", callback_data="mza_nodes")],
+        [InlineKeyboardButton("🔙 داشبورد", callback_data="mza_home")],
+    ]
     if not ok or not isinstance(nodes, list):
-        return await _mza_render(target, f"❌ خطا در دریافت نودها\n<code>{esc(nodes)}</code>", kb)
+        return await _mza_render(
+            target,
+            f"❌ خطا در دریافت نودها\n<code>{esc(nodes)}</code>",
+            fallback_kb,
+        )
 
-    lines = ["🖥 <b>نودهای Marzban</b>", "━━━━━━━━━━━━━━", ""]
+    counts = _mza_node_counts(nodes)
+    lines = [
+        "🖥 <b>زیرساخت Marzban</b>",
+        "━━━━━━━━━━━━━━",
+        f"کل نودها  <b>{len(nodes)}</b>",
+        f"🟢 سالم  {counts['connected']}     🟡 در اتصال  {counts['connecting']}",
+        f"🔴 خطا  {counts['error']}     ⚫ غیرفعال  {counts['disabled']}",
+        "",
+    ]
+    kb = []
     for node in nodes:
         if not isinstance(node, dict):
             continue
-        status = str(node.get("status") or "unknown")
-        icon = {"connected": "🟢", "connecting": "🟡", "error": "🔴", "disabled": "⚫"}.get(status, "⚪")
-        status_label = {
-            "connected": "متصل",
-            "connecting": "در حال اتصال",
-            "error": "خطا",
-            "disabled": "غیرفعال",
-        }.get(status, status)
-        lines.extend([
-            f"{icon} <b>{esc(node.get('name', 'Unnamed'))}</b>",
-            f"└ <code>{esc(node.get('address', '?'))}:{esc(node.get('port', '?'))}</code>",
-            f"   API <code>{esc(node.get('api_port', '?'))}</code> · {esc(status_label)}",
-            f"   Xray <code>{esc(node.get('xray_version') or '—')}</code> · Ratio {esc(node.get('usage_coefficient', 1))}",
-            "",
+        try:
+            node_id = int(node.get("id"))
+        except (TypeError, ValueError):
+            continue
+        icon, status_label, _ = _mza_node_status_meta(node.get("status"))
+        name = str(node.get("name") or f"Node {node_id}")
+        address = str(node.get("address") or "?")
+        port = node.get("port", "?")
+        lines.append(
+            f"{icon} <b>{esc(name)}</b> — {esc(status_label)}\n"
+            f"└ <code>{esc(address)}:{esc(port)}</code> · Ratio {esc(node.get('usage_coefficient', 1))}"
+        )
+        kb.append([
+            InlineKeyboardButton(
+                f"{icon} {name}",
+                callback_data=f"mza_node_{node_id}",
+            )
         ])
-    if len(lines) == 3:
+
+    if not kb:
         lines.append("هیچ نودی ثبت نشده است.")
+
+    kb.extend(fallback_kb)
     await _mza_render(target, "\n".join(lines), kb)
+
+
+async def _show_marzban_node_detail(target, context, node_id):
+    try:
+        node_id = marzban_admin.normalize_node_id(node_id)
+    except ValueError:
+        return await _mza_render(
+            target,
+            "❌ شناسه نود نامعتبر است.",
+            [[InlineKeyboardButton("🔙 نودها", callback_data="mza_nodes")]],
+        )
+
+    service = await _get_marzban_admin_service()
+    (ok_node, node), (ok_usage, usage_payload) = await asyncio.gather(
+        service.get_node(node_id),
+        service.get_nodes_usage(),
+    )
+    if not ok_node or not isinstance(node, dict):
+        return await _mza_render(
+            target,
+            f"❌ دریافت اطلاعات نود ناموفق بود.\n<code>{esc(node)}</code>",
+            [[InlineKeyboardButton("🔙 نودها", callback_data="mza_nodes")]],
+        )
+
+    icon, status_label, health_label = _mza_node_status_meta(node.get("status"))
+    name = str(node.get("name") or f"Node {node_id}")
+    address = str(node.get("address") or "?")
+    port = node.get("port", "?")
+    api_port = node.get("api_port", "?")
+    xray_version = node.get("xray_version") or "—"
+    ratio = node.get("usage_coefficient", 1)
+    message = str(node.get("message") or "").strip()
+
+    usage = _mza_find_node_usage(usage_payload if ok_usage else None, node_id, name)
+    if usage:
+        uplink = int(usage.get("uplink", 0) or 0)
+        downlink = int(usage.get("downlink", 0) or 0)
+        traffic_line = (
+            f"📊 ترافیک ثبت‌شده  <b>{_mza_bytes(uplink + downlink)}</b> "
+            f"(↑ {_mza_bytes(uplink)} · ↓ {_mza_bytes(downlink)})"
+        )
+    else:
+        traffic_line = "📊 ترافیک ثبت‌شده  نامشخص"
+
+    lines = [
+        f"{icon} <b>{esc(name)}</b>",
+        "━━━━━━━━━━━━━━",
+        f"Node ID  <code>{node_id}</code>",
+        f"وضعیت  <b>{esc(status_label)}</b>",
+        f"Health (Marzban)  <b>{esc(health_label)}</b>",
+        "",
+        "🌐 <b>اتصال</b>",
+        f"Address  <code>{esc(address)}</code>",
+        f"Port  <code>{esc(port)}</code>",
+        f"API Port  <code>{esc(api_port)}</code>",
+        "",
+        "⚙️ <b>Runtime</b>",
+        f"Xray  <code>{esc(xray_version)}</code>",
+        f"Usage Ratio  <b>{esc(ratio)}</b>",
+        traffic_line,
+    ]
+    if message:
+        lines.extend(["", f"⚠️ پیام Marzban: <code>{esc(message[:500])}</code>"])
+
+    status_key = str(node.get("status") or "").lower()
+    kb = []
+    if status_key == "disabled":
+        kb.append([InlineKeyboardButton("🟢 فعال‌سازی نود", callback_data=f"mza_ntoggle_{node_id}")])
+    else:
+        kb.append([
+            InlineKeyboardButton("🔴 غیرفعال‌سازی", callback_data=f"mza_ntoggle_{node_id}"),
+            InlineKeyboardButton("🔄 Reconnect", callback_data=f"mza_nreconnect_{node_id}"),
+        ])
+    kb.extend([
+        [
+            InlineKeyboardButton("✏️ نام", callback_data=f"mza_nedit_name_{node_id}"),
+            InlineKeyboardButton("🌐 آدرس", callback_data=f"mza_nedit_address_{node_id}"),
+        ],
+        [
+            InlineKeyboardButton("🔌 پورت‌ها", callback_data=f"mza_nedit_ports_{node_id}"),
+            InlineKeyboardButton("📊 Usage Ratio", callback_data=f"mza_nedit_ratio_{node_id}"),
+        ],
+        [
+            InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"mza_node_{node_id}"),
+            InlineKeyboardButton("🔙 نودها", callback_data="mza_nodes"),
+        ],
+    ])
+    await _mza_render(target, "\n".join(lines), kb)
+
 
 #----------------------------------------------------------
 
@@ -5470,6 +5655,53 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop('mza_action_user', None)
             await _mza_show_addvol_confirm(update.message, username, amount)
             return
+
+    node_input_states = {
+        'MZA_NODE_NAME_INPUT',
+        'MZA_NODE_ADDRESS_INPUT',
+        'MZA_NODE_PORTS_INPUT',
+        'MZA_NODE_RATIO_INPUT',
+    }
+    if state in node_input_states:
+        if role != 'admin':
+            context.user_data.pop('state', None)
+            context.user_data.pop('mza_action_node', None)
+            context.user_data.pop('mza_node_pending_changes', None)
+            await update.message.reply_text("⛔️ دسترسی غیرمجاز.")
+            return
+
+        node_id = context.user_data.get('mza_action_node')
+        try:
+            node_id = marzban_admin.normalize_node_id(node_id)
+            if state == 'MZA_NODE_NAME_INPUT':
+                changes = marzban_admin.normalize_node_changes({"name": text})
+            elif state == 'MZA_NODE_ADDRESS_INPUT':
+                changes = marzban_admin.normalize_node_changes({"address": text})
+            elif state == 'MZA_NODE_PORTS_INPUT':
+                parts = text.replace(",", " ").replace(":", " ").split()
+                if len(parts) != 2:
+                    raise ValueError("two ports required")
+                changes = marzban_admin.normalize_node_changes({
+                    "port": parts[0],
+                    "api_port": parts[1],
+                })
+            else:
+                changes = marzban_admin.normalize_node_changes({
+                    "usage_coefficient": text.strip(),
+                })
+        except ValueError:
+            hints = {
+                'MZA_NODE_NAME_INPUT': "نام باید بین ۱ تا ۸۰ کاراکتر باشد.",
+                'MZA_NODE_ADDRESS_INPUT': "یک IP یا hostname بدون http/https و بدون فاصله وارد کنید.",
+                'MZA_NODE_PORTS_INPUT': "دو پورت معتبر وارد کنید؛ مثال: 62050 62051",
+                'MZA_NODE_RATIO_INPUT': "ضریب باید یک عدد مثبت باشد؛ مثال: 1 یا 1.5",
+            }
+            await update.message.reply_text(f"❌ مقدار نامعتبر است.\n{hints.get(state, '')}")
+            return
+
+        context.user_data.pop('state', None)
+        await _mza_show_node_edit_confirm(update.message, context, node_id, changes)
+        return
 
     # 🛡 Stateful V2Ray management must re-check ownership on every text continuation.
     _v2_state_target = None
@@ -8356,15 +8588,31 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             or d.startswith('mza_subname_')
             or d.startswith('mza_renew_custom_')
             or d.startswith('mza_addvol_custom_')
+            or d.startswith('mza_nedit_name_')
+            or d.startswith('mza_nedit_address_')
+            or d.startswith('mza_nedit_ports_')
+            or d.startswith('mza_nedit_ratio_')
         )
         if not starters and input_state in (
             'MARZBAN_ADMIN_SEARCH',
             'MZA_SUBNAME_INPUT',
             'MZA_RENEW_INPUT',
             'MZA_ADDVOL_INPUT',
+            'MZA_NODE_NAME_INPUT',
+            'MZA_NODE_ADDRESS_INPUT',
+            'MZA_NODE_PORTS_INPUT',
+            'MZA_NODE_RATIO_INPUT',
         ):
             context.user_data.pop('state', None)
             context.user_data.pop('mza_action_user', None)
+            context.user_data.pop('mza_action_node', None)
+            context.user_data.pop('mza_node_pending_changes', None)
+
+        # A confirmation message can outlive the screen that created it.
+        # Any unrelated Marzban callback invalidates the pending node edit.
+        if not d.startswith('mza_nedit_confirm_') and not starters:
+            context.user_data.pop('mza_action_node', None)
+            context.user_data.pop('mza_node_pending_changes', None)
 
     # 🛡 Central V2Ray authorization boundary.  Callback data and persisted
     # state only identify a target; ownership is always reloaded from SQLite.
@@ -8378,13 +8626,222 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("⛔️ شما مجاز به مشاهده/مدیریت این اکانت نیستید.")
             return
 
-    # ---------------- Marzban Admin Dashboard (read-only) ----------------
+    # ---------------- Marzban Admin Dashboard ----------------
     if d == 'mza_home':
         await _show_marzban_admin_dashboard(query, context)
         return
     elif d == 'mza_nodes':
         await _show_marzban_nodes(query, context)
         return
+    elif d.startswith('mza_node_'):
+        node_id = d[len('mza_node_'):]
+        await _show_marzban_node_detail(query, context, node_id)
+        return
+
+    elif d.startswith('mza_ntoggle_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_ntoggle_'):])
+        service = await _get_marzban_admin_service()
+        ok_node, node = await service.get_node(node_id)
+        if not ok_node or not isinstance(node, dict):
+            await query.edit_message_text("❌ دریافت وضعیت نود از Marzban ناموفق بود.")
+            return
+        status_key = str(node.get('status') or '').lower()
+        enabling = status_key == 'disabled'
+        action = "فعال شود" if enabling else "غیرفعال شود"
+        confirm_cb = f"mza_nset_enabled_{node_id}" if enabling else f"mza_nset_disabled_{node_id}"
+        await query.edit_message_text(
+            f"⚙️ <b>تغییر وضعیت نود</b>\n\n"
+            f"نود: <b>{esc(node.get('name') or node_id)}</b>\n"
+            f"وضعیت فعلی: <code>{esc(status_key or 'unknown')}</code>\n\n"
+            f"آیا نود {action}؟",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ تایید", callback_data=confirm_cb)],
+                [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_node_{node_id}")],
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_nset_enabled_') or d.startswith('mza_nset_disabled_'):
+        enabling = d.startswith('mza_nset_enabled_')
+        prefix = 'mza_nset_enabled_' if enabling else 'mza_nset_disabled_'
+        node_id = marzban_admin.normalize_node_id(d[len(prefix):])
+        service = await _get_marzban_admin_service()
+        ok_node, node = await service.get_node(node_id)
+        if not ok_node or not isinstance(node, dict):
+            await query.edit_message_text("❌ دریافت وضعیت نود از Marzban ناموفق بود.")
+            return
+        current = str(node.get('status') or '').lower()
+        if enabling and current != 'disabled':
+            await _show_marzban_node_detail(query, context, node_id)
+            return
+        if not enabling and current == 'disabled':
+            await _show_marzban_node_detail(query, context, node_id)
+            return
+        ok_mod, payload = await service.set_node_enabled(node_id, enabling)
+        if not ok_mod:
+            log.warning("Marzban node status mutation failed for %s: %r", node_id, payload)
+            await query.edit_message_text(
+                f"❌ تغییر وضعیت نود انجام نشد.\n<code>{esc(payload)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+        await _show_marzban_node_detail(query, context, node_id)
+        return
+
+    elif d.startswith('mza_nreconnect_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nreconnect_'):])
+        service = await _get_marzban_admin_service()
+        ok_node, node = await service.get_node(node_id)
+        if not ok_node or not isinstance(node, dict):
+            await query.edit_message_text("❌ دریافت وضعیت نود از Marzban ناموفق بود.")
+            return
+        if str(node.get('status') or '').lower() == 'disabled':
+            await query.edit_message_text(
+                "❌ نود غیرفعال است؛ ابتدا آن را فعال کنید.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+        await query.edit_message_text(
+            f"🔄 <b>Reconnect Node</b>\n\n"
+            f"اتصال نود <b>{esc(node.get('name') or node_id)}</b> دوباره برقرار شود؟",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Reconnect", callback_data=f"mza_nreconnectyes_{node_id}")],
+                [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_node_{node_id}")],
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_nreconnectyes_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nreconnectyes_'):])
+        service = await _get_marzban_admin_service()
+        ok_node, node = await service.get_node(node_id)
+        if not ok_node or not isinstance(node, dict):
+            await query.edit_message_text("❌ دریافت وضعیت نود از Marzban ناموفق بود.")
+            return
+        if str(node.get('status') or '').lower() == 'disabled':
+            await query.edit_message_text(
+                "❌ نود غیرفعال است و Reconnect اجرا نشد.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+        ok_reconnect, payload = await service.reconnect_node(node_id)
+        if not ok_reconnect:
+            log.warning("Marzban node reconnect failed for %s: %r", node_id, payload)
+            await query.edit_message_text(
+                f"❌ درخواست Reconnect ناموفق بود.\n<code>{esc(payload)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+        await _show_marzban_node_detail(query, context, node_id)
+        return
+
+    elif d.startswith('mza_nedit_name_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nedit_name_'):])
+        context.user_data['state'] = 'MZA_NODE_NAME_INPUT'
+        context.user_data['mza_action_node'] = node_id
+        context.user_data.pop('mza_node_pending_changes', None)
+        await query.edit_message_text(
+            "✏️ <b>تغییر نام نود</b>\n\nنام جدید را بفرستید:",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_node_{node_id}")]
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_nedit_address_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nedit_address_'):])
+        context.user_data['state'] = 'MZA_NODE_ADDRESS_INPUT'
+        context.user_data['mza_action_node'] = node_id
+        context.user_data.pop('mza_node_pending_changes', None)
+        await query.edit_message_text(
+            "🌐 <b>تغییر آدرس نود</b>\n\nIP یا hostname جدید را بدون http/https بفرستید:",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_node_{node_id}")]
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_nedit_ports_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nedit_ports_'):])
+        context.user_data['state'] = 'MZA_NODE_PORTS_INPUT'
+        context.user_data['mza_action_node'] = node_id
+        context.user_data.pop('mza_node_pending_changes', None)
+        await query.edit_message_text(
+            "🔌 <b>تغییر پورت‌های نود</b>\n\n"
+            "Port و API Port را در یک پیام بفرستید.\n"
+            "مثال: <code>62050 62051</code>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_node_{node_id}")]
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_nedit_ratio_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nedit_ratio_'):])
+        context.user_data['state'] = 'MZA_NODE_RATIO_INPUT'
+        context.user_data['mza_action_node'] = node_id
+        context.user_data.pop('mza_node_pending_changes', None)
+        await query.edit_message_text(
+            "📊 <b>تغییر Usage Ratio</b>\n\n"
+            "ضریب مصرف جدید را بفرستید؛ مثال: <code>1</code> یا <code>1.5</code>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_node_{node_id}")]
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_nedit_confirm_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nedit_confirm_'):])
+        pending_node = context.user_data.get('mza_action_node')
+        pending = context.user_data.get('mza_node_pending_changes')
+        try:
+            pending_node = marzban_admin.normalize_node_id(pending_node)
+        except ValueError:
+            pending_node = None
+        if pending_node != node_id or not isinstance(pending, dict) or not pending:
+            context.user_data.pop('mza_action_node', None)
+            context.user_data.pop('mza_node_pending_changes', None)
+            await query.edit_message_text(
+                "❌ این عملیات منقضی شده است.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+
+        service = await _get_marzban_admin_service()
+        ok_mod, payload = await service.update_node_settings(node_id, **pending)
+        context.user_data.pop('mza_action_node', None)
+        context.user_data.pop('mza_node_pending_changes', None)
+        if not ok_mod:
+            log.warning("Marzban node settings update failed for %s: %r", node_id, payload)
+            await query.edit_message_text(
+                f"❌ تغییر تنظیمات نود انجام نشد.\n<code>{esc(payload)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+        await _show_marzban_node_detail(query, context, node_id)
+        return
+
     elif d == 'mza_search':
         context.user_data['state'] = 'MARZBAN_ADMIN_SEARCH'
         await query.edit_message_text(

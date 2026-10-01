@@ -12,6 +12,7 @@ This module intentionally keeps the existing ``(ok, payload)`` contract used by
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -24,6 +25,70 @@ ApiResult = Tuple[bool, Any]
 SUBSCRIPTION_NAME_MIN_LENGTH = 2
 SUBSCRIPTION_NAME_MAX_LENGTH = 30
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+NODE_MUTABLE_FIELDS = {"name", "address", "port", "api_port", "status", "usage_coefficient"}
+NODE_MUTABLE_STATUSES = {"disabled", "connecting"}
+
+
+def normalize_node_id(value: Any) -> int:
+    try:
+        node_id = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("node id must be an integer")
+    if node_id <= 0:
+        raise ValueError("node id must be positive")
+    return node_id
+
+
+def normalize_node_changes(changes: Dict[str, Any], *, allow_status: bool = True) -> Dict[str, Any]:
+    """Validate and normalize the small subset of NodeModify exposed by NVL."""
+    if not changes:
+        raise ValueError("no node changes supplied")
+
+    unsupported = set(changes) - NODE_MUTABLE_FIELDS
+    if unsupported:
+        raise ValueError("unsupported node fields: " + ", ".join(sorted(unsupported)))
+
+    normalized: Dict[str, Any] = {}
+    for key, value in changes.items():
+        if key == "name":
+            cleaned = _CONTROL_CHARS_RE.sub("", str(value or "")).strip()
+            cleaned = " ".join(cleaned.split())
+            if not cleaned or len(cleaned) > 80:
+                raise ValueError("node name must be between 1 and 80 characters")
+            normalized[key] = cleaned
+        elif key == "address":
+            cleaned = _CONTROL_CHARS_RE.sub("", str(value or "")).strip()
+            if not cleaned or len(cleaned) > 255 or any(ch.isspace() for ch in cleaned):
+                raise ValueError("node address must be a non-empty hostname or IP without spaces")
+            if "://" in cleaned:
+                raise ValueError("node address must not include a URL scheme")
+            normalized[key] = cleaned
+        elif key in {"port", "api_port"}:
+            try:
+                port = int(value)
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be an integer")
+            if not 1 <= port <= 65535:
+                raise ValueError(f"{key} must be between 1 and 65535")
+            normalized[key] = port
+        elif key == "usage_coefficient":
+            try:
+                ratio = float(value)
+            except (TypeError, ValueError):
+                raise ValueError("usage coefficient must be a number")
+            if not math.isfinite(ratio) or ratio <= 0:
+                raise ValueError("usage coefficient must be a positive finite number")
+            normalized[key] = ratio
+        elif key == "status":
+            if not allow_status:
+                raise ValueError("node status cannot be changed through settings update")
+            status = str(value or "").strip().lower()
+            if status not in NODE_MUTABLE_STATUSES:
+                raise ValueError("node status mutation must be disabled or connecting")
+            normalized[key] = status
+
+    return normalized
 
 
 def can_manage_v2ray_account(role: Optional[str], actor_agent_id: int, owner_agent_id: int) -> bool:
@@ -175,6 +240,47 @@ class MarzbanAdminService:
     async def get_nodes(self) -> ApiResult:
         return await self.request("GET", "/api/nodes")
 
+    async def get_node(self, node_id: int) -> ApiResult:
+        node_id = normalize_node_id(node_id)
+        return await self.request("GET", f"/api/node/{node_id}")
+
+    async def modify_node(self, node_id: int, **changes: Any) -> ApiResult:
+        node_id = normalize_node_id(node_id)
+        payload = normalize_node_changes(changes)
+        return await self.request("PUT", f"/api/node/{node_id}", json_data=payload)
+
+    async def update_node_settings(self, node_id: int, **changes: Any) -> ApiResult:
+        """Update settings without accidentally enabling a disabled node."""
+        node_id = normalize_node_id(node_id)
+        payload = normalize_node_changes(changes, allow_status=False)
+        ok, current = await self.get_node(node_id)
+        if not ok:
+            return False, current
+        if not isinstance(current, dict):
+            return False, "Invalid Marzban node response"
+        # Marzban sets status=connecting for a NodeModify request unless
+        # status=disabled is explicitly preserved.
+        if str(current.get("status") or "").lower() == "disabled":
+            payload["status"] = "disabled"
+        return await self.request("PUT", f"/api/node/{node_id}", json_data=payload)
+
+    async def set_node_enabled(self, node_id: int, enabled: bool) -> ApiResult:
+        return await self.modify_node(
+            node_id,
+            status="connecting" if enabled else "disabled",
+        )
+
+    async def reconnect_node(self, node_id: int) -> ApiResult:
+        node_id = normalize_node_id(node_id)
+        return await self.request("POST", f"/api/node/{node_id}/reconnect")
+
+    async def get_nodes_usage(self, *, start: Optional[str] = None, end: Optional[str] = None) -> ApiResult:
+        params: Dict[str, Any] = {}
+        if start:
+            params["start"] = str(start).strip()
+        if end:
+            params["end"] = str(end).strip()
+        return await self.request("GET", "/api/nodes/usage", params=params or None)
     async def get_inbounds(self) -> ApiResult:
         return await self.request("GET", "/api/inbounds")
 

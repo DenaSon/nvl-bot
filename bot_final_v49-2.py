@@ -9642,7 +9642,8 @@ async def _show_v2_vol_confirm(message_or_query, context, gb, role, ag_id, is_ed
     txt = f"🪐 <b>تایید ساخت اکانت V2Ray حجمی</b>\n\n👤 نشانه/نام: {esc(customer_name)}\n📦 حجم اکانت: {gb} گیگابایت\n⏳ انقضا: {expiry_label}\n👥 تعداد کاربر: نامحدود{cost_txt}\n\nآیا از ساخت این اکانت مطمئن هستید؟"
     kb = [
         [InlineKeyboardButton("✅ بله، ساخته شود", callback_data="v2conf_vol_yes")],
-        [InlineKeyboardButton("❌ خیر، انصراف", callback_data="v2r_type_vol")]
+        [InlineKeyboardButton("↩️ انتخاب انقضا", callback_data="v2vexp_back")],
+        [InlineKeyboardButton("❌ انصراف", callback_data="buy_back_start")],
     ]
     if is_edit:
         await message_or_query.edit_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
@@ -12883,6 +12884,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("✏️ حجم دلخواه را فقط به‌صورت عدد وارد کنید.\n\nبازه مجاز: 1 تا 100 گیگ", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="v2r_type_vol")]]))
             return
         context.user_data['v2_vol_gb'] = int(val)
+        context.user_data['state'] = None
+        await _show_v2_vol_expiry_step(query, context, is_edit=True)
+        return
+
+    elif d == "v2vexp_back":
         context.user_data['state'] = None
         await _show_v2_vol_expiry_step(query, context, is_edit=True)
         return

@@ -49,6 +49,26 @@ class Phase57ModernV2RaySalesRegressionTests(unittest.TestCase):
         self.assertIn("_apply_agent_cashback_if_eligible", self.source)
         self.assertIn("_db_increment_lifetime_sold", self.source)
 
+    def test_sale_provisioning_uses_verified_marzban_service_layer(self):
+        self.assertIn("async def _provision_v2ray_sale_user", self.source)
+        self.assertIn("service = await _get_marzban_admin_service()", self.source)
+        self.assertIn("ok, result = await service.create_user(", self.source)
+        self.assertIn("selected_inbound_tags=None", self.source)
+        self.assertIn("ok_sub, sub_url = await service.get_subscription_url(username)", self.source)
+        self.assertIn('"created": True', self.source)
+        self.assertIn("_db_mark_reserved_v2ray_sale", self.source)
+
+    def test_sale_paths_no_longer_call_legacy_create_user(self):
+        self.assertNotIn(
+            "await v2ray_engine.create_user(m_url, m_user, m_pwd, un",
+            self.source,
+        )
+
+    def test_uncertain_remote_create_is_not_blindly_retried(self):
+        self.assertIn("created_uncertain", self.source)
+        self.assertIn("Never POST the same sale again.", self.source)
+        self.assertIn("رکورد رزرو محلی برای بازیابی نگه داشته شد", self.source)
+
     def test_direct_marzban_creation_remains_admin_only_and_separate(self):
         self.assertIn("if d.startswith('mza_') and role != 'admin':", self.source)
         self.assertIn("elif d == 'mza_create':", self.source)

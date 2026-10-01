@@ -8315,6 +8315,277 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         page = int(d.rsplit('_', 1)[1])
         await _show_marzban_users(query, context, page=page, mode='search')
         return
+    elif d.startswith('mza_toggle_'):
+        username = d[len('mza_toggle_'):]
+        service = await _get_marzban_admin_service()
+        ok_user, user = await service.get_user(username)
+        if not ok_user or not isinstance(user, dict):
+            await query.edit_message_text("❌ دریافت وضعیت کاربر از Marzban ناموفق بود.")
+            return
+        new_status = 'disabled' if str(user.get('status') or '').lower() == 'active' else 'active'
+        ok_mod, err = await service.set_user_status(username, new_status)
+        if not ok_mod:
+            log.warning("Marzban dashboard toggle failed for %s: %r", username, err)
+            await query.edit_message_text("❌ تغییر وضعیت انجام نشد.")
+            return
+        local = await asyncio.to_thread(_db_get_user, username)
+        if local:
+            db_status = "🟢 فعال" if new_status == 'active' else "🔴 غیرفعال"
+            with db_conn() as conn:
+                conn.execute("UPDATE ssh_accounts SET status=? WHERE username=?", (db_status, username))
+        await query.answer("✅ وضعیت بروزرسانی شد")
+        await _show_marzban_user_readonly(query, context, username)
+        return
+
+    elif d.startswith('mza_reset_') and not d.startswith('mza_resetyes_'):
+        username = d[len('mza_reset_'):]
+        await query.edit_message_text(
+            f"♻️ <b>ریست مصرف</b>\n\nمصرف ثبت‌شده برای <code>{esc(username)}</code> صفر شود؟",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ بله، ریست شود", callback_data=f"mza_resetyes_{username}")],
+                [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_user_{username}")],
+            ])
+        )
+        return
+
+    elif d.startswith('mza_resetyes_'):
+        username = d[len('mza_resetyes_'):]
+        service = await _get_marzban_admin_service()
+        ok_reset, err = await service.reset_user_usage(username)
+        if not ok_reset:
+            log.warning("Marzban dashboard usage reset failed for %s: %r", username, err)
+            await query.edit_message_text("❌ ریست مصرف انجام نشد.")
+            return
+        await query.answer("✅ مصرف ریست شد")
+        await _show_marzban_user_readonly(query, context, username)
+        return
+
+    elif d.startswith('mza_subname_'):
+        username = d[len('mza_subname_'):]
+        local = await asyncio.to_thread(_db_get_user, username)
+        if not local:
+            await query.edit_message_text(
+                "❌ این کاربر رکورد محلی NVL ندارد و نام اشتراک برای آن قابل ذخیره نیست.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_user_{username}")]])
+            )
+            return
+        current = await asyncio.to_thread(_db_get_subscription_name, username)
+        context.user_data['state'] = 'MZA_SUBNAME_INPUT'
+        context.user_data['mza_action_user'] = username
+        await query.edit_message_text(
+            f"✏️ <b>نام اشتراک</b>\n\nکاربر: <code>{esc(username)}</code>\n"
+            f"نام فعلی: <b>{esc(current or 'تنظیم نشده')}</b>\n\n"
+            "نام جدید را بفرستید؛ بین ۲ تا ۳۰ کاراکتر.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🧹 حذف نام", callback_data=f"mza_subclear_{username}")],
+                [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_user_{username}")],
+            ])
+        )
+        return
+
+    elif d.startswith('mza_subclear_'):
+        username = d[len('mza_subclear_'):]
+        await asyncio.to_thread(_db_set_subscription_name, username, None)
+        context.user_data.pop('state', None)
+        context.user_data.pop('mza_action_user', None)
+        await query.answer("✅ نام اشتراک حذف شد")
+        await _show_marzban_user_readonly(query, context, username)
+        return
+
+    elif d.startswith('mza_link_'):
+        username = d[len('mza_link_'):]
+        service = await _get_marzban_admin_service()
+        ok_sub, sub_url = await service.get_subscription_url(username)
+        if not ok_sub:
+            await query.message.reply_text("❌ دریافت لینک اشتراک ناموفق بود.")
+            return
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"🔗 <b>لینک اشتراک {esc(username)}</b>\n\n<code>{esc(sub_url)}</code>",
+            parse_mode='HTML',
+        )
+        return
+
+    elif d.startswith('mza_qr_'):
+        username = d[len('mza_qr_'):]
+        service = await _get_marzban_admin_service()
+        ok_sub, sub_url = await service.get_subscription_url(username)
+        if not ok_sub:
+            await query.message.reply_text("❌ دریافت لینک اشتراک ناموفق بود.")
+            return
+        qr_buf = await asyncio.to_thread(v2ray_engine.generate_qr, sub_url)
+        await context.bot.send_photo(
+            chat_id=query.message.chat_id,
+            photo=qr_buf,
+            caption=f"📱 <b>QR اشتراک {esc(username)}</b>",
+            parse_mode='HTML',
+        )
+        return
+
+    elif d.startswith('mza_renew_') and not d.startswith('mza_renew_custom_'):
+        username = d[len('mza_renew_'):]
+        kb = [
+            [InlineKeyboardButton("۳۰ روز", callback_data=f"mza_rdays_30_{username}"),
+             InlineKeyboardButton("۶۰ روز", callback_data=f"mza_rdays_60_{username}")],
+            [InlineKeyboardButton("۹۰ روز", callback_data=f"mza_rdays_90_{username}"),
+             InlineKeyboardButton("✏️ دلخواه", callback_data=f"mza_renew_custom_{username}")],
+            [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_user_{username}")],
+        ]
+        await query.edit_message_text(
+            f"📅 <b>تمدید اشتراک</b>\n\nکاربر: <code>{esc(username)}</code>\nمدت تمدید را انتخاب کنید:",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(kb),
+        )
+        return
+
+    elif d.startswith('mza_rdays_'):
+        rest = d[len('mza_rdays_'):]
+        days_text, username = rest.split('_', 1)
+        await _mza_show_renew_confirm(query, username, int(days_text))
+        return
+
+    elif d.startswith('mza_renew_custom_'):
+        username = d[len('mza_renew_custom_'):]
+        context.user_data['state'] = 'MZA_RENEW_INPUT'
+        context.user_data['mza_action_user'] = username
+        await query.edit_message_text(
+            f"📅 <b>تمدید دلخواه</b>\n\nتعداد روز برای <code>{esc(username)}</code> را بفرستید:",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_user_{username}")]])
+        )
+        return
+
+    elif d.startswith('mza_renewyes_'):
+        rest = d[len('mza_renewyes_'):]
+        days_text, username = rest.split('_', 1)
+        days = int(days_text)
+        service = await _get_marzban_admin_service()
+        ok_user, user = await service.get_user(username)
+        if not ok_user or not isinstance(user, dict):
+            await query.edit_message_text("❌ دریافت وضعیت کاربر از Marzban ناموفق بود.")
+            return
+        current_expire = int(user.get('expire', 0) or 0)
+        if current_expire <= 0:
+            await query.edit_message_text(
+                "❌ این کاربر تاریخ انقضای محدود ندارد.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_user_{username}")]])
+            )
+            return
+        base_ts = max(int(time.time()), current_expire)
+        new_expire = base_ts + (days * 86400)
+        ok_mod, err = await service.modify_user(username, expire=new_expire, status='active')
+        if not ok_mod:
+            log.warning("Marzban dashboard renewal failed for %s: %r", username, err)
+            await query.edit_message_text("❌ تمدید انجام نشد.")
+            return
+        local = await asyncio.to_thread(_db_get_user, username)
+        if local:
+            new_date = datetime.fromtimestamp(new_expire, tz=timezone.utc).astimezone(IRAN_TZ).strftime("%Y-%m-%d")
+            with db_conn() as conn:
+                conn.execute(
+                    "UPDATE ssh_accounts SET expire_date=?, status='🟢 فعال', hold_active=0 WHERE username=?",
+                    (new_date, username),
+                )
+        await query.answer(f"✅ {days} روز تمدید شد")
+        await _show_marzban_user_readonly(query, context, username)
+        return
+
+    elif d.startswith('mza_addvol_') and not d.startswith('mza_addvol_custom_') and not d.startswith('mza_addvolyes_'):
+        username = d[len('mza_addvol_'):]
+        kb = [
+            [InlineKeyboardButton("۱۰ GB", callback_data=f"mza_vgb_10_{username}"),
+             InlineKeyboardButton("۲۰ GB", callback_data=f"mza_vgb_20_{username}")],
+            [InlineKeyboardButton("۵۰ GB", callback_data=f"mza_vgb_50_{username}"),
+             InlineKeyboardButton("۱۰۰ GB", callback_data=f"mza_vgb_100_{username}")],
+            [InlineKeyboardButton("✏️ دلخواه", callback_data=f"mza_addvol_custom_{username}")],
+            [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_user_{username}")],
+        ]
+        await query.edit_message_text(
+            f"➕ <b>افزایش حجم</b>\n\nکاربر: <code>{esc(username)}</code>\nحجم موردنظر را انتخاب کنید:",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(kb),
+        )
+        return
+
+    elif d.startswith('mza_vgb_'):
+        rest = d[len('mza_vgb_'):]
+        gb_text, username = rest.split('_', 1)
+        await _mza_show_addvol_confirm(query, username, int(gb_text))
+        return
+
+    elif d.startswith('mza_addvol_custom_'):
+        username = d[len('mza_addvol_custom_'):]
+        context.user_data['state'] = 'MZA_ADDVOL_INPUT'
+        context.user_data['mza_action_user'] = username
+        await query.edit_message_text(
+            f"➕ <b>حجم دلخواه</b>\n\nمقدار حجم برای <code>{esc(username)}</code> را به گیگابایت بفرستید:",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_user_{username}")]])
+        )
+        return
+
+    elif d.startswith('mza_addvolyes_'):
+        rest = d[len('mza_addvolyes_'):]
+        gb_text, username = rest.split('_', 1)
+        gb = int(gb_text)
+        service = await _get_marzban_admin_service()
+        ok_user, user = await service.get_user(username)
+        if not ok_user or not isinstance(user, dict):
+            await query.edit_message_text("❌ دریافت وضعیت کاربر از Marzban ناموفق بود.")
+            return
+        current_limit = int(user.get('data_limit', 0) or 0)
+        if current_limit <= 0:
+            await query.edit_message_text(
+                "❌ این کاربر محدودیت حجم ندارد؛ افزایش حجم روی پلن نامحدود اعمال نمی‌شود.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_user_{username}")]])
+            )
+            return
+        new_limit = current_limit + (gb * 1024**3)
+        ok_mod, err = await service.modify_user(username, data_limit=new_limit)
+        if not ok_mod:
+            log.warning("Marzban dashboard add-volume failed for %s: %r", username, err)
+            await query.edit_message_text("❌ افزایش حجم انجام نشد.")
+            return
+        local = await asyncio.to_thread(_db_get_user, username)
+        if local:
+            with db_conn() as conn:
+                conn.execute("UPDATE ssh_accounts SET data_limit=? WHERE username=?", (new_limit, username))
+        await query.answer(f"✅ {gb} گیگ اضافه شد")
+        await _show_marzban_user_readonly(query, context, username)
+        return
+
+    elif d.startswith('mza_delete_') and not d.startswith('mza_deleteyes_'):
+        username = d[len('mza_delete_'):]
+        await query.edit_message_text(
+            f"🗑 <b>حذف کاربر</b>\n\nکاربر <code>{esc(username)}</code> به‌طور کامل حذف شود؟\n"
+            "این عملیات قابل بازگشت نیست.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ بله، حذف شود", callback_data=f"mza_deleteyes_{username}")],
+                [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_user_{username}")],
+            ])
+        )
+        return
+
+    elif d.startswith('mza_deleteyes_'):
+        username = d[len('mza_deleteyes_'):]
+        ok_del, msg, refund_note = await _delete_marzban_user_consistent(username)
+        if not ok_del:
+            await query.edit_message_text(
+                f"⚠️ {esc(msg)}",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 داشبورد", callback_data="mza_home")]])
+            )
+            return
+        await query.edit_message_text(
+            f"✅ <b>کاربر حذف شد</b>\n\n<code>{esc(username)}</code>{refund_note}",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به کاربران", callback_data="mza_users_0")]])
+        )
+        return
+
     elif d.startswith('mza_user_'):
         username = d[len('mza_user_'):]
         await _show_marzban_user_readonly(query, context, username)

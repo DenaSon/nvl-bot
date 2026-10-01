@@ -92,6 +92,7 @@ import json
 import aiohttp
 import qrcode
 import v2ray_engine
+import marzban_admin
 import secrets
 
 import base64
@@ -759,6 +760,12 @@ def init_db():
         except sqlite3.OperationalError: pass
         
         try: c.execute("ALTER TABLE ssh_accounts ADD COLUMN sub_url TEXT DEFAULT NULL")
+        except sqlite3.OperationalError: pass
+
+        # 🆕 Phase 1 Marzban Admin foundation: end-user-facing subscription title.
+        # This is intentionally separate from customer_name (internal reseller/admin label).
+        # Rendering it into subscription links/profile titles is deferred to the presentation phase.
+        try: c.execute("ALTER TABLE ssh_accounts ADD COLUMN subscription_name TEXT DEFAULT NULL")
         except sqlite3.OperationalError: pass
 
         try: c.execute("ALTER TABLE agents ADD COLUMN v2ray_gb_price REAL DEFAULT 3000.0")
@@ -2008,6 +2015,19 @@ def _db_get_customer_name(un):
             row = conn.execute("SELECT customer_name FROM ssh_accounts WHERE username=?", (un,)).fetchone()
             return row[0] if row and row[0] else None
         except Exception: return None
+
+def _db_get_subscription_name(un):
+    """User-facing subscription title reserved for the future presentation layer."""
+    with db_conn() as conn:
+        row = conn.execute("SELECT subscription_name FROM ssh_accounts WHERE username=?", (un,)).fetchone()
+        return row[0] if row and row[0] else None
+
+def _db_set_subscription_name(un, value):
+    normalized = marzban_admin.normalize_subscription_name(value)
+    with db_conn() as conn:
+        conn.execute("UPDATE ssh_accounts SET subscription_name=? WHERE username=?", (normalized, un))
+    return normalized
+
 def _db_set_account_host(un, host):
     with db_conn() as conn: conn.execute("UPDATE ssh_accounts SET host=? WHERE username=?", (host, un))
 def _db_set_hosts_bulk(usernames, host):
@@ -3829,8 +3849,81 @@ def safe_clear_context(context):
 def is_auth(context): return context.user_data.get('logged_in', False)
 
 def _can_manage_user(role, ag_id, owner_agent_id):
-    """کنترل دسترسی: ادمین به همه اکانت‌ها و هر نماینده فقط به اکانت‌های خودش دسترسی مدیریتی دارد."""
-    return role == 'admin' or (role == 'agent' and owner_agent_id == ag_id)
+    """کنترل دسترسی مرکزی: ادمین همه؛ نماینده فقط رکوردهای متعلق به agent_id خودش."""
+    return marzban_admin.can_manage_v2ray_account(role, ag_id, owner_agent_id)
+
+
+async def _get_marzban_admin_service():
+    """Build the Telegram-agnostic Marzban admin facade from the current DB settings."""
+    m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
+    m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
+    m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
+    return marzban_admin.MarzbanAdminService(m_url, m_user, m_pwd)
+
+
+async def _authorize_v2ray_account(context, username):
+    """Re-check V2Ray ownership from SQLite for every privileged read/mutation."""
+    if not username:
+        return False, None, "expired"
+
+    def _lookup():
+        with db_conn() as conn:
+            return conn.execute(
+                "SELECT agent_id, service_type FROM ssh_accounts WHERE username=?",
+                (username,),
+            ).fetchone()
+
+    row = await asyncio.to_thread(_lookup)
+    if not row:
+        return False, None, "missing"
+
+    owner_agent_id, service_type = row
+    if service_type not in ('v2ray', 'v2ray_vol'):
+        return False, row, "not_v2ray"
+
+    role = context.user_data.get('role')
+    actor_agent_id = context.user_data.get('agent_id', 0)
+    if not _can_manage_user(role, actor_agent_id, owner_agent_id):
+        return False, row, "forbidden"
+
+    return True, row, None
+
+
+def _v2ray_management_target_from_callback(data, context):
+    """Resolve the authoritative account target for all existing V2Ray management callbacks.
+
+    None means this is not a V2Ray management callback.  An empty string means
+    it is a management continuation whose state has expired.
+    """
+    direct_prefixes = (
+        "v2act_sub_",
+        "v2act_tg_",
+        "v2act_rn_",
+        "v2act_rd_",
+        "v2rnd_custom_",
+        "v2rdd_custom_",
+        "v2act_ul_",
+        "v2act_lim_",
+        "v2act_addvol_",
+        "v2act_decvol_",
+        "v2act_dl_",
+        "v2delyes_",
+    )
+    for prefix in direct_prefixes:
+        if data.startswith(prefix):
+            return data[len(prefix):]
+
+    if data.startswith("v2rn_") or data in ("v2rnyes", "v2rn_emergency_yes"):
+        return context.user_data.get('v2_renew_un') or ""
+
+    if data.startswith("v2addvol_gb_") or data in ("v2addvol_conf_yes", "v2addvol_emergency_yes"):
+        return context.user_data.get('v2_vol_un') or ""
+
+    if data == "v2decvol_conf_yes":
+        return context.user_data.get('v2_vol_un') or ""
+
+    return None
+
 
 async def require_login(update):
     text = "⛔️ <b>سیستم قفل است.</b>\n\n👤 لطفاً نام کاربری (Username) خود را بفرستید:"
@@ -4245,20 +4338,24 @@ async def _show_user_detail(update_or_query, username, context):
         else: await target.message.reply_text(msg)
         return
     p, exp, crt, lim, st, owner_aid, acc_host, acc_conn_mode = res
-    # 🌟 روتینگ هوشمند: هدایت به پنل V2Ray در صورت نیاز
-    with db_conn() as conn:
-        stype_row = conn.execute("SELECT service_type, data_limit, sub_url FROM ssh_accounts WHERE username=?", (username,)).fetchone()
-    if stype_row and stype_row[0] in ('v2ray', 'v2ray_vol'):
-        return await _show_v2ray_user_detail(update_or_query, username, context, res, stype_row)
-    
-    acc_conn_mode = acc_conn_mode or 'direct'
     target = update_or_query.callback_query if hasattr(update_or_query, 'callback_query') and update_or_query.callback_query else update_or_query
     role, ag_id = context.user_data.get('role'), context.user_data.get('agent_id', 0)
+
+    # 🛡 Authorization must run BEFORE routing to the V2Ray detail renderer.
+    # Previously the V2Ray branch returned early and skipped the ownership check.
     if not _can_manage_user(role, ag_id, owner_aid):
         msg = "⛔️ شما مجاز به مشاهده/مدیریت این اکانت نیستید."
         if hasattr(target, 'edit_message_text'): await target.edit_message_text(msg)
         else: await target.message.reply_text(msg)
         return
+
+    # 🌟 روتینگ هوشمند: هدایت به پنل V2Ray در صورت نیاز
+    with db_conn() as conn:
+        stype_row = conn.execute("SELECT service_type, data_limit, sub_url FROM ssh_accounts WHERE username=?", (username,)).fetchone()
+    if stype_row and stype_row[0] in ('v2ray', 'v2ray_vol'):
+        return await _show_v2ray_user_detail(update_or_query, username, context, res, stype_row)
+
+    acc_conn_mode = acc_conn_mode or 'direct'
     rem_str = get_remaining_days(exp)
     owner_label = "مستقیم (ادمین)"
     if owner_aid:
@@ -4822,6 +4919,24 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = context.user_data.get('state')
     role = context.user_data.get('role')
     chat_id = update.effective_chat.id
+
+    # 🛡 Stateful V2Ray management must re-check ownership on every text continuation.
+    _v2_state_target = None
+    if state == 'V2_ADD_VOL_INPUT':
+        _v2_state_target = context.user_data.get('v2_vol_un')
+    elif state == 'V2_RENEW_DAYS_INPUT':
+        _v2_state_target = context.user_data.get('v2_renew_un')
+    elif state == 'V2_DEC_VOL_INPUT':
+        _v2_state_target = context.user_data.get('v2_vol_un')
+
+    if state in ('V2_ADD_VOL_INPUT', 'V2_RENEW_DAYS_INPUT', 'V2_DEC_VOL_INPUT'):
+        _ok_access, _meta, _reason = await _authorize_v2ray_account(context, _v2_state_target)
+        if not _ok_access:
+            safe_clear_context(context)
+            await update.message.reply_text(
+                "⛔️ دسترسی این عملیات منقضی شده یا شما مجاز به مدیریت این اکانت نیستید."
+            )
+            return
 
     # --- دستور مخفی ادمین برای فعال‌سازی همه اینباندها (از جمله REALITY) برای کاربران V2Ray فعلی ---
     if text == 'v2ray_upgrade_inbounds' and role == 'admin':
@@ -7685,6 +7800,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if d not in allowed_cbs:
                 await query.message.reply_text("⛔️ <b>کاربر گرامی، ابتدا باید نام برند خود را تعیین کنید (مثلاً: AliVpn).</b>\nلطفاً از منوی اصلی ربات روی دکمه «✏️ تغییر نام برند» کلیک کنید.", parse_mode="HTML")
                 return
+
+    # 🛡 Central V2Ray authorization boundary.  Callback data and persisted
+    # state only identify a target; ownership is always reloaded from SQLite.
+    _v2_target = _v2ray_management_target_from_callback(d, context)
+    if _v2_target is not None:
+        if not _v2_target:
+            await query.message.reply_text("❌ تراکنش منقضی شده است؛ دوباره از صفحه اکانت شروع کنید.")
+            return
+        _ok_access, _meta, _reason = await _authorize_v2ray_account(context, _v2_target)
+        if not _ok_access:
+            await query.message.reply_text("⛔️ شما مجاز به مشاهده/مدیریت این اکانت نیستید.")
+            return
+
     # 🚨 گارد جامع وضعیت فروش سرویس‌ها (جلوگیری از کلیک روی دکمه‌های منقضی‌شده در تمامی مراحل خرید)
     if d.startswith(("bm_", "bu_", "blkc_", "buyfav_", "cm_set_")) or d in ("buy_direct", "buy_bulk_start", "buy_yes", "buy_emergency_yes"):
         ssh_en = await asyncio.to_thread(_db_get_setting, 'sell_ssh', '1') == '1'

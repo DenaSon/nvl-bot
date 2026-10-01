@@ -65,11 +65,19 @@ class Phase56NavigationRegressionTests(unittest.TestCase):
 
     def test_user_hub_is_a_navigation_level_for_admin_and_agent(self):
         self.assertIn("async def _show_users_hub", self.source)
-        self.assertIn('callback_data="umanage_ssh"', self.source)
-        self.assertIn('callback_data="umanage_v2ray"', self.source)
-        self.assertIn('callback_data="umanage_v2ray_vol"', self.source)
+        self.assertIn('"umanage_ssh"', self.source)
+        self.assertIn('"umanage_v2ray"', self.source)
+        self.assertIn('"umanage_v2ray_vol"', self.source)
         self.assertIn('back_cb = f"agm_det_{agent_filter}" if agent_filter is not None else "users_hub"', self.source)
         self.assertIn('elif d == "users_hub":', self.source)
+
+    def test_user_navigation_callbacks_are_role_guarded(self):
+        self.assertIn('d.startswith("umanage_")', self.source)
+        self.assertIn("role not in ('admin', 'agent')", self.source)
+        self.assertIn(
+            "دسترسی به مدیریت کاربران برای این نقش مجاز نیست.",
+            self.source,
+        )
 
     def test_back_and_home_mean_different_levels(self):
         self.assertIn('InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")', self.source)

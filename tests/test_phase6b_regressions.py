@@ -145,7 +145,7 @@ class Phase6BUnifiedHealthModelTests(unittest.TestCase):
         self.assertNotIn("if health_state", region)
 
     def test_monitoring_panel_shows_overall_state_and_membership_separately(self):
-        start = self.source.index("async def _render_host_pool_panel(query):")
+        start = self.source.index("async def _render_host_pool_panel(")
         end = self.source.index("async def _host_has_working_persistent_key", start)
         region = self.source[start:end]
         self.assertIn("Overall: <b>{esc(overall_state)}</b>", region)

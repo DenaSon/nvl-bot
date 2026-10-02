@@ -1056,6 +1056,31 @@ def init_db():
             except sqlite3.OperationalError:
                 pass
 
+        # Phase 6F — persisted regional round summary + final filtering state.
+        # These columns are additive; existing rows start UNKNOWN until the runtime
+        # collects fresh evidence. Raw node evidence remains in host_probe_results.
+        for _sql in (
+            "ALTER TABLE host_pool ADD COLUMN filter_state TEXT DEFAULT 'UNKNOWN'",
+            "ALTER TABLE host_pool ADD COLUMN regional_filter_state TEXT DEFAULT 'UNKNOWN'",
+            "ALTER TABLE host_pool ADD COLUMN regional_filter_reason TEXT DEFAULT 'INSUFFICIENT_COVERAGE'",
+            "ALTER TABLE host_pool ADD COLUMN regional_total_nodes INTEGER DEFAULT 0",
+            "ALTER TABLE host_pool ADD COLUMN regional_completed_nodes INTEGER DEFAULT 0",
+            "ALTER TABLE host_pool ADD COLUMN regional_successful_nodes INTEGER DEFAULT 0",
+            "ALTER TABLE host_pool ADD COLUMN regional_failed_nodes INTEGER DEFAULT 0",
+            "ALTER TABLE host_pool ADD COLUMN regional_pending_nodes INTEGER DEFAULT 0",
+            "ALTER TABLE host_pool ADD COLUMN regional_success_ratio REAL DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN regional_failed_asns TEXT DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN regional_failed_cities TEXT DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN regional_last_request_id TEXT DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN regional_provider_status TEXT DEFAULT 'NEVER'",
+            "ALTER TABLE host_pool ADD COLUMN regional_provider_error TEXT DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN regional_state_updated_at TEXT DEFAULT NULL",
+        ):
+            try:
+                c.execute(_sql)
+            except sqlite3.OperationalError:
+                pass
+
         c.execute('''CREATE TABLE IF NOT EXISTS host_probe_results (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         host TEXT NOT NULL,

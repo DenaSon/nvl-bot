@@ -142,6 +142,21 @@ class Phase6FBotIntegrationStaticTests(unittest.TestCase):
         self.assertNotIn("_db_record_regional_round", region)
         self.assertNotIn("regional_service_ok=0", region)
 
+    def test_provider_limit_streak_resets_only_after_full_scheduled_round(self):
+        probe_region = self._region(
+            "async def _regional_filter_probe_edge(",
+            "async def _regional_filter_tick(app):",
+        )
+        self.assertNotIn("_regional_provider_mark_ok", probe_region)
+
+        tick_region = self._region(
+            "async def _regional_filter_tick(app):",
+            "async def _regional_filter_probe_one_now",
+        )
+        self.assertIn("round_provider_ok = True", tick_region)
+        self.assertIn("if round_provider_ok:", tick_region)
+        self.assertIn("await _regional_provider_mark_ok(app)", tick_region)
+
     def test_runtime_targets_exclude_core_before_provider_check(self):
         region = self._region(
             "async def _regional_filter_tick(app):",

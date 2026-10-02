@@ -201,9 +201,9 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
         end = self.source.index(end_marker, start)
         return self.source[start:end]
 
-    def test_release_marker_is_phase6g(self):
+    def test_release_marker_includes_phase6h_on_top_of_phase6g_engine(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V117.0-2026-10-03-phase6g-safe-manual-failover"',
+            'BOT_VERSION_TAG = "V118.0-2026-10-03-phase6h-automatic-filtering-failover"',
             self.source,
         )
 
@@ -344,19 +344,21 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
         self.assertIn("retained_target_state", region)
         self.assertIn('db_state_retained": "target"', region)
 
-    def test_automatic_policy_is_still_not_connected(self):
-        regional_region = self._region(
-            "async def _regional_filter_probe_edge(",
-            "async def _regional_filter_tick(app):",
+    def test_phase6h_keeps_legacy_traffic_signal_notification_only(self):
+        legacy_region = self._region(
+            "async def _filter_detect_tick(app):",
+            "async def _filter_detect_loop(app):",
         )
-        self.assertNotIn("_safe_manual_failover", regional_region)
-        self.assertNotIn("_activate_standby_for_filtered_edge", regional_region)
+        self.assertNotIn("_safe_manual_failover", legacy_region)
+        self.assertNotIn("_phase6h_auto_failover_tick", legacy_region)
 
         post_init = self._region(
             "async def _post_init(app):",
             "async def _post_shutdown(app):",
         )
-        self.assertIn("_db_update_setting, 'auto_failover_mode', '0'", post_init)
+        self.assertNotIn("_db_update_setting, 'auto_failover_mode', '0'", post_init)
+        self.assertIn("phase6h_auto_failover_enabled", post_init)
+        self.assertIn("Phase6H automatic filtering failover startup state", post_init)
 
     def test_ui_requires_pick_then_confirm(self):
         for fragment in (

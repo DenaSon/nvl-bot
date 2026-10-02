@@ -229,6 +229,7 @@ from edge_observability import (
     DIAG_CORE_LOCAL,
     DIAG_FILTER_SUSPECTED,
     DIAG_INSUFFICIENT_EVIDENCE,
+    FILTER_CONFIDENCE_HIGH,
     FILTER_CONFIDENCE_MEDIUM,
     FILTER_CONFIDENCE_NONE,
     FILTER_REASON_INSUFFICIENT_EVIDENCE,
@@ -256,6 +257,7 @@ from filtering_runtime import (
     provider_backoff_until,
 )
 from safe_failover import (
+    FAILOVER_MODE_AUTO,
     FAILOVER_MODE_MANUAL,
     FAILOVER_STATUS_ABORTED_STALE,
     FAILOVER_STATUS_FAILED,
@@ -267,6 +269,10 @@ from safe_failover import (
     parse_helper_summary,
     validate_complete_rebuild,
 )
+from automatic_failover import (
+    evaluate_auto_failover,
+    rank_safe_standbys,
+)
 
 # ==========================================
 # ⚙️ پیکربندی امن (از Environment Variables)
@@ -275,7 +281,7 @@ from safe_failover import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V117.0-2026-10-03-phase6g-safe-manual-failover"
+BOT_VERSION_TAG = "V118.0-2026-10-03-phase6h-automatic-filtering-failover"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -549,6 +555,12 @@ REGIONAL_FILTER_PROVIDER_BACKOFF_MAX_SECONDS = _phase6c_env_int("NVL_REGIONAL_PR
 FAILOVER_LOCK_STALE_SECONDS = _phase6c_env_int("NVL_FAILOVER_LOCK_STALE_SECONDS", 1800)
 FAILOVER_HELPER_TIMEOUT_SECONDS = _phase6c_env_int("NVL_FAILOVER_HELPER_TIMEOUT_SECONDS", 300)
 
+# Phase 6H — automatic filtering failover. Auto mode remains opt-in. The switch
+# cooldown prevents ping-pong after a successful route change; the attempt cooldown
+# prevents a repeatedly failing preflight/provider condition from hammering a Standby.
+AUTO_FAILOVER_ATTEMPT_COOLDOWN_SECONDS = _phase6c_env_int("NVL_AUTO_FAILOVER_ATTEMPT_COOLDOWN_SECONDS", 900)
+AUTO_FAILOVER_SWITCH_COOLDOWN_SECONDS = _phase6c_env_int("NVL_AUTO_FAILOVER_SWITCH_COOLDOWN_SECONDS", 1800)
+
 # ==========================================
 # 🆕 V89 — سیستم شناسایی خودکار فیلتر شدن بر اساس کاربران آنلاین
 # ==========================================
@@ -787,7 +799,10 @@ def init_db():
                         ('udpgw_transparent_dns', '1'),
                         # 🆕 حالتِ تعویضِ خودکار (Failover — بندِ ۴): '1'=خودکار (اولین Standbyِ سالم
                         # بی‌درنگ فعال می‌شود)، '0'=دستی (پیش‌فرضِ امن — ادمین از پنل انتخاب می‌کند).
-                        ('auto_failover_mode', '0')])
+                        ('auto_failover_mode', '0'),
+                        # Phase 6H has a separate explicit opt-in. Never inherit the legacy
+                        # V89 auto-failover bit into the new regional-evidence policy.
+                        ('phase6h_auto_failover_enabled', '0')])
         c.execute('''CREATE TABLE IF NOT EXISTS ssh_accounts (
                         username TEXT PRIMARY KEY, password TEXT, expire_date TEXT, creation_date TEXT,
                         users_limit INTEGER, status TEXT DEFAULT '🟢 فعال', agent_id INTEGER DEFAULT 0)''')
@@ -1351,6 +1366,7 @@ def _build_server_settings_kb():
     ساختاری امکان‌پذیر نیست — هر تغییری این‌جا، خودکار در هر دو مسیر ورودی اعمال می‌شود.
     """
     return [[InlineKeyboardButton("🖥 وضعیت و نقش سرورها (Core/Edge)", callback_data="srv_status")],
+            [InlineKeyboardButton("🛡 وضعیت فیلترینگ", callback_data="hp_filtering")],
             [InlineKeyboardButton("✏️ تغییر نام برند", callback_data="srv_brand")],
             [InlineKeyboardButton("🎯 تنظیمات مستقیم", callback_data="srv_direct_menu"), InlineKeyboardButton("🔐 تنظیمات TLS", callback_data="srv_tls")],
             [InlineKeyboardButton("🔌 تنظیمات UDPGW", callback_data="srv_udpgw")],
@@ -2714,6 +2730,21 @@ def _db_seconds_since_last_ip_switch():
     except ValueError:
         return float('inf')
     return (datetime.now() - last).total_seconds()
+
+
+def _db_mark_auto_failover_attempt_now():
+    _db_update_setting('phase6h_auto_failover_last_attempt_at', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+
+def _db_seconds_since_auto_failover_attempt():
+    raw = _db_get_setting('phase6h_auto_failover_last_attempt_at', '')
+    if not raw:
+        return float('inf')
+    try:
+        last = _parse_flexible_datetime(raw)
+    except Exception:
+        return float('inf')
+    return max(0.0, (datetime.now() - last).total_seconds())
 
 # ============================================================================
 # 🚀 افزودن خودکار Edge جدید — SSH به یک VPS خام، اجرای setup_edge_relay.sh،
@@ -9807,8 +9838,10 @@ async def _render_host_pool_panel(query, page=0):
         dns_line = ("\n\n⚠️ دامنهٔ ثابت هنوز تنظیم نشده — مشتریان مستقیم IP خام می‌بینند. "
                      "برای فعال‌سازی سوییچ خودکار، روی «🌍 دامنهٔ ثابت + Cloudflare» بزنید.")
     standby_count = len(await asyncio.to_thread(_db_get_standby_hosts))
+    auto_enabled = (await asyncio.to_thread(_db_get_setting, 'phase6h_auto_failover_enabled', '0')) == '1'
+    failover_mode_text = "AUTO + MANUAL" if auto_enabled else "MANUAL ONLY"
     cz_line = (
-        f"\n\n🛡 Phase 6F: <b>MONITOR ONLY</b> — تشخیص و هشدار فعال؛ Failover خودکار غیرفعال. "
+        f"\n\n🛡 Phase 6H: Monitoring <b>ON</b> · Failover <b>{failover_mode_text}</b> · "
         f"Standby آماده: {standby_count}"
     )
     body = "\n\n".join(lines) if lines else "هیچ IP ای هنوز در استخر پایش ثبت نشده."
@@ -9868,14 +9901,14 @@ async def _render_filtering_monitor_panel(query, page=0):
         provider_line += f" · ⏳ Backoff ~{max(1, backoff // 60)} دقیقه"
 
     latest_failover = await asyncio.to_thread(_db_get_latest_failover_operation)
-    failover_line = "Last manual failover: <code>none</code>"
+    failover_line = "Last failover: <code>none</code>"
     if latest_failover:
         (
             op_id, op_mode, op_source, op_target, op_status, op_started,
             op_updated, op_finished, op_accounts, op_moved, op_error,
         ) = latest_failover
         failover_line = (
-            f"Last manual failover: <code>#{op_id}</code> · "
+            f"Last failover: <code>#{op_id}</code> · <b>{esc(op_mode)}</b> · "
             f"<b>{esc(op_status)}</b> · "
             f"<code>{esc(op_source)}</code> → <code>{esc(op_target)}</code> · "
             f"{op_moved or 0}/{op_accounts or 0}"
@@ -9883,11 +9916,16 @@ async def _render_filtering_monitor_panel(query, page=0):
         if op_error:
             failover_line += f" · ⚠️ <code>{esc(str(op_error)[:120])}</code>"
 
+    auto_enabled = (await asyncio.to_thread(_db_get_setting, 'phase6h_auto_failover_enabled', '0')) == '1'
+    auto_label = "ON" if auto_enabled else "OFF"
+    failover_label = "AUTO + MANUAL" if auto_enabled else "MANUAL ONLY"
+
     lines = [
-        "🛡 <b>Filtering Monitor — Phase 6G</b>",
+        "🛡 <b>Filtering Monitor — Phase 6H</b>",
         "",
-        "Detection: <b>AUTO MONITOR</b> · Failover: <b>MANUAL ONLY</b> · Auto Failover: <b>OFF</b>",
+        f"Detection: <b>AUTO MONITOR</b> · Failover: <b>{failover_label}</b> · Auto Failover: <b>{auto_label}</b>",
         f"Check interval: <code>{REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS}s</code>",
+        f"Auto safety: LIKELY + HIGH · switch cooldown <code>{AUTO_FAILOVER_SWITCH_COOLDOWN_SECONDS // 60}m</code>",
         provider_line,
         failover_line,
         "",
@@ -9927,7 +9965,11 @@ async def _render_filtering_monitor_panel(query, page=0):
     if not edge_rows:
         lines.append("هیچ Edge فعالی برای مانیتورینگ ثبت نشده است.")
 
-    kb.append([InlineKeyboardButton("🔙 بازگشت به وضعیت IPها", callback_data="hp_menu")])
+    if auto_enabled:
+        kb.append([InlineKeyboardButton("🛑 غیرفعال‌سازی Failover خودکار", callback_data="flt_auto_disable")])
+    else:
+        kb.append([InlineKeyboardButton("🤖 فعال‌سازی Failover خودکار", callback_data="flt_auto_enable")])
+    kb.append([InlineKeyboardButton("🔙 بازگشت به تنظیمات", callback_data="srv_menu_back")])
     await query.edit_message_text(
         "\n".join(lines),
         reply_markup=InlineKeyboardMarkup(kb),
@@ -15591,6 +15633,34 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d == "hp_filtering" and role == 'admin':
         await _render_filtering_monitor_panel(query)
 
+    elif d == "flt_auto_enable" and role == 'admin':
+        await query.edit_message_text(
+            "⚠️ <b>فعال‌سازی Automatic Filtering Failover</b>\n\n"
+            "پس از فعال‌سازی، فقط وقتی Edge پیش‌فرض با Evidence منطقه‌ای تکرارشونده "
+            "<b>LIKELY + HIGH</b> تشخیص داده شود و یک Standby با Evidence سالم و CLEAR وجود داشته باشد، "
+            "ربات می‌تواند بدون تأیید دوم Failover را اجرا کند.\n\n"
+            "همان Preflight، persisted lock، Core fallback، rebuild کامل و rollback امن Phase 6G "
+            "در هر اجرای خودکار نیز اجباری است.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ فعال کن", callback_data="flt_auto_enable_yes")],
+                [InlineKeyboardButton("↩️ انصراف", callback_data="hp_filtering")],
+            ]),
+            parse_mode="HTML",
+        )
+
+    elif d == "flt_auto_enable_yes" and role == 'admin':
+        await asyncio.to_thread(_db_update_setting, 'phase6h_auto_failover_enabled', '1')
+        await asyncio.to_thread(_db_update_setting, 'phase6h_auto_failover_last_attempt_at', '')
+        await query.message.reply_text(
+            "✅ Automatic Filtering Failover فعال شد. فقط policy سخت‌گیرانه Phase 6H اجازه اجرا می‌دهد."
+        )
+        await _render_filtering_monitor_panel(query)
+
+    elif d == "flt_auto_disable" and role == 'admin':
+        await asyncio.to_thread(_db_update_setting, 'phase6h_auto_failover_enabled', '0')
+        await query.message.reply_text("🛑 Automatic Filtering Failover غیرفعال شد؛ Monitoring همچنان فعال است.")
+        await _render_filtering_monitor_panel(query)
+
     elif d.startswith("flt_page_") and role == 'admin':
         try:
             page = int(d[len("flt_page_"):])
@@ -16006,9 +16076,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Phase 6F safety guard: legacy action callbacks can exist in old Telegram
     # messages, but this release must remain MONITOR-ONLY.
     elif d == "hp_failover_toggle" and role == 'admin':
+        # Compatibility for stale pre-6H Telegram messages: fail closed and turn off
+        # both the legacy V89 bit and the Phase 6H opt-in.
         await asyncio.to_thread(_db_update_setting, 'auto_failover_mode', '0')
+        await asyncio.to_thread(_db_update_setting, 'phase6h_auto_failover_enabled', '0')
         await query.message.reply_text(
-            "🛡 Phase 6G فقط Manual Failover امن را اجازه می‌دهد. Auto Failover همچنان خاموش است و در 6H فعال خواهد شد."
+            "🛡 این دکمه متعلق به پیام قدیمی است. Automatic Filtering Failover خاموش شد؛ "
+            "برای مدیریت آن از «⚙️ تنظیمات → 🛡 وضعیت فیلترینگ» استفاده کنید."
         )
         await _render_host_pool_panel(query)
 
@@ -17538,13 +17612,21 @@ async def _run_phase6g_rebuild_helper(source_host, target_host, target_admin_por
     return proc.returncode, summary, out.decode(errors="ignore"), err.decode(errors="ignore")
 
 
-async def _safe_manual_failover(app, source_host: str, target_host: str):
-    """Phase 6G manual-only, lock-protected, scoped and rollback-aware failover."""
+async def _safe_manual_failover(
+    app,
+    source_host: str,
+    target_host: str,
+    *,
+    mode=FAILOVER_MODE_MANUAL,
+):
+    """Shared Phase 6G/6H lock-protected, scoped and rollback-aware failover engine."""
+    automatic = mode == FAILOVER_MODE_AUTO
+    failover_label = "Automatic Filtering Failover" if automatic else "Safe Manual Failover"
     operation_id, busy_operation_id = await asyncio.to_thread(
         _db_acquire_failover_lock,
         source_host,
         target_host,
-        mode=FAILOVER_MODE_MANUAL,
+        mode=mode,
     )
     if not operation_id:
         await _notify_admins(
@@ -17577,7 +17659,7 @@ async def _safe_manual_failover(app, source_host: str, target_host: str):
             )
             await _notify_admins(
                 app,
-                "⛔️ <b>Safe Manual Failover شروع نشد.</b>\n\n"
+                f"⛔️ <b>{failover_label} شروع نشد.</b>\n\n"
                 f"Source: <code>{esc(source_host)}</code>\n"
                 f"Target: <code>{esc(target_host)}</code>\n"
                 f"Preflight: <code>{esc(' | '.join(errors))}</code>\n\n"
@@ -17599,6 +17681,7 @@ async def _safe_manual_failover(app, source_host: str, target_host: str):
             core_fallback_ip=core_public_ip,
             detail={
                 "phase": "PREFLIGHT_OK",
+                "mode": mode,
                 "source_service_port": preflight["source_service_port"],
                 "target_service_port": preflight["target_service_port"],
                 "target_filter_state": preflight["target_filter_state"],
@@ -17790,6 +17873,7 @@ async def _safe_manual_failover(app, source_host: str, target_host: str):
             moved_count=moved_count,
             detail={
                 "phase": "SUCCEEDED",
+                "mode": mode,
                 "moved_count": moved_count,
                 "dns_target": target_host,
                 "source_host": source_host,
@@ -17799,7 +17883,7 @@ async def _safe_manual_failover(app, source_host: str, target_host: str):
 
         await _notify_admins(
             app,
-            "✅ <b>Safe Manual Failover با موفقیت کامل شد.</b>\n\n"
+            f"✅ <b>{failover_label} با موفقیت کامل شد.</b>\n\n"
             f"Operation: <code>{operation_id}</code>\n"
             f"Source: <code>{esc(source_host)}</code>\n"
             f"Target: <code>{esc(target_host)}</code>\n"
@@ -17873,7 +17957,7 @@ async def _safe_manual_failover(app, source_host: str, target_host: str):
         )
         await _notify_admins(
             app,
-            "❌ <b>Safe Manual Failover متوقف شد.</b>\n\n"
+            f"❌ <b>{failover_label} متوقف شد.</b>\n\n"
             f"Operation: <code>{operation_id}</code>\n"
             f"Source: <code>{esc(source_host)}</code>\n"
             f"Target: <code>{esc(target_host)}</code>\n"
@@ -18332,6 +18416,13 @@ async def _notify_filter_state_transition(app, host, recompute_result, regional_
     failed_asns = ", ".join(summary.failed_asns) or "—"
     failed_cities = ", ".join(summary.failed_cities) or "—"
 
+    auto_enabled = (await asyncio.to_thread(_db_get_setting, 'phase6h_auto_failover_enabled', '0')) == '1'
+    auto_note = (
+        "🤖 Phase 6H Auto Failover روشن است؛ اقدام فقط بعد از تکمیل کامل round و عبور از همه Safety Gateها بررسی می‌شود."
+        if auto_enabled else
+        "ℹ️ Phase 6H Auto Failover خاموش است؛ هیچ Failover خودکاری انجام نمی‌شود."
+    )
+
     await _notify_admins(
         app,
         f"{title}\n\n"
@@ -18344,7 +18435,7 @@ async def _notify_filter_state_transition(app, host, recompute_result, regional_
         f"External(Core→Edge): {_probe_state_text(ph.get('external_service_ok'))}\n"
         f"WireGuard: {_probe_state_text(ph.get('wg_peer_ok'))}\n"
         f"Core path: {_probe_state_text(ph.get('core_path_ok'))}\n\n"
-        "ℹ️ Phase 6F فقط مانیتورینگ/هشدار است؛ هیچ DNS یا Failover خودکاری انجام نشده."
+        f"{auto_note}"
     )
 
 
@@ -18493,6 +18584,92 @@ async def _regional_filter_probe_edge(app, host, service_port, client, nodes):
     }
 
 
+async def _phase6h_auto_failover_tick(app):
+    """Evaluate one automatic failover after a complete successful regional round.
+
+    No automatic action is possible unless the admin explicitly enabled Phase 6H.
+    Candidate selection uses strict persisted evidence; the shared Phase 6G engine
+    then repeats fresh preflight checks before the first customer-state mutation.
+    """
+    enabled = (await asyncio.to_thread(_db_get_setting, 'phase6h_auto_failover_enabled', '0')) == '1'
+    if not enabled:
+        return {"eligible": False, "reason": "AUTO_DISABLED"}
+
+    source_host = await asyncio.to_thread(_db_get_default_host)
+    if not source_host:
+        return {"eligible": False, "reason": "NO_DEFAULT_SOURCE"}
+
+    source_meta = await asyncio.to_thread(_db_get_failover_host_meta, source_host)
+    health_map = await asyncio.to_thread(_db_get_host_port_health_map)
+    pool_rows = await asyncio.to_thread(_db_get_host_pool)
+    for row in pool_rows:
+        host = row[0]
+        if host in health_map:
+            health_map[host] = dict(health_map[host])
+            health_map[host]["avg_latency_ms"] = row[8] if len(row) > 8 else None
+    source_health = health_map.get(source_host) or {}
+    standbys = [
+        host for host in await asyncio.to_thread(_db_get_standby_hosts)
+        if host != source_host
+    ]
+    safe_candidates = rank_safe_standbys(standbys, health_map)
+    provider_runtime = await asyncio.to_thread(_db_get_regional_provider_runtime)
+
+    decision = evaluate_auto_failover(
+        enabled=enabled,
+        source_is_default=bool(source_meta and source_meta.get("is_default")),
+        source_is_standby=bool(source_meta and source_meta.get("is_standby")),
+        filter_state=source_health.get("filter_state"),
+        filter_confidence=source_health.get("filter_confidence"),
+        diagnostic_reason=source_health.get("diagnostic_reason"),
+        failure_streak=source_health.get("filter_consecutive_failures", 0),
+        confirm_threshold=EDGE_FILTER_CONFIRM_THRESHOLD,
+        provider_status=provider_runtime.get("status"),
+        seconds_since_last_switch=await asyncio.to_thread(_db_seconds_since_last_ip_switch),
+        switch_cooldown_seconds=AUTO_FAILOVER_SWITCH_COOLDOWN_SECONDS,
+        seconds_since_last_attempt=await asyncio.to_thread(_db_seconds_since_auto_failover_attempt),
+        attempt_cooldown_seconds=AUTO_FAILOVER_ATTEMPT_COOLDOWN_SECONDS,
+        safe_standby_count=len(safe_candidates),
+    )
+    if not decision.eligible:
+        log.info(
+            "Phase6H auto failover skipped source=%s reason=%s candidates=%s",
+            source_host,
+            decision.reason,
+            len(safe_candidates),
+        )
+        return {"eligible": False, "reason": decision.reason}
+
+    target_host = safe_candidates[0]
+    # Persist before starting network work. If the attempt fails safely, the monitor
+    # will not hammer DNS/SSH/preflight again on every scheduled round.
+    await asyncio.to_thread(_db_mark_auto_failover_attempt_now)
+
+    await _notify_admins(
+        app,
+        "🤖 <b>Automatic Filtering Failover شروع شد.</b>\n\n"
+        f"Source: <code>{esc(source_host)}</code>\n"
+        f"Target Standby: <code>{esc(target_host)}</code>\n"
+        f"Evidence: <b>{esc(source_health.get('filter_state'))} / "
+        f"{esc(source_health.get('filter_confidence'))}</b>\n"
+        f"Failure streak: <b>{source_health.get('filter_consecutive_failures', 0)}</b>\n\n"
+        "موتور امن Phase 6G دوباره Preflight زنده، rebuild، DB commit، DNS handoff و rollback را کنترل می‌کند."
+    )
+
+    result = await _safe_manual_failover(
+        app,
+        source_host,
+        target_host,
+        mode=FAILOVER_MODE_AUTO,
+    )
+    return {
+        "eligible": True,
+        "source_host": source_host,
+        "target_host": target_host,
+        "result": result,
+    }
+
+
 async def _regional_filter_tick(app):
     remaining = await asyncio.to_thread(_db_regional_backoff_remaining_seconds)
     if remaining > 0:
@@ -18564,6 +18741,7 @@ async def _regional_filter_tick(app):
     # a repeated limit that appears on Edge B.
     if round_provider_ok:
         await _regional_provider_mark_ok(app)
+        await _phase6h_auto_failover_tick(app)
 
 
 async def _regional_filter_probe_one_now(app, host):
@@ -18606,7 +18784,7 @@ async def _regional_filter_loop(app):
     if REGIONAL_FILTER_MONITOR_INITIAL_DELAY_SECONDS > 0:
         await asyncio.sleep(REGIONAL_FILTER_MONITOR_INITIAL_DELAY_SECONDS)
     log.info(
-        "🛡 Phase6F regional filtering monitor started (interval=%ss, max_nodes=%s, edge_gap=%ss).",
+        "🛡 Phase6H regional filtering monitor started (interval=%ss, max_nodes=%s, edge_gap=%ss).",
         REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS,
         REGIONAL_FILTER_MAX_NODES,
         REGIONAL_FILTER_EDGE_GAP_SECONDS,
@@ -18615,7 +18793,7 @@ async def _regional_filter_loop(app):
         try:
             await _regional_filter_tick(app)
         except Exception:
-            log.exception("Phase6F regional filtering round failed; next round will continue.")
+            log.exception("Phase6H regional filtering round failed; next round will continue.")
         await asyncio.sleep(REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS)
 
 async def _udpgw_health_tick(app):
@@ -18851,8 +19029,9 @@ async def _filter_detect_tick(app):
                 f"کاربران آنلاین: {online_count} از {total_active} ({online_pct:.1f}٪)\n"
                 f"آستانه: {threshold:.0f}٪\n\n"
                 "این فقط یک سیگنال کمکی است و <b>به‌تنهایی فیلترینگ محسوب نمی‌شود</b>. "
-                "Phase 6F برای تشخیص، Evidence منطقه‌ای هر Edge را جداگانه بررسی می‌کند.\n"
-                "✅ هیچ DNS، IP، Account یا Standby تغییری انجام نشد."
+                "Phase 6H برای تصمیم Failover فقط Evidence منطقه‌ای مستقل هر Edge را بررسی می‌کند؛ "
+                "این Traffic Anomaly هرگز Trigger عملیات نیست.\n"
+                "✅ هیچ DNS، IP، Account یا Standby تغییری از این سیگنال انجام نشد."
             )
     else:
         if _filter_detect_low_ticks > 0:
@@ -18878,12 +19057,13 @@ async def _filter_detect_loop(app):
         await asyncio.sleep(FILTER_DETECT_CHECK_INTERVAL_SECONDS)
 
 async def _post_init(app):
-    # Phase 6G safety boundary: the legacy V89 auto_failover_mode previously allowed
-    # a coarse traffic signal to mutate DNS/accounts. Phase 6G permits only explicit
-    # admin-confirmed manual failover; automatic policy remains disabled until Phase 6H.
-    if (await asyncio.to_thread(_db_get_setting, 'auto_failover_mode', '0')) == '1':
-        await asyncio.to_thread(_db_update_setting, 'auto_failover_mode', '0')
-        log.warning("Phase6G disabled legacy auto_failover_mode; failover remains manual-only.")
+    # Phase 6H uses a dedicated explicit admin opt-in key. The legacy V89
+    # auto_failover_mode/traffic-anomaly path remains notification-only and cannot call failover.
+    auto_enabled = (await asyncio.to_thread(_db_get_setting, 'phase6h_auto_failover_enabled', '0')) == '1'
+    log.info(
+        "Phase6H automatic filtering failover startup state: %s",
+        "ENABLED" if auto_enabled else "DISABLED",
+    )
 
     # 🔧 عمداً از asyncio.create_task به‌جای JobQueue استفاده شده تا وابستگی اضافه‌ای
     # (اکستنشن job-queue / APScheduler) به requirements.txt پروژه اضافه نشود.
@@ -18909,7 +19089,7 @@ async def _post_shutdown(app):
     # قلم افتاده بود — پس هیچ‌وقت cancel نمی‌شد و روی asyncio.sleep(...) منتظر می‌ماند، پروسه
     # واقعاً خارج نمی‌شد تا systemd صبرش تمام شود و به‌زور بکشدش (که همان قطعیِ طولانی و نیازِ
     # نماینده‌ها به ورودِ مجدد را رقم می‌زد).
-    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 Phase6F Regional Filter Monitor'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار')):
+    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 Phase6H Regional Filter Monitor'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار')):
         task = app.bot_data.get(key)
         if task and not task.done():
             task.cancel()
@@ -18954,5 +19134,6 @@ if __name__ == '__main__':
     print(f"🌐 پایش خودکار فشار IP فعال است (هر {IP_PRESSURE_CHECK_INTERVAL_SECONDS}s چک، آستانهٔ هشدار {IP_PRESSURE_WARN_PCT}٪، بالانس خودکار بعد از {IP_PRESSURE_AUTOBALANCE_AFTER_HOURS} ساعت بدون واکنش).")
     print(f"🛡️ پایش سلامت IPها فعال است (هر {HOST_HEALTH_CHECK_INTERVAL_SECONDS}s چک، غیرفعال‌سازی خودکار بعد از {HOST_HEALTH_FAIL_THRESHOLD} شکست متوالی).")
     print(f"📉 Traffic Anomaly signal فعال است (هر {FILTER_DETECT_CHECK_INTERVAL_SECONDS}s؛ بدون Failover).")
-    print(f"🛡 Phase6G Filtering Monitor فعال است (هر {REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS}s؛ detection خودکار، Failover فقط دستی، Auto OFF).")
+    auto_state = "ON" if _db_get_setting('phase6h_auto_failover_enabled', '0') == '1' else "OFF"
+    print(f"🛡 Phase6H Filtering Monitor فعال است (هر {REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS}s؛ Auto Failover={auto_state}).")
     app.run_polling()

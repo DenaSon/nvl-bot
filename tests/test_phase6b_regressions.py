@@ -34,7 +34,7 @@ class Phase6BUnifiedHealthModelTests(unittest.TestCase):
         ast.fix_missing_locations(module)
         cls.ns = {}
         exec(compile(module, "<phase6b-health-model>", "exec"), cls.ns)
-        cls.derive = cls.ns["_derive_host_health_state"]
+        cls.derive = staticmethod(cls.ns["_derive_host_health_state"])
 
     def test_v114_marker_is_present(self):
         self.assertIn(

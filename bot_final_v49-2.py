@@ -8590,7 +8590,6 @@ async def _render_host_pool_panel(query):
     lines = []
     kb = []
     for host, active, fails, last_check, last_status, disabled_reason, disabled_at, is_default, avg_latency_ms, added_at, is_standby in pool:
-        icon = "🟢" if active else "🔴"
         star = " ⭐ (پیش‌فرض سیستم)" if is_default else ""
         standby_badge = " 🅢 (Standby)" if is_standby else ""
         # 🆕 «کدام VPS سرعتش بهتره»: تاخیر اتصال TCP (میانگین هموارشده) کنار وضعیت هر IP نشان داده
@@ -8602,14 +8601,27 @@ async def _render_host_pool_panel(query):
         ph = port_health.get(host, {})
         service_status = ph.get("service_last_status") or last_status or "بررسی‌نشده"
         admin_status = ph.get("admin_last_status") or "بررسی‌نشده"
+        overall_state = ph.get("health_state") or HEALTH_STATE_UNKNOWN
+        overall_reason = ph.get("health_reason") or HEALTH_REASON_INSUFFICIENT_EVIDENCE
+        overall_icon = _health_state_icon(overall_state)
+        membership = "ACTIVE" if active else "INACTIVE"
         line = (
-            f"{icon} <code>{esc(host)}</code>{star}{standby_badge}{latency_txt}\n"
+            f"{overall_icon} <code>{esc(host)}</code>{star}{standby_badge}{latency_txt}\n"
+            f"   🧭 Overall: <b>{esc(overall_state)}</b> · <code>{esc(overall_reason)}</code>\n"
+            f"   📍 Membership: <code>{membership}</code>\n"
             f"   🌐 Service <code>{service_port}</code> — {esc(service_status)}\n"
             f"   🔐 Admin SSH <code>{admin_port}</code> — {esc(admin_status)}"
         )
-        if last_check: line += f"\n   ⏱ آخرین Service check: {esc(last_check)}"
-        if ph.get("admin_last_check"): line += f"\n   ⏱ آخرین Admin check: {esc(ph['admin_last_check'])}"
-        if not active and disabled_reason: line += f"\n   🚫 غیرفعال از: {esc(disabled_at)} ({esc(disabled_reason)})"
+        if ph.get("health_since"):
+            line += f"\n   🕒 وضعیت فعلی از: {esc(ph['health_since'])}"
+        if ph.get("last_success_at"):
+            line += f"\n   ✅ آخرین موفقیت Service: {esc(ph['last_success_at'])}"
+        if last_check:
+            line += f"\n   ⏱ آخرین Service check: {esc(last_check)}"
+        if ph.get("admin_last_check"):
+            line += f"\n   ⏱ آخرین Admin check: {esc(ph['admin_last_check'])}"
+        if not active and disabled_reason:
+            line += f"\n   🚫 غیرفعال از: {esc(disabled_at)} ({esc(disabled_reason)})"
         # 🆕 اگر هنوز داخل دورهٔ مهلت تازه‌افزوده‌شدن است، همین‌جا شفاف نشان می‌دهیم — وگرنه
         # «بررسی‌نشده» تنها می‌تواند گیج‌کننده باشد (چرا هنوز تست نشده؟).
         if active and added_at:
@@ -8673,7 +8685,8 @@ async def _render_host_pool_panel(query):
     body = "\n\n".join(lines) if lines else "هیچ IP ای هنوز در استخر پایش ثبت نشده."
     await query.edit_message_text(
         f"🛡 <b>وضعیت پایش سلامت IPها</b>\n\n{body}{dns_line}{cz_line}\n\n"
-        f"🟢 = فعال و در حال سرویس‌دهی | 🔴 = غیرفعال (خودکار یا دستی) | ⚡ = تاخیر اتصال (هرچه کمتر بهتر) | 🏆 = سریع‌ترین فعال\n"
+        f"🟢 HEALTHY | 🟠 DEGRADED | 🔴 UNHEALTHY | ⚫️ OFFLINE | ⚪️ UNKNOWN | ⚡ تاخیر Service | 🏆 سریع‌ترین فعال\n"
+        f"Membership (ACTIVE/INACTIVE) مستقل از Health است و همچنان منطق فعلی سرویس/Failover را کنترل می‌کند.\n"
         f"می‌توانید هر IP سالم را دستی «بلاک» کنید (مثلاً وقتی مشتری گزارش فیلترشدن داده) یا یک IP "
         f"غیرفعال را دوباره تست و فعال کنید.", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 

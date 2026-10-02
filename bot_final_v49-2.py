@@ -799,7 +799,10 @@ def init_db():
                         ('udpgw_transparent_dns', '1'),
                         # 🆕 حالتِ تعویضِ خودکار (Failover — بندِ ۴): '1'=خودکار (اولین Standbyِ سالم
                         # بی‌درنگ فعال می‌شود)، '0'=دستی (پیش‌فرضِ امن — ادمین از پنل انتخاب می‌کند).
-                        ('auto_failover_mode', '0')])
+                        ('auto_failover_mode', '0'),
+                        # Phase 6H has a separate explicit opt-in. Never inherit the legacy
+                        # V89 auto-failover bit into the new regional-evidence policy.
+                        ('phase6h_auto_failover_enabled', '0')])
         c.execute('''CREATE TABLE IF NOT EXISTS ssh_accounts (
                         username TEXT PRIMARY KEY, password TEXT, expire_date TEXT, creation_date TEXT,
                         users_limit INTEGER, status TEXT DEFAULT '🟢 فعال', agent_id INTEGER DEFAULT 0)''')
@@ -2730,11 +2733,11 @@ def _db_seconds_since_last_ip_switch():
 
 
 def _db_mark_auto_failover_attempt_now():
-    _db_update_setting('auto_failover_last_attempt_at', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    _db_update_setting('phase6h_auto_failover_last_attempt_at', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
 
 def _db_seconds_since_auto_failover_attempt():
-    raw = _db_get_setting('auto_failover_last_attempt_at', '')
+    raw = _db_get_setting('phase6h_auto_failover_last_attempt_at', '')
     if not raw:
         return float('inf')
     try:
@@ -9835,7 +9838,7 @@ async def _render_host_pool_panel(query, page=0):
         dns_line = ("\n\n⚠️ دامنهٔ ثابت هنوز تنظیم نشده — مشتریان مستقیم IP خام می‌بینند. "
                      "برای فعال‌سازی سوییچ خودکار، روی «🌍 دامنهٔ ثابت + Cloudflare» بزنید.")
     standby_count = len(await asyncio.to_thread(_db_get_standby_hosts))
-    auto_enabled = (await asyncio.to_thread(_db_get_setting, 'auto_failover_mode', '0')) == '1'
+    auto_enabled = (await asyncio.to_thread(_db_get_setting, 'phase6h_auto_failover_enabled', '0')) == '1'
     failover_mode_text = "AUTO + MANUAL" if auto_enabled else "MANUAL ONLY"
     cz_line = (
         f"\n\n🛡 Phase 6H: Monitoring <b>ON</b> · Failover <b>{failover_mode_text}</b> · "
@@ -9913,7 +9916,7 @@ async def _render_filtering_monitor_panel(query, page=0):
         if op_error:
             failover_line += f" · ⚠️ <code>{esc(str(op_error)[:120])}</code>"
 
-    auto_enabled = (await asyncio.to_thread(_db_get_setting, 'auto_failover_mode', '0')) == '1'
+    auto_enabled = (await asyncio.to_thread(_db_get_setting, 'phase6h_auto_failover_enabled', '0')) == '1'
     auto_label = "ON" if auto_enabled else "OFF"
     failover_label = "AUTO + MANUAL" if auto_enabled else "MANUAL ONLY"
 
@@ -15646,15 +15649,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif d == "flt_auto_enable_yes" and role == 'admin':
-        await asyncio.to_thread(_db_update_setting, 'auto_failover_mode', '1')
-        await asyncio.to_thread(_db_update_setting, 'auto_failover_last_attempt_at', '')
+        await asyncio.to_thread(_db_update_setting, 'phase6h_auto_failover_enabled', '1')
+        await asyncio.to_thread(_db_update_setting, 'phase6h_auto_failover_last_attempt_at', '')
         await query.message.reply_text(
             "✅ Automatic Filtering Failover فعال شد. فقط policy سخت‌گیرانه Phase 6H اجازه اجرا می‌دهد."
         )
         await _render_filtering_monitor_panel(query)
 
     elif d == "flt_auto_disable" and role == 'admin':
-        await asyncio.to_thread(_db_update_setting, 'auto_failover_mode', '0')
+        await asyncio.to_thread(_db_update_setting, 'phase6h_auto_failover_enabled', '0')
         await query.message.reply_text("🛑 Automatic Filtering Failover غیرفعال شد؛ Monitoring همچنان فعال است.")
         await _render_filtering_monitor_panel(query)
 
@@ -16073,9 +16076,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Phase 6F safety guard: legacy action callbacks can exist in old Telegram
     # messages, but this release must remain MONITOR-ONLY.
     elif d == "hp_failover_toggle" and role == 'admin':
+        # Compatibility for stale pre-6H Telegram messages: fail closed and turn off
+        # both the legacy V89 bit and the Phase 6H opt-in.
         await asyncio.to_thread(_db_update_setting, 'auto_failover_mode', '0')
+        await asyncio.to_thread(_db_update_setting, 'phase6h_auto_failover_enabled', '0')
         await query.message.reply_text(
-            "🛡 Phase 6G فقط Manual Failover امن را اجازه می‌دهد. Auto Failover همچنان خاموش است و در 6H فعال خواهد شد."
+            "🛡 این دکمه متعلق به پیام قدیمی است. Automatic Filtering Failover خاموش شد؛ "
+            "برای مدیریت آن از «⚙️ تنظیمات → 🛡 وضعیت فیلترینگ» استفاده کنید."
         )
         await _render_host_pool_panel(query)
 
@@ -18409,7 +18416,7 @@ async def _notify_filter_state_transition(app, host, recompute_result, regional_
     failed_asns = ", ".join(summary.failed_asns) or "—"
     failed_cities = ", ".join(summary.failed_cities) or "—"
 
-    auto_enabled = (await asyncio.to_thread(_db_get_setting, 'auto_failover_mode', '0')) == '1'
+    auto_enabled = (await asyncio.to_thread(_db_get_setting, 'phase6h_auto_failover_enabled', '0')) == '1'
     auto_note = (
         "🤖 Phase 6H Auto Failover روشن است؛ اقدام فقط بعد از تکمیل کامل round و عبور از همه Safety Gateها بررسی می‌شود."
         if auto_enabled else
@@ -18584,7 +18591,7 @@ async def _phase6h_auto_failover_tick(app):
     Candidate selection uses strict persisted evidence; the shared Phase 6G engine
     then repeats fresh preflight checks before the first customer-state mutation.
     """
-    enabled = (await asyncio.to_thread(_db_get_setting, 'auto_failover_mode', '0')) == '1'
+    enabled = (await asyncio.to_thread(_db_get_setting, 'phase6h_auto_failover_enabled', '0')) == '1'
     if not enabled:
         return {"eligible": False, "reason": "AUTO_DISABLED"}
 
@@ -19050,9 +19057,9 @@ async def _filter_detect_loop(app):
         await asyncio.sleep(FILTER_DETECT_CHECK_INTERVAL_SECONDS)
 
 async def _post_init(app):
-    # Phase 6H reuses auto_failover_mode only as an explicit admin opt-in. The legacy
-    # V89 traffic-anomaly signal remains notification-only and cannot call failover.
-    auto_enabled = (await asyncio.to_thread(_db_get_setting, 'auto_failover_mode', '0')) == '1'
+    # Phase 6H uses a dedicated explicit admin opt-in key. The legacy V89
+    # auto_failover_mode/traffic-anomaly path remains notification-only and cannot call failover.
+    auto_enabled = (await asyncio.to_thread(_db_get_setting, 'phase6h_auto_failover_enabled', '0')) == '1'
     log.info(
         "Phase6H automatic filtering failover startup state: %s",
         "ENABLED" if auto_enabled else "DISABLED",
@@ -19127,6 +19134,6 @@ if __name__ == '__main__':
     print(f"🌐 پایش خودکار فشار IP فعال است (هر {IP_PRESSURE_CHECK_INTERVAL_SECONDS}s چک، آستانهٔ هشدار {IP_PRESSURE_WARN_PCT}٪، بالانس خودکار بعد از {IP_PRESSURE_AUTOBALANCE_AFTER_HOURS} ساعت بدون واکنش).")
     print(f"🛡️ پایش سلامت IPها فعال است (هر {HOST_HEALTH_CHECK_INTERVAL_SECONDS}s چک، غیرفعال‌سازی خودکار بعد از {HOST_HEALTH_FAIL_THRESHOLD} شکست متوالی).")
     print(f"📉 Traffic Anomaly signal فعال است (هر {FILTER_DETECT_CHECK_INTERVAL_SECONDS}s؛ بدون Failover).")
-    auto_state = "ON" if _db_get_setting('auto_failover_mode', '0') == '1' else "OFF"
+    auto_state = "ON" if _db_get_setting('phase6h_auto_failover_enabled', '0') == '1' else "OFF"
     print(f"🛡 Phase6H Filtering Monitor فعال است (هر {REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS}s؛ Auto Failover={auto_state}).")
     app.run_polling()

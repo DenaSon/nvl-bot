@@ -90,6 +90,16 @@ class Phase6CClassifierTests(unittest.TestCase):
         self.assertTrue(d.filter_suspected)
         self.assertEqual(d.filter_confidence, FILTER_CONFIDENCE_MEDIUM)
 
+    def test_external_and_regional_failure_never_confirms_filtering(self):
+        d = derive_observability(
+            True, True, True, True, False, False,
+            regional_failure_streak=5,
+            confirm_threshold=3,
+        )
+        self.assertEqual(d.diagnostic_reason, DIAG_EXTERNAL_REACHABILITY_FAILURE)
+        self.assertFalse(d.filter_suspected)
+        self.assertEqual(d.filter_confidence, FILTER_CONFIDENCE_LOW)
+
     def test_external_and_regional_failure_together_do_not_newly_confirm_filtering(self):
         d = derive_observability(
             True, True, True, True, False, False,
@@ -218,6 +228,15 @@ class Phase6CIntegrationRegressionTests(unittest.TestCase):
         self.assertIn("WG_HANDSHAKE_MAX_AGE_SECONDS", region)
         self.assertIn('["ping", "-c", "1"', region)
         self.assertIn("wg_last_handshake_at", region)
+
+    def test_wireguard_probe_wakes_idle_peer_before_handshake_freshness_check(self):
+        start = self.source.index("def _probe_wireguard_edge_sync(")
+        end = self.source.index("async def _host_health_tick(app):", start)
+        region = self.source[start:end]
+        ping_pos = region.index('["ping", "-c", "1"')
+        handshake_pos = region.index('["wg", "show", "wg0", "latest-handshakes"]')
+        self.assertLess(ping_pos, handshake_pos)
+        self.assertIn("WG_PATH_PROVEN_BY_TUNNEL", region)
 
     def test_wireguard_probe_stimulates_tunnel_before_reading_handshake(self):
         start = self.source.index("def _probe_wireguard_edge_sync(")

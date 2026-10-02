@@ -226,6 +226,7 @@ from telegram.error import BadRequest
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, PicklePersistence, PersistenceInput
 
 from edge_observability import (
+    DIAG_CORE_LOCAL,
     DIAG_FILTER_SUSPECTED,
     DIAG_INSUFFICIENT_EVIDENCE,
     FILTER_CONFIDENCE_MEDIUM,
@@ -244,7 +245,7 @@ from edge_observability import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V115-2026-10-02-phase6c-edge-observability"
+BOT_VERSION_TAG = "V115.1-2026-10-02-phase6c-core-scope-fix"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -1445,6 +1446,22 @@ def _db_append_probe_result(host, probe_type, source, ok, latency_ms=None, reaso
         _db_prune_probe_history(conn, host)
 
 
+def _is_current_core_host(host):
+    """Return True only for the authoritative current Core public IP.
+
+    host_pool contains both the Core fallback endpoint and managed Edge relays. Phase 6C
+    WireGuard/core-path evidence is Edge-specific, so the Core must never be classified
+    from an old or stale edge peer marker. The failover workflow keeps
+    settings.core_wg_public_ip updated when the Core role moves.
+    """
+    core_ip = str(_db_get_setting("core_wg_public_ip", "") or "").strip()
+    if not core_ip:
+        # Backward-compatible bootstrap for installations that predate this setting.
+        with contextlib.suppress(Exception):
+            core_ip = str(_get_core_public_ip_cached() or "").strip()
+    return bool(core_ip and str(host or "").strip() == core_ip)
+
+
 def _db_recompute_host_observability(host):
     """Persist the Phase 6C diagnostic/filter dimension only.
 
@@ -1453,6 +1470,53 @@ def _db_recompute_host_observability(host):
     """
     now_dt = datetime.now()
     now = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    # host_pool intentionally contains the Core as a fallback/customer endpoint too.
+    # Phase 6C is per-Edge observability: never interpret the Core public IP as an Edge,
+    # even if a stale peer marker from an earlier role still exists in wg0.conf.
+    if _is_current_core_host(host):
+        with db_conn() as conn:
+            row = conn.execute(
+                "SELECT diagnostic_reason FROM host_pool WHERE host=?",
+                (host,),
+            ).fetchone()
+            if not row:
+                return None
+            previous_diagnostic = row[0]
+            conn.execute(
+                "UPDATE host_pool SET "
+                "wg_peer_ok=NULL, wg_last_handshake_at=NULL, wg_last_check=NULL, "
+                "core_path_ok=NULL, core_path_last_check=NULL, "
+                "external_service_ok=NULL, external_service_last_check=NULL, external_probe_source=NULL, "
+                "regional_service_ok=NULL, regional_service_last_check=NULL, regional_probe_source=NULL, "
+                "diagnostic_reason=?, filter_suspected=NULL, filter_confidence=?, filter_reason=?, "
+                "filter_updated_at=NULL, filter_consecutive_failures=0, "
+                "filter_consecutive_successes=0, filter_cooldown_until=NULL, evidence_updated_at=? "
+                "WHERE host=?",
+                (
+                    DIAG_CORE_LOCAL,
+                    FILTER_CONFIDENCE_NONE,
+                    FILTER_REASON_INSUFFICIENT_EVIDENCE,
+                    now,
+                    host,
+                ),
+            )
+        if previous_diagnostic != DIAG_CORE_LOCAL:
+            log.info(
+                "Phase6C diagnostic transition host=%s previous=%s current=%s "
+                "filter_suspected=None confidence=%s",
+                host,
+                previous_diagnostic or DIAG_INSUFFICIENT_EVIDENCE,
+                DIAG_CORE_LOCAL,
+                FILTER_CONFIDENCE_NONE,
+            )
+        return {
+            "diagnostic_reason": DIAG_CORE_LOCAL,
+            "filter_suspected": None,
+            "filter_confidence": FILTER_CONFIDENCE_NONE,
+            "filter_reason": FILTER_REASON_INSUFFICIENT_EVIDENCE,
+            "changed": False,
+        }
     with db_conn() as conn:
         row = conn.execute(
             "SELECT service_ok, admin_ok, wg_peer_ok, core_path_ok, "
@@ -8970,6 +9034,7 @@ async def _render_host_pool_panel(query, page=0):
         overall_icon = _health_state_icon(overall_state)
         membership = "ACTIVE" if active else "INACTIVE"
         diagnostic_reason = ph.get("diagnostic_reason") or DIAG_INSUFFICIENT_EVIDENCE
+        core_badge = " 🧠 (Core)" if diagnostic_reason == DIAG_CORE_LOCAL else ""
         filter_suspected = ph.get("filter_suspected")
         filter_confidence = ph.get("filter_confidence") or FILTER_CONFIDENCE_NONE
 
@@ -8988,7 +9053,7 @@ async def _render_host_pool_panel(query, page=0):
             filter_txt = "⚪ UNKNOWN"
 
         line = (
-            f"{overall_icon} <code>{esc(host)}</code>{star}{standby_badge}{latency_txt}\n"
+            f"{overall_icon} <code>{esc(host)}</code>{star}{standby_badge}{core_badge}{latency_txt}\n"
             f"   🧭 Overall: <b>{esc(overall_state)}</b> · <code>{_panel_value(overall_reason)}</code>\n"
             f"   📍 Membership: <code>{membership}</code>\n"
             f"   🧩 Diagnostic: <code>{_panel_value(diagnostic_reason)}</code>\n"
@@ -16688,21 +16753,23 @@ async def _host_health_tick(app):
                 host, admin_port, admin_fails, admin_err,
             )
 
-        # Phase 6C local path evidence is passive: it is persisted/classified but never
-        # changes membership or triggers DNS/failover actions.
-        local_path = await asyncio.to_thread(_probe_wireguard_edge_sync, host)
-        await asyncio.to_thread(
-            _db_record_observability_probe,
-            host, "wireguard", "core",
-            local_path.get("wg_peer_ok"), None, local_path.get("wg_reason"),
-            local_path.get("wg_last_handshake_at"), False,
-        )
-        await asyncio.to_thread(
-            _db_record_observability_probe,
-            host, "core_path", "core",
-            local_path.get("core_path_ok"), None, local_path.get("core_path_reason"),
-            None, True,
-        )
+        # Phase 6C local path evidence is Edge-specific. host_pool also contains the
+        # current Core fallback endpoint, which must never be probed as its own WG peer.
+        # The recompute calls above already normalize the Core row to CORE_LOCAL.
+        if not await asyncio.to_thread(_is_current_core_host, host):
+            local_path = await asyncio.to_thread(_probe_wireguard_edge_sync, host)
+            await asyncio.to_thread(
+                _db_record_observability_probe,
+                host, "wireguard", "core",
+                local_path.get("wg_peer_ok"), None, local_path.get("wg_reason"),
+                local_path.get("wg_last_handshake_at"), False,
+            )
+            await asyncio.to_thread(
+                _db_record_observability_probe,
+                host, "core_path", "core",
+                local_path.get("core_path_ok"), None, local_path.get("core_path_reason"),
+                None, True,
+            )
 
         if service_ok or new_fails < HOST_HEALTH_FAIL_THRESHOLD:
             continue

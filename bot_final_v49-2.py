@@ -2386,7 +2386,7 @@ def _db_commit_failover_account_state(
         for username in usernames:
             cur = conn.execute(
                 "UPDATE ssh_accounts SET host=? "
-                "WHERE username=? AND host=? AND service_type='ssh' "
+                "WHERE username=? AND (host=? OR host IS NULL OR host='') AND service_type='ssh' "
                 "AND status != '⏳ درحال ساخت'",
                 (target_host, username, source_host),
             )
@@ -18715,12 +18715,12 @@ async def _filter_detect_loop(app):
         await asyncio.sleep(FILTER_DETECT_CHECK_INTERVAL_SECONDS)
 
 async def _post_init(app):
-    # Phase 6F safety migration: the legacy V89 auto_failover_mode previously allowed
-    # a coarse traffic signal to mutate DNS/accounts. Until Phase 6G/6H reintroduce a
-    # scoped action policy, force this legacy operational switch off.
+    # Phase 6G safety boundary: the legacy V89 auto_failover_mode previously allowed
+    # a coarse traffic signal to mutate DNS/accounts. Phase 6G permits only explicit
+    # admin-confirmed manual failover; automatic policy remains disabled until Phase 6H.
     if (await asyncio.to_thread(_db_get_setting, 'auto_failover_mode', '0')) == '1':
         await asyncio.to_thread(_db_update_setting, 'auto_failover_mode', '0')
-        log.warning("Phase6F disabled legacy auto_failover_mode; monitoring is action-free.")
+        log.warning("Phase6G disabled legacy auto_failover_mode; failover remains manual-only.")
 
     # 🔧 عمداً از asyncio.create_task به‌جای JobQueue استفاده شده تا وابستگی اضافه‌ای
     # (اکستنشن job-queue / APScheduler) به requirements.txt پروژه اضافه نشود.

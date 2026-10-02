@@ -17101,6 +17101,305 @@ async def _host_health_loop(app):
             log.exception("خطای غیرمنتظره در حلقهٔ پایش سلامت IPها — دور بعدی ادامه می‌یابد.")
         await asyncio.sleep(HOST_HEALTH_CHECK_INTERVAL_SECONDS)
 
+async def _notify_filter_state_transition(app, host, recompute_result, regional_decision):
+    transition = classify_filter_transition(
+        recompute_result.get("previous_filter_state"),
+        recompute_result.get("filter_state"),
+    )
+    if not transition.notify:
+        return
+
+    ph = (await asyncio.to_thread(_db_get_host_port_health_map)).get(host, {})
+    state = recompute_result.get("filter_state") or FILTER_STATE_UNKNOWN
+    confidence = recompute_result.get("filter_confidence") or FILTER_CONFIDENCE_NONE
+    summary = regional_decision.summary
+
+    if transition.kind == TRANSITION_CRITICAL:
+        title = "🔴 <b>فیلترینگ با اطمینان بالا</b>"
+    elif transition.kind == TRANSITION_WARNING:
+        title = "🟡 <b>احتمال فیلترینگ</b>"
+    elif transition.kind == TRANSITION_RECOVERED:
+        title = "🟢 <b>دسترسی منطقه‌ای بازیابی شد</b>"
+    else:
+        title = "⚪️ <b>وضعیت فیلترینگ نامطمئن شد</b>"
+
+    failed_asns = ", ".join(summary.failed_asns) or "—"
+    failed_cities = ", ".join(summary.failed_cities) or "—"
+
+    await _notify_admins(
+        app,
+        f"{title}\n\n"
+        f"Edge: <code>{esc(host)}</code>\n"
+        f"State: <b>{esc(state)}</b> · Confidence: <b>{esc(confidence)}</b>\n"
+        f"Regional: {summary.failed_nodes}/{summary.completed_nodes} failed "
+        f"({(summary.failure_ratio or 0) * 100:.0f}%)\n"
+        f"Failed ASN: <code>{esc(failed_asns)}</code>\n"
+        f"Failed City: <code>{esc(failed_cities)}</code>\n"
+        f"External(Core→Edge): {_probe_state_text(ph.get('external_service_ok'))}\n"
+        f"WireGuard: {_probe_state_text(ph.get('wg_peer_ok'))}\n"
+        f"Core path: {_probe_state_text(ph.get('core_path_ok'))}\n\n"
+        "ℹ️ Phase 6F فقط مانیتورینگ/هشدار است؛ هیچ DNS یا Failover خودکاری انجام نشده."
+    )
+
+
+def _probe_state_text(value):
+    if value is True:
+        return "✅ UP"
+    if value is False:
+        return "❌ DOWN"
+    return "⚪ UNKNOWN"
+
+
+async def _regional_provider_enter_limited(app, host, error):
+    state = await asyncio.to_thread(_db_get_regional_provider_runtime)
+    previous_status = state.get("status") or PROVIDER_STATUS_NEVER
+    count = max(0, int(state.get("limit_count") or 0)) + 1
+    until_dt = provider_backoff_until(
+        datetime.now(),
+        count,
+        base_seconds=REGIONAL_FILTER_PROVIDER_BACKOFF_BASE_SECONDS,
+        max_seconds=REGIONAL_FILTER_PROVIDER_BACKOFF_MAX_SECONDS,
+    )
+    until = until_dt.strftime("%Y-%m-%d %H:%M:%S")
+    await asyncio.to_thread(
+        _db_set_regional_provider_runtime,
+        PROVIDER_STATUS_LIMITED,
+        backoff_until=until,
+        limit_count=count,
+        error=str(error),
+    )
+    await asyncio.to_thread(
+        _db_record_regional_provider_status,
+        host,
+        PROVIDER_STATUS_LIMITED,
+        str(error),
+    )
+    seconds = max(0, int((until_dt - datetime.now()).total_seconds()))
+    if previous_status != PROVIDER_STATUS_LIMITED:
+        await _notify_admins(
+            app,
+            "⚠️ <b>Regional Probe موقتاً محدود شد</b>\n\n"
+            "Check-Host پاسخ <code>limit_exceeded</code> داده است. "
+            f"برای جلوگیری از فشار بیشتر، probeها حدود {max(1, seconds // 60)} دقیقه متوقف می‌شوند.\n"
+            "این وضعیت <b>فیلترینگ Edge محسوب نمی‌شود</b> و state قبلی حفظ می‌شود."
+        )
+    return seconds
+
+
+async def _regional_provider_mark_ok(app):
+    state = await asyncio.to_thread(_db_get_regional_provider_runtime)
+    previous_status = state.get("status") or PROVIDER_STATUS_NEVER
+    await asyncio.to_thread(
+        _db_set_regional_provider_runtime,
+        PROVIDER_STATUS_OK,
+        backoff_until="",
+        limit_count=0,
+        error="",
+    )
+    if previous_status == PROVIDER_STATUS_LIMITED:
+        await _notify_admins(
+            app,
+            "✅ <b>Regional Probe دوباره در دسترس است</b>\n"
+            "Backoff Check-Host پایان یافت و مانیتورینگ Edgeها از سر گرفته شد."
+        )
+
+
+async def _regional_filter_probe_edge(app, host, service_port, client, nodes):
+    """Probe one Edge. Diagnostic-only: no DNS, account or failover mutation."""
+    if await asyncio.to_thread(_is_current_core_host, host):
+        return {"status": "SKIPPED_CORE", "host": host}
+
+    # Same-round external control from the Core's public network perspective.
+    external_ok, external_err = await _tcp_health_check(
+        host,
+        service_port,
+        timeout=EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS,
+    )
+    await asyncio.to_thread(
+        _db_record_observability_probe,
+        host,
+        "external_service",
+        "core-direct-tcp",
+        external_ok,
+        None,
+        PROBE_REASON_OK if external_ok else normalize_probe_error(external_err),
+        None,
+        False,
+    )
+
+    def _run_provider():
+        request_id, permanent_link, request_nodes = client.start_tcp_check(
+            host,
+            service_port,
+            nodes,
+        )
+        return client.poll_tcp_result(
+            request_id,
+            request_nodes,
+            target_host=host,
+            target_port=service_port,
+            permanent_link=permanent_link,
+        )
+
+    try:
+        probe = await asyncio.to_thread(_run_provider)
+    except CheckHostLimitExceeded as exc:
+        await _regional_provider_enter_limited(app, host, exc)
+        return {"status": PROVIDER_STATUS_LIMITED, "host": host, "error": str(exc)}
+    except CheckHostError as exc:
+        await asyncio.to_thread(
+            _db_record_regional_provider_status,
+            host,
+            PROVIDER_STATUS_ERROR,
+            str(exc),
+        )
+        await asyncio.to_thread(
+            _db_set_regional_provider_runtime,
+            PROVIDER_STATUS_ERROR,
+            backoff_until="",
+            limit_count=0,
+            error=str(exc),
+        )
+        log.warning("Phase6F Check-Host provider error host=%s: %s", host, exc)
+        return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": str(exc)}
+
+    regional_decision = classify_regional_evidence(probe.evidence)
+    recompute_result = await asyncio.to_thread(
+        _db_record_regional_round,
+        host,
+        probe,
+        regional_decision,
+    )
+    await _regional_provider_mark_ok(app)
+
+    if recompute_result:
+        await _notify_filter_state_transition(
+            app,
+            host,
+            recompute_result,
+            regional_decision,
+        )
+
+    return {
+        "status": PROVIDER_STATUS_OK,
+        "host": host,
+        "probe": probe,
+        "regional_decision": regional_decision,
+        "observability": recompute_result,
+    }
+
+
+async def _regional_filter_tick(app):
+    remaining = await asyncio.to_thread(_db_regional_backoff_remaining_seconds)
+    if remaining > 0:
+        log.info(
+            "Phase6F regional monitor in provider backoff (%ss remaining); round skipped.",
+            remaining,
+        )
+        return
+
+    targets = await asyncio.to_thread(_db_get_regional_monitor_targets)
+    edge_targets = []
+    for host, service_port, is_standby in targets:
+        if await asyncio.to_thread(_is_current_core_host, host):
+            continue
+        try:
+            port = int(service_port)
+        except (TypeError, ValueError):
+            port = 0
+        if not 1 <= port <= 65535:
+            log.warning("Phase6F skip host=%s: invalid service_port=%r", host, service_port)
+            continue
+        edge_targets.append((host, port, bool(is_standby)))
+
+    if not edge_targets:
+        return
+
+    client = CheckHostClient(
+        request_timeout=max(6.0, float(EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS)),
+        poll_timeout=max(12.0, float(EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS) * 4),
+    )
+    try:
+        nodes = await asyncio.to_thread(client.discover_nodes, "ir")
+    except CheckHostError as exc:
+        await asyncio.to_thread(
+            _db_set_regional_provider_runtime,
+            PROVIDER_STATUS_ERROR,
+            backoff_until="",
+            limit_count=0,
+            error=str(exc),
+        )
+        log.warning("Phase6F node discovery failed: %s", exc)
+        return
+
+    nodes = tuple(nodes[:REGIONAL_FILTER_MAX_NODES])
+    if not nodes:
+        log.warning("Phase6F node discovery returned no Iranian nodes.")
+        return
+
+    for index, (host, service_port, _is_standby) in enumerate(edge_targets):
+        result = await _regional_filter_probe_edge(
+            app,
+            host,
+            service_port,
+            client,
+            nodes,
+        )
+        if result.get("status") == PROVIDER_STATUS_LIMITED:
+            break
+        if index + 1 < len(edge_targets) and REGIONAL_FILTER_EDGE_GAP_SECONDS > 0:
+            await asyncio.sleep(REGIONAL_FILTER_EDGE_GAP_SECONDS)
+
+
+async def _regional_filter_probe_one_now(app, host):
+    """Manual admin recheck, still respecting provider backoff."""
+    remaining = await asyncio.to_thread(_db_regional_backoff_remaining_seconds)
+    if remaining > 0:
+        return {
+            "status": PROVIDER_STATUS_LIMITED,
+            "host": host,
+            "backoff_seconds": remaining,
+            "error": "provider backoff active",
+        }
+
+    if await asyncio.to_thread(_is_current_core_host, host):
+        return {"status": "SKIPPED_CORE", "host": host}
+
+    service_port = await asyncio.to_thread(_db_get_host_service_port, host, 22)
+    client = CheckHostClient(
+        request_timeout=max(6.0, float(EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS)),
+        poll_timeout=max(12.0, float(EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS) * 4),
+    )
+    try:
+        nodes = await asyncio.to_thread(client.discover_nodes, "ir")
+    except CheckHostError as exc:
+        return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": str(exc)}
+    nodes = tuple(nodes[:REGIONAL_FILTER_MAX_NODES])
+    return await _regional_filter_probe_edge(
+        app,
+        host,
+        service_port,
+        client,
+        nodes,
+    )
+
+
+async def _regional_filter_loop(app):
+    if REGIONAL_FILTER_MONITOR_INITIAL_DELAY_SECONDS > 0:
+        await asyncio.sleep(REGIONAL_FILTER_MONITOR_INITIAL_DELAY_SECONDS)
+    log.info(
+        "🛡 Phase6F regional filtering monitor started (interval=%ss, max_nodes=%s, edge_gap=%ss).",
+        REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS,
+        REGIONAL_FILTER_MAX_NODES,
+        REGIONAL_FILTER_EDGE_GAP_SECONDS,
+    )
+    while True:
+        try:
+            await _regional_filter_tick(app)
+        except Exception:
+            log.exception("Phase6F regional filtering round failed; next round will continue.")
+        await asyncio.sleep(REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS)
+
 async def _udpgw_health_tick(app):
     """
     🆕 چون badvpn-udpgw روی خودِ همین سرور اجرا می‌شود (نه یک هاست دوردست)، پایشش یک اتصال TCP

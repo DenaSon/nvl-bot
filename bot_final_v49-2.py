@@ -1515,26 +1515,24 @@ def _is_current_core_host(host):
 
 
 def _db_recompute_host_observability(host):
-    """Persist the Phase 6C diagnostic/filter dimension only.
+    """Persist the Phase 6C/6E diagnostic and filtering dimensions only.
 
-    This function is intentionally side-effect-limited to SQLite + logging. It never
+    Side effects are deliberately limited to SQLite + logging. This function never
     changes host membership, DNS, standby state, accounts, Core/Edge roles or failover.
     """
     now_dt = datetime.now()
     now = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    # host_pool intentionally contains the Core as a fallback/customer endpoint too.
-    # Phase 6C is per-Edge observability: never interpret the Core public IP as an Edge,
-    # even if a stale peer marker from an earlier role still exists in wg0.conf.
+    # Core is the control plane, never a regional Edge filtering target.
     if _is_current_core_host(host):
         with db_conn() as conn:
             row = conn.execute(
-                "SELECT diagnostic_reason FROM host_pool WHERE host=?",
+                "SELECT diagnostic_reason, filter_state FROM host_pool WHERE host=?",
                 (host,),
             ).fetchone()
             if not row:
                 return None
-            previous_diagnostic = row[0]
+            previous_diagnostic, previous_filter_state = row
             conn.execute(
                 "UPDATE host_pool SET "
                 "wg_peer_ok=NULL, wg_last_handshake_at=NULL, wg_last_check=NULL, "
@@ -1542,6 +1540,11 @@ def _db_recompute_host_observability(host):
                 "external_service_ok=NULL, external_service_last_check=NULL, external_probe_source=NULL, "
                 "regional_service_ok=NULL, regional_service_last_check=NULL, regional_probe_source=NULL, "
                 "diagnostic_reason=?, filter_suspected=NULL, filter_confidence=?, filter_reason=?, "
+                "filter_state=?, regional_filter_state=?, regional_filter_reason='CORE_LOCAL', "
+                "regional_total_nodes=0, regional_completed_nodes=0, regional_successful_nodes=0, "
+                "regional_failed_nodes=0, regional_pending_nodes=0, regional_success_ratio=NULL, "
+                "regional_failed_asns=NULL, regional_failed_cities=NULL, regional_last_request_id=NULL, "
+                "regional_provider_status=?, regional_provider_error=NULL, regional_state_updated_at=?, "
                 "filter_updated_at=NULL, filter_consecutive_failures=0, "
                 "filter_consecutive_successes=0, filter_cooldown_until=NULL, evidence_updated_at=? "
                 "WHERE host=?",
@@ -1549,33 +1552,39 @@ def _db_recompute_host_observability(host):
                     DIAG_CORE_LOCAL,
                     FILTER_CONFIDENCE_NONE,
                     FILTER_REASON_INSUFFICIENT_EVIDENCE,
+                    FILTER_STATE_UNKNOWN,
+                    FILTER_STATE_UNKNOWN,
+                    PROVIDER_STATUS_NEVER,
+                    now,
                     now,
                     host,
                 ),
             )
         if previous_diagnostic != DIAG_CORE_LOCAL:
             log.info(
-                "Phase6C diagnostic transition host=%s previous=%s current=%s "
-                "filter_suspected=None confidence=%s",
+                "Phase6F Core exclusion host=%s previous=%s current=%s",
                 host,
                 previous_diagnostic or DIAG_INSUFFICIENT_EVIDENCE,
                 DIAG_CORE_LOCAL,
-                FILTER_CONFIDENCE_NONE,
             )
         return {
             "diagnostic_reason": DIAG_CORE_LOCAL,
             "filter_suspected": None,
             "filter_confidence": FILTER_CONFIDENCE_NONE,
             "filter_reason": FILTER_REASON_INSUFFICIENT_EVIDENCE,
+            "filter_state": FILTER_STATE_UNKNOWN,
+            "previous_filter_state": previous_filter_state or FILTER_STATE_UNKNOWN,
+            "state_changed": (previous_filter_state or FILTER_STATE_UNKNOWN) != FILTER_STATE_UNKNOWN,
             "changed": False,
         }
+
     with db_conn() as conn:
         row = conn.execute(
             "SELECT service_ok, admin_ok, wg_peer_ok, core_path_ok, "
             "external_service_ok, regional_service_ok, "
             "filter_consecutive_failures, filter_consecutive_successes, "
             "filter_suspected, filter_confidence, filter_reason, diagnostic_reason, "
-            "filter_updated_at, filter_cooldown_until "
+            "filter_updated_at, filter_cooldown_until, regional_filter_state, filter_state "
             "FROM host_pool WHERE host=?",
             (host,),
         ).fetchone()
@@ -1587,9 +1596,13 @@ def _db_recompute_host_observability(host):
             external_ok, regional_ok, failure_streak, success_streak,
             previous_raw, previous_confidence, previous_filter_reason,
             previous_diagnostic, previous_updated_at, cooldown_until,
+            regional_filter_state, previous_filter_state,
         ) = row
 
         previous = None if previous_raw is None else bool(previous_raw)
+        regional_filter_state = regional_filter_state or FILTER_STATE_UNKNOWN
+        previous_filter_state = previous_filter_state or FILTER_STATE_UNKNOWN
+
         decision = derive_observability(
             None if service_ok is None else bool(service_ok),
             None if admin_ok is None else bool(admin_ok),
@@ -1602,17 +1615,17 @@ def _db_recompute_host_observability(host):
             confirm_threshold=EDGE_FILTER_CONFIRM_THRESHOLD,
             recovery_threshold=EDGE_FILTER_RECOVERY_THRESHOLD,
             previous_filter_suspected=previous,
+            regional_filter_state=regional_filter_state,
         )
 
         proposed = decision.filter_suspected
         diagnostic_reason = decision.diagnostic_reason
         filter_confidence = decision.filter_confidence
         filter_reason = decision.filter_reason
+        filter_state = decision.filter_state
 
         cooldown_active = False
-        # Cooldown only suppresses rapid re-entry into FILTER_SUSPECTED after a
-        # confirmed recovery. It must never hide a newly observed WG/Core/service
-        # failure behind an old filtering diagnosis.
+        # Cooldown suppresses only rapid re-entry after a qualified recovery.
         if cooldown_until and previous is False and proposed is True:
             try:
                 cooldown_active = _parse_flexible_datetime(cooldown_until) > now_dt
@@ -1623,6 +1636,7 @@ def _db_recompute_host_observability(host):
             proposed = previous
             filter_confidence = previous_confidence or FILTER_CONFIDENCE_NONE
             filter_reason = previous_filter_reason or FILTER_REASON_INSUFFICIENT_EVIDENCE
+            filter_state = previous_filter_state
             diagnostic_reason = (
                 DIAG_FILTER_SUSPECTED if previous else
                 (previous_diagnostic or decision.diagnostic_reason)
@@ -1630,10 +1644,11 @@ def _db_recompute_host_observability(host):
 
         changed = previous is not None and proposed is not None and previous != proposed
         initialized = previous is None and proposed is not None
+        state_changed = previous_filter_state != filter_state
         filter_updated_at = previous_updated_at
         new_cooldown_until = cooldown_until
 
-        if changed or initialized:
+        if changed or initialized or state_changed:
             filter_updated_at = now
         if changed:
             new_cooldown_until = (
@@ -1642,13 +1657,14 @@ def _db_recompute_host_observability(host):
 
         conn.execute(
             "UPDATE host_pool SET diagnostic_reason=?, filter_suspected=?, "
-            "filter_confidence=?, filter_reason=?, filter_updated_at=?, "
+            "filter_confidence=?, filter_reason=?, filter_state=?, filter_updated_at=?, "
             "filter_cooldown_until=?, evidence_updated_at=? WHERE host=?",
             (
                 diagnostic_reason,
                 None if proposed is None else (1 if proposed else 0),
                 filter_confidence,
                 filter_reason,
+                filter_state,
                 filter_updated_at,
                 new_cooldown_until,
                 now,
@@ -1658,25 +1674,32 @@ def _db_recompute_host_observability(host):
 
     if previous_diagnostic != diagnostic_reason:
         log.info(
-            "Phase6C diagnostic transition host=%s previous=%s current=%s "
-            "filter_suspected=%s confidence=%s",
+            "Phase6F diagnostic transition host=%s previous=%s current=%s "
+            "filter_state=%s confidence=%s",
             host,
             previous_diagnostic or DIAG_INSUFFICIENT_EVIDENCE,
             diagnostic_reason,
-            proposed,
+            filter_state,
             filter_confidence,
         )
-    if changed:
+    if state_changed:
         log.warning(
-            "Phase6C filter evidence transition host=%s previous=%s current=%s "
+            "Phase6F filter-state transition host=%s previous=%s current=%s "
             "reason=%s confidence=%s",
-            host, previous, proposed, filter_reason, filter_confidence,
+            host,
+            previous_filter_state,
+            filter_state,
+            filter_reason,
+            filter_confidence,
         )
     return {
         "diagnostic_reason": diagnostic_reason,
         "filter_suspected": proposed,
         "filter_confidence": filter_confidence,
         "filter_reason": filter_reason,
+        "filter_state": filter_state,
+        "previous_filter_state": previous_filter_state,
+        "state_changed": state_changed,
         "changed": changed,
     }
 

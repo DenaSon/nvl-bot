@@ -189,6 +189,7 @@ def derive_observability(
             False,
             FILTER_CONFIDENCE_NONE,
             FILTER_REASON_NONE,
+            FILTER_STATE_UNKNOWN,
         )
 
     if wg_peer_ok is None or core_path_ok is None:
@@ -205,6 +206,7 @@ def derive_observability(
             False,
             FILTER_CONFIDENCE_NONE,
             FILTER_REASON_NONE,
+            FILTER_STATE_UNKNOWN,
         )
 
     if not bool(core_path_ok):
@@ -213,6 +215,7 @@ def derive_observability(
             False,
             FILTER_CONFIDENCE_NONE,
             FILTER_REASON_NONE,
+            FILTER_STATE_UNKNOWN,
         )
 
     if not bool(service_ok):
@@ -221,6 +224,7 @@ def derive_observability(
             False,
             FILTER_CONFIDENCE_NONE,
             FILTER_REASON_NONE,
+            FILTER_STATE_UNKNOWN,
         )
 
     base_reason = (
@@ -323,6 +327,7 @@ def derive_observability(
             False,
             FILTER_CONFIDENCE_LOW,
             FILTER_REASON_NONE,
+            FILTER_STATE_UNKNOWN,
         )
 
     if regional_service_ok is True:

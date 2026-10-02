@@ -5,11 +5,13 @@ Phase 6G failover engine. It does **not** create a second migration/DNS path.
 
 ## Safety model
 
-Automatic failover is opt-in and defaults to OFF.
+Automatic failover is opt-in and defaults to OFF. Phase 6H uses the dedicated
+`phase6h_auto_failover_enabled` setting and deliberately does not inherit the
+legacy V89 `auto_failover_mode` bit.
 
 An automatic attempt is eligible only when all of the following are true:
 
-- the admin explicitly enabled `auto_failover_mode`;
+- the admin explicitly enabled `phase6h_auto_failover_enabled`;
 - the source is the current default Edge and is not a Standby;
 - the source filtering state is `LIKELY`;
 - filtering confidence is `HIGH`;

@@ -30,7 +30,7 @@ class Phase56NavigationRegressionTests(unittest.TestCase):
             self.assertIn(label, self.source)
 
     def test_agent_home_exposes_one_sales_entry_and_owned_users(self):
-        self.assertIn("['➕ فروش اشتراک', '👥 کاربران من']", self.source)
+        self.assertIn("['➕ فروش اشتراک', '👥 کاربران']", self.source)
         self.assertIn("['💰 کیف پول و حساب', '💳 شارژ حساب']", self.source)
         self.assertIn(
             'SSH و V2Ray هر دو از همین مسیر فروش و کیف پول نمایندگی استفاده می‌کنند.',
@@ -99,6 +99,27 @@ class Phase56NavigationRegressionTests(unittest.TestCase):
         self.assertIn('panel_title = f"👥 کاربران من › {srv_name}"', self.source)
         self.assertIn('panel_title = f"👥 کاربران › {srv_name}"', self.source)
         self.assertIn('panel_title = f"🤝 نمایندگان › {esc(agent_name)} › {srv_name}"', self.source)
+
+
+    def test_agent_visible_action_buttons_drop_possessive_mine(self):
+        for rendered in (
+            "kb.append([\'💳 کارت اختصاصی\'])",
+            '("🔐 SSH", "umanage_ssh")',
+            '("🚀 V2Ray مدت‌دار", "umanage_v2ray")',
+            '("📦 V2Ray حجمی", "umanage_v2ray_vol")',
+            'InlineKeyboardButton("🗑 حذف کارت", callback_data="agself_card_clear")',
+            'InlineKeyboardButton("✏️ ثبت کارت", callback_data="agself_card_set")',
+            'InlineKeyboardButton("👥 زیرمجموعه‌ها", callback_data="mysubs_1")',
+        ):
+            self.assertIn(rendered, self.source)
+
+        for old_rendered in (
+            "kb.append([\'💳 کارت اختصاصی من\'])",
+            'InlineKeyboardButton("🗑 حذف کارت من", callback_data="agself_card_clear")',
+            'InlineKeyboardButton("✏️ ثبت کارت من", callback_data="agself_card_set")',
+            'InlineKeyboardButton("👥 زیرمجموعه‌های من", callback_data="mysubs_1")',
+        ):
+            self.assertNotIn(old_rendered, self.source)
 
 
 if __name__ == "__main__":

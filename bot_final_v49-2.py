@@ -1343,7 +1343,7 @@ async def _run_speed_test_all_hosts():
     خروجی: لیست [(host, avg_ms, ok), ...] مرتب از سریع‌ترین به کندترین
     """
     pool = await asyncio.to_thread(_db_get_host_pool)
-    port_map = await asyncio.to_thread(_db_get_host_ssh_port_map)
+    port_map = await asyncio.to_thread(_db_get_host_service_port_map)
 
     async def _test_one_host(host):
         samples = []
@@ -1467,7 +1467,7 @@ async def _acct_host_port(owner_row):
     host = owner_row[6] if owner_row and len(owner_row) > 6 else None
     if not host:
         host = await asyncio.to_thread(_pick_target_host_for_new_account)
-    port = await asyncio.to_thread(_db_get_host_ssh_port, host, 22)
+    port = await asyncio.to_thread(_db_get_host_service_port, host, 22)
     return host, port
 
 # 🆕 حذفِ *کامل* یک Edge — قبلاً «حذف» فقط یک ردیف از دیتابیس (host_pool) پاک می‌کرد، ولی
@@ -3324,7 +3324,7 @@ async def _get_health_for_host(host):
     if not host or host == core_ip:
         health, err = await _get_server_health()
         return health, err, False
-    port = await asyncio.to_thread(_db_get_host_ssh_port, host, 22)
+    port = await asyncio.to_thread(_db_get_host_admin_ssh_port, host, 22)
     health, err = await _get_remote_server_health(host, port)
     return health, err, True
 
@@ -3435,7 +3435,7 @@ async def _get_live_connection_counts():
                     return host, False, err_data.decode(errors='ignore').strip()
                 return host, True, out_data.decode(errors='ignore')
             else:
-                port = await asyncio.to_thread(_db_get_host_ssh_port, host, 22)
+                port = await asyncio.to_thread(_db_get_host_admin_ssh_port, host, 22)
                 def _sync_remote():
                     import paramiko
                     ssh = None
@@ -4588,7 +4588,7 @@ async def _build_napsternet_link(host: str, port, un: str, pw: str, conn_mode: s
         effective_host = public_domain.strip() if public_domain.strip() else host
         # اگر دامنهٔ ثابت فعال باشد، DNS ممکن است به IP دیگری اشاره کند؛ پورت همان IP خوانده می‌شود.
         dns_target = await asyncio.to_thread(_db_get_setting, 'dns_current_ip', '') if public_domain.strip() else ''
-        effective_port = await asyncio.to_thread(_db_get_host_ssh_port, dns_target.strip() or host, port)
+        effective_port = await asyncio.to_thread(_db_get_host_service_port, dns_target.strip() or host, port)
         cfg = {"sshConfigType": "SSH-Direct", "remarks": un, "sshHost": effective_host, "sshPort": int(effective_port),
                "sshUsername": un, "sshPassword": pw, "sni": "", "tlsVersion": "DEFAULT", "httpProxy": "",
                "authenticateProxy": False, "proxyUsername": "", "proxyPassword": "", "payload": "", "dnsTTMode": "UDP",
@@ -4623,7 +4623,7 @@ async def _build_invoice_text(un: str):
             primary_host = acc_host if acc_host else (hl[0] if hl else _hosts_fallback_with_warning())
         # در حالت دامنهٔ ثابت، پورت باید متعلق به IP فعلیِ همان دامنه باشد، نه لزوماً IP اولیهٔ اکانت.
         dns_target = await asyncio.to_thread(_db_get_setting, 'dns_current_ip', '') if public_domain.strip() else ''
-        prt = await asyncio.to_thread(_db_get_host_ssh_port, dns_target.strip() or primary_host, prt)
+        prt = await asyncio.to_thread(_db_get_host_service_port, dns_target.strip() or primary_host, prt)
         mode_line = "🔌 حالت اتصال: مستقیم\n"
     rem_str = get_remaining_days(exp)
     hold_active, _hd, hold_days = await asyncio.to_thread(_db_get_hold_info, un)
@@ -7036,7 +7036,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # ۴. آپدیت iptables روی Edge فعال
             tls_port = await asyncio.to_thread(_db_get_setting, 'tls_port', '2088')
-            port_map = await asyncio.to_thread(_db_get_host_ssh_port_map)
+            port_map = await asyncio.to_thread(_db_get_host_admin_ssh_port_map)
             ssh_port = port_map.get(active_edge_ip, 22)
             
             try:
@@ -8010,7 +8010,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try: await update.message.delete()
         except: pass
         target_ip = context.user_data.get('srv_target_ip')
-        target_port = await asyncio.to_thread(_db_get_host_ssh_port, target_ip, 22)
+        target_port = await asyncio.to_thread(_db_get_host_admin_ssh_port, target_ip, 22)
         safe_clear_context(context)
         if paramiko is None:
             await update.message.reply_text("❌ کتابخانهٔ paramiko روی Core نصب نیست.")
@@ -8111,19 +8111,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 ok, detail = await _change_remote_ssh_port(target_host, current_port, new_port, root_password)
                 if ok:
-                    await asyncio.to_thread(_db_set_host_ssh_port, target_host, new_port)
-                    core_ip = await asyncio.to_thread(_get_core_public_ip_cached)
-                    is_default = await asyncio.to_thread(_db_is_default_host, target_host)
-                    # تنظیم سراسری فقط fallback/سازگاری است؛ برای Core یا IP پیش‌فرض همگام نگه داشته می‌شود.
-                    if target_host == core_ip or is_default:
-                        await asyncio.to_thread(_db_update_setting, 'port', str(new_port))
-                    reply = InlineKeyboardMarkup([[InlineKeyboardButton('🔌 مشاهدهٔ همهٔ پورت‌ها', callback_data='srv_port')]])
+                    await asyncio.to_thread(_db_set_host_admin_ssh_port, target_host, new_port)
+                    reply = InlineKeyboardMarkup([[InlineKeyboardButton('🔌 مشاهدهٔ پورت‌های مدیریت', callback_data='srv_port')]])
                     await context.bot.edit_message_text(
-                        f"✅ <b>پورت SSH واقعاً تغییر کرد.</b>\n\n"
+                        f"✅ <b>پورت مدیریت SSH واقعاً تغییر کرد.</b>\n\n"
                         f"IP: <code>{esc(target_host)}</code>\n"
-                        f"پورت جدید: <code>{new_port}</code>\n\n"
+                        f"پورت مدیریت جدید: <code>{new_port}</code>\n\n"
                         f"{esc(detail)}\n\n"
-                        "از این پس فاکتورها و کدهای اتصال مستقیمِ این IP پورت جدید را می‌گیرند.",
+                        "پورت سرویس مشتری تغییر نکرده است.",
                         chat_id=chat_id, message_id=progress.message_id, parse_mode='HTML', reply_markup=reply)
                 else:
                     reply = InlineKeyboardMarkup([[InlineKeyboardButton('🔙 بازگشت به پورت‌ها', callback_data='srv_port')]])
@@ -8463,7 +8458,9 @@ async def _render_udpgw_panel(query):
 async def _render_host_pool_panel(query):
     await asyncio.to_thread(_db_sync_host_pool)
     pool = await asyncio.to_thread(_db_get_host_pool)
-    port_map = await asyncio.to_thread(_db_get_host_ssh_port_map)
+    service_port_map = await asyncio.to_thread(_db_get_host_service_port_map)
+    admin_port_map = await asyncio.to_thread(_db_get_host_admin_ssh_port_map)
+    port_health = await asyncio.to_thread(_db_get_host_port_health_map)
     fastest_host = await asyncio.to_thread(_db_get_fastest_active_host)
     lines = []
     kb = []
@@ -8475,9 +8472,18 @@ async def _render_host_pool_panel(query):
         # می‌شود؛ سریع‌ترین IP فعال هم با 🏆 مشخص می‌شود تا مقایسه با چشم هم ساده باشد.
         trophy = " 🏆" if (active and host == fastest_host) else ""
         latency_txt = f" — ⚡ {avg_latency_ms:.0f}ms{trophy}" if (active and avg_latency_ms is not None) else ""
-        host_port = port_map.get(host, 22)
-        line = f"{icon} <code>{esc(host)}:{host_port}</code>{star}{standby_badge}{latency_txt} — {esc(last_status or 'بررسی‌نشده')}"
-        if last_check: line += f"\n   ⏱ آخرین بررسی: {esc(last_check)}"
+        service_port = service_port_map.get(host, 22)
+        admin_port = admin_port_map.get(host, 22)
+        ph = port_health.get(host, {})
+        service_status = ph.get("service_last_status") or last_status or "بررسی‌نشده"
+        admin_status = ph.get("admin_last_status") or "بررسی‌نشده"
+        line = (
+            f"{icon} <code>{esc(host)}</code>{star}{standby_badge}{latency_txt}\n"
+            f"   🌐 Service <code>{service_port}</code> — {esc(service_status)}\n"
+            f"   🔐 Admin SSH <code>{admin_port}</code> — {esc(admin_status)}"
+        )
+        if last_check: line += f"\n   ⏱ آخرین Service check: {esc(last_check)}"
+        if ph.get("admin_last_check"): line += f"\n   ⏱ آخرین Admin check: {esc(ph['admin_last_check'])}"
         if not active and disabled_reason: line += f"\n   🚫 غیرفعال از: {esc(disabled_at)} ({esc(disabled_reason)})"
         # 🆕 اگر هنوز داخل دورهٔ مهلت تازه‌افزوده‌شدن است، همین‌جا شفاف نشان می‌دهیم — وگرنه
         # «بررسی‌نشده» تنها می‌تواند گیج‌کننده باشد (چرا هنوز تست نشده؟).
@@ -8575,7 +8581,8 @@ async def _render_server_status_panel(query, context):
     core_ip = await asyncio.to_thread(_get_core_public_ip_cached)
     await asyncio.to_thread(_db_sync_host_pool)
     pool = await asyncio.to_thread(_db_get_host_pool)
-    port_map = await asyncio.to_thread(_db_get_host_ssh_port_map)
+    service_port_map = await asyncio.to_thread(_db_get_host_service_port_map)
+    admin_port_map = await asyncio.to_thread(_db_get_host_admin_ssh_port_map)
 
     # 🆕 اضافه شدن متغیرهای مربوط به تشخیص Edge فعال (دامنه)
     active_edge_ip = await asyncio.to_thread(_db_get_setting, 'dns_current_ip', '')
@@ -8596,7 +8603,7 @@ async def _render_server_status_panel(query, context):
     lines.append(f"🏠 <b>سرور Core فعلی:</b> <code>{esc(core_ip)}</code>\n")
 
     # چکِ موازیِ وضعیتِ کلیدِ دائمی برای همهٔ Edgeها هم‌زمان
-    edge_hosts = [(host, port_map.get(host, 22)) for host, *_ in pool if host != core_ip]
+    edge_hosts = [(host, admin_port_map.get(host, 22)) for host, *_ in pool if host != core_ip]
     if edge_hosts:
         key_check_results = await asyncio.gather(
             *[_host_has_working_persistent_key(h, p) for h, p in edge_hosts]
@@ -8642,7 +8649,11 @@ async def _render_server_status_panel(query, context):
             kb.append(key_row)
         
         status_icon = "🟢" if active else "🔴"
-        lines.append(f"{status_icon} <code>{esc(host)}:{port_map.get(host, 22)}</code> {role_icon}")
+        lines.append(
+            f"{status_icon} <code>{esc(host)}</code> {role_icon} — "
+            f"Service <code>{service_port_map.get(host, 22)}</code> | "
+            f"Admin <code>{admin_port_map.get(host, 22)}</code>"
+        )
         
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")])
     
@@ -8841,7 +8852,7 @@ async def _run_promote_with_migration(ip, password, cust_port, chat_id, context)
     # بود، اتصال با ۲۲ همیشه شکست می‌خورد — با رمز کاملاً درست، بازم رد می‌شد چون اصلاً پورت
     # درست رو امتحان نمی‌کرد. الان هم ۲۲ (پورت مدیریتیِ استاندارد) هم پورتِ ثبت‌شدهٔ واقعیِ این
     # IP در دیتابیس، هر دو امتحان می‌شن.
-    known_port = await asyncio.to_thread(_db_get_host_ssh_port, ip, 22)
+    known_port = await asyncio.to_thread(_db_get_host_admin_ssh_port, ip, 22)
     candidate_ports = [22] + ([known_port] if known_port != 22 else [])
 
     try:
@@ -9111,7 +9122,7 @@ async def _run_remote_script(ip, password, script_path, args_str, chat_id, conte
             ssh_port = 8443
     else:
         # سازگاری با فراخوانی‌های قدیمی‌تر: پورت ثبت‌شدهٔ همان IP را می‌گیریم، نه یک مقدار سراسری.
-        ssh_port = await asyncio.to_thread(_db_get_host_ssh_port, ip, 8443)
+        ssh_port = await asyncio.to_thread(_db_get_host_admin_ssh_port, ip, 22)
 
     # 🩺🔧 رفع ریشه‌ای کل خانوادهٔ این باگ‌ها: اگر IP هدف دقیقاً همون سروریه که خودِ ربات
     # روش در حال اجراست (مثلاً دکمهٔ «بهینه‌سازی سرعت و شبکه» روی Core خودش)، اصلاً نیازی
@@ -9389,7 +9400,7 @@ async def _change_remote_ssh_port(host, current_port, new_port, root_password):
         # *جدید* از قبل (در یک تلاش قبلی که دیتابیس ربات ازش خبر نداره) واقعاً با موفقیت فعال
         # شده باشه. اگر این‌طور بود، این عملیات را «قبلاً انجام‌شده» در نظر می‌گیریم، نه شکست.
         if _probe_ssh_banner(new_port):
-            await asyncio.to_thread(_db_set_host_ssh_port, host, new_port)
+            await asyncio.to_thread(_db_set_host_admin_ssh_port, host, new_port)
             return True, (f'پورت {new_port} از قبل روی این سرور فعال بود (احتمالاً در یک تلاش قبلی با موفقیت اعمال شده ولی '
                           f'دیتابیس ربات هماهنگ نشده بود). دیتابیس اکنون با پورت {new_port} هماهنگ شد — نیازی به تغییر مجدد نیست.')
         tried = ", ".join(str(p) for p in ([current_port] + [p for p in admin_candidates if p != current_port]))
@@ -9694,24 +9705,33 @@ echo "MANUS_PORT_CHANGE_OK:$BACKUP_DIR"
 
 
 async def _render_ssh_port_panel(query):
-    """پنل تغییر واقعی پورت؛ هر IP با پورت اختصاصی خودش نمایش داده می‌شود."""
+    """Management-plane SSH port editor. Customer service_port is intentionally separate."""
     await asyncio.to_thread(_db_sync_host_pool)
     pool = await asyncio.to_thread(_db_get_host_pool)
-    port_map = await asyncio.to_thread(_db_get_host_ssh_port_map)
+    admin_port_map = await asyncio.to_thread(_db_get_host_admin_ssh_port_map)
+    service_port_map = await asyncio.to_thread(_db_get_host_service_port_map)
     lines, kb = [], []
     for host, active, *_rest in pool:
-        port = port_map.get(host, 22)
+        admin_port = admin_port_map.get(host, 22)
+        service_port = service_port_map.get(host, 22)
         icon = '🟢' if active else '🔴'
-        lines.append(f'{icon} <code>{esc(host)}:{port}</code>')
-        kb.append([InlineKeyboardButton(f'✏️ تغییر پورت — {host}:{port}', callback_data=f'sshport_edit:{host}')])
+        lines.append(
+            f'{icon} <code>{esc(host)}</code> — مدیریت <code>{admin_port}</code> | سرویس <code>{service_port}</code>'
+        )
+        kb.append([
+            InlineKeyboardButton(
+                f'✏️ تغییر SSH مدیریت — {host}:{admin_port}',
+                callback_data=f'sshport_edit:{host}',
+            )
+        ])
     kb.append([InlineKeyboardButton('🔄 بروزرسانی', callback_data='srv_port')])
     kb.append([InlineKeyboardButton('🔙 بازگشت', callback_data='srv_direct_menu')])
     body = '\n'.join(lines) if lines else 'هیچ IPی در استخر ثبت نشده است.'
     await query.edit_message_text(
-        '🔌 <b>تغییر واقعی پورت SSH هر IP</b>\n\n'
+        '🔐 <b>پورت مدیریت SSH هر سرور</b>\n\n'
         f'{body}\n\n'
-        'با زدن «تغییر پورت»، ربات با پورت فعلی به همان سرور متصل می‌شود، تنظیمات sshd و فایروال سیستم‌عامل را تغییر می‌دهد، سپس از پورت جدید اتصال مجدد را آزمایش می‌کند. '
-        'فقط پس از موفقیت این آزمون، پورت تازه در فاکتورها و کد اتصال مشتری ثبت می‌شود.',
+        'این بخش فقط پورت مدیریتی sshd را تغییر می‌دهد. '
+        'پورت سرویس مشتری و فاکتورها مستقل هستند و از این عملیات تغییر نمی‌کنند.',
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
 #--------------------------------------------------------
 
@@ -11638,7 +11658,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # ۳. آپدیت پورت‌ها (NAT) روی سرور Edge انتخاب شده
             tls_port = await asyncio.to_thread(_db_get_setting, 'tls_port', '2088')
-            port_map = await asyncio.to_thread(_db_get_host_ssh_port_map)
+            port_map = await asyncio.to_thread(_db_get_host_admin_ssh_port_map)
             ssh_port = port_map.get(target_ip, 22)
             
             try:
@@ -11958,11 +11978,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d == "srv_ssh_diag" and role == 'admin':
         await query.edit_message_text("⏳ در حال بررسی پورت واقعی sshd و مقایسه با تنظیمات ربات...")
 
-        configured_port_raw = await asyncio.to_thread(_db_get_setting, 'port', '2252')
-        try:
-            configured_port = int(configured_port_raw)
-        except (TypeError, ValueError):
-            configured_port = None
+        _diag_core_ip = await asyncio.to_thread(_get_core_public_ip_cached)
+        configured_port = (
+            await asyncio.to_thread(_db_get_host_admin_ssh_port, _diag_core_ip, 22)
+            if _diag_core_ip else 22
+        )
 
         # چک محلی (subprocess مستقیم، بدون SSH — چون خودِ ربات همین الان روی همین سرور اجرا
         # می‌شود) که واقعاً sshd/dropbear الان روی چه پورت‌ها و روی چه آدرسی (0.0.0.0 یا فقط
@@ -12014,12 +12034,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not new_port.isdigit():
             await query.edit_message_text("❌ مقدار پورت نامعتبر است.")
             return
-        await asyncio.to_thread(_db_update_setting, 'port', new_port)
         _diag_core_ip = await asyncio.to_thread(_get_core_public_ip_cached)
         if _diag_core_ip:
-            await asyncio.to_thread(_db_set_host_ssh_port, _diag_core_ip, new_port)
+            await asyncio.to_thread(_db_set_host_admin_ssh_port, _diag_core_ip, new_port)
         await query.edit_message_text(
-            f"✅ تنظیمات ربات به‌روزرسانی شد — پورت SSH الان روی <code>{esc(new_port)}</code> ثبت شده (مطابق با چیزی که sshd واقعاً رویش گوش می‌دهد).",
+            f"✅ پورت مدیریت SSH روی <code>{esc(new_port)}</code> ثبت شد. پورت سرویس مشتری بدون تغییر باقی ماند.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🩹 بررسی دوباره", callback_data="srv_ssh_diag")],
                                                  [InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")]]))
@@ -12084,7 +12103,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not target_host or not await asyncio.to_thread(_db_host_exists, target_host):
             await query.answer('این IP دیگر در استخر نیست.', show_alert=True)
             return
-        current_port = await asyncio.to_thread(_db_get_host_ssh_port, target_host, 22)
+        current_port = await asyncio.to_thread(_db_get_host_admin_ssh_port, target_host, 22)
         context.user_data['ssh_port_target_host'] = target_host
         context.user_data['ssh_port_current'] = current_port
         context.user_data['state'] = 'SSH_PORT_NEW_INPUT'
@@ -15742,7 +15761,7 @@ async def _activate_standby_for_filtered_edge(app, filtered_host: str, target_ho
             return
         target_host = standbys[0]
 
-    target_port = await asyncio.to_thread(_db_get_host_ssh_port, target_host, 22)
+    target_port = await asyncio.to_thread(_db_get_host_admin_ssh_port, target_host, 22)
     if not os.path.exists(STANDBY_SCRIPT_PATH):
         await _notify_admins(app,
             f"❌ اسکریپتِ promote_standby_for_filtered_edge.py کنارِ خودِ بات پیدا نشد "

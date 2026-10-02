@@ -2378,10 +2378,32 @@ def _db_commit_failover_account_state(
     *,
     previous_default_host=None,
 ):
-    """Atomically move the scoped account set and, only if needed, the default host."""
+    """Atomically revalidate and move the exact rebuilt source account set."""
     usernames = list(dict.fromkeys(str(u) for u in usernames))
     with db_conn() as conn:
+        # BEGIN IMMEDIATE serializes the final snapshot check with the ownership/default
+        # mutation. This closes the helper-snapshot -> DB-commit race.
         conn.execute("BEGIN IMMEDIATE")
+        current_usernames = [
+            row[0]
+            for row in conn.execute(
+                "SELECT username FROM ssh_accounts "
+                "WHERE (host=? OR host IS NULL OR host='') AND service_type='ssh' "
+                "AND status LIKE '%فعال%' AND status NOT LIKE '%غیر%' "
+                "ORDER BY username",
+                (source_host,),
+            ).fetchall()
+        ]
+        expected_usernames = sorted(usernames)
+        if current_usernames != expected_usernames:
+            added = sorted(set(current_usernames) - set(expected_usernames))
+            removed = sorted(set(expected_usernames) - set(current_usernames))
+            raise RuntimeError(
+                "SOURCE_ACCOUNT_SET_CHANGED:"
+                f"expected={len(expected_usernames)} current={len(current_usernames)} "
+                f"added={added[:10]} removed={removed[:10]}"
+            )
+
         moved = 0
         for username in usernames:
             cur = conn.execute(
@@ -2527,6 +2549,26 @@ def _db_get_latest_failover_operation():
             "FROM failover_operations ORDER BY id DESC LIMIT 1"
         ).fetchone()
     return row
+
+
+def _db_running_failover_id(conn):
+    """Return the active Phase 6G operation id, if the schema is available."""
+    try:
+        row = conn.execute(
+            "SELECT id FROM failover_operations WHERE status=? ORDER BY id DESC LIMIT 1",
+            (FAILOVER_STATUS_RUNNING,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # Compatibility for narrow unit-test/legacy DB schemas before init_db migration.
+        return None
+    return int(row[0]) if row else None
+
+
+def _db_assert_account_write_allowed(conn):
+    """Freeze SSH ownership/finalization writes while a manual failover is RUNNING."""
+    operation_id = _db_running_failover_id(conn)
+    if operation_id is not None:
+        raise RuntimeError(f"FAILOVER_WRITE_LOCKED:{operation_id}")
 
 
 def _pick_target_host_for_new_account():
@@ -3315,11 +3357,25 @@ def _db_set_subscription_name(un, value):
     return normalized
 
 def _db_set_account_host(un, host):
-    with db_conn() as conn: conn.execute("UPDATE ssh_accounts SET host=? WHERE username=?", (host, un))
+    with db_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _db_assert_account_write_allowed(conn)
+        conn.execute("UPDATE ssh_accounts SET host=? WHERE username=?", (host, un))
+
 def _db_set_hosts_bulk(usernames, host):
-    with db_conn() as conn: conn.executemany("UPDATE ssh_accounts SET host=? WHERE username=?", [(host, u) for u in usernames])
+    with db_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _db_assert_account_write_allowed(conn)
+        conn.executemany(
+            "UPDATE ssh_accounts SET host=? WHERE username=?",
+            [(host, u) for u in usernames],
+        )
+
 def _db_set_all_accounts_host(host):
-    with db_conn() as conn: conn.execute("UPDATE ssh_accounts SET host=? WHERE status != '⏳ درحال ساخت'", (host,))
+    with db_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _db_assert_account_write_allowed(conn)
+        conn.execute("UPDATE ssh_accounts SET host=? WHERE status != '⏳ درحال ساخت'", (host,))
 def _db_get_recent_active_accounts(days=7):
     """اکانت‌های فعالی که در N روز اخیر ساخته شده‌اند (برای انتقال خودکار هنگام فشار سرور)."""
     w = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -3503,17 +3559,29 @@ def _db_cancel_reservation(un: str):
     with db_conn() as conn:
         conn.execute("DELETE FROM ssh_accounts WHERE username=? AND status='⏳ درحال ساخت'", (un,))
 
-def _db_finalize_reserved_user(un, pw, exp, cr, lim, cnt, br, agid=0, conn_mode='direct', hold_deadline=None, hold_duration_days=None):
-    """ردیف رزروشده را با اطلاعات نهایی اکانت (و حالت اتصال انتخاب‌شده) تکمیل و شمارندهٔ
-    اختصاصی همان پیشوند/برند را آپدیت می‌کند.
-    🆕 اگر hold_deadline مقدار داشته باشد، اکانت در حالت «آنهولد» ثبت می‌شود (شمارش انقضای واقعی
-    هنوز شروع نشده) و exp در این حالت فقط یک مقدار موقت (پایان مهلت آنهولد) است، نه انقضای واقعی."""
+def _db_finalize_reserved_user(un, pw, exp, cr, lim, cnt, br, agid=0, conn_mode='direct', hold_deadline=None, hold_duration_days=None, host=None):
+    """Finalize one reserved SSH account atomically with its owning Edge.
+
+    Phase 6G forbids this transition while a manual failover is RUNNING so an
+    account cannot become active between the rebuild snapshot and final handoff.
+    """
+    if not host:
+        raise RuntimeError("SSH_ACCOUNT_HOST_REQUIRED")
     with db_conn() as conn:
-        conn.execute(
-            "UPDATE ssh_accounts SET password=?, expire_date=?, creation_date=?, users_limit=?, status='🟢 فعال', agent_id=?, conn_mode=?, "
-            "hold_active=?, hold_deadline=?, hold_duration_days=? "
-            "WHERE username=?",
-            (pw, exp, cr, lim, agid, conn_mode, 1 if hold_deadline else 0, hold_deadline, hold_duration_days, un))
+        conn.execute("BEGIN IMMEDIATE")
+        _db_assert_account_write_allowed(conn)
+        cur = conn.execute(
+            "UPDATE ssh_accounts SET password=?, expire_date=?, creation_date=?, users_limit=?, status='🟢 فعال', "
+            "agent_id=?, conn_mode=?, hold_active=?, hold_deadline=?, hold_duration_days=?, host=? "
+            "WHERE username=? AND status='⏳ درحال ساخت'",
+            (
+                pw, exp, cr, lim, agid, conn_mode,
+                1 if hold_deadline else 0, hold_deadline, hold_duration_days,
+                host, un,
+            ),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError(f"SSH_RESERVATION_FINALIZE_MISMATCH:{un}")
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (f"counter_{br}", cnt))
 def _db_finalize_v2ray_user(un, pw, exp, cr, lim, cnt, br, agid, data_limit, sub_url, hold_deadline, hold_duration_days):
     with db_conn() as conn:
@@ -7700,8 +7768,7 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
 
             # گام ۴: تکمیل نهایی رکورد دیتابیس
             try:
-                await asyncio.to_thread(_db_finalize_reserved_user, un, pw, exp_db, cr_db, u, str(c + 1).zfill(4), br, ag_id, chosen_conn_mode, hold_sched.hold_deadline, exp_days)
-                await asyncio.to_thread(_db_set_account_host, un, target_host)  # 🆕 ثبتِ Edgeِ صاحبِ این اکانت
+                await asyncio.to_thread(_db_finalize_reserved_user, un, pw, exp_db, cr_db, u, str(c + 1).zfill(4), br, ag_id, chosen_conn_mode, hold_sched.hold_deadline, exp_days, target_host)
             except Exception:
                 log.exception("خطا در ثبت نهایی اکانت bulk %s در دیتابیس؛ کاربر لینوکسی حذف می‌شود (Rollback).", un)
                 await run_cmd("sudo", "userdel", "-f", un)
@@ -15076,8 +15143,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # گام ۴: تکمیل نهایی رکورد دیتابیس (فقط پس از موفقیت کامل مراحل لینوکسی)
             try:
-                await asyncio.to_thread(_db_finalize_reserved_user, un, pw, exp_db, cr_db, u, str(c + 1).zfill(4), br, ag_id, chosen_conn_mode, hold_deadline_db, exp_days)
-                await asyncio.to_thread(_db_set_account_host, un, target_host)  # 🆕 ثبتِ Edgeِ صاحبِ این اکانت
+                await asyncio.to_thread(_db_finalize_reserved_user, un, pw, exp_db, cr_db, u, str(c + 1).zfill(4), br, ag_id, chosen_conn_mode, hold_deadline_db, exp_days, target_host)
             except Exception:
                 log.exception("خطا در ثبت نهایی اکانت %s در دیتابیس؛ کاربر لینوکسی حذف می‌شود (Rollback).", un)
                 await run_cmd("sudo", "userdel", "-f", un)
@@ -16131,6 +16197,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # اعمال تغییرات در دیتابیس
         def _apply_distribution():
             with db_conn() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                _db_assert_account_write_allowed(conn)
                 for username, host in assignments.items():
                     conn.execute("UPDATE ssh_accounts SET host=? WHERE username=?", (host, username))
         await asyncio.to_thread(_apply_distribution)
@@ -17466,6 +17534,8 @@ async def _safe_manual_failover(app, source_host: str, target_host: str):
 
     preflight = None
     db_committed = False
+    final_dns_started = False
+    target_route_active = False
     accounts = []
     previous_default_host = None
     core_public_ip = None
@@ -17595,8 +17665,43 @@ async def _safe_manual_failover(app, source_host: str, target_host: str):
         )
 
         # Step 5: final customer route to Standby.
+        # A failed multi-record Cloudflare update may already have changed the public
+        # A record. Never roll DB ownership back until Core routing is re-established.
+        final_dns_started = True
         dns_ok, dns_msg = await _cf_switch_public_domain(target_host, app=None)
+        target_route_active = bool(dns_ok)
         if not dns_ok:
+            core_restore_ok, core_restore_msg = await _cf_switch_public_domain(core_public_ip, app=None)
+            if not core_restore_ok:
+                await asyncio.to_thread(
+                    _db_update_failover_operation,
+                    operation_id,
+                    status=FAILOVER_STATUS_FAILED,
+                    error=(
+                        f"FINAL_DNS_FAILED_AND_CORE_RESTORE_FAILED:{dns_msg}; "
+                        f"core={core_restore_msg}"
+                    )[:1000],
+                    detail={
+                        "phase": "ROUTE_RECOVERY_FAILED",
+                        "dns_error": dns_msg,
+                        "core_restore_error": core_restore_msg,
+                        "db_state_retained": "target",
+                    },
+                    finished=True,
+                )
+                await _notify_admins(
+                    app,
+                    "🚨 <b>Failover نیازمند بررسی فوری است.</b>\n"
+                    "سوییچ نهایی DNS شکست خورد و بازگردانی مسیر به Core هم تأیید نشد.\n"
+                    f"Operation: <code>{operation_id}</code>\n"
+                    "برای جلوگیری از split-brain، DB/default روی Target نگه داشته شد."
+                )
+                return {
+                    "ok": False,
+                    "reason": "FINAL_DNS_FAILED_CORE_RESTORE_FAILED",
+                    "operation_id": operation_id,
+                }
+
             try:
                 await asyncio.to_thread(
                     _db_rollback_failover_account_state,
@@ -17615,6 +17720,7 @@ async def _safe_manual_failover(app, source_host: str, target_host: str):
                     detail={
                         "phase": "ROLLBACK_FAILED",
                         "dns_error": dns_msg,
+                        "core_restore": core_restore_msg,
                         "rollback_error": str(rollback_exc),
                     },
                     finished=True,
@@ -17622,9 +17728,8 @@ async def _safe_manual_failover(app, source_host: str, target_host: str):
                 await _notify_admins(
                     app,
                     "🚨 <b>Failover نیازمند بررسی فوری است.</b>\n"
-                    "سوییچ نهایی DNS شکست خورد و rollback دیتابیس هم کامل نشد.\n"
-                    f"Operation: <code>{operation_id}</code>\n"
-                    f"DNS همچنان باید روی Core بررسی شود."
+                    "مسیر به Core برگشت، اما rollback دیتابیس کامل نشد.\n"
+                    f"Operation: <code>{operation_id}</code>"
                 )
                 return {"ok": False, "reason": "ROLLBACK_FAILED", "operation_id": operation_id}
 
@@ -17636,17 +17741,18 @@ async def _safe_manual_failover(app, source_host: str, target_host: str):
                 detail={
                     "phase": "ROLLED_BACK",
                     "dns_error": dns_msg,
+                    "core_restore": core_restore_msg,
                     "safe_route": core_public_ip,
                 },
                 finished=True,
             )
             await _notify_admins(
                 app,
-                "⚠️ <b>Failover نهایی نشد؛ DB rollback شد.</b>\n\n"
+                "⚠️ <b>Failover نهایی نشد؛ مسیر و DB rollback شدند.</b>\n\n"
                 f"Source: <code>{esc(source_host)}</code>\n"
                 f"Target: <code>{esc(target_host)}</code>\n"
                 f"Operation: <code>{operation_id}</code>\n"
-                "اکانت‌ها/default به state قبل برگشتند و دامنه روی Core fallback باقی مانده است.\n"
+                "دامنه روی Core fallback تأیید شد و اکانت‌ها/default به state قبل برگشتند.\n"
                 f"DNS error: <code>{esc(dns_msg)}</code>"
             )
             return {"ok": False, "reason": "FINAL_DNS_FAILED_ROLLED_BACK", "operation_id": operation_id}
@@ -17687,30 +17793,52 @@ async def _safe_manual_failover(app, source_host: str, target_host: str):
         }
 
     except Exception as exc:
-        # If scoped DB state was committed but an unexpected exception happened
-        # before final success, restore it. DNS is intentionally left on Core fallback.
+        # After DB commit, rollback is allowed only when routing is known to be on
+        # Core. If the final Target handoff succeeded, retain the committed Target
+        # ownership instead of creating a DNS/DB split-brain.
         rollback_error = None
+        route_recovery_error = None
+        retained_target_state = False
         if db_committed and accounts:
-            try:
-                await asyncio.to_thread(
-                    _db_rollback_failover_account_state,
-                    accounts,
-                    source_host,
-                    target_host,
-                    previous_default_host=previous_default_host,
-                )
-                db_committed = False
-            except Exception as rb_exc:
-                rollback_error = str(rb_exc)
+            if target_route_active:
+                retained_target_state = True
+            else:
+                if final_dns_started and core_public_ip:
+                    try:
+                        core_ok, core_msg = await _cf_switch_public_domain(core_public_ip, app=None)
+                        if not core_ok:
+                            route_recovery_error = str(core_msg)
+                    except Exception as route_exc:
+                        route_recovery_error = str(route_exc)
 
-        final_status = FAILOVER_STATUS_FAILED if rollback_error else (
+                if route_recovery_error is None:
+                    try:
+                        await asyncio.to_thread(
+                            _db_rollback_failover_account_state,
+                            accounts,
+                            source_host,
+                            target_host,
+                            previous_default_host=previous_default_host,
+                        )
+                        db_committed = False
+                    except Exception as rb_exc:
+                        rollback_error = str(rb_exc)
+                else:
+                    retained_target_state = True
+
+        final_status = FAILOVER_STATUS_FAILED if (
+            rollback_error or route_recovery_error or retained_target_state
+        ) else (
             FAILOVER_STATUS_ROLLED_BACK if preflight and preflight.get("ok") else FAILOVER_STATUS_FAILED
         )
         detail = {
             "phase": "EXCEPTION",
             "error": str(exc),
             "db_rollback_error": rollback_error,
-            "safe_route": core_public_ip,
+            "route_recovery_error": route_recovery_error,
+            "target_route_active": target_route_active,
+            "db_state_retained": "target" if retained_target_state else None,
+            "safe_route": core_public_ip if not retained_target_state else None,
         }
         await asyncio.to_thread(
             _db_update_failover_operation,
@@ -17730,12 +17858,24 @@ async def _safe_manual_failover(app, source_host: str, target_host: str):
             + (
                 f"🚨 DB rollback error: <code>{esc(rollback_error)}</code>\n"
                 if rollback_error else
-                "✅ DB در state قبلی است.\n"
+                (
+                    "⚠️ DB/default روی Target نگه داشته شد تا با مسیر نهایی ناسازگار نشود.\n"
+                    if retained_target_state else
+                    "✅ DB در state قبلی است.\n"
+                )
             )
             + (
-                f"🛟 مسیر امن فعلی: Core <code>{esc(core_public_ip)}</code>"
-                if core_public_ip else
-                "⚠️ وضعیت DNS/Core باید دستی بررسی شود."
+                f"🚨 Core route recovery error: <code>{esc(route_recovery_error)}</code>"
+                if route_recovery_error else
+                (
+                    f"✅ مسیر Target فعال باقی مانده است: <code>{esc(target_host)}</code>"
+                    if retained_target_state and target_route_active else
+                    (
+                        f"🛟 مسیر امن فعلی: Core <code>{esc(core_public_ip)}</code>"
+                        if core_public_ip else
+                        "⚠️ وضعیت DNS/Core باید دستی بررسی شود."
+                    )
+                )
             )
         )
         return {"ok": False, "reason": "FAILOVER_EXCEPTION", "operation_id": operation_id, "error": str(exc)}

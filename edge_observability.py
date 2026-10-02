@@ -110,8 +110,13 @@ def derive_observability(
         # evidence, an unrelated WG/Core failure, or a single successful regional
         # check. Only the explicit recovery condition above clears it.
         if sticky_confirmed_filter and suspected is not True:
+            sticky_diagnostic = (
+                DIAG_FILTER_SUSPECTED
+                if diagnostic in {DIAG_ALL_PATHS_HEALTHY, DIAG_ADMIN_ONLY_FAILURE}
+                else diagnostic
+            )
             return ObservabilityDecision(
-                diagnostic,
+                sticky_diagnostic,
                 True,
                 FILTER_CONFIDENCE_LOW,
                 FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,

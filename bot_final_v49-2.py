@@ -6529,7 +6529,7 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
         # Edge فقط endpoint عمومی این دسته است؛ Linux userها در توپولوژی Relay روی Core ساخته می‌شوند.
         # همهٔ اکانت‌های همین دسته یک endpoint مشترک می‌گیرند تا خروجی/مدیریت آن‌ها یکدست بماند.
         target_host = await asyncio.to_thread(_pick_target_host_for_new_account)
-        target_port = await asyncio.to_thread(_db_get_host_ssh_port, target_host, 22)
+        target_port = await asyncio.to_thread(_db_get_host_service_port, target_host, 22)
 
         for i in range(count):
             # گام ۱: رزرو اتمیک یوزرنیم
@@ -8139,7 +8139,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not pv.isdigit() or not (1 <= int(pv) <= 65535):
             await update.message.reply_text("❌ پورت باید یک عدد بین 1 تا 65535 باشد. دوباره بفرستید:"); return
         await asyncio.to_thread(_db_update_setting, 'port', pv)
-        await update.message.reply_text(f"✅ پورت پیش‌فرض به {esc(pv)} تغییر یافت. برای تغییر واقعیِ هر سرور از پنل «تغییر پورت» استفاده کنید.", parse_mode="HTML")
+        await update.message.reply_text(f"✅ پورت پیش‌فرض سرویس مشتری به {esc(pv)} تغییر یافت. پورت مدیریت SSH مستقل است.", parse_mode="HTML")
         safe_clear_context(context); await show_main_menu(update, context)
     # 🆕 ورودی دامنه/پورت سرور TLS به‌صورت «دامنه:پورت» — هر دو مقدار با هم ذخیره می‌شوند تا هرگز
     # یکی به‌روز و دیگری قدیمی نماند.
@@ -13638,7 +13638,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # endpoint عمومی این اکانت یک‌بار انتخاب می‌شود؛ عملیات Linux در توپولوژی Relay
             # روی Core انجام می‌شود و target_host فقط برای routing/invoice metadata باقی می‌ماند.
             target_host = await asyncio.to_thread(_pick_target_host_for_new_account)
-            target_port = await asyncio.to_thread(_db_get_host_ssh_port, target_host, 22)
+            target_port = await asyncio.to_thread(_db_get_host_service_port, target_host, 22)
             while await _os_user_exists(un, target_host, target_port) and os_retries < MAX_OS_RETRIES:
                 await asyncio.to_thread(_db_cancel_reservation, un)
                 un, c = await asyncio.to_thread(_db_reserve_username, br, c + 1)
@@ -14127,44 +14127,46 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d.startswith("hpact_") and role == 'admin':
         host = d[len("hpact_"):]
-        stored_port = await asyncio.to_thread(_db_get_host_ssh_port, host, 22)
-        await query.answer("⏳ در حال تست اتصال...", show_alert=False)
+        service_port = await asyncio.to_thread(_db_get_host_service_port, host, 22)
+        admin_port = await asyncio.to_thread(_db_get_host_admin_ssh_port, host, 22)
+        await query.answer("⏳ در حال تست Service و Admin...", show_alert=False)
 
-        # 🐛🔧 رفع باگ: قبلاً این تست فقط دقیقاً همون پورتِ ذخیره‌شده در دیتابیس رو امتحان
-        # می‌کرد. اگه پورت واقعیِ سرور (مثلاً بعد از یک تغییر دستی یا یک «تغییر پورت» که موفق
-        # شده ولی دیتابیس رو هماهنگ نکرده بود) با مقدار ذخیره‌شده فرق داشت، این تست همیشه شکست
-        # می‌خورد و دکمه هیچ‌وقت IP رو فعال نمی‌کرد — حتی وقتی سرور کاملاً سالم و در دسترس بود.
-        # الان اگه پورت ذخیره‌شده جواب نداد، پورت پیش‌فرض ۲۲ و پورت سراسریِ ربات رو هم امتحان
-        # می‌کنه؛ اگه هرکدوم جواب داد، هم IP رو فعال می‌کنه هم دیتابیس رو با پورت واقعی هماهنگ.
-        global_port = _normalize_ssh_port(await asyncio.to_thread(_db_get_setting, 'port', '2252'), 8443)
-        candidate_ports = [stored_port] + [p for p in (22, global_port) if p != stored_port]
-
-        working_port = None
-        last_err = None
         t0 = time.monotonic()
-        for cp in candidate_ports:
-            ok, err = await _tcp_health_check(host, cp)
-            if ok:
-                working_port = cp
-                break
-            last_err = err
+        service_ok, service_err = await _tcp_health_check(host, service_port)
+        if service_ok:
+            await asyncio.to_thread(
+                _db_record_host_latency, host, (time.monotonic() - t0) * 1000
+            )
+        await asyncio.to_thread(_db_record_host_check, host, service_ok, service_err)
 
-        if working_port is not None:
-            await asyncio.to_thread(_db_record_host_latency, host, (time.monotonic() - t0) * 1000)
+        admin_ok, admin_err = await _check_ssh_reachable(host, admin_port)
+        await asyncio.to_thread(_db_record_admin_host_check, host, admin_ok, admin_err)
+
+        if service_ok:
             await asyncio.to_thread(_db_set_host_active, host, True)
-            if working_port != stored_port:
-                await asyncio.to_thread(_db_set_host_ssh_port, host, working_port)
-                await asyncio.to_thread(_db_rebuild_hosts_from_pool)
-                await query.message.reply_text(
-                    f"✅ {host} سالم است و دوباره فعال شد.\n"
-                    f"⚠️ توجه: پورت واقعی <code>{working_port}</code> بود، نه <code>{stored_port}</code> که در دیتابیس ثبت شده بود — "
-                    f"دیتابیس خودکار هماهنگ شد.", parse_mode="HTML")
-            else:
-                await asyncio.to_thread(_db_rebuild_hosts_from_pool)
-                await query.message.reply_text(f"✅ {host} سالم است و دوباره فعال شد.")
+            await asyncio.to_thread(_db_rebuild_hosts_from_pool)
+            admin_txt = (
+                f"✅ Admin SSH <code>{admin_port}</code> سالم است."
+                if admin_ok else
+                f"⚠️ Service سالم است، اما Admin SSH <code>{admin_port}</code> پاسخ صحیح نداد: "
+                f"<code>{esc(admin_err)}</code>"
+            )
+            await query.message.reply_text(
+                f"✅ Service <code>{esc(host)}:{service_port}</code> سالم است و Edge دوباره فعال شد.\n"
+                f"{admin_txt}",
+                parse_mode="HTML",
+            )
         else:
-            tried = ", ".join(str(p) for p in candidate_ports)
-            await query.message.reply_text(f"❌ همچنان پاسخ نمی‌دهد (پورت‌های امتحان‌شده: {tried}): {last_err}")
+            admin_txt = (
+                f"Admin SSH <code>{admin_port}</code>: ✅ سالم"
+                if admin_ok else
+                f"Admin SSH <code>{admin_port}</code>: ❌ {esc(admin_err)}"
+            )
+            await query.message.reply_text(
+                f"❌ Service <code>{esc(host)}:{service_port}</code> هنوز پاسخ نمی‌دهد: "
+                f"<code>{esc(service_err)}</code>\n{admin_txt}",
+                parse_mode="HTML",
+            )
         await _render_host_pool_panel(query)
 
     elif d.startswith("hpdelconfirm_") and role == 'admin':
@@ -14291,12 +14293,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # قطع‌شدن کاربران واقعی می‌شود (چون host همهٔ اکانت‌های موجود را عوض می‌کند)، پس حتی اگر
         # مرحلهٔ «پیش‌فرض‌کردن» زودتر رد شده باشد، اینجا هم دوباره و مستقل چک می‌کنیم — چون ممکن
         # است بین آن مرحله و این تایید نهایی، فاصله زمانی افتاده و وضعیت IP عوض شده باشد.
-        port_to_check = await asyncio.to_thread(_db_get_host_ssh_port, host, 22)
+        port_to_check = await asyncio.to_thread(_db_get_host_service_port, host, 22)
         reachable, reach_detail = await _check_ssh_reachable(host, port_to_check)
         if not reachable:
             await query.message.reply_text(
                 f"⛔️ <b>انتقال انجام نشد.</b>\n\n"
-                f"دوباره یک اتصال SSH واقعی به <code>{esc(host)}:{port_to_check}</code> امتحان شد و جواب نداد:\n"
+                f"دوباره سرویس مشتری روی <code>{esc(host)}:{port_to_check}</code> امتحان شد و جواب نداد:\n"
                 f"<code>{esc(reach_detail)}</code>\n\n"
                 f"اگر همهٔ کاربران به این IP منتقل می‌شدند، دقیقاً همه قطع می‌شدند — برای همین این عملیات متوقف شد.",
                 parse_mode="HTML")
@@ -14306,7 +14308,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cf_ok, cf_msg = await _update_cloudflare_dns(host)
         cf_suffix = f"\n\n☁️ <b>وضعیت کلودفلر:</b> {cf_msg}" if cf_ok else f"\n\n⚠️ <b>هشدار کلودفلر:</b> {cf_msg}"
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به سرویس IP", callback_data="ipsvc_menu")]])
-        await query.edit_message_text(f"✅ اتصال SSH زنده تأیید شد و هاستِ همهٔ اکانت‌های موجود به <code>{esc(host)}</code> منتقل شد." + cf_suffix, reply_markup=kb, parse_mode="HTML")
+        await query.edit_message_text(f"✅ سرویس مشتری زنده تأیید شد و هاستِ همهٔ اکانت‌های موجود به <code>{esc(host)}</code> منتقل شد." + cf_suffix, reply_markup=kb, parse_mode="HTML")
 
     elif d.startswith("hpdef_") and role == 'admin':
         host = d[len("hpdef_"):]
@@ -14319,12 +14321,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # همان مشکلی که با ssh.socket پیش آمد: پورت توی دیتابیس یک چیز بود، پورت واقعی گوش‌داده‌شده
         # چیز دیگر). نتیجه: انتقال کور به یک IP که واقعاً آماده نیست و قطعی کامل کاربران. الان قبل
         # از هرچیز، با یک چک سبک (بدون نیاز به رمز) مطمئن می‌شویم واقعاً یک SSH زنده آن‌جا هست.
-        port_to_check = await asyncio.to_thread(_db_get_host_ssh_port, host, 22)
+        port_to_check = await asyncio.to_thread(_db_get_host_service_port, host, 22)
         reachable, reach_detail = await _check_ssh_reachable(host, port_to_check)
         if not reachable:
             await query.message.reply_text(
                 f"⛔️ <b>پیش‌فرض نشد.</b>\n\n"
-                f"قبل از پیش‌فرض‌کردن، یک اتصال SSH واقعی به <code>{esc(host)}:{port_to_check}</code> امتحان شد و جواب نداد:\n"
+                f"قبل از پیش‌فرض‌کردن، سرویس مشتری روی <code>{esc(host)}:{port_to_check}</code> امتحان شد و جواب نداد:\n"
                 f"<code>{esc(reach_detail)}</code>\n\n"
                 f"اگر این IP تازه اضافه شده، اول مطمئن شوید SSH رویش کامل بالا آمده (و پورت ثبت‌شده در "
                 f"«سرویس IP» با پورت واقعی سرور یکی است)، بعد دوباره امتحان کنید.",
@@ -14339,7 +14341,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [[InlineKeyboardButton("👥 بله، اکانت‌های موجود هم به این IP منتقل شوند", callback_data=f"hpdef_migrate_{host}")],
               [InlineKeyboardButton("🔙 بازگشت به سرویس IP", callback_data="ipsvc_menu")]]
         await query.edit_message_text(
-            f"⭐ <code>{esc(host)}</code> به‌عنوان پیش‌فرض کل سیستم ثبت شد (اتصال SSH زنده هم تأیید شد ✅)؛ از این پس اکانت‌های جدید و هر "
+            f"⭐ <code>{esc(host)}</code> به‌عنوان پیش‌فرض کل سیستم ثبت شد (سرویس مشتری هم تأیید شد ✅)؛ از این پس اکانت‌های جدید و هر "
             f"فاکتور بدون هاست مشخص، اول همین IP را نشان می‌دهند.\n\n"
             f"می‌خواهید هاستِ اکانت‌های <b>از قبل ساخته‌شده</b> هم به همین IP جدید منتقل شود؟",
             reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
@@ -15916,59 +15918,89 @@ async def _tcp_health_check(host: str, port: int, timeout: float = HOST_HEALTH_T
 async def _host_health_tick(app):
     await asyncio.to_thread(_db_sync_host_pool)
     pool = await asyncio.to_thread(_db_get_host_pool)
-    port_map = await asyncio.to_thread(_db_get_host_ssh_port_map)
+    service_port_map = await asyncio.to_thread(_db_get_host_service_port_map)
+    admin_port_map = await asyncio.to_thread(_db_get_host_admin_ssh_port_map)
 
-    # 🐛🔧 رفع باگ واقعی: از وقتی ستون is_default به _db_get_host_pool اضافه شد (۸ ستون برمی‌گرداند)،
-    # این حلقه هنوز فقط ۷ مقدار unpack می‌کرد و با ValueError («too many values to unpack») در هر
-    # دور کرش می‌کرد — یعنی پایش خودکار سلامت IPها عملاً هرگز واقعاً اجرا نمی‌شد (فقط لاگ خطا
-    # می‌ریخت و رد می‌شد). is_default اینجا لازم نیست، فقط باید در unpack حساب شود.
     for host, active, fails, last_check, last_status, disabled_reason, disabled_at, _is_default, _avg_latency_ms, added_at, _is_standby in pool:
         if not active:
-            continue  # IPهای غیرفعال‌شده خودکار تست نمی‌شوند؛ فقط با دکمهٔ دستی ادمین دوباره تست می‌شوند
-        # 🆕 دورهٔ مهلتِ IP تازه‌افزوده‌شده — اگر هنوز داخل این بازه‌ایم، این IP را کلاً رد می‌کنیم
-        # (نه فقط شکست را نادیده می‌گیریم) تا سرور تازه‌بالاآمده فرصت کامل بوت‌شدن را داشته باشد.
+            continue
         if added_at:
             try:
-                age_minutes = (datetime.now() - datetime.strptime(added_at, "%Y-%m-%d %H:%M:%S")).total_seconds() / 60
+                age_minutes = (
+                    datetime.now() - datetime.strptime(added_at, "%Y-%m-%d %H:%M:%S")
+                ).total_seconds() / 60
                 if age_minutes < HOST_HEALTH_GRACE_PERIOD_MINUTES:
                     continue
             except ValueError:
-                pass  # فرمت غیرمنتظره — برای احتیاط طوری رفتار می‌کنیم که انگار مهلت گذشته (رفتار قبلی)
+                pass
+
+        service_port = service_port_map.get(host, 22)
+        admin_port = admin_port_map.get(host, 22)
+
+        # Data plane: customer-facing endpoint. This remains the signal that can
+        # remove an Edge from active service after the existing failure threshold.
         t0 = time.monotonic()
-        host_port = port_map.get(host, 22)
-        ok, err = await _tcp_health_check(host, host_port)
-        if ok:
-            # 🆕 «کدام VPS سرعتش بهتره»: تاخیر همین اتصال موفق را ثبت می‌کنیم (میانگین هموارشده)
-            # تا مقایسهٔ IPهای فعال با هم و پیشنهاد سریع‌ترین‌شان ممکن شود.
-            await asyncio.to_thread(_db_record_host_latency, host, (time.monotonic() - t0) * 1000)
-        new_fails = await asyncio.to_thread(_db_record_host_check, host, ok, err)
-        if ok or new_fails < HOST_HEALTH_FAIL_THRESHOLD:
+        service_ok, service_err = await _tcp_health_check(host, service_port)
+        if service_ok:
+            await asyncio.to_thread(
+                _db_record_host_latency, host, (time.monotonic() - t0) * 1000
+            )
+        new_fails = await asyncio.to_thread(
+            _db_record_host_check, host, service_ok, service_err
+        )
+
+        # Management plane: real SSH banner on the Edge admin port.
+        # Failure is recorded independently and MUST NOT disable customer service.
+        admin_ok, admin_err = await _check_ssh_reachable(host, admin_port)
+        admin_fails = await asyncio.to_thread(
+            _db_record_admin_host_check, host, admin_ok, admin_err
+        )
+        if not admin_ok:
+            log.warning(
+                "Edge admin SSH unhealthy: host=%s admin_port=%s fails=%s error=%s",
+                host, admin_port, admin_fails, admin_err,
+            )
+
+        if service_ok or new_fails < HOST_HEALTH_FAIL_THRESHOLD:
             continue
+
         active_now = await asyncio.to_thread(_db_get_active_hosts_from_pool)
         if len(active_now) <= 1:
-            # 🛡️ آخرین IP فعال را هرگز خودکار غیرفعال نمی‌کنیم — فقط هشدار بحرانی می‌دهیم
-            await _notify_admins(app,
-                f"🔴 <b>هشدار بحرانی — تنها IP فعال پاسخ نمی‌دهد</b>\n\n"
-                f"IP <code>{esc(host)}</code> در {new_fails} بررسی متوالی پاسخ نداد، ولی چون تنها هاست فعال شماست "
-                f"به‌صورت خودکار غیرفعال نشد (تا فاکتورسازی کاملاً متوقف نشود).\n"
-                f"آخرین خطا: <code>{esc(err)}</code>\n\n"
-                f"⚠️ لطفاً فوراً یک IP دیگر اضافه کنید: تنظیمات سرور ← 🌐 سرویس IP ← 🛡 وضعیت IPها")
+            await _notify_admins(
+                app,
+                f"🔴 <b>هشدار بحرانی — تنها Service فعال پاسخ نمی‌دهد</b>\n\n"
+                f"Service <code>{esc(host)}:{service_port}</code> در {new_fails} بررسی متوالی پاسخ نداد، "
+                f"ولی چون تنها هاست فعال است خودکار غیرفعال نشد.\n"
+                f"آخرین خطای Service: <code>{esc(service_err)}</code>\n"
+                f"Admin SSH: {'✅ سالم' if admin_ok else '❌ ناموفق'}",
+            )
             continue
-        await asyncio.to_thread(_db_set_host_active, host, False, f"غیرفعال خودکار پس از {new_fails} شکست متوالی: {err}")
+
+        await asyncio.to_thread(
+            _db_set_host_active,
+            host,
+            False,
+            f"Service port failed after {new_fails} consecutive checks: {service_err}",
+        )
         await asyncio.to_thread(_db_rebuild_hosts_from_pool)
-        # 🆕 اگر دامنهٔ ثابت عمومی تنظیم شده، خودکار به یکی از IPهای سالمِ باقی‌مانده سوییچ می‌کنیم
-        # تا مشتریانی که با همان دامنه (نه IP خام) وصل می‌شوند بدون هیچ اقدامی خودکار منتقل شوند.
         remaining_active = await asyncio.to_thread(_db_get_active_hosts_from_pool)
         if remaining_active:
             await _cf_switch_public_domain(remaining_active[0], app=app)
-        await _notify_admins(app,
-            f"🔴 <b>یک IP به‌صورت خودکار از سرویس خارج شد</b>\n\n"
-            f"IP <code>{esc(host)}</code> در {new_fails} بررسی متوالی (هر {HOST_HEALTH_CHECK_INTERVAL_SECONDS // 60} دقیقه) "
-            f"پاسخ نداد و از لیست IPهای فعال حذف شد.\n"
-            f"آخرین خطا: <code>{esc(err)}</code>\n\n"
-            f"مشتریانی که با این IP وصل بودند را از «🌐 سرویس IP» به IP دیگری منتقل کنید.\n"
-            f"برای تست دوباره و بازگردانی: تنظیمات سرور ← 🌐 سرویس IP ← 🛡 وضعیت IPها")
-        log.warning("IP %s پس از %s شکست متوالی به‌صورت خودکار غیرفعال شد: %s", host, new_fails, err)
+
+        await _notify_admins(
+            app,
+            f"🔴 <b>یک Service endpoint از سرویس خارج شد</b>\n\n"
+            f"Service <code>{esc(host)}:{service_port}</code> در {new_fails} بررسی متوالی "
+            f"پاسخ نداد و از لیست فعال حذف شد.\n"
+            f"آخرین خطا: <code>{esc(service_err)}</code>\n"
+            f"Admin SSH <code>{admin_port}</code>: {'✅ سالم' if admin_ok else '❌ ناموفق'}\n\n"
+            f"توجه: وضعیت Admin SSH مستقل ثبت می‌شود و به‌تنهایی باعث خروج Edge از سرویس نمی‌شود.",
+        )
+        log.warning(
+            "Service endpoint %s:%s disabled after %s failures: %s",
+            host, service_port, new_fails, service_err,
+        )
+
 
 async def _host_health_loop(app):
     log.info("🛡️ حلقهٔ پایش سلامت/در دسترس‌بودن IPها آغاز شد (بازهٔ چک: %ss، آستانهٔ غیرفعال‌سازی: %s شکست متوالی).",
@@ -16268,18 +16300,18 @@ async def _filter_detect_tick(app):
             candidates = [fastest_host] + [h for h in active_hosts if h != fastest_host]
             chosen_host, chosen_detail = None, ''
             for cand in candidates:
-                cand_port = await asyncio.to_thread(_db_get_host_ssh_port, cand, 22)
+                cand_port = await asyncio.to_thread(_db_get_host_service_port, cand, 22)
                 ok_reach, reach_detail = await _check_ssh_reachable(cand, cand_port)
                 if ok_reach:
                     chosen_host = cand
                     break
-                log.warning("پایش فیلتر: کاندید %s رد شد (SSH زنده نبود): %s", cand, reach_detail)
+                log.warning("پایش فیلتر: کاندید %s رد شد (service path زنده نبود): %s", cand, reach_detail)
                 chosen_detail = reach_detail
             if not chosen_host:
                 await _notify_admins(app,
                     f"🚨 <b>فیلتر IP تشخیص داده شد، ولی سوییچ خودکار انجام نشد!</b>\n\n"
                     f"📊 کاربران آنلاین: {online_count} از {total_active} ({online_pct:.1f}\u066a)\n"
-                    f"❌ هیچ‌کدام از {len(candidates)} IP فعال، اتصال SSH زنده نداشتند (آخرین خطا: {chosen_detail}).\n"
+                    f"❌ هیچ‌کدام از {len(candidates)} IP فعال، service path زنده نداشتند (آخرین خطا: {chosen_detail}).\n"
                     f"لطفاً دستی بررسی کنید — سوییچ به یک IP غیرقابل‌اتصال انجام نشد تا کاربران بی‌دلیل قطع نشوند.")
                 # 🆕 هیچ IP موجودی زنده نبود — این هم دقیقاً یک موردِ نیاز به فعال‌سازیِ Standby است
                 if old_default_host:

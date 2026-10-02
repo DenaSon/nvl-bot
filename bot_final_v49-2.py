@@ -225,6 +225,18 @@ from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKe
 from telegram.error import BadRequest
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, PicklePersistence, PersistenceInput
 
+from edge_observability import (
+    DIAG_FILTER_SUSPECTED,
+    DIAG_INSUFFICIENT_EVIDENCE,
+    FILTER_CONFIDENCE_MEDIUM,
+    FILTER_CONFIDENCE_NONE,
+    FILTER_REASON_INSUFFICIENT_EVIDENCE,
+    FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
+    PROBE_REASON_OK,
+    derive_observability,
+    normalize_probe_error,
+)
+
 # ==========================================
 # ⚙️ پیکربندی امن (از Environment Variables)
 # ==========================================
@@ -232,7 +244,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V114-2026-10-02-phase6b-unified-health-model"
+BOT_VERSION_TAG = "V115-2026-10-02-phase6c-edge-observability"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -476,6 +488,20 @@ HOST_HEALTH_TCP_TIMEOUT_SECONDS = 6
 # طبیعی است سرور هنوز کامل بالا نیامده باشد؛ رد کردنش در این مدت باعث غیرفعال‌سازیِ زودهنگام و
 # نادرست می‌شد (دقیقاً همان مشکلی که یک‌بار موقع افزودن Edge جدید رخ داد).
 HOST_HEALTH_GRACE_PERIOD_MINUTES = 15
+
+# Phase 6C — per-Edge observability. These thresholds affect evidence/classification only;
+# they never trigger DNS switching, membership changes, promotion or customer migration.
+def _phase6c_env_int(name, default, minimum=1):
+    try:
+        return max(minimum, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return int(default)
+
+EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS = _phase6c_env_int("NVL_OBSERVABILITY_PROBE_TIMEOUT", 3)
+WG_HANDSHAKE_MAX_AGE_SECONDS = _phase6c_env_int("NVL_WG_HANDSHAKE_MAX_AGE", 900)
+EDGE_FILTER_CONFIRM_THRESHOLD = _phase6c_env_int("NVL_FILTER_CONFIRM_THRESHOLD", 3)
+EDGE_FILTER_RECOVERY_THRESHOLD = _phase6c_env_int("NVL_FILTER_RECOVERY_THRESHOLD", 2)
+EDGE_FILTER_COOLDOWN_SECONDS = _phase6c_env_int("NVL_FILTER_COOLDOWN_SECONDS", 600)
 
 # ==========================================
 # 🆕 V89 — سیستم شناسایی خودکار فیلتر شدن بر اساس کاربران آنلاین
@@ -971,6 +997,50 @@ def init_db():
         except sqlite3.OperationalError: pass
         try: c.execute("ALTER TABLE host_pool ADD COLUMN last_success_at TEXT DEFAULT NULL")
         except sqlite3.OperationalError: pass
+
+        # Phase 6C — additive per-Edge observability evidence. Optional external/regional
+        # evidence remains NULL until an independent probe integration records it.
+        for _sql in (
+            "ALTER TABLE host_pool ADD COLUMN wg_peer_ok INTEGER DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN wg_last_handshake_at TEXT DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN wg_last_check TEXT DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN core_path_ok INTEGER DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN core_path_last_check TEXT DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN external_service_ok INTEGER DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN external_service_last_check TEXT DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN external_probe_source TEXT DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN regional_service_ok INTEGER DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN regional_service_last_check TEXT DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN regional_probe_source TEXT DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN diagnostic_reason TEXT DEFAULT 'INSUFFICIENT_EVIDENCE'",
+            "ALTER TABLE host_pool ADD COLUMN filter_suspected INTEGER DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN filter_confidence TEXT DEFAULT 'NONE'",
+            "ALTER TABLE host_pool ADD COLUMN filter_reason TEXT DEFAULT 'INSUFFICIENT_EVIDENCE'",
+            "ALTER TABLE host_pool ADD COLUMN filter_updated_at TEXT DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN evidence_updated_at TEXT DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN filter_consecutive_failures INTEGER DEFAULT 0",
+            "ALTER TABLE host_pool ADD COLUMN filter_consecutive_successes INTEGER DEFAULT 0",
+            "ALTER TABLE host_pool ADD COLUMN filter_cooldown_until TEXT DEFAULT NULL",
+        ):
+            try:
+                c.execute(_sql)
+            except sqlite3.OperationalError:
+                pass
+
+        c.execute('''CREATE TABLE IF NOT EXISTS host_probe_results (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        host TEXT NOT NULL,
+                        probe_type TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        ok INTEGER DEFAULT NULL,
+                        latency_ms REAL DEFAULT NULL,
+                        reason TEXT,
+                        checked_at TEXT NOT NULL,
+                        FOREIGN KEY(host) REFERENCES host_pool(host) ON DELETE CASCADE)''')
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_host_probe_results_host_checked "
+            "ON host_probe_results(host, checked_at)"
+        )
         # 🆕 زمان افزوده‌شدنِ این IP — برای دادن «دورهٔ مهلت» به Edgeهای تازه‌ساخته قبل از اینکه
         # پایش خودکار سلامت (_host_health_tick) سخت‌گیری کند. سرور تازه‌استارت‌شده معمولاً چند
         # دقیقه طول می‌کشد تا کامل بالا بیاید؛ بدون این مهلت، پایش می‌تواند در همون بازهٔ کوتاه
@@ -1340,16 +1410,236 @@ def _db_recompute_host_health(host):
         return new_state, new_reason, changed
 
 
+def _db_append_probe_result(host, probe_type, source, ok, latency_ms=None, reason=None, checked_at=None):
+    """Append structured Phase 6C evidence without performing any operational action."""
+    checked_at = checked_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ok_db = None if ok is None else (1 if bool(ok) else 0)
+    with db_conn() as conn:
+        conn.execute(
+            "INSERT INTO host_probe_results "
+            "(host, probe_type, source, ok, latency_ms, reason, checked_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                host,
+                str(probe_type)[:40],
+                str(source or "unknown")[:80],
+                ok_db,
+                latency_ms,
+                str(reason or "")[:200],
+                checked_at,
+            ),
+        )
+
+
+def _db_recompute_host_observability(host):
+    """Persist the Phase 6C diagnostic/filter dimension only.
+
+    This function is intentionally side-effect-limited to SQLite + logging. It never
+    changes host membership, DNS, standby state, accounts, Core/Edge roles or failover.
+    """
+    now_dt = datetime.now()
+    now = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT service_ok, admin_ok, wg_peer_ok, core_path_ok, "
+            "external_service_ok, regional_service_ok, "
+            "filter_consecutive_failures, filter_consecutive_successes, "
+            "filter_suspected, filter_confidence, filter_reason, diagnostic_reason, "
+            "filter_updated_at, filter_cooldown_until "
+            "FROM host_pool WHERE host=?",
+            (host,),
+        ).fetchone()
+        if not row:
+            return None
+
+        (
+            service_ok, admin_ok, wg_peer_ok, core_path_ok,
+            external_ok, regional_ok, failure_streak, success_streak,
+            previous_raw, previous_confidence, previous_filter_reason,
+            previous_diagnostic, previous_updated_at, cooldown_until,
+        ) = row
+
+        previous = None if previous_raw is None else bool(previous_raw)
+        decision = derive_observability(
+            None if service_ok is None else bool(service_ok),
+            None if admin_ok is None else bool(admin_ok),
+            None if wg_peer_ok is None else bool(wg_peer_ok),
+            None if core_path_ok is None else bool(core_path_ok),
+            None if external_ok is None else bool(external_ok),
+            None if regional_ok is None else bool(regional_ok),
+            regional_failure_streak=failure_streak or 0,
+            regional_success_streak=success_streak or 0,
+            confirm_threshold=EDGE_FILTER_CONFIRM_THRESHOLD,
+            recovery_threshold=EDGE_FILTER_RECOVERY_THRESHOLD,
+            previous_filter_suspected=previous,
+        )
+
+        proposed = decision.filter_suspected
+        diagnostic_reason = decision.diagnostic_reason
+        filter_confidence = decision.filter_confidence
+        filter_reason = decision.filter_reason
+
+        cooldown_active = False
+        if cooldown_until and previous is not None and proposed is not None and proposed != previous:
+            try:
+                cooldown_active = _parse_flexible_datetime(cooldown_until) > now_dt
+            except (TypeError, ValueError):
+                cooldown_active = False
+
+        if cooldown_active:
+            proposed = previous
+            filter_confidence = previous_confidence or FILTER_CONFIDENCE_NONE
+            filter_reason = previous_filter_reason or FILTER_REASON_INSUFFICIENT_EVIDENCE
+            diagnostic_reason = (
+                DIAG_FILTER_SUSPECTED if previous else
+                (previous_diagnostic or decision.diagnostic_reason)
+            )
+
+        changed = previous is not None and proposed is not None and previous != proposed
+        initialized = previous is None and proposed is not None
+        filter_updated_at = previous_updated_at
+        new_cooldown_until = cooldown_until
+
+        if changed or initialized:
+            filter_updated_at = now
+        if changed:
+            new_cooldown_until = (
+                now_dt + timedelta(seconds=EDGE_FILTER_COOLDOWN_SECONDS)
+            ).strftime("%Y-%m-%d %H:%M:%S")
+
+        conn.execute(
+            "UPDATE host_pool SET diagnostic_reason=?, filter_suspected=?, "
+            "filter_confidence=?, filter_reason=?, filter_updated_at=?, "
+            "filter_cooldown_until=?, evidence_updated_at=? WHERE host=?",
+            (
+                diagnostic_reason,
+                None if proposed is None else (1 if proposed else 0),
+                filter_confidence,
+                filter_reason,
+                filter_updated_at,
+                new_cooldown_until,
+                now,
+                host,
+            ),
+        )
+
+    if changed:
+        log.warning(
+            "Phase6C filter evidence transition host=%s previous=%s current=%s "
+            "reason=%s confidence=%s",
+            host, previous, proposed, filter_reason, filter_confidence,
+        )
+    return {
+        "diagnostic_reason": diagnostic_reason,
+        "filter_suspected": proposed,
+        "filter_confidence": filter_confidence,
+        "filter_reason": filter_reason,
+        "changed": changed,
+    }
+
+
+def _db_record_observability_probe(
+    host,
+    probe_type,
+    source,
+    ok,
+    latency_ms=None,
+    reason=None,
+    handshake_at=None,
+    recompute=True,
+):
+    """Provider-neutral ingestion interface for Phase 6C probe evidence."""
+    allowed = {"wireguard", "core_path", "external_service", "regional_service"}
+    if probe_type not in allowed:
+        raise ValueError(f"Unsupported Phase 6C probe_type: {probe_type}")
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ok_db = None if ok is None else (1 if bool(ok) else 0)
+    source_txt = str(source or "unknown")[:80]
+    reason_txt = str(reason or "")[:200]
+
+    with db_conn() as conn:
+        if probe_type == "wireguard":
+            conn.execute(
+                "UPDATE host_pool SET wg_peer_ok=?, wg_last_handshake_at=?, "
+                "wg_last_check=?, evidence_updated_at=? WHERE host=?",
+                (ok_db, handshake_at, now, now, host),
+            )
+        elif probe_type == "core_path":
+            conn.execute(
+                "UPDATE host_pool SET core_path_ok=?, core_path_last_check=?, "
+                "evidence_updated_at=? WHERE host=?",
+                (ok_db, now, now, host),
+            )
+        elif probe_type == "external_service":
+            conn.execute(
+                "UPDATE host_pool SET external_service_ok=?, external_service_last_check=?, "
+                "external_probe_source=?, evidence_updated_at=? WHERE host=?",
+                (ok_db, now, source_txt, now, host),
+            )
+        else:
+            if ok is True:
+                streak_sql = (
+                    "filter_consecutive_successes=COALESCE(filter_consecutive_successes,0)+1, "
+                    "filter_consecutive_failures=0"
+                )
+            elif ok is False:
+                streak_sql = (
+                    "filter_consecutive_failures=COALESCE(filter_consecutive_failures,0)+1, "
+                    "filter_consecutive_successes=0"
+                )
+            else:
+                streak_sql = (
+                    "filter_consecutive_failures=COALESCE(filter_consecutive_failures,0), "
+                    "filter_consecutive_successes=COALESCE(filter_consecutive_successes,0)"
+                )
+            conn.execute(
+                "UPDATE host_pool SET regional_service_ok=?, regional_service_last_check=?, "
+                "regional_probe_source=?, evidence_updated_at=?, " + streak_sql + " WHERE host=?",
+                (ok_db, now, source_txt, now, host),
+            )
+
+        conn.execute(
+            "INSERT INTO host_probe_results "
+            "(host, probe_type, source, ok, latency_ms, reason, checked_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (host, probe_type, source_txt, ok_db, latency_ms, reason_txt, now),
+        )
+
+    if recompute:
+        return _db_recompute_host_observability(host)
+    return None
+
+
 def _db_get_host_port_health_map():
     with db_conn() as conn:
         rows = conn.execute(
             "SELECT host, service_last_check, service_last_status, service_ok, "
             "admin_last_check, admin_last_status, admin_ok, admin_consecutive_fails, "
-            "health_state, health_reason, health_updated_at, health_since, last_success_at "
+            "health_state, health_reason, health_updated_at, health_since, last_success_at, "
+            "wg_peer_ok, wg_last_handshake_at, wg_last_check, "
+            "core_path_ok, core_path_last_check, "
+            "external_service_ok, external_service_last_check, external_probe_source, "
+            "regional_service_ok, regional_service_last_check, regional_probe_source, "
+            "diagnostic_reason, filter_suspected, filter_confidence, filter_reason, "
+            "filter_updated_at, evidence_updated_at, "
+            "filter_consecutive_failures, filter_consecutive_successes, filter_cooldown_until "
             "FROM host_pool"
         ).fetchall()
-        return {
-            host: {
+        result = {}
+        for row in rows:
+            (
+                host, service_last_check, service_last_status, service_ok,
+                admin_last_check, admin_last_status, admin_ok, admin_fails,
+                health_state, health_reason, health_updated_at, health_since,
+                last_success_at, wg_peer_ok, wg_last_handshake_at, wg_last_check,
+                core_path_ok, core_path_last_check, external_ok, external_last_check,
+                external_source, regional_ok, regional_last_check, regional_source,
+                diagnostic_reason, filter_suspected, filter_confidence, filter_reason,
+                filter_updated_at, evidence_updated_at, filter_failures, filter_successes,
+                filter_cooldown_until,
+            ) = row
+            result[host] = {
                 "service_last_check": service_last_check,
                 "service_last_status": service_last_status,
                 "service_ok": None if service_ok is None else bool(service_ok),
@@ -1362,14 +1652,28 @@ def _db_get_host_port_health_map():
                 "health_updated_at": health_updated_at,
                 "health_since": health_since,
                 "last_success_at": last_success_at,
+                "wg_peer_ok": None if wg_peer_ok is None else bool(wg_peer_ok),
+                "wg_last_handshake_at": wg_last_handshake_at,
+                "wg_last_check": wg_last_check,
+                "core_path_ok": None if core_path_ok is None else bool(core_path_ok),
+                "core_path_last_check": core_path_last_check,
+                "external_service_ok": None if external_ok is None else bool(external_ok),
+                "external_service_last_check": external_last_check,
+                "external_probe_source": external_source,
+                "regional_service_ok": None if regional_ok is None else bool(regional_ok),
+                "regional_service_last_check": regional_last_check,
+                "regional_probe_source": regional_source,
+                "diagnostic_reason": diagnostic_reason or DIAG_INSUFFICIENT_EVIDENCE,
+                "filter_suspected": None if filter_suspected is None else bool(filter_suspected),
+                "filter_confidence": filter_confidence or FILTER_CONFIDENCE_NONE,
+                "filter_reason": filter_reason or FILTER_REASON_INSUFFICIENT_EVIDENCE,
+                "filter_updated_at": filter_updated_at,
+                "evidence_updated_at": evidence_updated_at,
+                "filter_consecutive_failures": filter_failures or 0,
+                "filter_consecutive_successes": filter_successes or 0,
+                "filter_cooldown_until": filter_cooldown_until,
             }
-            for (
-                host, service_last_check, service_last_status, service_ok,
-                admin_last_check, admin_last_status, admin_ok, admin_fails,
-                health_state, health_reason, health_updated_at, health_since,
-                last_success_at,
-            ) in rows
-        }
+        return result
 
 
 def _db_host_exists(host):
@@ -1491,6 +1795,11 @@ def _db_record_host_check(host, ok, reason=None):
                 (fails, now, status, now, status, host),
             )
     _db_recompute_host_health(host)
+    _db_append_probe_result(
+        host, "service", "core", ok, None,
+        PROBE_REASON_OK if ok else normalize_probe_error(reason), now,
+    )
+    _db_recompute_host_observability(host)
     return fails
 
 
@@ -1517,6 +1826,11 @@ def _db_record_admin_host_check(host, ok, reason=None):
                 (fails, now, f"🔴 ناموفق: {str(reason)[:150]}", host),
             )
     _db_recompute_host_health(host)
+    _db_append_probe_result(
+        host, "admin", "core", ok, None,
+        PROBE_REASON_OK if ok else normalize_probe_error(reason), now,
+    )
+    _db_recompute_host_observability(host)
     return fails
 def _db_set_host_active(host, active: bool, reason=None):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -8605,13 +8919,43 @@ async def _render_host_pool_panel(query):
         overall_reason = ph.get("health_reason") or HEALTH_REASON_INSUFFICIENT_EVIDENCE
         overall_icon = _health_state_icon(overall_state)
         membership = "ACTIVE" if active else "INACTIVE"
+        diagnostic_reason = ph.get("diagnostic_reason") or DIAG_INSUFFICIENT_EVIDENCE
+        filter_suspected = ph.get("filter_suspected")
+        filter_confidence = ph.get("filter_confidence") or FILTER_CONFIDENCE_NONE
+
+        def _probe_badge(value):
+            if value is True:
+                return "✅ UP"
+            if value is False:
+                return "❌ DOWN"
+            return "⚪ UNKNOWN"
+
+        if filter_suspected is True:
+            filter_txt = f"⚠️ SUSPECTED · {filter_confidence}"
+        elif filter_suspected is False:
+            filter_txt = "✅ NOT_SUSPECTED"
+        else:
+            filter_txt = "⚪ UNKNOWN"
+
         line = (
             f"{overall_icon} <code>{esc(host)}</code>{star}{standby_badge}{latency_txt}\n"
             f"   🧭 Overall: <b>{esc(overall_state)}</b> · <code>{esc(overall_reason)}</code>\n"
             f"   📍 Membership: <code>{membership}</code>\n"
+            f"   🧩 Diagnostic: <code>{esc(diagnostic_reason)}</code>\n"
             f"   🌐 Service <code>{service_port}</code> — {esc(service_status)}\n"
-            f"   🔐 Admin SSH <code>{admin_port}</code> — {esc(admin_status)}"
+            f"   🔐 Admin SSH <code>{admin_port}</code> — {esc(admin_status)}\n"
+            f"   🔗 WireGuard — {_probe_badge(ph.get('wg_peer_ok'))}\n"
+            f"   🛣 Core path — {_probe_badge(ph.get('core_path_ok'))}\n"
+            f"   🌍 External — {_probe_badge(ph.get('external_service_ok'))}\n"
+            f"   📡 Regional — {_probe_badge(ph.get('regional_service_ok'))}\n"
+            f"   🧪 Filtering: {filter_txt}"
         )
+        if ph.get("wg_last_handshake_at"):
+            line += f"\n   🤝 WG handshake: {esc(ph['wg_last_handshake_at'])}"
+        if ph.get("external_probe_source"):
+            line += f"\n   🌍 External source: <code>{esc(ph['external_probe_source'])}</code>"
+        if ph.get("regional_probe_source"):
+            line += f"\n   📡 Regional source: <code>{esc(ph['regional_probe_source'])}</code>"
         if ph.get("health_since"):
             line += f"\n   🕒 وضعیت فعلی از: {esc(ph['health_since'])}"
         if ph.get("last_success_at"):
@@ -14280,6 +14624,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         admin_ok, admin_err = await _check_ssh_reachable(host, admin_port)
         await asyncio.to_thread(_db_record_admin_host_check, host, admin_ok, admin_err)
 
+        local_path = await asyncio.to_thread(_probe_wireguard_edge_sync, host)
+        await asyncio.to_thread(
+            _db_record_observability_probe,
+            host, "wireguard", "core",
+            local_path.get("wg_peer_ok"), None, local_path.get("wg_reason"),
+            local_path.get("wg_last_handshake_at"), False,
+        )
+        await asyncio.to_thread(
+            _db_record_observability_probe,
+            host, "core_path", "core",
+            local_path.get("core_path_ok"), None, local_path.get("core_path_reason"),
+            None, True,
+        )
+
         if service_ok:
             await asyncio.to_thread(_db_set_host_active, host, True)
             await asyncio.to_thread(_db_rebuild_hosts_from_pool)
@@ -16053,6 +16411,144 @@ async def _tcp_health_check(host: str, port: int, timeout: float = HOST_HEALTH_T
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
 
+def _probe_wireguard_edge_sync(host):
+    """Collect local Core-side WG peer and tunnel-path evidence for one managed Edge."""
+    edge_marker = f"# edge-{str(host).replace('.', '-')}"
+    if not os.path.exists(WG_CONF_PATH):
+        return {
+            "wg_peer_ok": None,
+            "wg_last_handshake_at": None,
+            "wg_reason": "WG_CONFIG_MISSING",
+            "core_path_ok": None,
+            "core_path_reason": "WG_CONFIG_MISSING",
+        }
+
+    try:
+        with open(WG_CONF_PATH, encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception as e:
+        return {
+            "wg_peer_ok": None,
+            "wg_last_handshake_at": None,
+            "wg_reason": f"WG_CONFIG_READ_ERROR:{normalize_probe_error(e)}",
+            "core_path_ok": None,
+            "core_path_reason": "WG_CONFIG_READ_ERROR",
+        }
+
+    public_key = None
+    tunnel_ip = None
+    in_target = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "[Peer]":
+            in_target = False
+            continue
+        if stripped == edge_marker:
+            in_target = True
+            continue
+        if not in_target:
+            continue
+        if stripped.startswith("PublicKey"):
+            public_key = stripped.split("=", 1)[1].strip()
+        elif stripped.startswith("AllowedIPs"):
+            raw = stripped.split("=", 1)[1].strip().split(",", 1)[0].strip()
+            tunnel_ip = raw.split("/", 1)[0].strip()
+
+    if not public_key:
+        return {
+            "wg_peer_ok": False,
+            "wg_last_handshake_at": None,
+            "wg_reason": "WG_PEER_MISSING",
+            "core_path_ok": False,
+            "core_path_reason": "WG_PEER_MISSING",
+        }
+
+    try:
+        proc = subprocess.run(
+            ["wg", "show", "wg0", "latest-handshakes"],
+            capture_output=True,
+            text=True,
+            timeout=EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS,
+        )
+    except Exception as e:
+        return {
+            "wg_peer_ok": None,
+            "wg_last_handshake_at": None,
+            "wg_reason": f"WG_COMMAND_ERROR:{normalize_probe_error(e)}",
+            "core_path_ok": None,
+            "core_path_reason": "WG_COMMAND_ERROR",
+        }
+
+    if proc.returncode != 0:
+        return {
+            "wg_peer_ok": None,
+            "wg_last_handshake_at": None,
+            "wg_reason": "WG_COMMAND_FAILED",
+            "core_path_ok": None,
+            "core_path_reason": "WG_COMMAND_FAILED",
+        }
+
+    handshake_epoch = 0
+    for row in proc.stdout.splitlines():
+        parts = row.split()
+        if len(parts) >= 2 and parts[0] == public_key:
+            try:
+                handshake_epoch = int(parts[1])
+            except (TypeError, ValueError):
+                handshake_epoch = 0
+            break
+
+    if handshake_epoch <= 0:
+        return {
+            "wg_peer_ok": False,
+            "wg_last_handshake_at": None,
+            "wg_reason": "WG_HANDSHAKE_MISSING",
+            "core_path_ok": False,
+            "core_path_reason": "WG_HANDSHAKE_MISSING",
+        }
+
+    handshake_at = datetime.fromtimestamp(handshake_epoch).strftime("%Y-%m-%d %H:%M:%S")
+    age = max(0, int(time.time()) - handshake_epoch)
+    if age > WG_HANDSHAKE_MAX_AGE_SECONDS:
+        return {
+            "wg_peer_ok": False,
+            "wg_last_handshake_at": handshake_at,
+            "wg_reason": "WG_HANDSHAKE_STALE",
+            "core_path_ok": False,
+            "core_path_reason": "WG_HANDSHAKE_STALE",
+        }
+
+    if not tunnel_ip:
+        return {
+            "wg_peer_ok": True,
+            "wg_last_handshake_at": handshake_at,
+            "wg_reason": PROBE_REASON_OK,
+            "core_path_ok": None,
+            "core_path_reason": "WG_ALLOWED_IP_MISSING",
+        }
+
+    try:
+        ping = subprocess.run(
+            ["ping", "-c", "1", "-W", str(EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS), tunnel_ip],
+            capture_output=True,
+            text=True,
+            timeout=EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS + 2,
+        )
+        core_path_ok = ping.returncode == 0
+        core_reason = PROBE_REASON_OK if core_path_ok else "CORE_TUNNEL_PING_FAILED"
+    except Exception as e:
+        core_path_ok = None
+        core_reason = f"CORE_TUNNEL_PROBE_ERROR:{normalize_probe_error(e)}"
+
+    return {
+        "wg_peer_ok": True,
+        "wg_last_handshake_at": handshake_at,
+        "wg_reason": PROBE_REASON_OK,
+        "core_path_ok": core_path_ok,
+        "core_path_reason": core_reason,
+    }
+
+
 async def _host_health_tick(app):
     await asyncio.to_thread(_db_sync_host_pool)
     pool = await asyncio.to_thread(_db_get_host_pool)
@@ -16098,6 +16594,22 @@ async def _host_health_tick(app):
                 "Edge admin SSH unhealthy: host=%s admin_port=%s fails=%s error=%s",
                 host, admin_port, admin_fails, admin_err,
             )
+
+        # Phase 6C local path evidence is passive: it is persisted/classified but never
+        # changes membership or triggers DNS/failover actions.
+        local_path = await asyncio.to_thread(_probe_wireguard_edge_sync, host)
+        await asyncio.to_thread(
+            _db_record_observability_probe,
+            host, "wireguard", "core",
+            local_path.get("wg_peer_ok"), None, local_path.get("wg_reason"),
+            local_path.get("wg_last_handshake_at"), False,
+        )
+        await asyncio.to_thread(
+            _db_record_observability_probe,
+            host, "core_path", "core",
+            local_path.get("core_path_ok"), None, local_path.get("core_path_reason"),
+            None, True,
+        )
 
         if service_ok or new_fails < HOST_HEALTH_FAIL_THRESHOLD:
             continue

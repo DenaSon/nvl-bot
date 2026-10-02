@@ -70,9 +70,17 @@ def evaluate_auto_failover(
         return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_FAILURE_STREAK_LOW)
     if str(provider_status or "").upper() != "OK":
         return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_PROVIDER_NOT_OK)
-    if int(seconds_since_last_switch or 0) < max(0, int(switch_cooldown_seconds or 0)):
+    try:
+        switch_age = float(seconds_since_last_switch)
+    except (TypeError, ValueError):
+        switch_age = 0.0
+    try:
+        attempt_age = float(seconds_since_last_attempt)
+    except (TypeError, ValueError):
+        attempt_age = 0.0
+    if switch_age < max(0, int(switch_cooldown_seconds or 0)):
         return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_SWITCH_COOLDOWN)
-    if int(seconds_since_last_attempt or 0) < max(0, int(attempt_cooldown_seconds or 0)):
+    if attempt_age < max(0, int(attempt_cooldown_seconds or 0)):
         return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_ATTEMPT_COOLDOWN)
     if int(safe_standby_count or 0) <= 0:
         return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_NO_STANDBY)

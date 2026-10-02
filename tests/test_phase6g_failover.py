@@ -201,9 +201,9 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
         end = self.source.index(end_marker, start)
         return self.source[start:end]
 
-    def test_release_marker_is_phase6g(self):
+    def test_release_marker_includes_phase6h_on_top_of_phase6g_engine(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V117.0-2026-10-03-phase6g-safe-manual-failover"',
+            'BOT_VERSION_TAG = "V118.0-2026-10-03-phase6h-automatic-filtering-failover"',
             self.source,
         )
 

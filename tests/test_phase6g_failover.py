@@ -155,6 +155,7 @@ class Phase6GStandbyHelperTests(unittest.TestCase):
                 ("src_inactive", "p2", "2026-12-01", "1.1.1.1", "🔴 غیرفعال", "ssh"),
                 ("other_active", "p3", "2026-12-01", "3.3.3.3", "🟢 فعال", "ssh"),
                 ("src_v2ray", "p4", "2026-12-01", "1.1.1.1", "🟢 فعال", "v2ray"),
+                ("legacy_default", "p5", "2026-12-01", None, "🟢 فعال", "ssh"),
             ],
         )
         conn.commit()
@@ -172,6 +173,20 @@ class Phase6GStandbyHelperTests(unittest.TestCase):
         self.assertEqual(
             {row[0] for row in rows},
             {"src_active", "src_inactive"},
+        )
+
+
+    def test_helper_can_include_legacy_unassigned_default_accounts(self):
+        db = self._make_db()
+        rows = standby_helper._fetch_accounts(
+            db,
+            "1.1.1.1",
+            include_inactive=False,
+            include_unassigned=True,
+        )
+        self.assertEqual(
+            {row[0] for row in rows},
+            {"src_active", "legacy_default"},
         )
 
 
@@ -226,6 +241,25 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
         )
         self.assertIn("_db_count_other_explicit_active_ssh_hosts", region)
         self.assertIn("GLOBAL_DOMAIN_MULTI_EDGE_CONFLICT", region)
+
+    def test_legacy_unassigned_accounts_follow_default_source_safely(self):
+        snapshot = self._region(
+            "def _db_get_failover_accounts(",
+            "def _db_count_other_explicit_active_ssh_hosts(",
+        )
+        self.assertIn("(host=? OR host IS NULL OR host='')", snapshot)
+
+        commit = self._region(
+            "def _db_commit_failover_account_state(",
+            "def _db_rollback_failover_account_state(",
+        )
+        self.assertIn("(host=? OR host IS NULL OR host='')", commit)
+
+        helper_runner = self._region(
+            "async def _run_phase6g_rebuild_helper(",
+            "async def _safe_manual_failover(",
+        )
+        self.assertIn('"--include-unassigned"', helper_runner)
 
     def test_manual_engine_never_uses_broad_account_move(self):
         region = self._region(

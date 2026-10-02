@@ -199,14 +199,21 @@ class Phase6FBotIntegrationStaticTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, region)
 
-    def test_phase6f_forces_legacy_auto_failover_off(self):
+    def test_phase6h_preserves_explicit_auto_setting_but_legacy_signal_stays_passive(self):
         region = self._region(
             "async def _post_init(app):",
             "async def _post_shutdown(app):",
         )
         self.assertIn("'auto_failover_mode', '0'", region)
-        self.assertIn("_db_update_setting, 'auto_failover_mode', '0'", region)
+        self.assertNotIn("_db_update_setting, 'auto_failover_mode', '0'", region)
         self.assertIn("regional_filter_task", region)
+
+        legacy = self._region(
+            "async def _filter_detect_tick(app):",
+            "async def _filter_detect_loop(app):",
+        )
+        self.assertNotIn("_safe_manual_failover", legacy)
+        self.assertNotIn("_phase6h_auto_failover_tick", legacy)
 
     def test_phase6f_task_is_cancelled_cleanly(self):
         region = self._region(

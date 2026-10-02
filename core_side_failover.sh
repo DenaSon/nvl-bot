@@ -67,24 +67,26 @@ if [ -z "$SELF_IP" ]; then
 fi
 echo "   ✅ IP این Core: ${SELF_IP}"
 
-echo "🔹 ۲) پیدا کردن پورتِ SSH بازِ Edgeِ مقصد (${TARGET_EDGE})..."
-DEFAULT_CUSTOMER_PORT=$(sqlite3 "$DB_PATH" "SELECT value FROM settings WHERE key='port';" 2>/dev/null)
-DEFAULT_CUSTOMER_PORT="${DEFAULT_CUSTOMER_PORT:-8443}"
-EDGE_PORT=""
-for p in 22 "$DEFAULT_CUSTOMER_PORT" "$CUSTOMER_SSH_PORT"; do
-    if ssh -i "$EDGE_SSH_KEY" -p "$p" -o ConnectTimeout=6 -o BatchMode=yes \
-            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "root@${TARGET_EDGE}" "true" 2>/dev/null; then
-        EDGE_PORT="$p"
-        break
+echo "🔹 ۲) بررسی SSH مدیریتی Edge مقصد (${TARGET_EDGE})..."
+# Phase 6A: customer service ports may DNAT through this Edge to Core. They are never
+# valid management fallbacks. Read the dedicated admin_ssh_port; legacy DBs fall back to 22.
+EDGE_PORT="22"
+HAS_ADMIN_COL="$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM pragma_table_info('host_pool') WHERE name='admin_ssh_port';" 2>/dev/null || echo 0)"
+if [ "$HAS_ADMIN_COL" = "1" ]; then
+    SAFE_TARGET_EDGE="${TARGET_EDGE//\'/\'\'}"
+    DB_ADMIN_PORT="$(sqlite3 "$DB_PATH" "SELECT admin_ssh_port FROM host_pool WHERE host='${SAFE_TARGET_EDGE}' LIMIT 1;" 2>/dev/null)"
+    if [[ "$DB_ADMIN_PORT" =~ ^[0-9]+$ ]] && [ "$DB_ADMIN_PORT" -ge 1 ] && [ "$DB_ADMIN_PORT" -le 65535 ]; then
+        EDGE_PORT="$DB_ADMIN_PORT"
     fi
-done
-if [ -z "$EDGE_PORT" ]; then
-    echo "❌ هیچ‌کدام از پورت‌های امتحان‌شده (22, ${DEFAULT_CUSTOMER_PORT}, ${CUSTOMER_SSH_PORT}) روی"
-    echo "   ${TARGET_EDGE} با کلید دائمی پاسخ ندادند — این سرور هنوز کلید ندارد یا خاموش/فیلتر است."
+fi
+if ! ssh -i "$EDGE_SSH_KEY" -p "$EDGE_PORT" -o ConnectTimeout=6 -o BatchMode=yes \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "root@${TARGET_EDGE}" "true" 2>/dev/null; then
+    echo "❌ SSH مدیریتی ${TARGET_EDGE}:${EDGE_PORT} با کلید دائمی پاسخ نداد."
+    echo "   Phase 6A عمداً پورت سرویس مشتری (${CUSTOMER_SSH_PORT}) را به‌عنوان مسیر مدیریت امتحان نمی‌کند."
     exit 1
 fi
 SSH_OPTS=(-i "$EDGE_SSH_KEY" -p "$EDGE_PORT" -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
-echo "   ✅ اتصال روی پورت ${EDGE_PORT} برقرار شد."
+echo "   ✅ اتصال مدیریتی روی پورت ${EDGE_PORT} برقرار شد."
 
 echo "🔹 ۳) توقفِ nvlbot روی همین Core (قبل از بکاپِ نهاییِ دیتابیس، تا نوشته‌ای گم نشود)..."
 # 🐛🔧 رفع باگِ ریشه‌ایِ واقعی (دو مشکل با هم): ۱) promote_edge_to_core.sh (مرحلهٔ ۱۰، محافظِ

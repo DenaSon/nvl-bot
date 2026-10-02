@@ -15,11 +15,11 @@ class Phase6APortHealthSeparationTests(unittest.TestCase):
         cls.update_edges = (ROOT / "update_all_edges_endpoint.sh").read_text(encoding="utf-8")
         cls.relay = (ROOT / "setup_edge_relay.sh").read_text(encoding="utf-8")
 
-    def test_v113_marker_is_present(self):
-        self.assertIn(
-            'BOT_VERSION_TAG = "V113-2026-10-02-phase6a-port-health-separation"',
-            self.source,
-        )
+    def test_phase6a_features_survive_current_version(self):
+        self.assertIn("BOT_VERSION_TAG =", self.source)
+        self.assertIn("admin_ssh_port", self.source)
+        self.assertIn("service_port", self.source)
+        self.assertIn("def _db_record_admin_host_check", self.source)
 
     def test_host_pool_has_explicit_service_and_admin_fields(self):
         for column in (

@@ -1778,6 +1778,174 @@ def _db_record_observability_probe(
     return None
 
 
+
+def _db_record_regional_round(host, probe, regional_decision):
+    """Persist ONE aggregated Phase 6D/6E regional round, then recompute final state.
+
+    Raw per-node evidence is retained in host_probe_results for audit/detail views.
+    Pending nodes remain NULL evidence and never count as failed.
+    """
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    summary = regional_decision.summary
+    regional_ok = regional_decision.regional_service_ok
+    ok_db = None if regional_ok is None else (1 if regional_ok else 0)
+
+    failed_asns = ",".join(summary.failed_asns)
+    failed_cities = ",".join(summary.failed_cities)
+
+    with db_conn() as conn:
+        if regional_decision.state == FILTER_STATE_CLEAR:
+            streak_sql = (
+                "filter_consecutive_successes=COALESCE(filter_consecutive_successes,0)+1, "
+                "filter_consecutive_failures=0"
+            )
+        elif regional_decision.state in {FILTER_STATE_POSSIBLE, FILTER_STATE_LIKELY}:
+            streak_sql = (
+                "filter_consecutive_failures=COALESCE(filter_consecutive_failures,0)+1, "
+                "filter_consecutive_successes=0"
+            )
+        else:
+            streak_sql = (
+                "filter_consecutive_failures=COALESCE(filter_consecutive_failures,0), "
+                "filter_consecutive_successes=COALESCE(filter_consecutive_successes,0)"
+            )
+
+        conn.execute(
+            "UPDATE host_pool SET "
+            "regional_service_ok=?, regional_service_last_check=?, regional_probe_source='check-host', "
+            "regional_filter_state=?, regional_filter_reason=?, "
+            "regional_total_nodes=?, regional_completed_nodes=?, regional_successful_nodes=?, "
+            "regional_failed_nodes=?, regional_pending_nodes=?, regional_success_ratio=?, "
+            "regional_failed_asns=?, regional_failed_cities=?, regional_last_request_id=?, "
+            "regional_provider_status=?, regional_provider_error=NULL, regional_state_updated_at=?, "
+            "evidence_updated_at=?, " + streak_sql + " WHERE host=?",
+            (
+                ok_db,
+                now,
+                regional_decision.state,
+                regional_decision.reason,
+                summary.total_nodes,
+                summary.completed_nodes,
+                summary.successful_nodes,
+                summary.failed_nodes,
+                summary.pending_nodes,
+                summary.success_ratio,
+                failed_asns or None,
+                failed_cities or None,
+                getattr(probe, "request_id", None),
+                PROVIDER_STATUS_OK,
+                now,
+                now,
+                host,
+            ),
+        )
+
+        for item in getattr(probe, "evidence", ()) or ():
+            item_ok = getattr(item, "ok", None)
+            item_ok_db = None if item_ok is None else (1 if item_ok else 0)
+            latency_ms = getattr(item, "latency_ms", None)
+            reason = (
+                getattr(item, "error", None)
+                or ("PENDING" if getattr(item, "pending", False) else "OK")
+            )
+            source = str(getattr(item, "node", "check-host"))[:80]
+            meta = (
+                f"{reason}; city={getattr(item, 'city', '')}; "
+                f"asn={getattr(item, 'asn', '')}"
+            )[:200]
+            conn.execute(
+                "INSERT INTO host_probe_results "
+                "(host, probe_type, source, ok, latency_ms, reason, checked_at) "
+                "VALUES (?, 'regional_node', ?, ?, ?, ?, ?)",
+                (host, source, item_ok_db, latency_ms, meta, now),
+            )
+
+        conn.execute(
+            "INSERT INTO host_probe_results "
+            "(host, probe_type, source, ok, latency_ms, reason, checked_at) "
+            "VALUES (?, 'regional_service', 'check-host', ?, NULL, ?, ?)",
+            (
+                host,
+                ok_db,
+                (
+                    f"{regional_decision.state}:{regional_decision.reason}; "
+                    f"{summary.failed_nodes}/{summary.completed_nodes} failed"
+                )[:200],
+                now,
+            ),
+        )
+        _db_prune_probe_history(conn, host)
+
+    return _db_recompute_host_observability(host)
+
+
+def _db_record_regional_provider_status(host, status, error=None):
+    """Record provider health without fabricating Edge reachability evidence."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE host_pool SET regional_provider_status=?, regional_provider_error=?, "
+            "regional_service_last_check=?, regional_probe_source='check-host', evidence_updated_at=? "
+            "WHERE host=?",
+            (str(status or PROVIDER_STATUS_ERROR), str(error or "")[:200] or None, now, now, host),
+        )
+
+
+def _db_get_regional_monitor_targets():
+    """Return active customer-facing endpoints. Core exclusion happens at runtime."""
+    with db_conn() as conn:
+        return conn.execute(
+            "SELECT host, service_port, is_standby FROM host_pool "
+            "WHERE active=1 ORDER BY is_default DESC, host"
+        ).fetchall()
+
+
+def _db_get_recent_regional_node_results(host, limit=16):
+    with db_conn() as conn:
+        return conn.execute(
+            "SELECT source, ok, latency_ms, reason, checked_at "
+            "FROM host_probe_results "
+            "WHERE host=? AND probe_type='regional_node' "
+            "ORDER BY id DESC LIMIT ?",
+            (host, max(1, int(limit))),
+        ).fetchall()
+
+
+def _db_get_regional_provider_runtime():
+    until = _db_get_setting("regional_provider_backoff_until", "")
+    try:
+        count = max(0, int(_db_get_setting("regional_provider_limit_count", "0")))
+    except (TypeError, ValueError):
+        count = 0
+    status = _db_get_setting("regional_provider_global_status", PROVIDER_STATUS_NEVER)
+    error = _db_get_setting("regional_provider_last_error", "")
+    return {
+        "backoff_until": until or "",
+        "limit_count": count,
+        "status": status or PROVIDER_STATUS_NEVER,
+        "error": error or "",
+    }
+
+
+def _db_set_regional_provider_runtime(status, *, backoff_until="", limit_count=0, error=""):
+    _db_update_setting("regional_provider_global_status", status)
+    _db_update_setting("regional_provider_backoff_until", backoff_until or "")
+    _db_update_setting("regional_provider_limit_count", str(max(0, int(limit_count or 0))))
+    _db_update_setting("regional_provider_last_error", str(error or "")[:300])
+
+
+def _db_regional_backoff_remaining_seconds():
+    state = _db_get_regional_provider_runtime()
+    raw = state.get("backoff_until") or ""
+    if not raw:
+        return 0
+    try:
+        until = _parse_flexible_datetime(raw)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, int((until - datetime.now()).total_seconds()))
+
+
 def _db_get_host_port_health_map():
     with db_conn() as conn:
         rows = conn.execute(
@@ -1789,8 +1957,13 @@ def _db_get_host_port_health_map():
             "external_service_ok, external_service_last_check, external_probe_source, "
             "regional_service_ok, regional_service_last_check, regional_probe_source, "
             "diagnostic_reason, filter_suspected, filter_confidence, filter_reason, "
-            "filter_updated_at, evidence_updated_at, "
-            "filter_consecutive_failures, filter_consecutive_successes, filter_cooldown_until "
+            "filter_state, filter_updated_at, evidence_updated_at, "
+            "filter_consecutive_failures, filter_consecutive_successes, filter_cooldown_until, "
+            "regional_filter_state, regional_filter_reason, "
+            "regional_total_nodes, regional_completed_nodes, regional_successful_nodes, "
+            "regional_failed_nodes, regional_pending_nodes, regional_success_ratio, "
+            "regional_failed_asns, regional_failed_cities, regional_last_request_id, "
+            "regional_provider_status, regional_provider_error, regional_state_updated_at "
             "FROM host_pool"
         ).fetchall()
         result = {}
@@ -1803,8 +1976,13 @@ def _db_get_host_port_health_map():
                 core_path_ok, core_path_last_check, external_ok, external_last_check,
                 external_source, regional_ok, regional_last_check, regional_source,
                 diagnostic_reason, filter_suspected, filter_confidence, filter_reason,
-                filter_updated_at, evidence_updated_at, filter_failures, filter_successes,
-                filter_cooldown_until,
+                filter_state, filter_updated_at, evidence_updated_at,
+                filter_failures, filter_successes, filter_cooldown_until,
+                regional_filter_state, regional_filter_reason,
+                regional_total_nodes, regional_completed_nodes, regional_successful_nodes,
+                regional_failed_nodes, regional_pending_nodes, regional_success_ratio,
+                regional_failed_asns, regional_failed_cities, regional_last_request_id,
+                regional_provider_status, regional_provider_error, regional_state_updated_at,
             ) = row
             result[host] = {
                 "service_last_check": service_last_check,
@@ -1834,11 +2012,26 @@ def _db_get_host_port_health_map():
                 "filter_suspected": None if filter_suspected is None else bool(filter_suspected),
                 "filter_confidence": filter_confidence or FILTER_CONFIDENCE_NONE,
                 "filter_reason": filter_reason or FILTER_REASON_INSUFFICIENT_EVIDENCE,
+                "filter_state": filter_state or FILTER_STATE_UNKNOWN,
                 "filter_updated_at": filter_updated_at,
                 "evidence_updated_at": evidence_updated_at,
                 "filter_consecutive_failures": filter_failures or 0,
                 "filter_consecutive_successes": filter_successes or 0,
                 "filter_cooldown_until": filter_cooldown_until,
+                "regional_filter_state": regional_filter_state or FILTER_STATE_UNKNOWN,
+                "regional_filter_reason": regional_filter_reason or "",
+                "regional_total_nodes": regional_total_nodes or 0,
+                "regional_completed_nodes": regional_completed_nodes or 0,
+                "regional_successful_nodes": regional_successful_nodes or 0,
+                "regional_failed_nodes": regional_failed_nodes or 0,
+                "regional_pending_nodes": regional_pending_nodes or 0,
+                "regional_success_ratio": regional_success_ratio,
+                "regional_failed_asns": regional_failed_asns or "",
+                "regional_failed_cities": regional_failed_cities or "",
+                "regional_last_request_id": regional_last_request_id,
+                "regional_provider_status": regional_provider_status or PROVIDER_STATUS_NEVER,
+                "regional_provider_error": regional_provider_error,
+                "regional_state_updated_at": regional_state_updated_at,
             }
         return result
 

@@ -213,7 +213,14 @@ def derive_observability(
         )
 
     if regional_service_ok is True:
-        # recovery_confirmed is reflected here because sticky_confirmed_filter is false.
+        if sticky_confirmed_filter:
+            return ObservabilityDecision(
+                DIAG_FILTER_SUSPECTED,
+                True,
+                FILTER_CONFIDENCE_MEDIUM,
+                FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
+            )
+        # Recovery is complete only after the configured regional success threshold.
         return result(
             base_reason,
             False,

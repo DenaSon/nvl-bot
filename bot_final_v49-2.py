@@ -2351,6 +2351,80 @@ def _db_restore_accounts_host_scoped(usernames, current_host, restore_host):
         return restored
 
 
+def _db_commit_failover_account_state(
+    usernames,
+    source_host,
+    target_host,
+    *,
+    previous_default_host=None,
+):
+    """Atomically move the scoped account set and, only if needed, the default host."""
+    usernames = list(dict.fromkeys(str(u) for u in usernames))
+    with db_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        moved = 0
+        for username in usernames:
+            cur = conn.execute(
+                "UPDATE ssh_accounts SET host=? "
+                "WHERE username=? AND host=? AND service_type='ssh' "
+                "AND status != '⏳ درحال ساخت'",
+                (target_host, username, source_host),
+            )
+            moved += cur.rowcount
+        if moved != len(usernames):
+            raise RuntimeError(
+                f"atomic failover move mismatch: expected={len(usernames)} moved={moved}"
+            )
+
+        default_changed = previous_default_host == source_host
+        if default_changed:
+            conn.execute("UPDATE host_pool SET is_default=0")
+            cur = conn.execute(
+                "UPDATE host_pool SET is_default=1 WHERE host=? AND active=1",
+                (target_host,),
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError("target host could not become default")
+
+        return moved, default_changed
+
+
+def _db_rollback_failover_account_state(
+    usernames,
+    source_host,
+    target_host,
+    *,
+    previous_default_host=None,
+):
+    """Atomically restore DB ownership/default after a post-commit routing failure."""
+    usernames = list(dict.fromkeys(str(u) for u in usernames))
+    with db_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        restored = 0
+        for username in usernames:
+            cur = conn.execute(
+                "UPDATE ssh_accounts SET host=? "
+                "WHERE username=? AND host=? AND service_type='ssh'",
+                (source_host, username, target_host),
+            )
+            restored += cur.rowcount
+        if restored != len(usernames):
+            raise RuntimeError(
+                f"atomic failover rollback mismatch: expected={len(usernames)} restored={restored}"
+            )
+
+        if previous_default_host:
+            conn.execute("UPDATE host_pool SET is_default=0")
+            cur = conn.execute(
+                "UPDATE host_pool SET is_default=1 WHERE host=? AND active=1",
+                (previous_default_host,),
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError("previous default host could not be restored")
+
+        return restored
+
+
 def _db_acquire_failover_lock(source_host, target_host, *, mode=FAILOVER_MODE_MANUAL):
     """Acquire the single persisted Phase 6G failover lock."""
     now_dt = datetime.now()

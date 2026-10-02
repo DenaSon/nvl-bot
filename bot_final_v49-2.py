@@ -9775,12 +9775,29 @@ async def _render_filtering_monitor_panel(query, page=0):
     if backoff > 0:
         provider_line += f" · ⏳ Backoff ~{max(1, backoff // 60)} دقیقه"
 
+    latest_failover = await asyncio.to_thread(_db_get_latest_failover_operation)
+    failover_line = "Last manual failover: <code>none</code>"
+    if latest_failover:
+        (
+            op_id, op_mode, op_source, op_target, op_status, op_started,
+            op_updated, op_finished, op_accounts, op_moved, op_error,
+        ) = latest_failover
+        failover_line = (
+            f"Last manual failover: <code>#{op_id}</code> · "
+            f"<b>{esc(op_status)}</b> · "
+            f"<code>{esc(op_source)}</code> → <code>{esc(op_target)}</code> · "
+            f"{op_moved or 0}/{op_accounts or 0}"
+        )
+        if op_error:
+            failover_line += f" · ⚠️ <code>{esc(str(op_error)[:120])}</code>"
+
     lines = [
-        "🛡 <b>Filtering Monitor — Phase 6F</b>",
+        "🛡 <b>Filtering Monitor — Phase 6G</b>",
         "",
-        "Mode: <b>MONITOR ONLY</b> — هیچ Failover/DNS/Account action خودکاری انجام نمی‌شود.",
+        "Detection: <b>AUTO MONITOR</b> · Failover: <b>MANUAL ONLY</b> · Auto Failover: <b>OFF</b>",
         f"Check interval: <code>{REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS}s</code>",
         provider_line,
+        failover_line,
         "",
     ]
     kb = []
@@ -18770,5 +18787,5 @@ if __name__ == '__main__':
     print(f"🌐 پایش خودکار فشار IP فعال است (هر {IP_PRESSURE_CHECK_INTERVAL_SECONDS}s چک، آستانهٔ هشدار {IP_PRESSURE_WARN_PCT}٪، بالانس خودکار بعد از {IP_PRESSURE_AUTOBALANCE_AFTER_HOURS} ساعت بدون واکنش).")
     print(f"🛡️ پایش سلامت IPها فعال است (هر {HOST_HEALTH_CHECK_INTERVAL_SECONDS}s چک، غیرفعال‌سازی خودکار بعد از {HOST_HEALTH_FAIL_THRESHOLD} شکست متوالی).")
     print(f"📉 Traffic Anomaly signal فعال است (هر {FILTER_DETECT_CHECK_INTERVAL_SECONDS}s؛ بدون Failover).")
-    print(f"🛡 Phase6F Regional Filter Monitor فعال است (هر {REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS}s؛ حداکثر {REGIONAL_FILTER_MAX_NODES} Node ایران؛ MONITOR ONLY).")
+    print(f"🛡 Phase6G Filtering Monitor فعال است (هر {REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS}s؛ detection خودکار، Failover فقط دستی، Auto OFF).")
     app.run_polling()

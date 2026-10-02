@@ -61,6 +61,8 @@ source set before changing ownership/default. If an account was added, activated
 removed, or reassigned after the rebuild snapshot, the commit aborts with
 `SOURCE_ACCOUNT_SET_CHANGED`.
 
+The same transaction also consumes the selected target's Standby role (`is_standby=0`). A target that owns the migrated accounts/default therefore cannot remain advertised as a spare Standby, including when final DNS state is uncertain. A successful rollback restores `is_standby=1` atomically with the previous account/default ownership.
+
 SSH account finalization also participates in the Phase 6G write lock: status and
 owning `host` are committed atomically, and a reservation cannot become an active
 SSH account while a failover operation is `RUNNING`. Generic account-host moves
@@ -267,12 +269,10 @@ Verify Standby service + admin again
         |
         v
 Atomic scoped DB/default commit
++ consume Target Standby role
         |
         v
-DNS: Core -> Standby
-        |
-        v
-Target leaves Standby role
+DNS: Core -> Target
         |
         v
 SUCCEEDED
@@ -313,8 +313,9 @@ Phase 6G now:
 3. marks the operation `ROLLED_BACK`.
 
 If Core route recovery itself cannot be confirmed, Phase 6G **does not roll the
-DB/default back**. It retains Target ownership and raises an urgent FAILED
-operation so the system does not create a DNS/DB split-brain.
+DB/default back**. It retains Target ownership, keeps the Target out of the
+Standby pool, and raises an urgent FAILED operation so the system does not create
+a DNS/DB split-brain or allow that live owner to be selected as a spare.
 
 If the final Target handoff already succeeded and a later bookkeeping step fails,
 Target routing + committed DB ownership are retained for the same reason.
@@ -469,6 +470,7 @@ Required cases:
 
 7. **Final DNS failure + Core recovery failure**
    - DB/default remain committed to Target;
+   - Target remains out of the Standby pool;
    - operation is `FAILED`;
    - no source rollback is attempted while route state is uncertain.
 

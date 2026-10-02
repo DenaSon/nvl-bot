@@ -99,6 +99,33 @@ class Phase6CClassifierTests(unittest.TestCase):
         self.assertEqual(d.diagnostic_reason, DIAG_EXTERNAL_REACHABILITY_FAILURE)
         self.assertFalse(d.filter_suspected)
 
+    def test_regional_and_external_failure_cannot_newly_confirm_filtering(self):
+        d = derive_observability(
+            True, True, True, True, False, False,
+            regional_failure_streak=10,
+            confirm_threshold=3,
+        )
+        self.assertEqual(d.diagnostic_reason, DIAG_EXTERNAL_REACHABILITY_FAILURE)
+        self.assertFalse(d.filter_suspected)
+        self.assertEqual(d.filter_confidence, FILTER_CONFIDENCE_LOW)
+
+    def test_confirmed_filter_survives_unrelated_wireguard_failure(self):
+        d = derive_observability(
+            True, True, False, False, None, None,
+            previous_filter_suspected=True,
+        )
+        self.assertEqual(d.diagnostic_reason, DIAG_WIREGUARD_PATH_FAILURE)
+        self.assertTrue(d.filter_suspected)
+        self.assertEqual(d.filter_confidence, FILTER_CONFIDENCE_LOW)
+
+    def test_confirmed_filter_is_not_cleared_by_missing_regional_evidence(self):
+        d = derive_observability(
+            True, True, True, True, True, None,
+            previous_filter_suspected=True,
+        )
+        self.assertEqual(d.diagnostic_reason, DIAG_ALL_PATHS_HEALTHY)
+        self.assertTrue(d.filter_suspected)
+
     def test_confirmed_filter_requires_recovery_threshold(self):
         sticky = derive_observability(
             True, True, True, True, True, True,
@@ -191,6 +218,22 @@ class Phase6CIntegrationRegressionTests(unittest.TestCase):
         self.assertIn("WG_HANDSHAKE_MAX_AGE_SECONDS", region)
         self.assertIn('["ping", "-c", "1"', region)
         self.assertIn("wg_last_handshake_at", region)
+
+    def test_wireguard_probe_stimulates_tunnel_before_reading_handshake(self):
+        start = self.source.index("def _probe_wireguard_edge_sync(")
+        end = self.source.index("async def _host_health_tick(app):", start)
+        region = self.source[start:end]
+        ping_pos = region.index('["ping", "-c", "1"')
+        handshake_pos = region.index('["wg", "show", "wg0", "latest-handshakes"]')
+        self.assertLess(ping_pos, handshake_pos)
+
+    def test_probe_history_has_bounded_retention(self):
+        self.assertIn("EDGE_PROBE_HISTORY_RETENTION_DAYS", self.source)
+        self.assertIn("def _db_prune_probe_history(", self.source)
+        self.assertGreaterEqual(
+            self.source.count("_db_prune_probe_history(conn, host)"),
+            2,
+        )
 
     def test_health_tick_records_phase6c_evidence_without_replacing_phase6a_threshold(self):
         start = self.source.index("async def _host_health_tick(app):")

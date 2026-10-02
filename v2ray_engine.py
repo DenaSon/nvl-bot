@@ -11,23 +11,77 @@ log = logging.getLogger("V2RayEngine")
 # process-global token was unsafe as soon as NVL talked to more than one
 # Marzban backend or admin account.
 _MARZBAN_TOKEN_CACHE = {}
+_MARZBAN_AUTH_ERRORS = {}
+
+
+def normalize_marzban_base_url(url):
+    """Normalize the configured Marzban base URL without swallowing real subpaths.
+
+    Operators commonly paste https://host/api from API docs. NVL appends /api/*
+    endpoints itself, so strip only a terminal /api to avoid /api/api/... requests.
+    """
+    base = (url or "").strip().rstrip("/")
+    if base.lower().endswith("/api"):
+        base = base[:-4].rstrip("/")
+    return base
 
 
 def _token_cache_key(url, user):
-    return ((url or "").strip().rstrip("/"), (user or "").strip())
+    return (normalize_marzban_base_url(url), (user or "").strip())
+
+
+def _auth_error_key(url, user):
+    return _token_cache_key(url, user)
+
+
+def _set_auth_error(url, user, message):
+    _MARZBAN_AUTH_ERRORS[_auth_error_key(url, user)] = str(message or "unknown auth error")
+
+
+def get_last_auth_error(url, user):
+    return _MARZBAN_AUTH_ERRORS.get(_auth_error_key(url, user))
+
+
+def _format_auth_failure(status, payload):
+    detail = payload
+    if isinstance(payload, dict):
+        detail = payload.get("detail") or payload.get("message") or payload
+    text = str(detail or "").strip().replace("\n", " ")
+    if len(text) > 240:
+        text = text[:237] + "..."
+    if status == 401:
+        return f"HTTP 401: {text or 'incorrect username or password'}"
+    if status == 403:
+        return f"HTTP 403: {text or 'access forbidden'}"
+    if status == 404:
+        return "HTTP 404: auth endpoint not found (check MARZBAN_URL; use the panel base URL, not a URL ending in /api/admin/token)"
+    return f"HTTP {status}: {text or 'unexpected authentication response'}"
 
 
 def clear_token_cache(url=None, user=None):
     """Clear one backend/admin token or the complete token cache."""
     if url is None and user is None:
         _MARZBAN_TOKEN_CACHE.clear()
+        _MARZBAN_AUTH_ERRORS.clear()
         return
-    _MARZBAN_TOKEN_CACHE.pop(_token_cache_key(url, user), None)
+    key = _token_cache_key(url, user)
+    _MARZBAN_TOKEN_CACHE.pop(key, None)
+    _MARZBAN_AUTH_ERRORS.pop(key, None)
 
 
 async def get_token(url, user, pwd, force_refresh=False):
     key = _token_cache_key(url, user)
     now = time.time()
+
+    if not key[0]:
+        _set_auth_error(url, user, "configuration error: MARZBAN_URL is empty")
+        return None
+    if not key[1]:
+        _set_auth_error(url, user, "configuration error: MARZBAN_USERNAME is empty")
+        return None
+    if not pwd:
+        _set_auth_error(url, user, "configuration error: MARZBAN_PASSWORD is empty")
+        return None
 
     if force_refresh:
         _MARZBAN_TOKEN_CACHE.pop(key, None)
@@ -41,18 +95,41 @@ async def get_token(url, user, pwd, force_refresh=False):
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 token_url,
-                data={"username": user, "password": pwd, "grant_type": "password"},
+                data={
+                    "username": key[1],
+                    "password": pwd,
+                    "grant_type": "password",
+                    "scope": "",
+                    "client_id": "",
+                    "client_secret": "",
+                },
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
                 timeout=10,
             ) as resp:
+                payload = await _response_payload(resp)
                 if resp.status == 200:
-                    data = await resp.json()
-                    token = data.get("access_token")
+                    if not isinstance(payload, dict):
+                        _set_auth_error(url, user, "HTTP 200 but Marzban returned a non-JSON token response")
+                        return None
+                    token = payload.get("access_token")
                     if token:
                         _MARZBAN_TOKEN_CACHE[key] = (token, now + 1800)
-                    return token
+                        _MARZBAN_AUTH_ERRORS.pop(key, None)
+                        return token
+                    _set_auth_error(url, user, "HTTP 200 but access_token is missing")
+                    return None
+
+                auth_error = _format_auth_failure(resp.status, payload)
+                _set_auth_error(url, user, auth_error)
+                log.warning("Marzban Auth Failed: base_url=%s user=%s error=%s", key[0], key[1], auth_error)
                 return None
     except Exception as e:
-        log.error("Marzban Auth Error: %s", e)
+        auth_error = f"network error: {type(e).__name__}: {e}"
+        _set_auth_error(url, user, auth_error)
+        log.error("Marzban Auth Error: base_url=%s user=%s error=%s", key[0], key[1], auth_error)
         return None
 
 
@@ -68,14 +145,16 @@ async def _response_payload(resp):
 
 
 async def api_request(method, endpoint, url, user, pwd, json_data=None, params=None):
-    full_url = f"{(url or '').strip().rstrip('/')}{endpoint}"
+    base_url = normalize_marzban_base_url(url)
+    full_url = f"{base_url}{endpoint}"
 
     try:
         async with aiohttp.ClientSession() as session:
             for attempt in range(2):
                 token = await get_token(url, user, pwd, force_refresh=(attempt == 1))
                 if not token:
-                    return False, "Marzban Auth Failed"
+                    detail = get_last_auth_error(url, user) or "unknown authentication error"
+                    return False, f"Marzban Auth Failed — {detail}"
 
                 headers = {
                     "Authorization": f"Bearer {token}",

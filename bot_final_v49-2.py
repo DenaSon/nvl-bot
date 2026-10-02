@@ -17933,5 +17933,6 @@ if __name__ == '__main__':
     print(f"🛡️ پایش تخطی ظرفیت اکانت‌ها فعال است (هر {CAPACITY_CHECK_INTERVAL_SECONDS}s چک، آستانه {CAPACITY_SUSPEND_AFTER_MINUTES} دقیقه).")
     print(f"🌐 پایش خودکار فشار IP فعال است (هر {IP_PRESSURE_CHECK_INTERVAL_SECONDS}s چک، آستانهٔ هشدار {IP_PRESSURE_WARN_PCT}٪، بالانس خودکار بعد از {IP_PRESSURE_AUTOBALANCE_AFTER_HOURS} ساعت بدون واکنش).")
     print(f"🛡️ پایش سلامت IPها فعال است (هر {HOST_HEALTH_CHECK_INTERVAL_SECONDS}s چک، غیرفعال‌سازی خودکار بعد از {HOST_HEALTH_FAIL_THRESHOLD} شکست متوالی).")
-    print(f"🛡 پایش فیلتر خودکار فعال است (هر {FILTER_DETECT_CHECK_INTERVAL_SECONDS}s چک، آستانه پیش‌فرض {FILTER_DETECT_ONLINE_PCT_THRESHOLD}\u066a، تایید {FILTER_DETECT_CONFIRM_TICKS} بار متوالی). [از منوی سرویس IP قابل تنظیم است]")
+    print(f"📉 Traffic Anomaly signal فعال است (هر {FILTER_DETECT_CHECK_INTERVAL_SECONDS}s؛ بدون Failover).")
+    print(f"🛡 Phase6F Regional Filter Monitor فعال است (هر {REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS}s؛ حداکثر {REGIONAL_FILTER_MAX_NODES} Node ایران؛ MONITOR ONLY).")
     app.run_polling()

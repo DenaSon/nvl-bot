@@ -3,6 +3,7 @@ import unittest
 
 from edge_observability import (
     DIAG_ADMIN_ONLY_FAILURE,
+    DIAG_CORE_LOCAL,
     DIAG_ALL_PATHS_HEALTHY,
     DIAG_CORE_PATH_FAILURE,
     DIAG_EXTERNAL_REACHABILITY_FAILURE,
@@ -178,9 +179,30 @@ class Phase6CIntegrationRegressionTests(unittest.TestCase):
 
     def test_v115_marker_is_present(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V115-2026-10-02-phase6c-edge-observability"',
+            'BOT_VERSION_TAG = "V115.1-2026-10-02-phase6c-core-scope-fix"',
             self.source,
         )
+
+    def test_core_is_excluded_from_phase6c_edge_probes(self):
+        recompute_start = self.source.index("def _db_recompute_host_observability(")
+        recompute_end = self.source.index("def _db_record_observability_probe(", recompute_start)
+        recompute_region = self.source[recompute_start:recompute_end]
+        self.assertIn("if _is_current_core_host(host):", recompute_region)
+        self.assertIn("DIAG_CORE_LOCAL", recompute_region)
+        self.assertIn("wg_peer_ok=NULL", recompute_region)
+        self.assertIn("core_path_ok=NULL", recompute_region)
+
+        tick_start = self.source.index("async def _host_health_tick(app):")
+        tick_end = self.source.index("async def _host_health_loop(app):", tick_start)
+        tick_region = self.source[tick_start:tick_end]
+        guard = "if not await asyncio.to_thread(_is_current_core_host, host):"
+        self.assertIn(guard, tick_region)
+        guard_pos = tick_region.index(guard)
+        probe_pos = tick_region.index("_probe_wireguard_edge_sync", guard_pos)
+        self.assertGreater(probe_pos, guard_pos)
+
+    def test_core_local_diagnostic_constant_is_stable(self):
+        self.assertEqual(DIAG_CORE_LOCAL, "CORE_LOCAL")
 
     def test_phase6c_schema_is_additive(self):
         for column in (

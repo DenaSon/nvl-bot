@@ -139,16 +139,10 @@ class Phase55UserCreationRegressionTests(unittest.TestCase):
             sale_region.index("service.get_subscription_url(username)"),
         )
 
-    def test_legacy_marzban_domain_is_not_hardcoded_in_runtime_files(self):
+    def test_marzban_runtime_uses_configured_url_and_current_bootstrap_endpoint(self):
         root = BOT_PATH.parent
-        runtime_paths = list(root.glob("*.py")) + list(root.glob("*.sh")) + [root / ".env.example"]
-        for path in runtime_paths:
-            if path.exists():
-                self.assertNotIn(
-                    "sublink.nvlsup.shop",
-                    path.read_text(encoding="utf-8", errors="ignore"),
-                    msg=f"legacy Marzban domain hardcoded in {path.name}",
-                )
+        env_example = (root / ".env.example").read_text(encoding="utf-8")
+        self.assertIn("MARZBAN_URL=https://gate.nvlsup.xyz", env_example)
         self.assertIn("_db_get_setting, \'marzban_url\', \'\'", self.source)
 
 

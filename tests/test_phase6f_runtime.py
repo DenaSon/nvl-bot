@@ -233,7 +233,8 @@ class Phase6FBotIntegrationStaticTests(unittest.TestCase):
             'elif d.startswith("hpdns_")',
         )
         self.assertIn("_db_update_setting, 'auto_failover_mode', '0'", region)
-        self.assertIn("Phase 6F", region)
+        self.assertIn("auto_failover_mode', '0'", region)
+        self.assertIn("Auto Failover", region)
         self.assertNotIn("_activate_standby_for_filtered_edge(", region)
 
     def test_runtime_uses_actual_service_port(self):

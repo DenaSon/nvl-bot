@@ -1799,15 +1799,18 @@ def _db_record_regional_round(host, probe, regional_decision):
                 "filter_consecutive_successes=COALESCE(filter_consecutive_successes,0)+1, "
                 "filter_consecutive_failures=0"
             )
-        elif regional_decision.state in {FILTER_STATE_POSSIBLE, FILTER_STATE_LIKELY}:
+        elif regional_decision.state == FILTER_STATE_LIKELY:
+            # Temporal confirmation counts consecutive STRONG rounds only.
+            # POSSIBLE evidence must never pre-fill the LIKELY confirmation streak.
             streak_sql = (
                 "filter_consecutive_failures=COALESCE(filter_consecutive_failures,0)+1, "
                 "filter_consecutive_successes=0"
             )
         else:
+            # POSSIBLE/UNKNOWN break a LIKELY streak and are not recovery evidence.
             streak_sql = (
-                "filter_consecutive_failures=COALESCE(filter_consecutive_failures,0), "
-                "filter_consecutive_successes=COALESCE(filter_consecutive_successes,0)"
+                "filter_consecutive_failures=0, "
+                "filter_consecutive_successes=0"
             )
 
         conn.execute(

@@ -9878,11 +9878,22 @@ async def _render_filtering_edge_detail(query, host):
     if backoff > 0:
         text += f"\n⏳ Global provider backoff: ~{max(1, backoff // 60)} دقیقه"
 
+    standbys = [
+        h for h in await asyncio.to_thread(_db_get_standby_hosts)
+        if h != host
+    ]
     kb = [
         [InlineKeyboardButton("🔄 تست مجدد الآن", callback_data=f"flt_check_{host}")],
         [InlineKeyboardButton("📊 آخرین Probeهای Node", callback_data=f"flt_probe_{host}")],
-        [InlineKeyboardButton("🔙 Filtering Monitor", callback_data="hp_filtering")],
     ]
+    if standbys:
+        kb.append([
+            InlineKeyboardButton(
+                "⚡ Safe Manual Failover",
+                callback_data=f"flt_failover_{host}",
+            )
+        ])
+    kb.append([InlineKeyboardButton("🔙 Filtering Monitor", callback_data="hp_filtering")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
 
@@ -15507,6 +15518,114 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("ℹ️ Core هدف Filtering Probe نیست.")
         await _render_filtering_edge_detail(query, host)
 
+    elif d.startswith("flt_failover_confirm_") and role == 'admin':
+        payload = d[len("flt_failover_confirm_"):]
+        source_host, sep, target_host = payload.partition("_")
+        if not sep or not source_host or not target_host:
+            await query.message.reply_text("❌ Failover callback نامعتبر است.")
+            return
+        await query.edit_message_text(
+            "⏳ <b>Safe Manual Failover شروع شد.</b>\n\n"
+            f"Source: <code>{esc(source_host)}</code>\n"
+            f"Target: <code>{esc(target_host)}</code>\n\n"
+            "نتیجهٔ هر مرحله و وضعیت نهایی برای ادمین‌ها ارسال می‌شود.",
+            parse_mode="HTML",
+        )
+        spawn_bg_task(
+            _safe_manual_failover(
+                context.application,
+                source_host,
+                target_host,
+            )
+        )
+
+    elif d.startswith("flt_failover_pick_") and role == 'admin':
+        payload = d[len("flt_failover_pick_"):]
+        source_host, sep, target_host = payload.partition("_")
+        if not sep or not source_host or not target_host:
+            await query.message.reply_text("❌ Failover target نامعتبر است.")
+            return
+
+        await query.edit_message_text(
+            f"⏳ Preflight امن <code>{esc(source_host)}</code> → "
+            f"<code>{esc(target_host)}</code>...",
+            parse_mode="HTML",
+        )
+        preflight = await _safe_manual_failover_preflight(source_host, target_host)
+        if not preflight.get("ok"):
+            errors = preflight.get("errors") or ["UNKNOWN_PREFLIGHT_ERROR"]
+            await query.edit_message_text(
+                "⛔️ <b>Preflight رد شد؛ Failover قابل اجرا نیست.</b>\n\n"
+                f"Source: <code>{esc(source_host)}</code>\n"
+                f"Target: <code>{esc(target_host)}</code>\n"
+                f"Errors: <code>{esc(' | '.join(errors))}</code>\n\n"
+                "هیچ تغییری روی DNS/DB/Account انجام نشد.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "🔙 جزئیات Edge",
+                        callback_data=f"flt_detail_{source_host}",
+                    )
+                ]]),
+                parse_mode="HTML",
+            )
+            return
+
+        await query.edit_message_text(
+            "⚠️ <b>تأیید Safe Manual Failover</b>\n\n"
+            f"Source: <code>{esc(source_host)}</code>\n"
+            f"Standby: <code>{esc(target_host)}</code>\n"
+            f"Accounts: <b>{preflight['account_count']}</b>\n"
+            f"Service port: <code>{preflight['source_service_port']}</code>\n"
+            f"DNS فعلی: <code>{esc(preflight['previous_dns_ip'])}</code>\n"
+            f"Core fallback: <code>{esc(preflight['core_public_ip'])}</code>\n"
+            f"Target filtering: <b>{esc(preflight['target_filter_state'])}</b>\n\n"
+            "ترتیب اجرا: DNS→Core، rebuild کامل، verify، DB scoped commit، DNS→Standby.\n"
+            "اگر مرحلهٔ نهایی DNS شکست بخورد، DB/default rollback می‌شود.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "✅ تأیید و اجرا",
+                    callback_data=f"flt_failover_confirm_{source_host}_{target_host}",
+                )],
+                [InlineKeyboardButton(
+                    "↩️ انصراف",
+                    callback_data=f"flt_detail_{source_host}",
+                )],
+            ]),
+            parse_mode="HTML",
+        )
+
+    elif d.startswith("flt_failover_") and role == 'admin':
+        source_host = d[len("flt_failover_"):]
+        standbys = [
+            h for h in await asyncio.to_thread(_db_get_standby_hosts)
+            if h != source_host
+        ]
+        if not standbys:
+            await query.message.reply_text("⚠️ هیچ Standby فعال و آماده‌ای ثبت نشده است.")
+            await _render_filtering_edge_detail(query, source_host)
+            return
+
+        kb = [
+            [InlineKeyboardButton(
+                f"🅢 {target}",
+                callback_data=f"flt_failover_pick_{source_host}_{target}",
+            )]
+            for target in standbys
+        ]
+        kb.append([
+            InlineKeyboardButton(
+                "↩️ انصراف",
+                callback_data=f"flt_detail_{source_host}",
+            )
+        ])
+        await query.edit_message_text(
+            "⚡ <b>Safe Manual Failover — Phase 6G</b>\n\n"
+            f"Source Edge: <code>{esc(source_host)}</code>\n"
+            "Standby مقصد را انتخاب کنید. قبل از نمایش تأیید نهایی، Preflight زنده انجام می‌شود.",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode="HTML",
+        )
+
     elif d.startswith("hppage_") and role == 'admin':
         try:
             page = int(d[len("hppage_"):])
@@ -15781,14 +15900,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d == "hp_failover_toggle" and role == 'admin':
         await asyncio.to_thread(_db_update_setting, 'auto_failover_mode', '0')
         await query.message.reply_text(
-            "🛡 Phase 6F روی MONITOR ONLY قفل است. Auto Failover در 6H فعال خواهد شد."
+            "🛡 Phase 6G فقط Manual Failover امن را اجازه می‌دهد. Auto Failover همچنان خاموش است و در 6H فعال خواهد شد."
         )
         await _render_host_pool_panel(query)
 
     elif d.startswith("standby_act_") and role == 'admin':
         await query.message.reply_text(
-            "🛡 این دکمه متعلق به پیام قدیمی است. در Phase 6F هیچ انتقالی انجام نمی‌شود؛ "
-            "Safe Manual Failover در Phase 6G پیاده‌سازی می‌شود."
+            "🛡 این دکمه متعلق به پیام قدیمی است. برای انتقال، از Filtering Monitor → Safe Manual Failover استفاده کنید."
         )
 
     elif d.startswith("hpdns_") and role == 'admin':

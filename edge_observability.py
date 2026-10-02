@@ -83,18 +83,48 @@ def derive_observability(
 ) -> ObservabilityDecision:
     """Derive a deterministic Phase 6C diagnostic/filtering decision.
 
-    Regional evidence is optional. Filtering is never confirmed from a single
-    failure and is only considered after the local service, WireGuard and tunnel
-    path are healthy. A previously confirmed suspicion requires the configured
-    recovery-success threshold before it clears.
+    Filtering is confirmed only from repeated regional failures while the local
+    Service/WireGuard/Core path remains healthy. Once confirmed, the filtering
+    dimension is sticky until *regional* recovery reaches recovery_threshold;
+    unrelated infrastructure failures are diagnostics, not proof of recovery.
     """
     confirm_threshold = max(1, int(confirm_threshold))
     recovery_threshold = max(1, int(recovery_threshold))
     regional_failure_streak = max(0, int(regional_failure_streak or 0))
     regional_success_streak = max(0, int(regional_success_streak or 0))
 
-    if service_ok is None or admin_ok is None:
+    recovery_confirmed = (
+        previous_filter_suspected is True
+        and service_ok is True
+        and wg_peer_ok is True
+        and core_path_ok is True
+        and regional_service_ok is True
+        and regional_success_streak >= recovery_threshold
+    )
+    sticky_confirmed_filter = (
+        previous_filter_suspected is True and not recovery_confirmed
+    )
+
+    def result(diagnostic, suspected, confidence, filter_reason):
+        # A previously confirmed filtering condition cannot be cleared by missing
+        # evidence, an unrelated WG/Core failure, or a single successful regional
+        # check. Only the explicit recovery condition above clears it.
+        if sticky_confirmed_filter and suspected is not True:
+            return ObservabilityDecision(
+                diagnostic,
+                True,
+                FILTER_CONFIDENCE_LOW,
+                FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
+            )
         return ObservabilityDecision(
+            diagnostic,
+            suspected,
+            confidence,
+            filter_reason,
+        )
+
+    if service_ok is None or admin_ok is None:
+        return result(
             DIAG_INSUFFICIENT_EVIDENCE,
             None,
             FILTER_CONFIDENCE_NONE,
@@ -102,7 +132,7 @@ def derive_observability(
         )
 
     if not bool(service_ok) and not bool(admin_ok):
-        return ObservabilityDecision(
+        return result(
             DIAG_EDGE_UNREACHABLE,
             False,
             FILTER_CONFIDENCE_NONE,
@@ -110,7 +140,7 @@ def derive_observability(
         )
 
     if wg_peer_ok is None or core_path_ok is None:
-        return ObservabilityDecision(
+        return result(
             DIAG_INSUFFICIENT_EVIDENCE,
             None,
             FILTER_CONFIDENCE_NONE,
@@ -118,7 +148,7 @@ def derive_observability(
         )
 
     if not bool(wg_peer_ok):
-        return ObservabilityDecision(
+        return result(
             DIAG_WIREGUARD_PATH_FAILURE,
             False,
             FILTER_CONFIDENCE_NONE,
@@ -126,7 +156,7 @@ def derive_observability(
         )
 
     if not bool(core_path_ok):
-        return ObservabilityDecision(
+        return result(
             DIAG_CORE_PATH_FAILURE,
             False,
             FILTER_CONFIDENCE_NONE,
@@ -134,7 +164,7 @@ def derive_observability(
         )
 
     if not bool(service_ok):
-        return ObservabilityDecision(
+        return result(
             DIAG_SERVICE_PATH_FAILURE,
             False,
             FILTER_CONFIDENCE_NONE,
@@ -145,20 +175,16 @@ def derive_observability(
         DIAG_ADMIN_ONLY_FAILURE if not bool(admin_ok) else DIAG_ALL_PATHS_HEALTHY
     )
 
-    # Once filtering is confirmed, transient recovery is deliberately sticky.
-    if (
-        previous_filter_suspected is True
-        and regional_service_ok is True
-        and regional_success_streak < recovery_threshold
-    ):
-        return ObservabilityDecision(
-            DIAG_FILTER_SUSPECTED,
-            True,
-            FILTER_CONFIDENCE_MEDIUM,
-            FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
-        )
-
     if regional_service_ok is False:
+        # If the independent external probe is also down, the evidence no longer
+        # isolates a regional path. Never newly confirm filtering from that pattern.
+        if external_service_ok is False:
+            return result(
+                DIAG_EXTERNAL_REACHABILITY_FAILURE,
+                False,
+                FILTER_CONFIDENCE_LOW,
+                FILTER_REASON_NONE,
+            )
         if regional_failure_streak >= confirm_threshold:
             confidence = (
                 FILTER_CONFIDENCE_HIGH
@@ -171,7 +197,7 @@ def derive_observability(
                 confidence,
                 FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
             )
-        return ObservabilityDecision(
+        return result(
             DIAG_REGIONAL_REACHABILITY_FAILURE,
             False,
             FILTER_CONFIDENCE_LOW,
@@ -179,7 +205,7 @@ def derive_observability(
         )
 
     if external_service_ok is False:
-        return ObservabilityDecision(
+        return result(
             DIAG_EXTERNAL_REACHABILITY_FAILURE,
             False,
             FILTER_CONFIDENCE_LOW,
@@ -187,7 +213,8 @@ def derive_observability(
         )
 
     if regional_service_ok is True:
-        return ObservabilityDecision(
+        # recovery_confirmed is reflected here because sticky_confirmed_filter is false.
+        return result(
             base_reason,
             False,
             FILTER_CONFIDENCE_NONE,
@@ -195,10 +222,12 @@ def derive_observability(
         )
 
     # Regional evidence is optional. Local diagnostics remain useful while the
-    # filtering dimension stays explicitly unknown.
-    return ObservabilityDecision(
+    # filtering dimension stays explicitly unknown unless a previous confirmation
+    # is still waiting for a qualified recovery.
+    return result(
         base_reason,
         None,
         FILTER_CONFIDENCE_NONE,
         FILTER_REASON_INSUFFICIENT_EVIDENCE,
     )
+

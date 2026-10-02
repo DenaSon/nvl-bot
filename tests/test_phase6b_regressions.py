@@ -36,11 +36,12 @@ class Phase6BUnifiedHealthModelTests(unittest.TestCase):
         exec(compile(module, "<phase6b-health-model>", "exec"), cls.ns)
         cls.derive = staticmethod(cls.ns["_derive_host_health_state"])
 
-    def test_v114_marker_is_present(self):
-        self.assertIn(
-            'BOT_VERSION_TAG = "V114-2026-10-02-phase6b-unified-health-model"',
-            self.source,
-        )
+    def test_phase6b_features_survive_current_version(self):
+        self.assertIn("BOT_VERSION_TAG =", self.source)
+        self.assertIn("def _derive_host_health_state(", self.source)
+        self.assertIn("def _db_recompute_host_health(", self.source)
+        self.assertIn("health_state", self.source)
+        self.assertIn("health_reason", self.source)
 
     def test_schema_is_additive_and_typed(self):
         for column in (
@@ -144,7 +145,7 @@ class Phase6BUnifiedHealthModelTests(unittest.TestCase):
         self.assertNotIn("if health_state", region)
 
     def test_monitoring_panel_shows_overall_state_and_membership_separately(self):
-        start = self.source.index("async def _render_host_pool_panel(query):")
+        start = self.source.index("async def _render_host_pool_panel(")
         end = self.source.index("async def _host_has_working_persistent_key", start)
         region = self.source[start:end]
         self.assertIn("Overall: <b>{esc(overall_state)}</b>", region)

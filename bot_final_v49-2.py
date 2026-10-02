@@ -502,6 +502,7 @@ WG_HANDSHAKE_MAX_AGE_SECONDS = _phase6c_env_int("NVL_WG_HANDSHAKE_MAX_AGE", 900)
 EDGE_FILTER_CONFIRM_THRESHOLD = _phase6c_env_int("NVL_FILTER_CONFIRM_THRESHOLD", 3)
 EDGE_FILTER_RECOVERY_THRESHOLD = _phase6c_env_int("NVL_FILTER_RECOVERY_THRESHOLD", 2)
 EDGE_FILTER_COOLDOWN_SECONDS = _phase6c_env_int("NVL_FILTER_COOLDOWN_SECONDS", 600)
+EDGE_PROBE_HISTORY_RETENTION_DAYS = _phase6c_env_int("NVL_PROBE_HISTORY_RETENTION_DAYS", 14)
 
 # ==========================================
 # 🆕 V89 — سیستم شناسایی خودکار فیلتر شدن بر اساس کاربران آنلاین
@@ -1410,6 +1411,18 @@ def _db_recompute_host_health(host):
         return new_state, new_reason, changed
 
 
+def _db_prune_probe_history(conn, host, now_dt=None):
+    """Keep Phase 6C probe history bounded so long-running installations do not grow forever."""
+    now_dt = now_dt or datetime.now()
+    cutoff = (
+        now_dt - timedelta(days=EDGE_PROBE_HISTORY_RETENTION_DAYS)
+    ).strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        "DELETE FROM host_probe_results WHERE host=? AND checked_at < ?",
+        (host, cutoff),
+    )
+
+
 def _db_append_probe_result(host, probe_type, source, ok, latency_ms=None, reason=None, checked_at=None):
     """Append structured Phase 6C evidence without performing any operational action."""
     checked_at = checked_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1429,6 +1442,7 @@ def _db_append_probe_result(host, probe_type, source, ok, latency_ms=None, reaso
                 checked_at,
             ),
         )
+        _db_prune_probe_history(conn, host)
 
 
 def _db_recompute_host_observability(host):
@@ -1608,6 +1622,7 @@ def _db_record_observability_probe(
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (host, probe_type, source_txt, ok_db, latency_ms, reason_txt, now),
         )
+        _db_prune_probe_history(conn, host)
 
     if recompute:
         return _db_recompute_host_observability(host)
@@ -16415,7 +16430,12 @@ async def _tcp_health_check(host: str, port: int, timeout: float = HOST_HEALTH_T
                 await writer.wait_closed()
 
 def _probe_wireguard_edge_sync(host):
-    """Collect local Core-side WG peer and tunnel-path evidence for one managed Edge."""
+    """Collect local Core-side WG peer and tunnel-path evidence for one managed Edge.
+
+    The tunnel path is probed before reading latest-handshakes. This deliberately
+    generates traffic so an otherwise healthy but idle peer is not misclassified
+    as stale merely because no customer traffic crossed the tunnel recently.
+    """
     edge_marker = f"# edge-{str(host).replace('.', '-')}"
     if not os.path.exists(WG_CONF_PATH):
         return {
@@ -16466,6 +16486,23 @@ def _probe_wireguard_edge_sync(host):
             "core_path_reason": "WG_PEER_MISSING",
         }
 
+    # Send traffic first. A healthy idle peer should refresh its handshake here.
+    core_path_ok = None
+    core_reason = "WG_ALLOWED_IP_MISSING"
+    if tunnel_ip:
+        try:
+            ping = subprocess.run(
+                ["ping", "-c", "1", "-W", str(EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS), tunnel_ip],
+                capture_output=True,
+                text=True,
+                timeout=EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS + 2,
+            )
+            core_path_ok = ping.returncode == 0
+            core_reason = PROBE_REASON_OK if core_path_ok else "CORE_TUNNEL_PING_FAILED"
+        except Exception as e:
+            core_path_ok = None
+            core_reason = f"CORE_TUNNEL_PROBE_ERROR:{normalize_probe_error(e)}"
+
     try:
         proc = subprocess.run(
             ["wg", "show", "wg0", "latest-handshakes"],
@@ -16478,8 +16515,8 @@ def _probe_wireguard_edge_sync(host):
             "wg_peer_ok": None,
             "wg_last_handshake_at": None,
             "wg_reason": f"WG_COMMAND_ERROR:{normalize_probe_error(e)}",
-            "core_path_ok": None,
-            "core_path_reason": "WG_COMMAND_ERROR",
+            "core_path_ok": core_path_ok,
+            "core_path_reason": core_reason,
         }
 
     if proc.returncode != 0:
@@ -16487,8 +16524,8 @@ def _probe_wireguard_edge_sync(host):
             "wg_peer_ok": None,
             "wg_last_handshake_at": None,
             "wg_reason": "WG_COMMAND_FAILED",
-            "core_path_ok": None,
-            "core_path_reason": "WG_COMMAND_FAILED",
+            "core_path_ok": core_path_ok,
+            "core_path_reason": core_reason,
         }
 
     handshake_epoch = 0
@@ -16506,47 +16543,17 @@ def _probe_wireguard_edge_sync(host):
             "wg_peer_ok": False,
             "wg_last_handshake_at": None,
             "wg_reason": "WG_HANDSHAKE_MISSING",
-            "core_path_ok": False,
-            "core_path_reason": "WG_HANDSHAKE_MISSING",
+            "core_path_ok": core_path_ok,
+            "core_path_reason": core_reason,
         }
 
     handshake_at = datetime.fromtimestamp(handshake_epoch).strftime("%Y-%m-%d %H:%M:%S")
     age = max(0, int(time.time()) - handshake_epoch)
-    if age > WG_HANDSHAKE_MAX_AGE_SECONDS:
-        return {
-            "wg_peer_ok": False,
-            "wg_last_handshake_at": handshake_at,
-            "wg_reason": "WG_HANDSHAKE_STALE",
-            "core_path_ok": False,
-            "core_path_reason": "WG_HANDSHAKE_STALE",
-        }
-
-    if not tunnel_ip:
-        return {
-            "wg_peer_ok": True,
-            "wg_last_handshake_at": handshake_at,
-            "wg_reason": PROBE_REASON_OK,
-            "core_path_ok": None,
-            "core_path_reason": "WG_ALLOWED_IP_MISSING",
-        }
-
-    try:
-        ping = subprocess.run(
-            ["ping", "-c", "1", "-W", str(EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS), tunnel_ip],
-            capture_output=True,
-            text=True,
-            timeout=EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS + 2,
-        )
-        core_path_ok = ping.returncode == 0
-        core_reason = PROBE_REASON_OK if core_path_ok else "CORE_TUNNEL_PING_FAILED"
-    except Exception as e:
-        core_path_ok = None
-        core_reason = f"CORE_TUNNEL_PROBE_ERROR:{normalize_probe_error(e)}"
-
+    wg_ok = age <= WG_HANDSHAKE_MAX_AGE_SECONDS
     return {
-        "wg_peer_ok": True,
+        "wg_peer_ok": wg_ok,
         "wg_last_handshake_at": handshake_at,
-        "wg_reason": PROBE_REASON_OK,
+        "wg_reason": PROBE_REASON_OK if wg_ok else "WG_HANDSHAKE_STALE",
         "core_path_ok": core_path_ok,
         "core_path_reason": core_reason,
     }

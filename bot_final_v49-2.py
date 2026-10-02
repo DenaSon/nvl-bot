@@ -233,9 +233,27 @@ from edge_observability import (
     FILTER_CONFIDENCE_NONE,
     FILTER_REASON_INSUFFICIENT_EVIDENCE,
     FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
+    FILTER_STATE_CLEAR,
+    FILTER_STATE_LIKELY,
+    FILTER_STATE_POSSIBLE,
+    FILTER_STATE_UNKNOWN,
     PROBE_REASON_OK,
     derive_observability,
     normalize_probe_error,
+)
+from checkhost_probe import CheckHostClient, CheckHostError, CheckHostLimitExceeded
+from regional_filtering import classify_regional_evidence
+from filtering_runtime import (
+    PROVIDER_STATUS_ERROR,
+    PROVIDER_STATUS_LIMITED,
+    PROVIDER_STATUS_NEVER,
+    PROVIDER_STATUS_OK,
+    TRANSITION_CRITICAL,
+    TRANSITION_DEGRADED,
+    TRANSITION_RECOVERED,
+    TRANSITION_WARNING,
+    classify_filter_transition,
+    provider_backoff_until,
 )
 
 # ==========================================
@@ -245,7 +263,7 @@ from edge_observability import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V115.2-2026-10-02-predeploy-fixes"
+BOT_VERSION_TAG = "V116.0-2026-10-03-phase6f-filtering-runtime"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -504,6 +522,15 @@ EDGE_FILTER_CONFIRM_THRESHOLD = _phase6c_env_int("NVL_FILTER_CONFIRM_THRESHOLD",
 EDGE_FILTER_RECOVERY_THRESHOLD = _phase6c_env_int("NVL_FILTER_RECOVERY_THRESHOLD", 2)
 EDGE_FILTER_COOLDOWN_SECONDS = _phase6c_env_int("NVL_FILTER_COOLDOWN_SECONDS", 600)
 EDGE_PROBE_HISTORY_RETENTION_DAYS = _phase6c_env_int("NVL_PROBE_HISTORY_RETENTION_DAYS", 14)
+
+# Phase 6F — regional filtering runtime. Defaults are deliberately conservative to
+# respect the public Check-Host provider and avoid bursty per-Edge polling.
+REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROBE_INTERVAL", 600)
+REGIONAL_FILTER_MONITOR_INITIAL_DELAY_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROBE_INITIAL_DELAY", 30, minimum=0)
+REGIONAL_FILTER_EDGE_GAP_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROBE_EDGE_GAP", 15, minimum=0)
+REGIONAL_FILTER_MAX_NODES = _phase6c_env_int("NVL_REGIONAL_PROBE_MAX_NODES", 8)
+REGIONAL_FILTER_PROVIDER_BACKOFF_BASE_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROVIDER_BACKOFF_BASE", 300)
+REGIONAL_FILTER_PROVIDER_BACKOFF_MAX_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROVIDER_BACKOFF_MAX", 3600)
 
 # ==========================================
 # 🆕 V89 — سیستم شناسایی خودکار فیلتر شدن بر اساس کاربران آنلاین
@@ -1029,6 +1056,31 @@ def init_db():
             except sqlite3.OperationalError:
                 pass
 
+        # Phase 6F — persisted regional round summary + final filtering state.
+        # These columns are additive; existing rows start UNKNOWN until the runtime
+        # collects fresh evidence. Raw node evidence remains in host_probe_results.
+        for _sql in (
+            "ALTER TABLE host_pool ADD COLUMN filter_state TEXT DEFAULT 'UNKNOWN'",
+            "ALTER TABLE host_pool ADD COLUMN regional_filter_state TEXT DEFAULT 'UNKNOWN'",
+            "ALTER TABLE host_pool ADD COLUMN regional_filter_reason TEXT DEFAULT 'INSUFFICIENT_COVERAGE'",
+            "ALTER TABLE host_pool ADD COLUMN regional_total_nodes INTEGER DEFAULT 0",
+            "ALTER TABLE host_pool ADD COLUMN regional_completed_nodes INTEGER DEFAULT 0",
+            "ALTER TABLE host_pool ADD COLUMN regional_successful_nodes INTEGER DEFAULT 0",
+            "ALTER TABLE host_pool ADD COLUMN regional_failed_nodes INTEGER DEFAULT 0",
+            "ALTER TABLE host_pool ADD COLUMN regional_pending_nodes INTEGER DEFAULT 0",
+            "ALTER TABLE host_pool ADD COLUMN regional_success_ratio REAL DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN regional_failed_asns TEXT DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN regional_failed_cities TEXT DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN regional_last_request_id TEXT DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN regional_provider_status TEXT DEFAULT 'NEVER'",
+            "ALTER TABLE host_pool ADD COLUMN regional_provider_error TEXT DEFAULT NULL",
+            "ALTER TABLE host_pool ADD COLUMN regional_state_updated_at TEXT DEFAULT NULL",
+        ):
+            try:
+                c.execute(_sql)
+            except sqlite3.OperationalError:
+                pass
+
         c.execute('''CREATE TABLE IF NOT EXISTS host_probe_results (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         host TEXT NOT NULL,
@@ -1463,26 +1515,24 @@ def _is_current_core_host(host):
 
 
 def _db_recompute_host_observability(host):
-    """Persist the Phase 6C diagnostic/filter dimension only.
+    """Persist the Phase 6C/6E diagnostic and filtering dimensions only.
 
-    This function is intentionally side-effect-limited to SQLite + logging. It never
+    Side effects are deliberately limited to SQLite + logging. This function never
     changes host membership, DNS, standby state, accounts, Core/Edge roles or failover.
     """
     now_dt = datetime.now()
     now = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    # host_pool intentionally contains the Core as a fallback/customer endpoint too.
-    # Phase 6C is per-Edge observability: never interpret the Core public IP as an Edge,
-    # even if a stale peer marker from an earlier role still exists in wg0.conf.
+    # Core is the control plane, never a regional Edge filtering target.
     if _is_current_core_host(host):
         with db_conn() as conn:
             row = conn.execute(
-                "SELECT diagnostic_reason FROM host_pool WHERE host=?",
+                "SELECT diagnostic_reason, filter_state FROM host_pool WHERE host=?",
                 (host,),
             ).fetchone()
             if not row:
                 return None
-            previous_diagnostic = row[0]
+            previous_diagnostic, previous_filter_state = row
             conn.execute(
                 "UPDATE host_pool SET "
                 "wg_peer_ok=NULL, wg_last_handshake_at=NULL, wg_last_check=NULL, "
@@ -1490,6 +1540,11 @@ def _db_recompute_host_observability(host):
                 "external_service_ok=NULL, external_service_last_check=NULL, external_probe_source=NULL, "
                 "regional_service_ok=NULL, regional_service_last_check=NULL, regional_probe_source=NULL, "
                 "diagnostic_reason=?, filter_suspected=NULL, filter_confidence=?, filter_reason=?, "
+                "filter_state=?, regional_filter_state=?, regional_filter_reason='CORE_LOCAL', "
+                "regional_total_nodes=0, regional_completed_nodes=0, regional_successful_nodes=0, "
+                "regional_failed_nodes=0, regional_pending_nodes=0, regional_success_ratio=NULL, "
+                "regional_failed_asns=NULL, regional_failed_cities=NULL, regional_last_request_id=NULL, "
+                "regional_provider_status=?, regional_provider_error=NULL, regional_state_updated_at=?, "
                 "filter_updated_at=NULL, filter_consecutive_failures=0, "
                 "filter_consecutive_successes=0, filter_cooldown_until=NULL, evidence_updated_at=? "
                 "WHERE host=?",
@@ -1497,33 +1552,39 @@ def _db_recompute_host_observability(host):
                     DIAG_CORE_LOCAL,
                     FILTER_CONFIDENCE_NONE,
                     FILTER_REASON_INSUFFICIENT_EVIDENCE,
+                    FILTER_STATE_UNKNOWN,
+                    FILTER_STATE_UNKNOWN,
+                    PROVIDER_STATUS_NEVER,
+                    now,
                     now,
                     host,
                 ),
             )
         if previous_diagnostic != DIAG_CORE_LOCAL:
             log.info(
-                "Phase6C diagnostic transition host=%s previous=%s current=%s "
-                "filter_suspected=None confidence=%s",
+                "Phase6F Core exclusion host=%s previous=%s current=%s",
                 host,
                 previous_diagnostic or DIAG_INSUFFICIENT_EVIDENCE,
                 DIAG_CORE_LOCAL,
-                FILTER_CONFIDENCE_NONE,
             )
         return {
             "diagnostic_reason": DIAG_CORE_LOCAL,
             "filter_suspected": None,
             "filter_confidence": FILTER_CONFIDENCE_NONE,
             "filter_reason": FILTER_REASON_INSUFFICIENT_EVIDENCE,
+            "filter_state": FILTER_STATE_UNKNOWN,
+            "previous_filter_state": previous_filter_state or FILTER_STATE_UNKNOWN,
+            "state_changed": (previous_filter_state or FILTER_STATE_UNKNOWN) != FILTER_STATE_UNKNOWN,
             "changed": False,
         }
+
     with db_conn() as conn:
         row = conn.execute(
             "SELECT service_ok, admin_ok, wg_peer_ok, core_path_ok, "
             "external_service_ok, regional_service_ok, "
             "filter_consecutive_failures, filter_consecutive_successes, "
             "filter_suspected, filter_confidence, filter_reason, diagnostic_reason, "
-            "filter_updated_at, filter_cooldown_until "
+            "filter_updated_at, filter_cooldown_until, regional_filter_state, filter_state "
             "FROM host_pool WHERE host=?",
             (host,),
         ).fetchone()
@@ -1535,9 +1596,13 @@ def _db_recompute_host_observability(host):
             external_ok, regional_ok, failure_streak, success_streak,
             previous_raw, previous_confidence, previous_filter_reason,
             previous_diagnostic, previous_updated_at, cooldown_until,
+            regional_filter_state, previous_filter_state,
         ) = row
 
         previous = None if previous_raw is None else bool(previous_raw)
+        regional_filter_state = regional_filter_state or FILTER_STATE_UNKNOWN
+        previous_filter_state = previous_filter_state or FILTER_STATE_UNKNOWN
+
         decision = derive_observability(
             None if service_ok is None else bool(service_ok),
             None if admin_ok is None else bool(admin_ok),
@@ -1550,17 +1615,17 @@ def _db_recompute_host_observability(host):
             confirm_threshold=EDGE_FILTER_CONFIRM_THRESHOLD,
             recovery_threshold=EDGE_FILTER_RECOVERY_THRESHOLD,
             previous_filter_suspected=previous,
+            regional_filter_state=regional_filter_state,
         )
 
         proposed = decision.filter_suspected
         diagnostic_reason = decision.diagnostic_reason
         filter_confidence = decision.filter_confidence
         filter_reason = decision.filter_reason
+        filter_state = decision.filter_state
 
         cooldown_active = False
-        # Cooldown only suppresses rapid re-entry into FILTER_SUSPECTED after a
-        # confirmed recovery. It must never hide a newly observed WG/Core/service
-        # failure behind an old filtering diagnosis.
+        # Cooldown suppresses only rapid re-entry after a qualified recovery.
         if cooldown_until and previous is False and proposed is True:
             try:
                 cooldown_active = _parse_flexible_datetime(cooldown_until) > now_dt
@@ -1571,6 +1636,7 @@ def _db_recompute_host_observability(host):
             proposed = previous
             filter_confidence = previous_confidence or FILTER_CONFIDENCE_NONE
             filter_reason = previous_filter_reason or FILTER_REASON_INSUFFICIENT_EVIDENCE
+            filter_state = previous_filter_state
             diagnostic_reason = (
                 DIAG_FILTER_SUSPECTED if previous else
                 (previous_diagnostic or decision.diagnostic_reason)
@@ -1578,10 +1644,11 @@ def _db_recompute_host_observability(host):
 
         changed = previous is not None and proposed is not None and previous != proposed
         initialized = previous is None and proposed is not None
+        state_changed = previous_filter_state != filter_state
         filter_updated_at = previous_updated_at
         new_cooldown_until = cooldown_until
 
-        if changed or initialized:
+        if changed or initialized or state_changed:
             filter_updated_at = now
         if changed:
             new_cooldown_until = (
@@ -1590,13 +1657,14 @@ def _db_recompute_host_observability(host):
 
         conn.execute(
             "UPDATE host_pool SET diagnostic_reason=?, filter_suspected=?, "
-            "filter_confidence=?, filter_reason=?, filter_updated_at=?, "
+            "filter_confidence=?, filter_reason=?, filter_state=?, filter_updated_at=?, "
             "filter_cooldown_until=?, evidence_updated_at=? WHERE host=?",
             (
                 diagnostic_reason,
                 None if proposed is None else (1 if proposed else 0),
                 filter_confidence,
                 filter_reason,
+                filter_state,
                 filter_updated_at,
                 new_cooldown_until,
                 now,
@@ -1606,25 +1674,32 @@ def _db_recompute_host_observability(host):
 
     if previous_diagnostic != diagnostic_reason:
         log.info(
-            "Phase6C diagnostic transition host=%s previous=%s current=%s "
-            "filter_suspected=%s confidence=%s",
+            "Phase6C diagnostic transition (Phase6F state) host=%s previous=%s current=%s "
+            "filter_state=%s confidence=%s",
             host,
             previous_diagnostic or DIAG_INSUFFICIENT_EVIDENCE,
             diagnostic_reason,
-            proposed,
+            filter_state,
             filter_confidence,
         )
-    if changed:
+    if state_changed:
         log.warning(
-            "Phase6C filter evidence transition host=%s previous=%s current=%s "
+            "Phase6F filter-state transition host=%s previous=%s current=%s "
             "reason=%s confidence=%s",
-            host, previous, proposed, filter_reason, filter_confidence,
+            host,
+            previous_filter_state,
+            filter_state,
+            filter_reason,
+            filter_confidence,
         )
     return {
         "diagnostic_reason": diagnostic_reason,
         "filter_suspected": proposed,
         "filter_confidence": filter_confidence,
         "filter_reason": filter_reason,
+        "filter_state": filter_state,
+        "previous_filter_state": previous_filter_state,
+        "state_changed": state_changed,
         "changed": changed,
     }
 
@@ -1703,6 +1778,177 @@ def _db_record_observability_probe(
     return None
 
 
+
+def _db_record_regional_round(host, probe, regional_decision):
+    """Persist ONE aggregated Phase 6D/6E regional round, then recompute final state.
+
+    Raw per-node evidence is retained in host_probe_results for audit/detail views.
+    Pending nodes remain NULL evidence and never count as failed.
+    """
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    summary = regional_decision.summary
+    regional_ok = regional_decision.regional_service_ok
+    ok_db = None if regional_ok is None else (1 if regional_ok else 0)
+
+    failed_asns = ",".join(summary.failed_asns)
+    failed_cities = ",".join(summary.failed_cities)
+
+    with db_conn() as conn:
+        if regional_decision.state == FILTER_STATE_CLEAR:
+            streak_sql = (
+                "filter_consecutive_successes=COALESCE(filter_consecutive_successes,0)+1, "
+                "filter_consecutive_failures=0"
+            )
+        elif regional_decision.state == FILTER_STATE_LIKELY:
+            # Temporal confirmation counts consecutive STRONG rounds only.
+            # POSSIBLE evidence must never pre-fill the LIKELY confirmation streak.
+            streak_sql = (
+                "filter_consecutive_failures=COALESCE(filter_consecutive_failures,0)+1, "
+                "filter_consecutive_successes=0"
+            )
+        else:
+            # POSSIBLE/UNKNOWN break a LIKELY streak and are not recovery evidence.
+            streak_sql = (
+                "filter_consecutive_failures=0, "
+                "filter_consecutive_successes=0"
+            )
+
+        conn.execute(
+            "UPDATE host_pool SET "
+            "regional_service_ok=?, regional_service_last_check=?, regional_probe_source='check-host', "
+            "regional_filter_state=?, regional_filter_reason=?, "
+            "regional_total_nodes=?, regional_completed_nodes=?, regional_successful_nodes=?, "
+            "regional_failed_nodes=?, regional_pending_nodes=?, regional_success_ratio=?, "
+            "regional_failed_asns=?, regional_failed_cities=?, regional_last_request_id=?, "
+            "regional_provider_status=?, regional_provider_error=NULL, regional_state_updated_at=?, "
+            "evidence_updated_at=?, " + streak_sql + " WHERE host=?",
+            (
+                ok_db,
+                now,
+                regional_decision.state,
+                regional_decision.reason,
+                summary.total_nodes,
+                summary.completed_nodes,
+                summary.successful_nodes,
+                summary.failed_nodes,
+                summary.pending_nodes,
+                summary.success_ratio,
+                failed_asns or None,
+                failed_cities or None,
+                getattr(probe, "request_id", None),
+                PROVIDER_STATUS_OK,
+                now,
+                now,
+                host,
+            ),
+        )
+
+        for item in getattr(probe, "evidence", ()) or ():
+            item_ok = getattr(item, "ok", None)
+            item_ok_db = None if item_ok is None else (1 if item_ok else 0)
+            latency_ms = getattr(item, "latency_ms", None)
+            reason = (
+                getattr(item, "error", None)
+                or ("PENDING" if getattr(item, "pending", False) else "OK")
+            )
+            source = str(getattr(item, "node", "check-host"))[:80]
+            meta = (
+                f"{reason}; city={getattr(item, 'city', '')}; "
+                f"asn={getattr(item, 'asn', '')}"
+            )[:200]
+            conn.execute(
+                "INSERT INTO host_probe_results "
+                "(host, probe_type, source, ok, latency_ms, reason, checked_at) "
+                "VALUES (?, 'regional_node', ?, ?, ?, ?, ?)",
+                (host, source, item_ok_db, latency_ms, meta, now),
+            )
+
+        conn.execute(
+            "INSERT INTO host_probe_results "
+            "(host, probe_type, source, ok, latency_ms, reason, checked_at) "
+            "VALUES (?, 'regional_service', 'check-host', ?, NULL, ?, ?)",
+            (
+                host,
+                ok_db,
+                (
+                    f"{regional_decision.state}:{regional_decision.reason}; "
+                    f"{summary.failed_nodes}/{summary.completed_nodes} failed"
+                )[:200],
+                now,
+            ),
+        )
+        _db_prune_probe_history(conn, host)
+
+    return _db_recompute_host_observability(host)
+
+
+def _db_record_regional_provider_status(host, status, error=None):
+    """Record provider health without fabricating Edge reachability evidence."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE host_pool SET regional_provider_status=?, regional_provider_error=?, "
+            "regional_service_last_check=?, regional_probe_source='check-host', evidence_updated_at=? "
+            "WHERE host=?",
+            (str(status or PROVIDER_STATUS_ERROR), str(error or "")[:200] or None, now, now, host),
+        )
+
+
+def _db_get_regional_monitor_targets():
+    """Return active customer-facing endpoints. Core exclusion happens at runtime."""
+    with db_conn() as conn:
+        return conn.execute(
+            "SELECT host, service_port, is_standby FROM host_pool "
+            "WHERE active=1 ORDER BY is_default DESC, host"
+        ).fetchall()
+
+
+def _db_get_recent_regional_node_results(host, limit=16):
+    with db_conn() as conn:
+        return conn.execute(
+            "SELECT source, ok, latency_ms, reason, checked_at "
+            "FROM host_probe_results "
+            "WHERE host=? AND probe_type='regional_node' "
+            "ORDER BY id DESC LIMIT ?",
+            (host, max(1, int(limit))),
+        ).fetchall()
+
+
+def _db_get_regional_provider_runtime():
+    until = _db_get_setting("regional_provider_backoff_until", "")
+    try:
+        count = max(0, int(_db_get_setting("regional_provider_limit_count", "0")))
+    except (TypeError, ValueError):
+        count = 0
+    status = _db_get_setting("regional_provider_global_status", PROVIDER_STATUS_NEVER)
+    error = _db_get_setting("regional_provider_last_error", "")
+    return {
+        "backoff_until": until or "",
+        "limit_count": count,
+        "status": status or PROVIDER_STATUS_NEVER,
+        "error": error or "",
+    }
+
+
+def _db_set_regional_provider_runtime(status, *, backoff_until="", limit_count=0, error=""):
+    _db_update_setting("regional_provider_global_status", status)
+    _db_update_setting("regional_provider_backoff_until", backoff_until or "")
+    _db_update_setting("regional_provider_limit_count", str(max(0, int(limit_count or 0))))
+    _db_update_setting("regional_provider_last_error", str(error or "")[:300])
+
+
+def _db_regional_backoff_remaining_seconds():
+    state = _db_get_regional_provider_runtime()
+    raw = state.get("backoff_until") or ""
+    if not raw:
+        return 0
+    try:
+        until = _parse_flexible_datetime(raw)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, int((until - datetime.now()).total_seconds()))
+
+
 def _db_get_host_port_health_map():
     with db_conn() as conn:
         rows = conn.execute(
@@ -1714,8 +1960,13 @@ def _db_get_host_port_health_map():
             "external_service_ok, external_service_last_check, external_probe_source, "
             "regional_service_ok, regional_service_last_check, regional_probe_source, "
             "diagnostic_reason, filter_suspected, filter_confidence, filter_reason, "
-            "filter_updated_at, evidence_updated_at, "
-            "filter_consecutive_failures, filter_consecutive_successes, filter_cooldown_until "
+            "filter_state, filter_updated_at, evidence_updated_at, "
+            "filter_consecutive_failures, filter_consecutive_successes, filter_cooldown_until, "
+            "regional_filter_state, regional_filter_reason, "
+            "regional_total_nodes, regional_completed_nodes, regional_successful_nodes, "
+            "regional_failed_nodes, regional_pending_nodes, regional_success_ratio, "
+            "regional_failed_asns, regional_failed_cities, regional_last_request_id, "
+            "regional_provider_status, regional_provider_error, regional_state_updated_at "
             "FROM host_pool"
         ).fetchall()
         result = {}
@@ -1728,8 +1979,13 @@ def _db_get_host_port_health_map():
                 core_path_ok, core_path_last_check, external_ok, external_last_check,
                 external_source, regional_ok, regional_last_check, regional_source,
                 diagnostic_reason, filter_suspected, filter_confidence, filter_reason,
-                filter_updated_at, evidence_updated_at, filter_failures, filter_successes,
-                filter_cooldown_until,
+                filter_state, filter_updated_at, evidence_updated_at,
+                filter_failures, filter_successes, filter_cooldown_until,
+                regional_filter_state, regional_filter_reason,
+                regional_total_nodes, regional_completed_nodes, regional_successful_nodes,
+                regional_failed_nodes, regional_pending_nodes, regional_success_ratio,
+                regional_failed_asns, regional_failed_cities, regional_last_request_id,
+                regional_provider_status, regional_provider_error, regional_state_updated_at,
             ) = row
             result[host] = {
                 "service_last_check": service_last_check,
@@ -1759,11 +2015,26 @@ def _db_get_host_port_health_map():
                 "filter_suspected": None if filter_suspected is None else bool(filter_suspected),
                 "filter_confidence": filter_confidence or FILTER_CONFIDENCE_NONE,
                 "filter_reason": filter_reason or FILTER_REASON_INSUFFICIENT_EVIDENCE,
+                "filter_state": filter_state or FILTER_STATE_UNKNOWN,
                 "filter_updated_at": filter_updated_at,
                 "evidence_updated_at": evidence_updated_at,
                 "filter_consecutive_failures": filter_failures or 0,
                 "filter_consecutive_successes": filter_successes or 0,
                 "filter_cooldown_until": filter_cooldown_until,
+                "regional_filter_state": regional_filter_state or FILTER_STATE_UNKNOWN,
+                "regional_filter_reason": regional_filter_reason or "",
+                "regional_total_nodes": regional_total_nodes or 0,
+                "regional_completed_nodes": regional_completed_nodes or 0,
+                "regional_successful_nodes": regional_successful_nodes or 0,
+                "regional_failed_nodes": regional_failed_nodes or 0,
+                "regional_pending_nodes": regional_pending_nodes or 0,
+                "regional_success_ratio": regional_success_ratio,
+                "regional_failed_asns": regional_failed_asns or "",
+                "regional_failed_cities": regional_failed_cities or "",
+                "regional_last_request_id": regional_last_request_id,
+                "regional_provider_status": regional_provider_status or PROVIDER_STATUS_NEVER,
+                "regional_provider_error": regional_provider_error,
+                "regional_state_updated_at": regional_state_updated_at,
             }
         return result
 
@@ -9046,7 +9317,7 @@ async def _render_host_pool_panel(query, page=0):
         membership = "ACTIVE" if active else "INACTIVE"
         diagnostic_reason = ph.get("diagnostic_reason") or DIAG_INSUFFICIENT_EVIDENCE
         core_badge = " 🧠 (Core)" if diagnostic_reason == DIAG_CORE_LOCAL else ""
-        filter_suspected = ph.get("filter_suspected")
+        filter_state = ph.get("filter_state") or FILTER_STATE_UNKNOWN
         filter_confidence = ph.get("filter_confidence") or FILTER_CONFIDENCE_NONE
 
         def _probe_badge(value):
@@ -9056,12 +9327,9 @@ async def _render_host_pool_panel(query, page=0):
                 return "❌ DOWN"
             return "⚪ UNKNOWN"
 
-        if filter_suspected is True:
-            filter_txt = f"⚠️ SUSPECTED · {filter_confidence}"
-        elif filter_suspected is False:
-            filter_txt = "✅ NOT_SUSPECTED"
-        else:
-            filter_txt = "⚪ UNKNOWN"
+        filter_txt = (
+            f"{_filter_state_icon(filter_state)} {filter_state} · {filter_confidence}"
+        )
 
         line = (
             f"{overall_icon} <code>{esc(host)}</code>{star}{standby_badge}{core_badge}{latency_txt}\n"
@@ -9145,10 +9413,7 @@ async def _render_host_pool_panel(query, page=0):
     kb.append([InlineKeyboardButton("➕ افزودن IP جدید به استخر", callback_data="hp_add")])
     kb.append([InlineKeyboardButton("🚀 افزودن Edge جدید (VPS از قبل‌خریداری‌شده)", callback_data="hp_addedge")])
     kb.append([InlineKeyboardButton("🌍 دامنهٔ ثابت + Cloudflare", callback_data="hp_cf_settings")])
-    auto_failover_on = (await asyncio.to_thread(_db_get_setting, 'auto_failover_mode', '0')) == '1'
-    kb.append([InlineKeyboardButton(
-        "🔴 خاموش‌کردنِ حالتِ خودکارِ Failover" if auto_failover_on else "🟢 روشن‌کردنِ حالتِ خودکارِ Failover",
-        callback_data="hp_failover_toggle")])
+    kb.append([InlineKeyboardButton("🛡 فیلترینگ و دسترسی", callback_data="hp_filtering")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="ipsvc_menu")])
     cf_cfg = await asyncio.to_thread(_cf_get_config)
     if _cf_configured(cf_cfg):
@@ -9157,17 +9422,11 @@ async def _render_host_pool_panel(query, page=0):
     else:
         dns_line = ("\n\n⚠️ دامنهٔ ثابت هنوز تنظیم نشده — مشتریان مستقیم IP خام می‌بینند. "
                      "برای فعال‌سازی سوییچ خودکار، روی «🌍 دامنهٔ ثابت + Cloudflare» بزنید.")
-    # 🆕 وضعیتِ Failover (جایگزینِ وضعیتِ قدیمیِ Self-Heal کلودزی): این پنل محلِ مدیریتِ کلِ
-    # استخر Edgeهاست، پس همین‌جا شفاف نشان می‌دهیم که اگر یک Edge فیلتر شود چه اتفاقی می‌افتد.
     standby_count = len(await asyncio.to_thread(_db_get_standby_hosts))
-    if auto_failover_on and standby_count > 0:
-        cz_line = f"\n\n🤖 Failoverِ خودکار: <b>فعال</b> ✅ — {standby_count} Standbyِ سالم آماده."
-    elif auto_failover_on:
-        cz_line = "\n\n⚠️ Failoverِ خودکار فعال است ولی هیچ Standbyِ سالمی ثبت نشده — عملاً فقط دامنه روی Core می‌ماند."
-    elif standby_count > 0:
-        cz_line = f"\n\nℹ️ Failoverِ دستی: {standby_count} Standby آمادهٔ فعال‌سازیِ دستی از پنل ادمین است."
-    else:
-        cz_line = "\n\nℹ️ هنوز هیچ Standbyی علامت‌گذاری نشده — در صورتِ فیلترشدنِ یک Edge، دامنه فقط روی Core باقی می‌ماند."
+    cz_line = (
+        f"\n\n🛡 Phase 6F: <b>MONITOR ONLY</b> — تشخیص و هشدار فعال؛ Failover خودکار غیرفعال. "
+        f"Standby آماده: {standby_count}"
+    )
     body = "\n\n".join(lines) if lines else "هیچ IP ای هنوز در استخر پایش ثبت نشده."
     page_line = ""
     if total_hosts:
@@ -9181,6 +9440,182 @@ async def _render_host_pool_panel(query, page=0):
         f"Membership (ACTIVE/INACTIVE) مستقل از Health است و همچنان منطق فعلی سرویس/Failover را کنترل می‌کند.\n"
         f"می‌توانید هر IP سالم را دستی «بلاک» کنید (مثلاً وقتی مشتری گزارش فیلترشدن داده) یا یک IP "
         f"غیرفعال را دوباره تست و فعال کنید.", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+
+
+def _filter_state_icon(state):
+    state = str(state or FILTER_STATE_UNKNOWN).upper()
+    if state == FILTER_STATE_CLEAR:
+        return "🟢"
+    if state == FILTER_STATE_POSSIBLE:
+        return "🟡"
+    if state == FILTER_STATE_LIKELY:
+        return "🔴"
+    return "⚪️"
+
+
+async def _render_filtering_monitor_panel(query, page=0):
+    await asyncio.to_thread(_db_sync_host_pool)
+    pool = await asyncio.to_thread(_db_get_host_pool)
+    health = await asyncio.to_thread(_db_get_host_port_health_map)
+    runtime = await asyncio.to_thread(_db_get_regional_provider_runtime)
+    backoff = await asyncio.to_thread(_db_regional_backoff_remaining_seconds)
+
+    edge_rows = []
+    for row in pool:
+        host = row[0]
+        if await asyncio.to_thread(_is_current_core_host, host):
+            continue
+        edge_rows.append(row)
+
+    page_size = 5
+    total = len(edge_rows)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    try:
+        page = int(page)
+    except (TypeError, ValueError):
+        page = 0
+    page = max(0, min(page, total_pages - 1))
+    start = page * page_size
+    end = min(start + page_size, total)
+
+    provider_status = runtime.get("status") or PROVIDER_STATUS_NEVER
+    provider_line = f"Provider: <b>{esc(provider_status)}</b>"
+    if backoff > 0:
+        provider_line += f" · ⏳ Backoff ~{max(1, backoff // 60)} دقیقه"
+
+    lines = [
+        "🛡 <b>Filtering Monitor — Phase 6F</b>",
+        "",
+        "Mode: <b>MONITOR ONLY</b> — هیچ Failover/DNS/Account action خودکاری انجام نمی‌شود.",
+        f"Check interval: <code>{REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS}s</code>",
+        provider_line,
+        "",
+    ]
+    kb = []
+
+    for row in edge_rows[start:end]:
+        host, active, *_rest = row
+        is_standby = bool(row[10]) if len(row) > 10 else False
+        ph = health.get(host, {})
+        state = ph.get("filter_state") or FILTER_STATE_UNKNOWN
+        icon = _filter_state_icon(state)
+        failed = ph.get("regional_failed_nodes", 0)
+        completed = ph.get("regional_completed_nodes", 0)
+        provider = ph.get("regional_provider_status") or PROVIDER_STATUS_NEVER
+        role = "Standby" if is_standby else ("Active" if active else "Inactive")
+        lines.append(
+            f"{icon} <code>{esc(host)}</code> — <b>{esc(state)}</b> · "
+            f"{failed}/{completed} failed · {esc(role)} · Provider {esc(provider)}"
+        )
+        kb.append([
+            InlineKeyboardButton(
+                f"{icon} جزئیات {host}",
+                callback_data=f"flt_detail_{host}",
+            )
+        ])
+
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"flt_page_{page - 1}"))
+        nav.append(InlineKeyboardButton(f"📄 {page + 1}/{total_pages}", callback_data=f"flt_page_{page}"))
+        if page + 1 < total_pages:
+            nav.append(InlineKeyboardButton("بعدی ➡️", callback_data=f"flt_page_{page + 1}"))
+        kb.append(nav)
+
+    if not edge_rows:
+        lines.append("هیچ Edge فعالی برای مانیتورینگ ثبت نشده است.")
+
+    kb.append([InlineKeyboardButton("🔙 بازگشت به وضعیت IPها", callback_data="hp_menu")])
+    await query.edit_message_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="HTML",
+    )
+
+
+async def _render_filtering_edge_detail(query, host):
+    health = await asyncio.to_thread(_db_get_host_port_health_map)
+    ph = health.get(host)
+    if not ph:
+        await query.edit_message_text(
+            "❌ این Edge در host_pool پیدا نشد.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Filtering Monitor", callback_data="hp_filtering")
+            ]]),
+        )
+        return
+
+    service_port = await asyncio.to_thread(_db_get_host_service_port, host, 22)
+    backoff = await asyncio.to_thread(_db_regional_backoff_remaining_seconds)
+    state = ph.get("filter_state") or FILTER_STATE_UNKNOWN
+    icon = _filter_state_icon(state)
+    success_ratio = ph.get("regional_success_ratio")
+    success_pct = "—" if success_ratio is None else f"{success_ratio * 100:.0f}%"
+    failed_asns = ph.get("regional_failed_asns") or "—"
+    failed_cities = ph.get("regional_failed_cities") or "—"
+    provider_error = ph.get("regional_provider_error") or "—"
+
+    text = (
+        f"{icon} <b>Filtering Detail</b>\n\n"
+        f"Edge: <code>{esc(host)}</code>\n"
+        f"Service port: <code>{service_port}</code>\n"
+        f"Final state: <b>{esc(state)}</b>\n"
+        f"Confidence: <b>{esc(ph.get('filter_confidence') or FILTER_CONFIDENCE_NONE)}</b>\n"
+        f"Diagnostic: <code>{esc(ph.get('diagnostic_reason') or DIAG_INSUFFICIENT_EVIDENCE)}</code>\n\n"
+        f"🌐 Service: {_probe_state_text(ph.get('service_ok'))}\n"
+        f"🔐 Admin: {_probe_state_text(ph.get('admin_ok'))}\n"
+        f"🔗 WireGuard: {_probe_state_text(ph.get('wg_peer_ok'))}\n"
+        f"🛣 Core path: {_probe_state_text(ph.get('core_path_ok'))}\n"
+        f"🌍 External (Core→Edge): {_probe_state_text(ph.get('external_service_ok'))}\n\n"
+        f"📡 Regional round: <b>{esc(ph.get('regional_filter_state') or FILTER_STATE_UNKNOWN)}</b>\n"
+        f"Reason: <code>{esc(ph.get('regional_filter_reason') or '—')}</code>\n"
+        f"Nodes: ✅ {ph.get('regional_successful_nodes', 0)} · ❌ {ph.get('regional_failed_nodes', 0)} · "
+        f"⏳ {ph.get('regional_pending_nodes', 0)} / {ph.get('regional_total_nodes', 0)}\n"
+        f"Success ratio: <b>{esc(success_pct)}</b>\n"
+        f"Failed ASNs: <code>{esc(failed_asns)}</code>\n"
+        f"Failed Cities: <code>{esc(failed_cities)}</code>\n"
+        f"Failure streak: <b>{ph.get('filter_consecutive_failures', 0)}</b> · "
+        f"Recovery streak: <b>{ph.get('filter_consecutive_successes', 0)}</b>\n\n"
+        f"Provider: <b>{esc(ph.get('regional_provider_status') or PROVIDER_STATUS_NEVER)}</b>\n"
+        f"Provider error: <code>{esc(provider_error)}</code>\n"
+        f"Request ID: <code>{esc(ph.get('regional_last_request_id') or '—')}</code>\n"
+        f"Last regional check: {esc(ph.get('regional_service_last_check') or '—')}\n"
+        f"Last state update: {esc(ph.get('regional_state_updated_at') or '—')}"
+    )
+    if backoff > 0:
+        text += f"\n⏳ Global provider backoff: ~{max(1, backoff // 60)} دقیقه"
+
+    kb = [
+        [InlineKeyboardButton("🔄 تست مجدد الآن", callback_data=f"flt_check_{host}")],
+        [InlineKeyboardButton("📊 آخرین Probeهای Node", callback_data=f"flt_probe_{host}")],
+        [InlineKeyboardButton("🔙 Filtering Monitor", callback_data="hp_filtering")],
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+
+
+async def _render_filtering_probe_details(query, host):
+    rows = await asyncio.to_thread(_db_get_recent_regional_node_results, host, REGIONAL_FILTER_MAX_NODES)
+    lines = [f"📊 <b>آخرین Node Probeها</b>\nEdge: <code>{esc(host)}</code>\n"]
+    if not rows:
+        lines.append("هنوز Node evidence ثبت نشده است.")
+    else:
+        for source, ok_raw, latency_ms, reason, checked_at in reversed(rows):
+            ok = None if ok_raw is None else bool(ok_raw)
+            badge = _probe_state_text(ok)
+            latency = f" · {latency_ms:.0f}ms" if latency_ms is not None else ""
+            lines.append(
+                f"{badge} <code>{esc(source)}</code>{latency}\n"
+                f"   <code>{esc(reason or '')}</code> · {esc(checked_at or '')}"
+            )
+
+    kb = [[InlineKeyboardButton("🔙 جزئیات Edge", callback_data=f"flt_detail_{host}")]]
+    await query.edit_message_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="HTML",
+    )
+
 
 async def _host_has_working_persistent_key(host, port=22, timeout=8):
     """🆕 تست سریع (بدون اجرای هیچ عملیاتی): آیا همین الان می‌شود با کلید دائمی، بدون رمز،
@@ -14742,6 +15177,44 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d == "hp_menu" and role == 'admin':
         await _render_host_pool_panel(query)
 
+    elif d == "hp_filtering" and role == 'admin':
+        await _render_filtering_monitor_panel(query)
+
+    elif d.startswith("flt_page_") and role == 'admin':
+        try:
+            page = int(d[len("flt_page_"):])
+        except (TypeError, ValueError):
+            page = 0
+        await _render_filtering_monitor_panel(query, page=page)
+
+    elif d.startswith("flt_detail_") and role == 'admin':
+        host = d[len("flt_detail_"):]
+        await _render_filtering_edge_detail(query, host)
+
+    elif d.startswith("flt_probe_") and role == 'admin':
+        host = d[len("flt_probe_"):]
+        await _render_filtering_probe_details(query, host)
+
+    elif d.startswith("flt_check_") and role == 'admin':
+        host = d[len("flt_check_"):]
+        await query.edit_message_text(
+            f"⏳ در حال Regional Probe برای <code>{esc(host)}</code>...",
+            parse_mode="HTML",
+        )
+        result = await _regional_filter_probe_one_now(context.application, host)
+        if result.get("status") == PROVIDER_STATUS_LIMITED:
+            mins = max(1, int(result.get("backoff_seconds", 0)) // 60)
+            await query.message.reply_text(
+                f"⚠️ Check-Host در Backoff است؛ حدود {mins} دقیقه دیگر دوباره تست کنید."
+            )
+        elif result.get("status") == PROVIDER_STATUS_ERROR:
+            await query.message.reply_text(
+                f"⚠️ Provider error: {result.get('error', 'unknown')}"
+            )
+        elif result.get("status") == "SKIPPED_CORE":
+            await query.message.reply_text("ℹ️ Core هدف Filtering Probe نیست.")
+        await _render_filtering_edge_detail(query, host)
+
     elif d.startswith("hppage_") and role == 'admin':
         try:
             page = int(d[len("hppage_"):])
@@ -15011,23 +15484,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("✅ به‌روزرسانی شد.", show_alert=False)
         await _render_host_pool_panel(query)
 
-    # 🆕 روشن/خاموش‌کردنِ حالتِ خودکارِ Failover (بندِ ۴)
+    # Phase 6F safety guard: legacy action callbacks can exist in old Telegram
+    # messages, but this release must remain MONITOR-ONLY.
     elif d == "hp_failover_toggle" and role == 'admin':
-        current = (await asyncio.to_thread(_db_get_setting, 'auto_failover_mode', '0')) == '1'
-        await asyncio.to_thread(_db_update_setting, 'auto_failover_mode', '0' if current else '1')
-        await query.answer("✅ به‌روزرسانی شد.", show_alert=False)
+        await asyncio.to_thread(_db_update_setting, 'auto_failover_mode', '0')
+        await query.message.reply_text(
+            "🛡 Phase 6F روی MONITOR ONLY قفل است. Auto Failover در 6H فعال خواهد شد."
+        )
         await _render_host_pool_panel(query)
 
-    # 🆕 فعال‌سازیِ دستیِ یک Standبی مشخص (دکمه‌ای که در پیامِ هشدارِ فیلترشدن به ادمین نشان
-    # داده می‌شود، وقتی auto_failover_mode خاموش است)
     elif d.startswith("standby_act_") and role == 'admin':
-        _, _, rest = d.partition("standby_act_")
-        filtered_host, _, target_host = rest.partition("_")
-        await query.edit_message_text(
-            f"⏳ در حالِ بازسازیِ کاربرانِ <code>{esc(filtered_host)}</code> روی <code>{esc(target_host)}</code>...",
-            parse_mode="HTML")
-        spawn_bg_task(_activate_standby_for_filtered_edge(
-            app=context.application, filtered_host=filtered_host, target_host=target_host))
+        await query.message.reply_text(
+            "🛡 این دکمه متعلق به پیام قدیمی است. در Phase 6F هیچ انتقالی انجام نمی‌شود؛ "
+            "Safe Manual Failover در Phase 6G پیاده‌سازی می‌شود."
+        )
 
     elif d.startswith("hpdns_") and role == 'admin':
         host = d[len("hpdns_"):]
@@ -16833,6 +17303,317 @@ async def _host_health_loop(app):
             log.exception("خطای غیرمنتظره در حلقهٔ پایش سلامت IPها — دور بعدی ادامه می‌یابد.")
         await asyncio.sleep(HOST_HEALTH_CHECK_INTERVAL_SECONDS)
 
+async def _notify_filter_state_transition(app, host, recompute_result, regional_decision):
+    transition = classify_filter_transition(
+        recompute_result.get("previous_filter_state"),
+        recompute_result.get("filter_state"),
+    )
+    if not transition.notify:
+        return
+
+    ph = (await asyncio.to_thread(_db_get_host_port_health_map)).get(host, {})
+    state = recompute_result.get("filter_state") or FILTER_STATE_UNKNOWN
+    confidence = recompute_result.get("filter_confidence") or FILTER_CONFIDENCE_NONE
+    summary = regional_decision.summary
+
+    if transition.kind == TRANSITION_CRITICAL:
+        title = "🔴 <b>فیلترینگ با اطمینان بالا</b>"
+    elif transition.kind == TRANSITION_WARNING:
+        title = "🟡 <b>احتمال فیلترینگ</b>"
+    elif transition.kind == TRANSITION_RECOVERED:
+        title = "🟢 <b>دسترسی منطقه‌ای بازیابی شد</b>"
+    else:
+        title = "⚪️ <b>وضعیت فیلترینگ نامطمئن شد</b>"
+
+    failed_asns = ", ".join(summary.failed_asns) or "—"
+    failed_cities = ", ".join(summary.failed_cities) or "—"
+
+    await _notify_admins(
+        app,
+        f"{title}\n\n"
+        f"Edge: <code>{esc(host)}</code>\n"
+        f"State: <b>{esc(state)}</b> · Confidence: <b>{esc(confidence)}</b>\n"
+        f"Regional: {summary.failed_nodes}/{summary.completed_nodes} failed "
+        f"({(summary.failure_ratio or 0) * 100:.0f}%)\n"
+        f"Failed ASN: <code>{esc(failed_asns)}</code>\n"
+        f"Failed City: <code>{esc(failed_cities)}</code>\n"
+        f"External(Core→Edge): {_probe_state_text(ph.get('external_service_ok'))}\n"
+        f"WireGuard: {_probe_state_text(ph.get('wg_peer_ok'))}\n"
+        f"Core path: {_probe_state_text(ph.get('core_path_ok'))}\n\n"
+        "ℹ️ Phase 6F فقط مانیتورینگ/هشدار است؛ هیچ DNS یا Failover خودکاری انجام نشده."
+    )
+
+
+def _probe_state_text(value):
+    if value is True:
+        return "✅ UP"
+    if value is False:
+        return "❌ DOWN"
+    return "⚪ UNKNOWN"
+
+
+async def _regional_provider_enter_limited(app, host, error):
+    state = await asyncio.to_thread(_db_get_regional_provider_runtime)
+    previous_status = state.get("status") or PROVIDER_STATUS_NEVER
+    count = max(0, int(state.get("limit_count") or 0)) + 1
+    until_dt = provider_backoff_until(
+        datetime.now(),
+        count,
+        base_seconds=REGIONAL_FILTER_PROVIDER_BACKOFF_BASE_SECONDS,
+        max_seconds=REGIONAL_FILTER_PROVIDER_BACKOFF_MAX_SECONDS,
+    )
+    until = until_dt.strftime("%Y-%m-%d %H:%M:%S")
+    await asyncio.to_thread(
+        _db_set_regional_provider_runtime,
+        PROVIDER_STATUS_LIMITED,
+        backoff_until=until,
+        limit_count=count,
+        error=str(error),
+    )
+    await asyncio.to_thread(
+        _db_record_regional_provider_status,
+        host,
+        PROVIDER_STATUS_LIMITED,
+        str(error),
+    )
+    seconds = max(0, int((until_dt - datetime.now()).total_seconds()))
+    if previous_status != PROVIDER_STATUS_LIMITED:
+        await _notify_admins(
+            app,
+            "⚠️ <b>Regional Probe موقتاً محدود شد</b>\n\n"
+            "Check-Host پاسخ <code>limit_exceeded</code> داده است. "
+            f"برای جلوگیری از فشار بیشتر، probeها حدود {max(1, seconds // 60)} دقیقه متوقف می‌شوند.\n"
+            "این وضعیت <b>فیلترینگ Edge محسوب نمی‌شود</b> و state قبلی حفظ می‌شود."
+        )
+    return seconds
+
+
+async def _regional_provider_mark_ok(app):
+    state = await asyncio.to_thread(_db_get_regional_provider_runtime)
+    previous_status = state.get("status") or PROVIDER_STATUS_NEVER
+    await asyncio.to_thread(
+        _db_set_regional_provider_runtime,
+        PROVIDER_STATUS_OK,
+        backoff_until="",
+        limit_count=0,
+        error="",
+    )
+    if previous_status == PROVIDER_STATUS_LIMITED:
+        await _notify_admins(
+            app,
+            "✅ <b>Regional Probe دوباره در دسترس است</b>\n"
+            "Backoff Check-Host پایان یافت و مانیتورینگ Edgeها از سر گرفته شد."
+        )
+
+
+async def _regional_filter_probe_edge(app, host, service_port, client, nodes):
+    """Probe one Edge. Diagnostic-only: no DNS, account or failover mutation."""
+    if await asyncio.to_thread(_is_current_core_host, host):
+        return {"status": "SKIPPED_CORE", "host": host}
+
+    # Same-round external control from the Core's public network perspective.
+    external_ok, external_err = await _tcp_health_check(
+        host,
+        service_port,
+        timeout=EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS,
+    )
+    await asyncio.to_thread(
+        _db_record_observability_probe,
+        host,
+        "external_service",
+        "core-direct-tcp",
+        external_ok,
+        None,
+        PROBE_REASON_OK if external_ok else normalize_probe_error(external_err),
+        None,
+        False,
+    )
+
+    def _run_provider():
+        request_id, permanent_link, request_nodes = client.start_tcp_check(
+            host,
+            service_port,
+            nodes,
+        )
+        return client.poll_tcp_result(
+            request_id,
+            request_nodes,
+            target_host=host,
+            target_port=service_port,
+            permanent_link=permanent_link,
+        )
+
+    try:
+        probe = await asyncio.to_thread(_run_provider)
+    except CheckHostLimitExceeded as exc:
+        await _regional_provider_enter_limited(app, host, exc)
+        return {"status": PROVIDER_STATUS_LIMITED, "host": host, "error": str(exc)}
+    except CheckHostError as exc:
+        await asyncio.to_thread(
+            _db_record_regional_provider_status,
+            host,
+            PROVIDER_STATUS_ERROR,
+            str(exc),
+        )
+        await asyncio.to_thread(
+            _db_set_regional_provider_runtime,
+            PROVIDER_STATUS_ERROR,
+            backoff_until="",
+            limit_count=0,
+            error=str(exc),
+        )
+        log.warning("Phase6F Check-Host provider error host=%s: %s", host, exc)
+        return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": str(exc)}
+
+    regional_decision = classify_regional_evidence(probe.evidence)
+    recompute_result = await asyncio.to_thread(
+        _db_record_regional_round,
+        host,
+        probe,
+        regional_decision,
+    )
+    if recompute_result:
+        await _notify_filter_state_transition(
+            app,
+            host,
+            recompute_result,
+            regional_decision,
+        )
+
+    return {
+        "status": PROVIDER_STATUS_OK,
+        "host": host,
+        "probe": probe,
+        "regional_decision": regional_decision,
+        "observability": recompute_result,
+    }
+
+
+async def _regional_filter_tick(app):
+    remaining = await asyncio.to_thread(_db_regional_backoff_remaining_seconds)
+    if remaining > 0:
+        log.info(
+            "Phase6F regional monitor in provider backoff (%ss remaining); round skipped.",
+            remaining,
+        )
+        return
+
+    targets = await asyncio.to_thread(_db_get_regional_monitor_targets)
+    edge_targets = []
+    for host, service_port, is_standby in targets:
+        if await asyncio.to_thread(_is_current_core_host, host):
+            continue
+        try:
+            port = int(service_port)
+        except (TypeError, ValueError):
+            port = 0
+        if not 1 <= port <= 65535:
+            log.warning("Phase6F skip host=%s: invalid service_port=%r", host, service_port)
+            continue
+        edge_targets.append((host, port, bool(is_standby)))
+
+    if not edge_targets:
+        return
+
+    client = CheckHostClient(
+        request_timeout=max(6.0, float(EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS)),
+        poll_timeout=max(12.0, float(EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS) * 4),
+    )
+    try:
+        nodes = await asyncio.to_thread(client.discover_nodes, "ir")
+    except CheckHostError as exc:
+        await asyncio.to_thread(
+            _db_set_regional_provider_runtime,
+            PROVIDER_STATUS_ERROR,
+            backoff_until="",
+            limit_count=0,
+            error=str(exc),
+        )
+        log.warning("Phase6F node discovery failed: %s", exc)
+        return
+
+    nodes = tuple(nodes[:REGIONAL_FILTER_MAX_NODES])
+    if not nodes:
+        log.warning("Phase6F node discovery returned no Iranian nodes.")
+        return
+
+    round_provider_ok = True
+    for index, (host, service_port, _is_standby) in enumerate(edge_targets):
+        result = await _regional_filter_probe_edge(
+            app,
+            host,
+            service_port,
+            client,
+            nodes,
+        )
+        status = result.get("status")
+        if status == PROVIDER_STATUS_LIMITED:
+            round_provider_ok = False
+            break
+        if status != PROVIDER_STATUS_OK:
+            round_provider_ok = False
+        if index + 1 < len(edge_targets) and REGIONAL_FILTER_EDGE_GAP_SECONDS > 0:
+            await asyncio.sleep(REGIONAL_FILTER_EDGE_GAP_SECONDS)
+
+    # Reset the global provider limit streak only after the entire scheduled round
+    # completed without provider errors/limits. A success on Edge A must not erase
+    # a repeated limit that appears on Edge B.
+    if round_provider_ok:
+        await _regional_provider_mark_ok(app)
+
+
+async def _regional_filter_probe_one_now(app, host):
+    """Manual admin recheck, still respecting provider backoff."""
+    remaining = await asyncio.to_thread(_db_regional_backoff_remaining_seconds)
+    if remaining > 0:
+        return {
+            "status": PROVIDER_STATUS_LIMITED,
+            "host": host,
+            "backoff_seconds": remaining,
+            "error": "provider backoff active",
+        }
+
+    if await asyncio.to_thread(_is_current_core_host, host):
+        return {"status": "SKIPPED_CORE", "host": host}
+
+    service_port = await asyncio.to_thread(_db_get_host_service_port, host, 22)
+    client = CheckHostClient(
+        request_timeout=max(6.0, float(EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS)),
+        poll_timeout=max(12.0, float(EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS) * 4),
+    )
+    try:
+        nodes = await asyncio.to_thread(client.discover_nodes, "ir")
+    except CheckHostError as exc:
+        return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": str(exc)}
+    nodes = tuple(nodes[:REGIONAL_FILTER_MAX_NODES])
+    result = await _regional_filter_probe_edge(
+        app,
+        host,
+        service_port,
+        client,
+        nodes,
+    )
+    if result.get("status") == PROVIDER_STATUS_OK:
+        await _regional_provider_mark_ok(app)
+    return result
+
+
+async def _regional_filter_loop(app):
+    if REGIONAL_FILTER_MONITOR_INITIAL_DELAY_SECONDS > 0:
+        await asyncio.sleep(REGIONAL_FILTER_MONITOR_INITIAL_DELAY_SECONDS)
+    log.info(
+        "🛡 Phase6F regional filtering monitor started (interval=%ss, max_nodes=%s, edge_gap=%ss).",
+        REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS,
+        REGIONAL_FILTER_MAX_NODES,
+        REGIONAL_FILTER_EDGE_GAP_SECONDS,
+    )
+    while True:
+        try:
+            await _regional_filter_tick(app)
+        except Exception:
+            log.exception("Phase6F regional filtering round failed; next round will continue.")
+        await asyncio.sleep(REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS)
+
 async def _udpgw_health_tick(app):
     """
     🆕 چون badvpn-udpgw روی خودِ همین سرور اجرا می‌شود (نه یک هاست دوردست)، پایشش یک اتصال TCP
@@ -17023,156 +17804,83 @@ async def _welcome_sales_report_delayed(app, chat_id):
 _filter_detect_low_ticks = 0  # تعداد دفعات متوالی که کاربران آنلاین زیر آستانه بودند
 
 async def _filter_detect_tick(app):
-    """
-    🆕 V89 — یک دور بررسی سیستم شناسایی خودکار فیلتر شدن:
-    - تعداد کاربران آنلاین را با کل کاربران فعال مقایسه می‌کند.
-    - اگر FILTER_DETECT_CONFIRM_TICKS بار متوالی زیر آستانه بود → فیلتر تشخیص داده می‌شود.
-    - خودکار به سریع‌ترین IP فعال تغییر می‌کند و به ادمین اطلاع می‌دهد.
+    """Legacy V89 traffic signal only.
+
+    Low global online percentage is a coarse anomaly indicator. Phase 6F explicitly
+    forbids this signal from changing DNS, host membership, account placement,
+    Standby state, or triggering failover.
     """
     global _filter_detect_low_ticks
-    # بررسی فعال بودن سیستم
+
     enabled = await asyncio.to_thread(_db_get_filter_detect_enabled)
     if not enabled:
         _filter_detect_low_ticks = 0
         return
-    # دریافت تعداد کاربران فعال
+
     total_active = await asyncio.to_thread(_db_get_total_active_accounts_count)
     if total_active < FILTER_DETECT_MIN_ACTIVE_ACCOUNTS:
-        log.debug("پایش فیلتر: تعداد کاربران فعال (%s) کمتر از حداقل لازم (%s) — این دور رد شد.", total_active, FILTER_DETECT_MIN_ACTIVE_ACCOUNTS)
+        _filter_detect_low_ticks = 0
         return
-    # دریافت تعداد کاربران آنلاین
+
     counts, err = await _get_live_connection_counts()
     if err:
-        log.warning("پایش فیلتر: خطا در دریافت اتصالات زنده: %s", err)
+        log.warning("Traffic anomaly signal: live connection count failed: %s", err)
         return
-    online_count = sum(1 for c in counts.values() if c > 0)
+
+    online_count = sum(1 for count in counts.values() if count > 0)
     threshold = await asyncio.to_thread(_db_get_filter_detect_threshold)
     online_pct = (online_count / total_active) * 100 if total_active > 0 else 0
-    log.debug("پایش فیلتر: آنلاین=%s از کل=%s (درصد=%.1f\u066a، آستانه=%.1f\u066a)", online_count, total_active, online_pct, threshold)
-    # 🆕 دورهٔ خنک‌شدن: اگه به‌تازگی سوییچ IP انجام شده (خودکار یا دستی)، این دور رو نادیده بگیر —
-    # چون افت موقتِ درصد آنلاین بلافاصله بعد از سوییچ طبیعیه (اتصال‌های در حال reconnect) و
-    # نباید باعث یه سوییچ دیگه بشه.
-    since_switch = await asyncio.to_thread(_db_seconds_since_last_ip_switch)
-    if since_switch < FILTER_DETECT_SWITCH_COOLDOWN_SECONDS:
-        log.debug("پایش فیلتر: در دورهٔ خنک‌شدنِ بعد از آخرین سوییچ (%.0f از %s ثانیه گذشته) — این دور رد شد.",
-                   since_switch, FILTER_DETECT_SWITCH_COOLDOWN_SECONDS)
-        _filter_detect_low_ticks = 0
-        return
+
     if online_pct < threshold:
         _filter_detect_low_ticks += 1
-        log.warning("پایش فیلتر: درصد آنلاین %.1f\u066a — زیر آستانه %.1f\u066a (دفعهٔ %s از %s)", online_pct, threshold, _filter_detect_low_ticks, FILTER_DETECT_CONFIRM_TICKS)
-        if _filter_detect_low_ticks >= FILTER_DETECT_CONFIRM_TICKS:
-            # فیلتر تشخیص داده شد!
-            _filter_detect_low_ticks = 0
-            log.warning("🚨 فیلتر تشخیص داده شد! درصد آنلاین: %.1f\u066a — در حال تغییر IP...", online_pct)
-            # 🆕 ☁️ همان IPای که تا همین لحظه پیش‌فرض بود، احتمالاً همان چیزیه که فیلتر شده —
-            # قبل از هر جابه‌جایی نگهش می‌داریم تا در ادامه، گامِ اولِ Failover و سپس (پس‌زمینه)
-            # فعال‌سازیِ یک Standby دقیقاً همین Edge را هدف بگیرند.
-            old_default_host = await asyncio.to_thread(_db_get_default_host)
-            # 🆕 گامِ اولِ Failover (بندِ ۴): فوراً دامنه را روی خودِ Core می‌بریم — چون طبقِ
-            # طراحیِ Mirroring، کاربرانِ *همهٔ* Edgeها روی Core هم وجود دارند، این تضمین‌شده‌ترین
-            # و سریع‌ترین راهِ نجاتِ آنیِ مشتریان است؛ برخلافِ «سریع‌ترین Edgeِ دیگر» که ممکن است
-            # اصلاً کاربرانِ همین Edgeِ فیلترشده رویش نباشد.
-            core_public_ip = await asyncio.to_thread(_get_core_public_ip_cached)
-            if core_public_ip and core_public_ip != old_default_host:
-                ok_core_reach, _core_detail = await _check_ssh_reachable(core_public_ip, 22)
-                if ok_core_reach:
-                    await asyncio.to_thread(_db_set_default_host, core_public_ip)
-                    await asyncio.to_thread(_db_mark_ip_switch_now)
-                    cf_ok, cf_msg = await _update_cloudflare_dns(core_public_ip)
-                    cf_suffix = f"\n\n☁️ <b>وضعیتِ کلودفلر:</b> {cf_msg}" if cf_ok else f"\n\n⚠️ <b>هشدارِ کلودفلر:</b> {cf_msg}"
-                    await _notify_admins(app,
-                        f"🚨 <b>سرورِ Edge با آی‌پیِ {esc(old_default_host)} فیلتر شد.</b>\n"
-                        f"📊 کاربران آنلاین: {online_count} از {total_active} ({online_pct:.1f}\u066a)\n\n"
-                        f"دامنه موقتاً روی سرورِ Core (<code>{esc(core_public_ip)}</code>) تنظیم شد؛ "
-                        f"مشتریان (که رویِ Core هم Mirror شده‌اند) نباید قطع شوند.{cf_suffix}")
-                    if old_default_host:
-                        spawn_bg_task(_activate_standby_for_filtered_edge(app, old_default_host))
-                    return
-                log.warning("پایش فیلتر: Core (%s) هم SSH زنده نداد (%s) — ادامه با منطقِ قدیمیِ انتخابِ سریع‌ترین Edge.",
-                            core_public_ip, _core_detail)
-            # پیدا کردن سریع‌ترین IP فعال (fallback اگر خودِ Core در دسترس نبود)
-            fastest_host = await asyncio.to_thread(_db_get_fastest_active_host)
-            current_hosts_raw = await asyncio.to_thread(_db_get_setting, 'hosts', '')
-            current_hosts = [h.strip() for h in current_hosts_raw.split(',') if h.strip()]
-            pool = await asyncio.to_thread(_db_get_host_pool)
-            active_hosts = [r[0] for r in pool if r[1]]
-            if not fastest_host and active_hosts:
-                # اگر تست سرعت انجام نشده، اولین IP فعال را بگیر
-                fastest_host = active_hosts[0]
-            if not fastest_host:
-                await _notify_admins(app,
-                    f"🚨 <b>فیلتر IP تشخیص داده شد!</b>\n\n"
-                    f"📊 کاربران آنلاین: {online_count} از {total_active} ({online_pct:.1f}\u066a)\n"
-                    f"❌ هیچ IP فعالی برای تعویض وجود ندارد! لطفاً دستی بررسی کنید.")
-                # 🆕 دقیقاً همین حالت (هیچ IP فعالی نمانده، حتی خودِ Core در گامِ قبل جواب نداد)
-                # بیشترین نیاز به فعال‌سازیِ یک Standby را دارد.
-                if old_default_host:
-                    spawn_bg_task(_activate_standby_for_filtered_edge(app, old_default_host))
-                return
-
-            # 🐛🔧 رفع باگ واقعی: قبلاً بدون هیچ چکی، «سریع‌ترین IP» (که فقط بر اساس آخرین تست
-            # تأخیر انتخاب شده، نه اینکه SSH رویش الان واقعاً زنده است یا نه) به‌عنوان پیش‌فرض
-            # ثبت و همهٔ کاربران کورکورانه بهش منتقل می‌شدند. اگر همان IP به هر دلیلی (پورت هنوز
-            # درست نشده، سرور تازه اضافه شده و ناقص، و ...) واقعاً SSH زنده نداشته باشد، این یعنی
-            # قطعیِ کامل کاربران دقیقاً در بدترین لحظه (وسط یک رخداد فیلترینگ). الان قبل از
-            # سوییچ، هر کاندید را با یک چک زندهٔ سبک (بدون رمز) امتحان می‌کنیم و اگر رد شد، سراغ
-            # کاندید بعدی می‌رویم؛ فقط وقتی یکی واقعاً جواب داد، سوییچ واقعی انجام می‌شود.
-            candidates = [fastest_host] + [h for h in active_hosts if h != fastest_host]
-            chosen_host, chosen_detail = None, ''
-            for cand in candidates:
-                cand_port = await asyncio.to_thread(_db_get_host_service_port, cand, 22)
-                ok_reach, reach_detail = await _check_ssh_reachable(cand, cand_port)
-                if ok_reach:
-                    chosen_host = cand
-                    break
-                log.warning("پایش فیلتر: کاندید %s رد شد (service path زنده نبود): %s", cand, reach_detail)
-                chosen_detail = reach_detail
-            if not chosen_host:
-                await _notify_admins(app,
-                    f"🚨 <b>فیلتر IP تشخیص داده شد، ولی سوییچ خودکار انجام نشد!</b>\n\n"
-                    f"📊 کاربران آنلاین: {online_count} از {total_active} ({online_pct:.1f}\u066a)\n"
-                    f"❌ هیچ‌کدام از {len(candidates)} IP فعال، service path زنده نداشتند (آخرین خطا: {chosen_detail}).\n"
-                    f"لطفاً دستی بررسی کنید — سوییچ به یک IP غیرقابل‌اتصال انجام نشد تا کاربران بی‌دلیل قطع نشوند.")
-                # 🆕 هیچ IP موجودی زنده نبود — این هم دقیقاً یک موردِ نیاز به فعال‌سازیِ Standby است
-                if old_default_host:
-                    spawn_bg_task(_activate_standby_for_filtered_edge(app, old_default_host))
-                return
-            fastest_host = chosen_host
-            # تغییر IP پیش‌فرض کل سیستم
-            await asyncio.to_thread(_db_set_default_host, fastest_host)
-            # انتقال همهٔ کاربران به سریع‌ترین IP
-            await asyncio.to_thread(_db_set_all_accounts_host, fastest_host)
-            await asyncio.to_thread(_db_mark_ip_switch_now)  # 🆕 شروع دورهٔ خنک‌شدن
-            cf_ok, cf_msg = await _update_cloudflare_dns(fastest_host)
-            cf_suffix = f"\n\n☁️ <b>وضعیت کلودفلر:</b> {cf_msg}" if cf_ok else f"\n\n⚠️ <b>هشدار کلودفلر:</b> {cf_msg}"
-            await _notify_admins(app,
-                f"🚨 <b>فیلتر IP تشخیص داده شد و IP تعویض شد!</b>\n\n"
-                f"📊 کاربران آنلاین: {online_count} از {total_active} ({online_pct:.1f}\u066a)\n"
-                f"🔴 آستانه تشخیص: {threshold:.0f}\u066a\n\n"
-                f"✅ سیستم خودکار IP را به <code>{esc(fastest_host)}</code> تغییر داد و همهٔ کاربران منتقل شدند." + cf_suffix + "\n\n"
-                f"⚠️ لطفاً وضعیت شبکه را بررسی کنید و در صورت نیاز، IP جدیدی اضافه کنید.")
-            # 🆕 سوییچِ بالا فقط یک تسکینِ فوری با یک IP از قبل موجود بود؛ حالا (در پس‌زمینه،
-            # بدون معطل‌کردنِ این حلقه) اگر یک Standby سالم ثبت شده باشد، کاربرانِ همان Edgeِ
-            # فیلترشده رویش بازسازی و دامنه به آن منتقل می‌شود (طبقِ auto_failover_mode).
-            if old_default_host and old_default_host != fastest_host:
-                spawn_bg_task(_activate_standby_for_filtered_edge(app, old_default_host))
+        log.warning(
+            "Traffic anomaly signal: online %.1f%% below %.1f%% (%s/%s confirmations).",
+            online_pct,
+            threshold,
+            _filter_detect_low_ticks,
+            FILTER_DETECT_CONFIRM_TICKS,
+        )
+        if _filter_detect_low_ticks == FILTER_DETECT_CONFIRM_TICKS:
+            await _notify_admins(
+                app,
+                "📉 <b>Traffic Anomaly Signal</b>\n\n"
+                f"کاربران آنلاین: {online_count} از {total_active} ({online_pct:.1f}٪)\n"
+                f"آستانه: {threshold:.0f}٪\n\n"
+                "این فقط یک سیگنال کمکی است و <b>به‌تنهایی فیلترینگ محسوب نمی‌شود</b>. "
+                "Phase 6F برای تشخیص، Evidence منطقه‌ای هر Edge را جداگانه بررسی می‌کند.\n"
+                "✅ هیچ DNS، IP، Account یا Standby تغییری انجام نشد."
+            )
     else:
         if _filter_detect_low_ticks > 0:
-            log.info("پایش فیلتر: وضعیت بهبود یافت (%.1f\u066a) — شمارنده ریست شد.", online_pct)
+            log.info(
+                "Traffic anomaly signal recovered: online %.1f%%; counter reset.",
+                online_pct,
+            )
         _filter_detect_low_ticks = 0
 
+
 async def _filter_detect_loop(app):
-    log.info("🛡 حلقهٔ پایش فیلتر خودکار آغاز شد (بازهٔ چک: %s ثانیه، آستانه: %s\u066a، تایید: %s بار متوالی).",
-              FILTER_DETECT_CHECK_INTERVAL_SECONDS, FILTER_DETECT_ONLINE_PCT_THRESHOLD, FILTER_DETECT_CONFIRM_TICKS)
+    log.info(
+        "📉 Traffic Anomaly monitor started (interval=%ss, threshold=%s%%, confirmations=%s).",
+        FILTER_DETECT_CHECK_INTERVAL_SECONDS,
+        FILTER_DETECT_ONLINE_PCT_THRESHOLD,
+        FILTER_DETECT_CONFIRM_TICKS,
+    )
     while True:
         try:
             await _filter_detect_tick(app)
         except Exception:
-            log.exception("خطای غیرمنتظره در حلقهٔ پایش فیلتر — دور بعدی ادامه می‌یابد.")
+            log.exception("Traffic Anomaly monitor failed; next round will continue.")
         await asyncio.sleep(FILTER_DETECT_CHECK_INTERVAL_SECONDS)
 
 async def _post_init(app):
+    # Phase 6F safety migration: the legacy V89 auto_failover_mode previously allowed
+    # a coarse traffic signal to mutate DNS/accounts. Until Phase 6G/6H reintroduce a
+    # scoped action policy, force this legacy operational switch off.
+    if (await asyncio.to_thread(_db_get_setting, 'auto_failover_mode', '0')) == '1':
+        await asyncio.to_thread(_db_update_setting, 'auto_failover_mode', '0')
+        log.warning("Phase6F disabled legacy auto_failover_mode; monitoring is action-free.")
+
     # 🔧 عمداً از asyncio.create_task به‌جای JobQueue استفاده شده تا وابستگی اضافه‌ای
     # (اکستنشن job-queue / APScheduler) به requirements.txt پروژه اضافه نشود.
     app.bot_data['capacity_monitor_task'] = asyncio.create_task(_capacity_monitor_loop(app))
@@ -17180,6 +17888,7 @@ async def _post_init(app):
     app.bot_data['expiry_monitor_task'] = asyncio.create_task(_expiry_monitor_loop(app))
     app.bot_data['ip_pressure_monitor_task'] = asyncio.create_task(_ip_pressure_monitor_loop(app))
     app.bot_data['host_health_task'] = asyncio.create_task(_host_health_loop(app))
+    app.bot_data['regional_filter_task'] = asyncio.create_task(_regional_filter_loop(app))
     app.bot_data['udpgw_health_task'] = asyncio.create_task(_udpgw_health_loop(app))
     app.bot_data['daily_sales_report_task'] = asyncio.create_task(_daily_sales_report_loop(app))
     app.bot_data['filter_detect_task'] = asyncio.create_task(_filter_detect_loop(app))  # 🆕 V89
@@ -17196,7 +17905,7 @@ async def _post_shutdown(app):
     # قلم افتاده بود — پس هیچ‌وقت cancel نمی‌شد و روی asyncio.sleep(...) منتظر می‌ماند، پروسه
     # واقعاً خارج نمی‌شد تا systemd صبرش تمام شود و به‌زور بکشدش (که همان قطعیِ طولانی و نیازِ
     # نماینده‌ها به ورودِ مجدد را رقم می‌زد).
-    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار')):
+    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 Phase6F Regional Filter Monitor'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار')):
         task = app.bot_data.get(key)
         if task and not task.done():
             task.cancel()
@@ -17240,5 +17949,6 @@ if __name__ == '__main__':
     print(f"🛡️ پایش تخطی ظرفیت اکانت‌ها فعال است (هر {CAPACITY_CHECK_INTERVAL_SECONDS}s چک، آستانه {CAPACITY_SUSPEND_AFTER_MINUTES} دقیقه).")
     print(f"🌐 پایش خودکار فشار IP فعال است (هر {IP_PRESSURE_CHECK_INTERVAL_SECONDS}s چک، آستانهٔ هشدار {IP_PRESSURE_WARN_PCT}٪، بالانس خودکار بعد از {IP_PRESSURE_AUTOBALANCE_AFTER_HOURS} ساعت بدون واکنش).")
     print(f"🛡️ پایش سلامت IPها فعال است (هر {HOST_HEALTH_CHECK_INTERVAL_SECONDS}s چک، غیرفعال‌سازی خودکار بعد از {HOST_HEALTH_FAIL_THRESHOLD} شکست متوالی).")
-    print(f"🛡 پایش فیلتر خودکار فعال است (هر {FILTER_DETECT_CHECK_INTERVAL_SECONDS}s چک، آستانه پیش‌فرض {FILTER_DETECT_ONLINE_PCT_THRESHOLD}\u066a، تایید {FILTER_DETECT_CONFIRM_TICKS} بار متوالی). [از منوی سرویس IP قابل تنظیم است]")
+    print(f"📉 Traffic Anomaly signal فعال است (هر {FILTER_DETECT_CHECK_INTERVAL_SECONDS}s؛ بدون Failover).")
+    print(f"🛡 Phase6F Regional Filter Monitor فعال است (هر {REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS}s؛ حداکثر {REGIONAL_FILTER_MAX_NODES} Node ایران؛ MONITOR ONLY).")
     app.run_polling()

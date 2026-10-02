@@ -199,6 +199,7 @@ class Phase6CIntegrationRegressionTests(unittest.TestCase):
             "demote_core_to_edge",
         ):
             self.assertNotIn(forbidden, region)
+        self.assertIn("previous is False and proposed is True", region)
 
     def test_phase6b_health_model_is_still_separate(self):
         start = self.source.index("def _derive_host_health_state(")

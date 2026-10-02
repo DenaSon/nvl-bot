@@ -129,14 +129,18 @@ def is_transparent_dns_handoff_safe(
     source_host: str,
     source_service_port: int,
     target_service_port: int,
+    core_fallback_ip: Optional[str] = None,
 ) -> tuple[bool, str]:
     """Static preflight constraints for transparent DNS-only handoff."""
     if not cloudflare_configured:
         return False, "CLOUDFLARE_NOT_CONFIGURED"
     if not dns_current_ip:
         return False, "DNS_CURRENT_IP_UNKNOWN"
-    if str(dns_current_ip) != str(source_host):
-        return False, "DNS_NOT_POINTING_TO_SOURCE"
+    allowed_dns_ips = {str(source_host)}
+    if core_fallback_ip:
+        allowed_dns_ips.add(str(core_fallback_ip))
+    if str(dns_current_ip) not in allowed_dns_ips:
+        return False, "DNS_NOT_POINTING_TO_SOURCE_OR_CORE"
     if int(source_service_port) != int(target_service_port):
         return False, "SERVICE_PORT_MISMATCH"
     return True, "OK"

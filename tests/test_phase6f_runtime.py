@@ -115,6 +115,24 @@ class Phase6FBotIntegrationStaticTests(unittest.TestCase):
         self.assertIn("'regional_node'", region)
         self.assertIn("'regional_service'", region)
 
+    def test_only_consecutive_likely_rounds_build_confirmation_streak(self):
+        region = self._region(
+            "def _db_record_regional_round(",
+            "def _db_record_regional_provider_status(",
+        )
+        self.assertIn(
+            "elif regional_decision.state == FILTER_STATE_LIKELY",
+            region,
+        )
+        self.assertIn(
+            "POSSIBLE/UNKNOWN break a LIKELY streak",
+            region,
+        )
+        self.assertIn(
+            '"filter_consecutive_failures=0, "',
+            region,
+        )
+
     def test_provider_limit_never_becomes_edge_failure(self):
         region = self._region(
             "async def _regional_provider_enter_limited(",

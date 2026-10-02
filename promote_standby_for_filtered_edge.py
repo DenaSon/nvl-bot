@@ -14,8 +14,9 @@ promote_standby_for_filtered_edge.py
     02_recreate_ssh_users.py، با این دو تفاوت:
       ۱) فقط اکانت‌های یک host مشخص هدف قرار می‌گیرند، نه کلِ دیتابیس.
       ۲) دستورات به‌جای اجرای محلی، یک‌جا (batch، در یک اتصالِ SSH) روی Standby اجرا می‌شوند.
-  گامِ سوم (جای دیگر): بعدِ برگشتِ موفقِ این اسکریپت، ربات دامنه را از Core به Standby
-    منتقل و به ادمین پیام موفقیت می‌دهد.
+  گامِ سوم (جای دیگر): orchestrator امن Phase 6G نتیجهٔ JSON را می‌خواند، فقط در صورت
+    موفقیت کاملِ همهٔ اکانت‌ها DB را به‌صورت scoped/atomic تغییر می‌دهد و سپس routing را
+    سوییچ می‌کند. این اسکریپت به‌صورت پیش‌فرض دیگر DB را تغییر نمی‌دهد.
 
 این اسکریپت هم CLI مستقل است (برای دکمهٔ «فعال‌سازیِ دستیِ این Edge» در پنل) و هم قرار است
 از داخلِ bot_final_v61.py با asyncio.create_subprocess_exec صدا زده شود (نگاه کنید به
@@ -25,11 +26,11 @@ bot_patch_notes.md، تابعِ _activate_standby_for_filtered_edge).
     python3 promote_standby_for_filtered_edge.py \\
         --filtered-host 1.2.3.4 --target-host 5.6.7.8 [--target-port 22] \\
         [--db-path /root/master_bot.db] [--ssh-key /root/.ssh/edge_provision_ed25519] \\
-        [--include-inactive] [--dry-run]
+        [--include-inactive] [--dry-run] [--commit-db]
 
 خروجیِ استاندارد: یک خط JSON خلاصه در انتها (برای پارس‌شدنِ آسان توسطِ ربات) + پیام‌های
-خوانا برای انسان قبل از آن. کدِ خروج: ۰ = موفق (حتی اگر چند اکانت تکی fail شده باشند، تا
-وقتی حداقل یکی موفق بوده یا لیست خالی بوده)، ۲ = خطای زیرساختی (اتصال/دیتابیس).
+خوانا برای انسان قبل از آن. کدِ خروج: ۰ = همهٔ اکانت‌های هدف با موفقیت rebuild شدند
+(یا لیست خالی بود)، ۲ = خطای زیرساختی یا هرگونه partial failure.
 """
 from __future__ import annotations
 
@@ -51,11 +52,25 @@ def _default_db_path() -> str:
     )
 
 
-def _fetch_accounts(db_path: str, filtered_host: str, include_inactive: bool):
+def _fetch_accounts(
+    db_path: str,
+    filtered_host: str,
+    include_inactive: bool,
+    include_unassigned: bool = False,
+):
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
-        base = "SELECT username, password, expire_date FROM ssh_accounts WHERE host = ?"
+        if include_unassigned:
+            base = (
+                "SELECT username, password, expire_date FROM ssh_accounts "
+                "WHERE (host = ? OR host IS NULL OR host = '') AND service_type='ssh'"
+            )
+        else:
+            base = (
+                "SELECT username, password, expire_date FROM ssh_accounts "
+                "WHERE host = ? AND service_type='ssh'"
+            )
         if not include_inactive:
             base += " AND status LIKE '%فعال%' AND status NOT LIKE '%غیر%'"
         cur.execute(base, (filtered_host,))
@@ -161,24 +176,58 @@ def main():
     ap.add_argument("--db-path", default=_default_db_path())
     ap.add_argument("--ssh-key", default="/root/.ssh/edge_provision_ed25519")
     ap.add_argument("--include-inactive", action="store_true")
+    ap.add_argument(
+        "--include-unassigned",
+        action="store_true",
+        help="Also rebuild legacy SSH rows with host NULL/empty. Use only when filtered-host is the current default.",
+    )
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument(
+        "--commit-db",
+        action="store_true",
+        help="Legacy/standalone mode only: after complete success, update only rebuilt usernames in DB. Phase 6G bot orchestration does not use this.",
+    )
     args = ap.parse_args()
 
     if not os.path.exists(args.db_path):
         print(f"❌ دیتابیس پیدا نشد: {args.db_path}", file=sys.stderr)
         sys.exit(2)
 
-    rows = _fetch_accounts(args.db_path, args.filtered_host, args.include_inactive)
+    rows = _fetch_accounts(
+        args.db_path,
+        args.filtered_host,
+        args.include_inactive,
+        include_unassigned=args.include_unassigned,
+    )
     print(f"📋 {len(rows)} اکانتِ متعلق به {args.filtered_host} برای بازسازی روی {args.target_host} پیدا شد.")
 
     if not rows:
-        print(json.dumps({"ok": True, "moved": 0, "failed": 0, "target_host": args.target_host}))
+        print(json.dumps({
+            "ok": True,
+            "source_host": args.filtered_host,
+            "target_host": args.target_host,
+            "requested": 0,
+            "rebuilt": 0,
+            "failed": 0,
+            "rebuilt_usernames": [],
+            "failed_usernames": [],
+            "db_committed": False,
+        }))
         sys.exit(0)
 
     if args.dry_run:
         for un, _pw, exp in rows:
             print(f"  🔍 [dry-run] بازسازی می‌شد: {un} (انقضا: {exp})")
-        print(json.dumps({"ok": True, "dry_run": True, "would_move": len(rows), "target_host": args.target_host}))
+        print(json.dumps({
+            "ok": True,
+            "dry_run": True,
+            "source_host": args.filtered_host,
+            "target_host": args.target_host,
+            "requested": len(rows),
+            "would_rebuild": len(rows),
+            "usernames": [un for un, _pw, _exp in rows],
+            "db_committed": False,
+        }))
         sys.exit(0)
 
     ok, failed, error = _run_batch_on_standby(args.target_host, args.target_port, args.ssh_key, rows)
@@ -192,19 +241,29 @@ def main():
     for un, reason in failed:
         print(f"  ❌ {un} شکست خورد: {reason}")
 
-    if ok:
+    complete_success = len(ok) == len(rows) and not failed
+    db_committed = False
+
+    # Phase 6G default is rebuild-only. Keeping DB mutation behind an explicit flag
+    # prevents the helper from racing the orchestrator or leaving partial host moves.
+    if complete_success and args.commit_db and ok:
         _mark_accounts_host(args.db_path, ok, args.target_host)
-        print(f"🔄 ستونِ host برای {len(ok)} اکانت در دیتابیس به {args.target_host} به‌روز شد.")
+        db_committed = True
+        print(f"🔄 [legacy --commit-db] ستون host برای {len(ok)} اکانت به {args.target_host} به‌روز شد.")
 
     print(f"\n=== خلاصه: {len(ok)} موفق، {len(failed)} ناموفق، از کلِ {len(rows)} ===")
     print(json.dumps({
-        "ok": len(failed) == 0,
-        "moved": len(ok),
-        "failed": len(failed),
-        "failed_usernames": [u for u, _ in failed],
+        "ok": complete_success,
+        "source_host": args.filtered_host,
         "target_host": args.target_host,
+        "requested": len(rows),
+        "rebuilt": len(ok),
+        "failed": len(failed),
+        "rebuilt_usernames": ok,
+        "failed_usernames": [u for u, _ in failed],
+        "db_committed": db_committed,
     }))
-    sys.exit(0 if ok else 2)
+    sys.exit(0 if complete_success else 2)
 
 
 if __name__ == "__main__":

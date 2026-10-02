@@ -217,13 +217,13 @@ class Phase6FBotIntegrationStaticTests(unittest.TestCase):
 
     def test_filtering_monitor_ui_exists(self):
         for fragment in (
-            "Filtering Monitor — Phase 6F",
+            "Filtering Monitor",
             'callback_data="hp_filtering"',
             'd == "hp_filtering"',
             'd.startswith("flt_detail_")',
             'd.startswith("flt_check_")',
             'd.startswith("flt_probe_")',
-            "MONITOR ONLY",
+            "Auto Failover",
         ):
             self.assertIn(fragment, self.source)
 

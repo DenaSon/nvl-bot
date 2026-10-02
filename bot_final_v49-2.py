@@ -9835,8 +9835,10 @@ async def _render_host_pool_panel(query, page=0):
         dns_line = ("\n\n⚠️ دامنهٔ ثابت هنوز تنظیم نشده — مشتریان مستقیم IP خام می‌بینند. "
                      "برای فعال‌سازی سوییچ خودکار، روی «🌍 دامنهٔ ثابت + Cloudflare» بزنید.")
     standby_count = len(await asyncio.to_thread(_db_get_standby_hosts))
+    auto_enabled = (await asyncio.to_thread(_db_get_setting, 'auto_failover_mode', '0')) == '1'
+    failover_mode_text = "AUTO + MANUAL" if auto_enabled else "MANUAL ONLY"
     cz_line = (
-        f"\n\n🛡 Phase 6F: <b>MONITOR ONLY</b> — تشخیص و هشدار فعال؛ Failover خودکار غیرفعال. "
+        f"\n\n🛡 Phase 6H: Monitoring <b>ON</b> · Failover <b>{failover_mode_text}</b> · "
         f"Standby آماده: {standby_count}"
     )
     body = "\n\n".join(lines) if lines else "هیچ IP ای هنوز در استخر پایش ثبت نشده."
@@ -9896,14 +9898,14 @@ async def _render_filtering_monitor_panel(query, page=0):
         provider_line += f" · ⏳ Backoff ~{max(1, backoff // 60)} دقیقه"
 
     latest_failover = await asyncio.to_thread(_db_get_latest_failover_operation)
-    failover_line = "Last manual failover: <code>none</code>"
+    failover_line = "Last failover: <code>none</code>"
     if latest_failover:
         (
             op_id, op_mode, op_source, op_target, op_status, op_started,
             op_updated, op_finished, op_accounts, op_moved, op_error,
         ) = latest_failover
         failover_line = (
-            f"Last manual failover: <code>#{op_id}</code> · "
+            f"Last failover: <code>#{op_id}</code> · <b>{esc(op_mode)}</b> · "
             f"<b>{esc(op_status)}</b> · "
             f"<code>{esc(op_source)}</code> → <code>{esc(op_target)}</code> · "
             f"{op_moved or 0}/{op_accounts or 0}"
@@ -18407,6 +18409,13 @@ async def _notify_filter_state_transition(app, host, recompute_result, regional_
     failed_asns = ", ".join(summary.failed_asns) or "—"
     failed_cities = ", ".join(summary.failed_cities) or "—"
 
+    auto_enabled = (await asyncio.to_thread(_db_get_setting, 'auto_failover_mode', '0')) == '1'
+    auto_note = (
+        "🤖 Phase 6H Auto Failover روشن است؛ اقدام فقط بعد از تکمیل کامل round و عبور از همه Safety Gateها بررسی می‌شود."
+        if auto_enabled else
+        "ℹ️ Phase 6H Auto Failover خاموش است؛ هیچ Failover خودکاری انجام نمی‌شود."
+    )
+
     await _notify_admins(
         app,
         f"{title}\n\n"
@@ -18419,7 +18428,7 @@ async def _notify_filter_state_transition(app, host, recompute_result, regional_
         f"External(Core→Edge): {_probe_state_text(ph.get('external_service_ok'))}\n"
         f"WireGuard: {_probe_state_text(ph.get('wg_peer_ok'))}\n"
         f"Core path: {_probe_state_text(ph.get('core_path_ok'))}\n\n"
-        "ℹ️ Phase 6F فقط مانیتورینگ/هشدار است؛ هیچ DNS یا Failover خودکاری انجام نشده."
+        f"{auto_note}"
     )
 
 
@@ -18585,6 +18594,12 @@ async def _phase6h_auto_failover_tick(app):
 
     source_meta = await asyncio.to_thread(_db_get_failover_host_meta, source_host)
     health_map = await asyncio.to_thread(_db_get_host_port_health_map)
+    pool_rows = await asyncio.to_thread(_db_get_host_pool)
+    for row in pool_rows:
+        host = row[0]
+        if host in health_map:
+            health_map[host] = dict(health_map[host])
+            health_map[host]["avg_latency_ms"] = row[8] if len(row) > 8 else None
     source_health = health_map.get(source_host) or {}
     standbys = [
         host for host in await asyncio.to_thread(_db_get_standby_hosts)
@@ -18762,7 +18777,7 @@ async def _regional_filter_loop(app):
     if REGIONAL_FILTER_MONITOR_INITIAL_DELAY_SECONDS > 0:
         await asyncio.sleep(REGIONAL_FILTER_MONITOR_INITIAL_DELAY_SECONDS)
     log.info(
-        "🛡 Phase6F regional filtering monitor started (interval=%ss, max_nodes=%s, edge_gap=%ss).",
+        "🛡 Phase6H regional filtering monitor started (interval=%ss, max_nodes=%s, edge_gap=%ss).",
         REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS,
         REGIONAL_FILTER_MAX_NODES,
         REGIONAL_FILTER_EDGE_GAP_SECONDS,
@@ -18771,7 +18786,7 @@ async def _regional_filter_loop(app):
         try:
             await _regional_filter_tick(app)
         except Exception:
-            log.exception("Phase6F regional filtering round failed; next round will continue.")
+            log.exception("Phase6H regional filtering round failed; next round will continue.")
         await asyncio.sleep(REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS)
 
 async def _udpgw_health_tick(app):
@@ -19007,8 +19022,9 @@ async def _filter_detect_tick(app):
                 f"کاربران آنلاین: {online_count} از {total_active} ({online_pct:.1f}٪)\n"
                 f"آستانه: {threshold:.0f}٪\n\n"
                 "این فقط یک سیگنال کمکی است و <b>به‌تنهایی فیلترینگ محسوب نمی‌شود</b>. "
-                "Phase 6F برای تشخیص، Evidence منطقه‌ای هر Edge را جداگانه بررسی می‌کند.\n"
-                "✅ هیچ DNS، IP، Account یا Standby تغییری انجام نشد."
+                "Phase 6H برای تصمیم Failover فقط Evidence منطقه‌ای مستقل هر Edge را بررسی می‌کند؛ "
+                "این Traffic Anomaly هرگز Trigger عملیات نیست.\n"
+                "✅ هیچ DNS، IP، Account یا Standby تغییری از این سیگنال انجام نشد."
             )
     else:
         if _filter_detect_low_ticks > 0:
@@ -19066,7 +19082,7 @@ async def _post_shutdown(app):
     # قلم افتاده بود — پس هیچ‌وقت cancel نمی‌شد و روی asyncio.sleep(...) منتظر می‌ماند، پروسه
     # واقعاً خارج نمی‌شد تا systemd صبرش تمام شود و به‌زور بکشدش (که همان قطعیِ طولانی و نیازِ
     # نماینده‌ها به ورودِ مجدد را رقم می‌زد).
-    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 Phase6F Regional Filter Monitor'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار')):
+    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 Phase6H Regional Filter Monitor'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار')):
         task = app.bot_data.get(key)
         if task and not task.done():
             task.cancel()

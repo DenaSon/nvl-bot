@@ -173,8 +173,8 @@ class Phase6HIntegrationShapeTests(unittest.TestCase):
         )
         self.assertIn('d == "flt_auto_enable"', region)
         self.assertIn('callback_data="flt_auto_enable_yes"', region)
-        self.assertIn("_db_update_setting, 'auto_failover_mode', '1'", region)
-        self.assertIn("_db_update_setting, 'auto_failover_mode', '0'", region)
+        self.assertIn("_db_update_setting, 'phase6h_auto_failover_enabled', '1'", region)
+        self.assertIn("_db_update_setting, 'phase6h_auto_failover_enabled', '0'", region)
 
     def test_scheduled_round_calls_6h_only_after_provider_success(self):
         region = self._region(
@@ -217,12 +217,13 @@ class Phase6HIntegrationShapeTests(unittest.TestCase):
         self.assertNotIn("_safe_manual_failover", region)
 
     def test_auto_default_remains_off_and_startup_does_not_force_state(self):
+        self.assertIn("('phase6h_auto_failover_enabled', '0')", self.source)
         self.assertIn("('auto_failover_mode', '0')", self.source)
         post_init = self._region(
             "async def _post_init(app):",
             "async def _post_shutdown(app):",
         )
-        self.assertNotIn("_db_update_setting, 'auto_failover_mode', '0'", post_init)
+        self.assertNotIn("_db_update_setting, 'phase6h_auto_failover_enabled', '0'", post_init)
 
 
 if __name__ == "__main__":

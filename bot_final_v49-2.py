@@ -233,9 +233,27 @@ from edge_observability import (
     FILTER_CONFIDENCE_NONE,
     FILTER_REASON_INSUFFICIENT_EVIDENCE,
     FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
+    FILTER_STATE_CLEAR,
+    FILTER_STATE_LIKELY,
+    FILTER_STATE_POSSIBLE,
+    FILTER_STATE_UNKNOWN,
     PROBE_REASON_OK,
     derive_observability,
     normalize_probe_error,
+)
+from checkhost_probe import CheckHostClient, CheckHostError, CheckHostLimitExceeded
+from regional_filtering import classify_regional_evidence
+from filtering_runtime import (
+    PROVIDER_STATUS_ERROR,
+    PROVIDER_STATUS_LIMITED,
+    PROVIDER_STATUS_NEVER,
+    PROVIDER_STATUS_OK,
+    TRANSITION_CRITICAL,
+    TRANSITION_DEGRADED,
+    TRANSITION_RECOVERED,
+    TRANSITION_WARNING,
+    classify_filter_transition,
+    provider_backoff_until,
 )
 
 # ==========================================
@@ -245,7 +263,7 @@ from edge_observability import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V115.2-2026-10-02-predeploy-fixes"
+BOT_VERSION_TAG = "V116.0-2026-10-03-phase6f-filtering-runtime"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -504,6 +522,15 @@ EDGE_FILTER_CONFIRM_THRESHOLD = _phase6c_env_int("NVL_FILTER_CONFIRM_THRESHOLD",
 EDGE_FILTER_RECOVERY_THRESHOLD = _phase6c_env_int("NVL_FILTER_RECOVERY_THRESHOLD", 2)
 EDGE_FILTER_COOLDOWN_SECONDS = _phase6c_env_int("NVL_FILTER_COOLDOWN_SECONDS", 600)
 EDGE_PROBE_HISTORY_RETENTION_DAYS = _phase6c_env_int("NVL_PROBE_HISTORY_RETENTION_DAYS", 14)
+
+# Phase 6F — regional filtering runtime. Defaults are deliberately conservative to
+# respect the public Check-Host provider and avoid bursty per-Edge polling.
+REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROBE_INTERVAL", 600)
+REGIONAL_FILTER_MONITOR_INITIAL_DELAY_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROBE_INITIAL_DELAY", 30, minimum=0)
+REGIONAL_FILTER_EDGE_GAP_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROBE_EDGE_GAP", 15, minimum=0)
+REGIONAL_FILTER_MAX_NODES = _phase6c_env_int("NVL_REGIONAL_PROBE_MAX_NODES", 8)
+REGIONAL_FILTER_PROVIDER_BACKOFF_BASE_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROVIDER_BACKOFF_BASE", 300)
+REGIONAL_FILTER_PROVIDER_BACKOFF_MAX_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROVIDER_BACKOFF_MAX", 3600)
 
 # ==========================================
 # 🆕 V89 — سیستم شناسایی خودکار فیلتر شدن بر اساس کاربران آنلاین

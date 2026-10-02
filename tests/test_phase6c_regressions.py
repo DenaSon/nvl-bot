@@ -133,7 +133,7 @@ class Phase6CClassifierTests(unittest.TestCase):
             True, True, True, True, True, None,
             previous_filter_suspected=True,
         )
-        self.assertEqual(d.diagnostic_reason, DIAG_ALL_PATHS_HEALTHY)
+        self.assertEqual(d.diagnostic_reason, DIAG_FILTER_SUSPECTED)
         self.assertTrue(d.filter_suspected)
 
     def test_confirmed_filter_requires_recovery_threshold(self):

@@ -27,7 +27,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check aiohttp qrcode
 
       - name: Compile changed Python modules
-        run: python -m py_compile bot_final_v49-2.py v2ray_engine.py marzban_admin.py edge_observability.py
+        run: python -m py_compile bot_final_v49-2.py v2ray_engine.py marzban_admin.py edge_observability.py checkhost_probe.py
 
       - name: Run unit tests
         run: python -m unittest discover -s tests -v

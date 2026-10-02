@@ -1480,7 +1480,10 @@ def _db_recompute_host_observability(host):
         filter_reason = decision.filter_reason
 
         cooldown_active = False
-        if cooldown_until and previous is not None and proposed is not None and proposed != previous:
+        # Cooldown only suppresses rapid re-entry into FILTER_SUSPECTED after a
+        # confirmed recovery. It must never hide a newly observed WG/Core/service
+        # failure behind an old filtering diagnosis.
+        if cooldown_until and previous is False and proposed is True:
             try:
                 cooldown_active = _parse_flexible_datetime(cooldown_until) > now_dt
             except (TypeError, ValueError):

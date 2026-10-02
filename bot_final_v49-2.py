@@ -9314,7 +9314,7 @@ async def _render_host_pool_panel(query, page=0):
         membership = "ACTIVE" if active else "INACTIVE"
         diagnostic_reason = ph.get("diagnostic_reason") or DIAG_INSUFFICIENT_EVIDENCE
         core_badge = " 🧠 (Core)" if diagnostic_reason == DIAG_CORE_LOCAL else ""
-        filter_suspected = ph.get("filter_suspected")
+        filter_state = ph.get("filter_state") or FILTER_STATE_UNKNOWN
         filter_confidence = ph.get("filter_confidence") or FILTER_CONFIDENCE_NONE
 
         def _probe_badge(value):
@@ -9324,12 +9324,9 @@ async def _render_host_pool_panel(query, page=0):
                 return "❌ DOWN"
             return "⚪ UNKNOWN"
 
-        if filter_suspected is True:
-            filter_txt = f"⚠️ SUSPECTED · {filter_confidence}"
-        elif filter_suspected is False:
-            filter_txt = "✅ NOT_SUSPECTED"
-        else:
-            filter_txt = "⚪ UNKNOWN"
+        filter_txt = (
+            f"{_filter_state_icon(filter_state)} {filter_state} · {filter_confidence}"
+        )
 
         line = (
             f"{overall_icon} <code>{esc(host)}</code>{star}{standby_badge}{core_badge}{latency_txt}\n"
@@ -9413,10 +9410,7 @@ async def _render_host_pool_panel(query, page=0):
     kb.append([InlineKeyboardButton("➕ افزودن IP جدید به استخر", callback_data="hp_add")])
     kb.append([InlineKeyboardButton("🚀 افزودن Edge جدید (VPS از قبل‌خریداری‌شده)", callback_data="hp_addedge")])
     kb.append([InlineKeyboardButton("🌍 دامنهٔ ثابت + Cloudflare", callback_data="hp_cf_settings")])
-    auto_failover_on = (await asyncio.to_thread(_db_get_setting, 'auto_failover_mode', '0')) == '1'
-    kb.append([InlineKeyboardButton(
-        "🔴 خاموش‌کردنِ حالتِ خودکارِ Failover" if auto_failover_on else "🟢 روشن‌کردنِ حالتِ خودکارِ Failover",
-        callback_data="hp_failover_toggle")])
+    kb.append([InlineKeyboardButton("🛡 فیلترینگ و دسترسی", callback_data="hp_filtering")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="ipsvc_menu")])
     cf_cfg = await asyncio.to_thread(_cf_get_config)
     if _cf_configured(cf_cfg):
@@ -9425,17 +9419,11 @@ async def _render_host_pool_panel(query, page=0):
     else:
         dns_line = ("\n\n⚠️ دامنهٔ ثابت هنوز تنظیم نشده — مشتریان مستقیم IP خام می‌بینند. "
                      "برای فعال‌سازی سوییچ خودکار، روی «🌍 دامنهٔ ثابت + Cloudflare» بزنید.")
-    # 🆕 وضعیتِ Failover (جایگزینِ وضعیتِ قدیمیِ Self-Heal کلودزی): این پنل محلِ مدیریتِ کلِ
-    # استخر Edgeهاست، پس همین‌جا شفاف نشان می‌دهیم که اگر یک Edge فیلتر شود چه اتفاقی می‌افتد.
     standby_count = len(await asyncio.to_thread(_db_get_standby_hosts))
-    if auto_failover_on and standby_count > 0:
-        cz_line = f"\n\n🤖 Failoverِ خودکار: <b>فعال</b> ✅ — {standby_count} Standbyِ سالم آماده."
-    elif auto_failover_on:
-        cz_line = "\n\n⚠️ Failoverِ خودکار فعال است ولی هیچ Standbyِ سالمی ثبت نشده — عملاً فقط دامنه روی Core می‌ماند."
-    elif standby_count > 0:
-        cz_line = f"\n\nℹ️ Failoverِ دستی: {standby_count} Standby آمادهٔ فعال‌سازیِ دستی از پنل ادمین است."
-    else:
-        cz_line = "\n\nℹ️ هنوز هیچ Standbyی علامت‌گذاری نشده — در صورتِ فیلترشدنِ یک Edge، دامنه فقط روی Core باقی می‌ماند."
+    cz_line = (
+        f"\n\n🛡 Phase 6F: <b>MONITOR ONLY</b> — تشخیص و هشدار فعال؛ Failover خودکار غیرفعال. "
+        f"Standby آماده: {standby_count}"
+    )
     body = "\n\n".join(lines) if lines else "هیچ IP ای هنوز در استخر پایش ثبت نشده."
     page_line = ""
     if total_hosts:
@@ -15186,6 +15174,44 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d == "hp_menu" and role == 'admin':
         await _render_host_pool_panel(query)
 
+    elif d == "hp_filtering" and role == 'admin':
+        await _render_filtering_monitor_panel(query)
+
+    elif d.startswith("flt_page_") and role == 'admin':
+        try:
+            page = int(d[len("flt_page_"):])
+        except (TypeError, ValueError):
+            page = 0
+        await _render_filtering_monitor_panel(query, page=page)
+
+    elif d.startswith("flt_detail_") and role == 'admin':
+        host = d[len("flt_detail_"):]
+        await _render_filtering_edge_detail(query, host)
+
+    elif d.startswith("flt_probe_") and role == 'admin':
+        host = d[len("flt_probe_"):]
+        await _render_filtering_probe_details(query, host)
+
+    elif d.startswith("flt_check_") and role == 'admin':
+        host = d[len("flt_check_"):]
+        await query.edit_message_text(
+            f"⏳ در حال Regional Probe برای <code>{esc(host)}</code>...",
+            parse_mode="HTML",
+        )
+        result = await _regional_filter_probe_one_now(context.application, host)
+        if result.get("status") == PROVIDER_STATUS_LIMITED:
+            mins = max(1, int(result.get("backoff_seconds", 0)) // 60)
+            await query.message.reply_text(
+                f"⚠️ Check-Host در Backoff است؛ حدود {mins} دقیقه دیگر دوباره تست کنید."
+            )
+        elif result.get("status") == PROVIDER_STATUS_ERROR:
+            await query.message.reply_text(
+                f"⚠️ Provider error: {result.get('error', 'unknown')}"
+            )
+        elif result.get("status") == "SKIPPED_CORE":
+            await query.message.reply_text("ℹ️ Core هدف Filtering Probe نیست.")
+        await _render_filtering_edge_detail(query, host)
+
     elif d.startswith("hppage_") and role == 'admin':
         try:
             page = int(d[len("hppage_"):])
@@ -15455,23 +15481,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("✅ به‌روزرسانی شد.", show_alert=False)
         await _render_host_pool_panel(query)
 
-    # 🆕 روشن/خاموش‌کردنِ حالتِ خودکارِ Failover (بندِ ۴)
+    # Phase 6F safety guard: legacy action callbacks can exist in old Telegram
+    # messages, but this release must remain MONITOR-ONLY.
     elif d == "hp_failover_toggle" and role == 'admin':
-        current = (await asyncio.to_thread(_db_get_setting, 'auto_failover_mode', '0')) == '1'
-        await asyncio.to_thread(_db_update_setting, 'auto_failover_mode', '0' if current else '1')
-        await query.answer("✅ به‌روزرسانی شد.", show_alert=False)
+        await asyncio.to_thread(_db_update_setting, 'auto_failover_mode', '0')
+        await query.message.reply_text(
+            "🛡 Phase 6F روی MONITOR ONLY قفل است. Auto Failover در 6H فعال خواهد شد."
+        )
         await _render_host_pool_panel(query)
 
-    # 🆕 فعال‌سازیِ دستیِ یک Standبی مشخص (دکمه‌ای که در پیامِ هشدارِ فیلترشدن به ادمین نشان
-    # داده می‌شود، وقتی auto_failover_mode خاموش است)
     elif d.startswith("standby_act_") and role == 'admin':
-        _, _, rest = d.partition("standby_act_")
-        filtered_host, _, target_host = rest.partition("_")
-        await query.edit_message_text(
-            f"⏳ در حالِ بازسازیِ کاربرانِ <code>{esc(filtered_host)}</code> روی <code>{esc(target_host)}</code>...",
-            parse_mode="HTML")
-        spawn_bg_task(_activate_standby_for_filtered_edge(
-            app=context.application, filtered_host=filtered_host, target_host=target_host))
+        await query.message.reply_text(
+            "🛡 این دکمه متعلق به پیام قدیمی است. در Phase 6F هیچ انتقالی انجام نمی‌شود؛ "
+            "Safe Manual Failover در Phase 6G پیاده‌سازی می‌شود."
+        )
 
     elif d.startswith("hpdns_") and role == 'admin':
         host = d[len("hpdns_"):]

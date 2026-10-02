@@ -55,8 +55,16 @@ WHERE username = :username
   AND service_type = 'ssh'
 ```
 
-Every account from the initial snapshot must still match the source host. If even
-one row does not match, the transaction aborts and rolls back.
+Every account from the initial snapshot must still match the source host. The
+final commit starts with `BEGIN IMMEDIATE` and re-reads the complete active
+source set before changing ownership/default. If an account was added, activated,
+removed, or reassigned after the rebuild snapshot, the commit aborts with
+`SOURCE_ACCOUNT_SET_CHANGED`.
+
+SSH account finalization also participates in the Phase 6G write lock: status and
+owning `host` are committed atomically, and a reservation cannot become an active
+SSH account while a failover operation is `RUNNING`. Generic account-host moves
+and manual distribution are blocked by the same guard during that window.
 
 ## Rebuild helper contract
 
@@ -294,18 +302,22 @@ Result:
 
 ### Final DNS switch failure after DB commit
 
-Phase 6G atomically restores:
+A Cloudflare update can fail after one record has already changed. Therefore a
+false final handoff result is treated as "route may have changed".
 
-- migrated account `host` values to source;
-- previous default host.
+Phase 6G now:
 
-DNS remains on Core fallback.
+1. explicitly switches the public route back to Core;
+2. only after Core recovery succeeds, atomically restores migrated account
+   `host` values and the previous default host;
+3. marks the operation `ROLLED_BACK`.
 
-Operation becomes:
+If Core route recovery itself cannot be confirmed, Phase 6G **does not roll the
+DB/default back**. It retains Target ownership and raises an urgent FAILED
+operation so the system does not create a DNS/DB split-brain.
 
-```text
-ROLLED_BACK
-```
+If the final Target handoff already succeeded and a later bookkeeping step fails,
+Target routing + committed DB ownership are retained for the same reason.
 
 ### DB rollback failure
 
@@ -449,14 +461,27 @@ Required cases:
    - unrelated account hosts remain unchanged.
 
 6. **Final DNS failure**
-   - account hosts roll back to source;
+   - simulate a partial/failed final Cloudflare handoff;
+   - Core route is restored before any DB rollback;
+   - account hosts roll back to source only after Core recovery;
    - previous default is restored;
    - operation status is `ROLLED_BACK`.
 
-7. **Concurrent operation**
+7. **Final DNS failure + Core recovery failure**
+   - DB/default remain committed to Target;
+   - operation is `FAILED`;
+   - no source rollback is attempted while route state is uncertain.
+
+8. **Account-write race**
+   - start/finalize an SSH account while failover is `RUNNING`;
+   - finalization/host mutation is rejected by the failover write lock;
+   - changing the active source set between rebuild and commit yields
+     `SOURCE_ACCOUNT_SET_CHANGED`.
+
+9. **Concurrent operation**
    - second operation is rejected as `FAILOVER_BUSY`.
 
-8. **Stale lock**
+10. **Stale lock**
    - old RUNNING operation becomes `ABORTED_STALE`;
    - new operation receives the lock.
 

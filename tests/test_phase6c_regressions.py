@@ -177,9 +177,9 @@ class Phase6CIntegrationRegressionTests(unittest.TestCase):
     def setUpClass(cls):
         cls.source = BOT_PATH.read_text(encoding="utf-8")
 
-    def test_v115_marker_is_present(self):
+    def test_current_release_marker_is_present(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V115.2-2026-10-02-predeploy-fixes"',
+            'BOT_VERSION_TAG = "V116.0-2026-10-03-phase6f-filtering-runtime"',
             self.source,
         )
 

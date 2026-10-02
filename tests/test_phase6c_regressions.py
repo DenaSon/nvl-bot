@@ -179,7 +179,7 @@ class Phase6CIntegrationRegressionTests(unittest.TestCase):
 
     def test_v115_marker_is_present(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V115.1-2026-10-02-phase6c-core-scope-fix"',
+            'BOT_VERSION_TAG = "V115.2-2026-10-02-predeploy-fixes"',
             self.source,
         )
 

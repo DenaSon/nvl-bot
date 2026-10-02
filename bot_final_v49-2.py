@@ -245,7 +245,7 @@ from edge_observability import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V115.1-2026-10-02-phase6c-core-scope-fix"
+BOT_VERSION_TAG = "V115.2-2026-10-02-predeploy-fixes"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -4710,14 +4710,24 @@ async def _provision_v2ray_sale_user(
     if not ok:
         return False, result, ""
 
-    ok_sub, sub_url = await service.get_subscription_url(username)
-    if not ok_sub:
-        return False, {
-            "stage": "subscription",
-            "created": True,
-            "username": username,
-            "error": sub_url,
-        }, ""
+    # create_user() already performs an authoritative GET verification and returns
+    # the verified Marzban user payload. Reuse its subscription_url instead of
+    # issuing a redundant second GET that could turn a successful sale into a
+    # late "Network Error". Only fall back to another GET when Marzban omitted
+    # subscription_url from the verified payload.
+    sub_url = str(result.get("subscription_url") or "").strip() if isinstance(result, dict) else ""
+    if sub_url.startswith("/"):
+        sub_url = f"{service.url}{sub_url}"
+
+    if not sub_url:
+        ok_sub, sub_url = await service.get_subscription_url(username)
+        if not ok_sub:
+            return False, {
+                "stage": "subscription",
+                "created": True,
+                "username": username,
+                "error": sub_url,
+            }, ""
 
     return True, result, sub_url
 
@@ -4821,13 +4831,13 @@ async def show_main_menu(update_or_query, context):
         text = "📊 پنل اختصاصی حسابداری\n\nجهت دریافت گزارشات مالی از دکمه‌های زیر استفاده نمایید:"
     else:
         kb = [
-            ['➕ فروش اشتراک', '👥 کاربران من'],
+            ['➕ فروش اشتراک', '👥 کاربران'],
             ['💰 کیف پول و حساب', '💳 شارژ حساب'],
             ['✏️ نام برند'],
         ]
         ag_id = context.user_data.get('agent_id', 0)
         if ag_id and await asyncio.to_thread(_db_get_agent_card_permission, ag_id):
-            kb.append(['💳 کارت اختصاصی من'])
+            kb.append(['💳 کارت اختصاصی'])
         kb.append(['❌ خروج'])
 
     reply_markup = ReplyKeyboardMarkup(kb, resize_keyboard=True)
@@ -4954,9 +4964,9 @@ async def _show_users_hub(target, context):
         title = "👥 <b>کاربران من</b>"
         subtitle = "سرویس موردنظر را انتخاب کنید."
         labels = (
-            ("🔐 SSH من", "umanage_ssh"),
-            ("🚀 V2Ray مدت‌دار من", "umanage_v2ray"),
-            ("📦 V2Ray حجمی من", "umanage_v2ray_vol"),
+            ("🔐 SSH", "umanage_ssh"),
+            ("🚀 V2Ray مدت‌دار", "umanage_v2ray"),
+            ("📦 V2Ray حجمی", "umanage_v2ray_vol"),
         )
     else:
         title = "👥 <b>کاربران</b>"
@@ -7651,11 +7661,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '➕ فروش / ساخت اشتراک', '➕ فروش اشتراک', '👥 کاربران', '👥 کاربران من',
         '🤝 نمایندگان', '📊 گزارش‌ها', '💰 مالی و کارت‌ها', '⚙️ تنظیمات',
         '🛠 V2Ray / Marzban', '📦 بکاپ', '💳 شارژ حساب', '💰 کیف پول و حساب',
-        '✏️ نام برند', '💳 کارت اختصاصی من',
+        '✏️ نام برند', '💳 کارت اختصاصی',
         # Backward-compatible aliases from pre-5.6 keyboards/messages
         '🛒 خرید اشتراک', '👥 مدیریت کاربران', '💼 مدیریت نماینده‌ها', '📊 آمار و لاگ',
         '💳 تنظیمات مالی', '⚙️ تنظیمات سرور', '🛠 مدیریت V2Ray', '📦 دریافت بکاپ',
         '💳 شارژ حساب (کارت به کارت)', '📊 اطلاعات حساب', '✏️ تغییر نام برند',
+        '👥 کاربران من', '💳 کارت اختصاصی من',
         '❌ خروج', '👑 تنظیمات سوپر ادمین', '📊 خروجی مالی امروز (اکسل)',
         '📅 خروجی مالی این هفته (اکسل)', '👑 آمار فروش ادمین'
     ]
@@ -7769,10 +7780,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="uact_back_to_menu")]])
             await update.message.reply_text("💰 لطفاً مبلغی که قصد واریز دارید را به تومان وارد کنید (فقط عدد):", reply_markup=kb)
             context.user_data['state'] = 'C2C_AMOUNT'; return
-        # 🆕 «کارت اختصاصی من» — فقط برای نماینده‌ای که ادمین صراحتاً مجوزش را صادر کرده باشد.
+        # 🆕 «کارت اختصاصی» — فقط برای نماینده‌ای که ادمین صراحتاً مجوزش را صادر کرده باشد.
         # حتی اگه کسی با ترفند همین متن رو دستی بفرسته، این چک دیتابیسی جلوی سوءاستفاده رو می‌گیره
         # (دفاع دوم، مستقل از مخفی‌بودن دکمه توی کیبورد).
-        elif text == '💳 کارت اختصاصی من' and role == 'agent':
+        elif text in ('💳 کارت اختصاصی', '💳 کارت اختصاصی من') and role == 'agent':
             ag_id = context.user_data.get('agent_id', 0)
             if not ag_id or not await asyncio.to_thread(_db_get_agent_card_permission, ag_id):
                 await update.message.reply_text("❌ شما مجوز استفاده از این بخش را ندارید."); return
@@ -7781,10 +7792,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 status_txt = f"💳 کارت فعلی شما:\n<code>{esc(card_row[0])}</code>\n👤 {esc(card_row[1] or '')}"
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("✏️ ویرایش کارت", callback_data="agself_card_set")],
-                    [InlineKeyboardButton("🗑 حذف کارت من", callback_data="agself_card_clear")]])
+                    [InlineKeyboardButton("🗑 حذف کارت", callback_data="agself_card_clear")]])
             else:
                 status_txt = "💳 شما هنوز کارت اختصاصی ثبت نکرده‌اید.\n\nتا وقتی کارتی ثبت نکنید، زیرمجموعه‌های شما همچنان کارت سیستم (یا کارت یکی از نمایندگان بالادستی‌تان، در صورت وجود) را می‌بینند."
-                kb = InlineKeyboardMarkup([[InlineKeyboardButton("✏️ ثبت کارت من", callback_data="agself_card_set")]])
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("✏️ ثبت کارت", callback_data="agself_card_set")]])
             await update.message.reply_text(status_txt, parse_mode="HTML", reply_markup=kb); return
 
     # 🔐 لاگین دو مرحله‌ای
@@ -13236,7 +13247,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pending_wds = await asyncio.to_thread(_db_get_agent_pending_withdrawals, ag_id)
             if pending_wds:
                 kb.append([InlineKeyboardButton(f"🧾 درخواست‌های برداشت در انتظار ({len(pending_wds)})", callback_data="wd_mylist")])
-            kb.append([InlineKeyboardButton("👥 زیرمجموعه‌های من", callback_data="mysubs_1")])
+            kb.append([InlineKeyboardButton("👥 زیرمجموعه‌ها", callback_data="mysubs_1")])
             kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="info_back")])
         else:
             bp = await asyncio.to_thread(_db_get_setting, 'base_price', '50,000 تومان')

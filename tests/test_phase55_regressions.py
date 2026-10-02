@@ -127,5 +127,24 @@ class Phase55UserCreationRegressionTests(unittest.TestCase):
         self.assertIn("MZA_CREATE_DATE_INPUT", self.source)
 
 
+    def test_sale_provisioning_reuses_verified_subscription_url_before_fallback_get(self):
+        sale_start = self.source.index("async def _provision_v2ray_sale_user")
+        sale_end = self.source.index("async def _authorize_v2ray_account", sale_start)
+        sale_region = self.source[sale_start:sale_end]
+        self.assertIn('result.get("subscription_url")', sale_region)
+        self.assertIn('sub_url = f"{service.url}{sub_url}"', sale_region)
+        self.assertIn("service.get_subscription_url(username)", sale_region)
+        self.assertLess(
+            sale_region.index('result.get("subscription_url")'),
+            sale_region.index("service.get_subscription_url(username)"),
+        )
+
+    def test_marzban_runtime_uses_configured_url_and_current_bootstrap_endpoint(self):
+        root = BOT_PATH.parent
+        env_example = (root / ".env.example").read_text(encoding="utf-8")
+        self.assertIn("MARZBAN_URL=https://gate.nvlsup.xyz", env_example)
+        self.assertIn("_db_get_setting, \'marzban_url\', \'\'", self.source)
+
+
 if __name__ == "__main__":
     unittest.main()

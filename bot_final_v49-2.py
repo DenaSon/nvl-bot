@@ -17860,13 +17860,17 @@ async def _filter_detect_tick(app):
 
 
 async def _filter_detect_loop(app):
-    log.info("🛡 حلقهٔ پایش فیلتر خودکار آغاز شد (بازهٔ چک: %s ثانیه، آستانه: %s\u066a، تایید: %s بار متوالی).",
-              FILTER_DETECT_CHECK_INTERVAL_SECONDS, FILTER_DETECT_ONLINE_PCT_THRESHOLD, FILTER_DETECT_CONFIRM_TICKS)
+    log.info(
+        "📉 Traffic Anomaly monitor started (interval=%ss, threshold=%s%%, confirmations=%s).",
+        FILTER_DETECT_CHECK_INTERVAL_SECONDS,
+        FILTER_DETECT_ONLINE_PCT_THRESHOLD,
+        FILTER_DETECT_CONFIRM_TICKS,
+    )
     while True:
         try:
             await _filter_detect_tick(app)
         except Exception:
-            log.exception("خطای غیرمنتظره در حلقهٔ پایش فیلتر — دور بعدی ادامه می‌یابد.")
+            log.exception("Traffic Anomaly monitor failed; next round will continue.")
         await asyncio.sleep(FILTER_DETECT_CHECK_INTERVAL_SECONDS)
 
 async def _post_init(app):

@@ -2305,6 +2305,23 @@ def _db_get_failover_accounts(source_host):
         ]
 
 
+def _db_count_other_explicit_active_ssh_hosts(source_host):
+    """Count active SSH accounts explicitly assigned to another Edge.
+
+    NULL/empty legacy host rows follow the system default and are not treated as a
+    conflicting explicit Edge assignment.
+    """
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM ssh_accounts "
+            "WHERE service_type='ssh' "
+            "AND status LIKE '%فعال%' AND status NOT LIKE '%غیر%' "
+            "AND host IS NOT NULL AND host != '' AND host != ?",
+            (source_host,),
+        ).fetchone()
+    return int(row[0] if row else 0)
+
+
 def _db_move_accounts_host_scoped(usernames, source_host, target_host):
     """Atomic compare-and-swap style account move.
 

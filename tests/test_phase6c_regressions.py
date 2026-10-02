@@ -179,7 +179,7 @@ class Phase6CIntegrationRegressionTests(unittest.TestCase):
 
     def test_current_release_marker_is_present(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V116.0-2026-10-03-phase6f-filtering-runtime"',
+            'BOT_VERSION_TAG = "V117.0-2026-10-03-phase6g-safe-manual-failover"',
             self.source,
         )
 

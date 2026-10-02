@@ -271,6 +271,30 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
         self.assertIn("_db_rollback_failover_account_state", region)
         self.assertIn("validate_complete_rebuild", region)
 
+    def test_commit_revalidates_exact_source_set_inside_immediate_transaction(self):
+        region = self._region(
+            "def _db_commit_failover_account_state(",
+            "def _db_rollback_failover_account_state(",
+        )
+        self.assertIn("BEGIN IMMEDIATE", region)
+        self.assertIn("SOURCE_ACCOUNT_SET_CHANGED", region)
+        self.assertIn("current_usernames", region)
+        self.assertIn("expected_usernames", region)
+
+    def test_ssh_finalize_is_atomic_with_host_and_respects_failover_write_lock(self):
+        region = self._region(
+            "def _db_finalize_reserved_user(",
+            "def _db_finalize_v2ray_user(",
+        )
+        self.assertIn("BEGIN IMMEDIATE", region)
+        self.assertIn("_db_assert_account_write_allowed", region)
+        self.assertIn("host=?", region)
+        self.assertIn("status='⏳ درحال ساخت'", region)
+        self.assertNotIn(
+            "await asyncio.to_thread(_db_set_account_host, un, target_host)",
+            self.source,
+        )
+
     def test_manual_engine_uses_core_before_final_target_dns(self):
         region = self._region(
             "async def _safe_manual_failover(",
@@ -282,7 +306,7 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
         self.assertLess(core_pos, db_pos)
         self.assertLess(db_pos, target_pos)
 
-    def test_final_dns_failure_rolls_back_db_and_default(self):
+    def test_final_dns_failure_restores_core_before_db_rollback(self):
         region = self._region(
             "async def _safe_manual_failover(",
             "async def _activate_standby_for_filtered_edge",
@@ -290,6 +314,17 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
         self.assertIn("FAILOVER_STATUS_ROLLED_BACK", region)
         self.assertIn("_db_rollback_failover_account_state", region)
         self.assertIn("FINAL_DNS_SWITCH_FAILED", region)
+        self.assertIn("FINAL_DNS_FAILED_AND_CORE_RESTORE_FAILED", region)
+        self.assertIn("core_restore_ok", region)
+
+    def test_post_handoff_exception_retains_target_state_instead_of_split_brain(self):
+        region = self._region(
+            "async def _safe_manual_failover(",
+            "async def _activate_standby_for_filtered_edge",
+        )
+        self.assertIn("target_route_active", region)
+        self.assertIn("retained_target_state", region)
+        self.assertIn('db_state_retained": "target"', region)
 
     def test_automatic_policy_is_still_not_connected(self):
         regional_region = self._region(

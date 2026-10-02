@@ -8922,16 +8922,38 @@ async def _render_udpgw_panel(query):
         f"می‌شوند، حتی اگر خودِ تونل SSH/TLS بدون مشکل وصل شود.",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
 
-async def _render_host_pool_panel(query):
+async def _render_host_pool_panel(query, page=0):
     await asyncio.to_thread(_db_sync_host_pool)
     pool = await asyncio.to_thread(_db_get_host_pool)
     service_port_map = await asyncio.to_thread(_db_get_host_service_port_map)
     admin_port_map = await asyncio.to_thread(_db_get_host_admin_ssh_port_map)
     port_health = await asyncio.to_thread(_db_get_host_port_health_map)
     fastest_host = await asyncio.to_thread(_db_get_fastest_active_host)
+
+    # Telegram limits message text to 4096 characters. Phase 6C adds enough
+    # per-Edge evidence that a moderately sized pool can exceed that limit, so
+    # render a bounded number of Edges per page instead of relying on truncation.
+    page_size = 2
+    total_hosts = len(pool)
+    total_pages = max(1, (total_hosts + page_size - 1) // page_size)
+    try:
+        page = int(page)
+    except (TypeError, ValueError):
+        page = 0
+    page = max(0, min(page, total_pages - 1))
+    page_start = page * page_size
+    page_end = min(page_start + page_size, total_hosts)
+    page_pool = pool[page_start:page_end]
+
+    def _panel_value(value, limit=120):
+        text = str(value or "")
+        if len(text) > limit:
+            text = text[:limit - 1] + "…"
+        return esc(text)
+
     lines = []
     kb = []
-    for host, active, fails, last_check, last_status, disabled_reason, disabled_at, is_default, avg_latency_ms, added_at, is_standby in pool:
+    for host, active, fails, last_check, last_status, disabled_reason, disabled_at, is_default, avg_latency_ms, added_at, is_standby in page_pool:
         star = " ⭐ (پیش‌فرض سیستم)" if is_default else ""
         standby_badge = " 🅢 (Standby)" if is_standby else ""
         # 🆕 «کدام VPS سرعتش بهتره»: تاخیر اتصال TCP (میانگین هموارشده) کنار وضعیت هر IP نشان داده
@@ -8967,11 +8989,11 @@ async def _render_host_pool_panel(query):
 
         line = (
             f"{overall_icon} <code>{esc(host)}</code>{star}{standby_badge}{latency_txt}\n"
-            f"   🧭 Overall: <b>{esc(overall_state)}</b> · <code>{esc(overall_reason)}</code>\n"
+            f"   🧭 Overall: <b>{esc(overall_state)}</b> · <code>{_panel_value(overall_reason)}</code>\n"
             f"   📍 Membership: <code>{membership}</code>\n"
-            f"   🧩 Diagnostic: <code>{esc(diagnostic_reason)}</code>\n"
-            f"   🌐 Service <code>{service_port}</code> — {esc(service_status)}\n"
-            f"   🔐 Admin SSH <code>{admin_port}</code> — {esc(admin_status)}\n"
+            f"   🧩 Diagnostic: <code>{_panel_value(diagnostic_reason)}</code>\n"
+            f"   🌐 Service <code>{service_port}</code> — {_panel_value(service_status)}\n"
+            f"   🔐 Admin SSH <code>{admin_port}</code> — {_panel_value(admin_status)}\n"
             f"   🔗 WireGuard — {_probe_badge(ph.get('wg_peer_ok'))}\n"
             f"   🛣 Core path — {_probe_badge(ph.get('core_path_ok'))}\n"
             f"   🌍 External — {_probe_badge(ph.get('external_service_ok'))}\n"
@@ -8981,9 +9003,9 @@ async def _render_host_pool_panel(query):
         if ph.get("wg_last_handshake_at"):
             line += f"\n   🤝 WG handshake: {esc(ph['wg_last_handshake_at'])}"
         if ph.get("external_probe_source"):
-            line += f"\n   🌍 External source: <code>{esc(ph['external_probe_source'])}</code>"
+            line += f"\n   🌍 External source: <code>{_panel_value(ph['external_probe_source'])}</code>"
         if ph.get("regional_probe_source"):
-            line += f"\n   📡 Regional source: <code>{esc(ph['regional_probe_source'])}</code>"
+            line += f"\n   📡 Regional source: <code>{_panel_value(ph['regional_probe_source'])}</code>"
         if ph.get("external_service_last_check"):
             line += f"\n   ⏱ External check: {esc(ph['external_service_last_check'])}"
         if ph.get("regional_service_last_check"):
@@ -8997,7 +9019,7 @@ async def _render_host_pool_panel(query):
         if ph.get("admin_last_check"):
             line += f"\n   ⏱ آخرین Admin check: {esc(ph['admin_last_check'])}"
         if not active and disabled_reason:
-            line += f"\n   🚫 غیرفعال از: {esc(disabled_at)} ({esc(disabled_reason)})"
+            line += f"\n   🚫 غیرفعال از: {esc(disabled_at)} ({_panel_value(disabled_reason, 160)})"
         # 🆕 اگر هنوز داخل دورهٔ مهلت تازه‌افزوده‌شدن است، همین‌جا شفاف نشان می‌دهیم — وگرنه
         # «بررسی‌نشده» تنها می‌تواند گیج‌کننده باشد (چرا هنوز تست نشده؟).
         if active and added_at:
@@ -9031,6 +9053,18 @@ async def _render_host_pool_panel(query):
         fastest_is_default = any(p[0] == fastest_host and p[7] for p in pool)
         if not fastest_is_default:
             kb.insert(0, [InlineKeyboardButton(f"🏆 پیش‌فرض = سریع‌ترین ({fastest_host})", callback_data=f"hpdef_{fastest_host}")])
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"hppage_{page - 1}"))
+        nav.append(InlineKeyboardButton(
+            f"📄 {page + 1}/{total_pages}",
+            callback_data=f"hppage_{page}",
+        ))
+        if page + 1 < total_pages:
+            nav.append(InlineKeyboardButton("بعدی ➡️", callback_data=f"hppage_{page + 1}"))
+        kb.append(nav)
+
     kb.append([InlineKeyboardButton("⚡ تست سرعت همه IPها (Speed Test)", callback_data="hp_speedtest_all")])
     kb.append([InlineKeyboardButton("➕ افزودن IP جدید به استخر", callback_data="hp_add")])
     kb.append([InlineKeyboardButton("🚀 افزودن Edge جدید (VPS از قبل‌خریداری‌شده)", callback_data="hp_addedge")])
@@ -9059,8 +9093,14 @@ async def _render_host_pool_panel(query):
     else:
         cz_line = "\n\nℹ️ هنوز هیچ Standbyی علامت‌گذاری نشده — در صورتِ فیلترشدنِ یک Edge، دامنه فقط روی Core باقی می‌ماند."
     body = "\n\n".join(lines) if lines else "هیچ IP ای هنوز در استخر پایش ثبت نشده."
+    page_line = ""
+    if total_hosts:
+        page_line = (
+            f"\n📄 صفحه <b>{page + 1}/{total_pages}</b> · "
+            f"نمایش {page_start + 1} تا {page_end} از {total_hosts} IP"
+        )
     await query.edit_message_text(
-        f"🛡 <b>وضعیت پایش سلامت IPها</b>\n\n{body}{dns_line}{cz_line}\n\n"
+        f"🛡 <b>وضعیت پایش سلامت IPها</b>{page_line}\n\n{body}{dns_line}{cz_line}\n\n"
         f"🟢 HEALTHY | 🟠 DEGRADED | 🔴 UNHEALTHY | ⚫️ OFFLINE | ⚪️ UNKNOWN | ⚡ تاخیر Service | 🏆 سریع‌ترین فعال\n"
         f"Membership (ACTIVE/INACTIVE) مستقل از Health است و همچنان منطق فعلی سرویس/Failover را کنترل می‌کند.\n"
         f"می‌توانید هر IP سالم را دستی «بلاک» کنید (مثلاً وقتی مشتری گزارش فیلترشدن داده) یا یک IP "
@@ -14625,6 +14665,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d == "hp_menu" and role == 'admin':
         await _render_host_pool_panel(query)
+
+    elif d.startswith("hppage_") and role == 'admin':
+        try:
+            page = int(d[len("hppage_"):])
+        except (TypeError, ValueError):
+            page = 0
+        await _render_host_pool_panel(query, page=page)
 
     elif d.startswith("hpblk_") and role == 'admin':
         host = d[len("hpblk_"):]

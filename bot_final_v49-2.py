@@ -17590,144 +17590,60 @@ async def _welcome_sales_report_delayed(app, chat_id):
 _filter_detect_low_ticks = 0  # تعداد دفعات متوالی که کاربران آنلاین زیر آستانه بودند
 
 async def _filter_detect_tick(app):
-    """
-    🆕 V89 — یک دور بررسی سیستم شناسایی خودکار فیلتر شدن:
-    - تعداد کاربران آنلاین را با کل کاربران فعال مقایسه می‌کند.
-    - اگر FILTER_DETECT_CONFIRM_TICKS بار متوالی زیر آستانه بود → فیلتر تشخیص داده می‌شود.
-    - خودکار به سریع‌ترین IP فعال تغییر می‌کند و به ادمین اطلاع می‌دهد.
+    """Legacy V89 traffic signal only.
+
+    Low global online percentage is a coarse anomaly indicator. Phase 6F explicitly
+    forbids this signal from changing DNS, host membership, account placement,
+    Standby state, or triggering failover.
     """
     global _filter_detect_low_ticks
-    # بررسی فعال بودن سیستم
+
     enabled = await asyncio.to_thread(_db_get_filter_detect_enabled)
     if not enabled:
         _filter_detect_low_ticks = 0
         return
-    # دریافت تعداد کاربران فعال
+
     total_active = await asyncio.to_thread(_db_get_total_active_accounts_count)
     if total_active < FILTER_DETECT_MIN_ACTIVE_ACCOUNTS:
-        log.debug("پایش فیلتر: تعداد کاربران فعال (%s) کمتر از حداقل لازم (%s) — این دور رد شد.", total_active, FILTER_DETECT_MIN_ACTIVE_ACCOUNTS)
+        _filter_detect_low_ticks = 0
         return
-    # دریافت تعداد کاربران آنلاین
+
     counts, err = await _get_live_connection_counts()
     if err:
-        log.warning("پایش فیلتر: خطا در دریافت اتصالات زنده: %s", err)
+        log.warning("Traffic anomaly signal: live connection count failed: %s", err)
         return
-    online_count = sum(1 for c in counts.values() if c > 0)
+
+    online_count = sum(1 for count in counts.values() if count > 0)
     threshold = await asyncio.to_thread(_db_get_filter_detect_threshold)
     online_pct = (online_count / total_active) * 100 if total_active > 0 else 0
-    log.debug("پایش فیلتر: آنلاین=%s از کل=%s (درصد=%.1f\u066a، آستانه=%.1f\u066a)", online_count, total_active, online_pct, threshold)
-    # 🆕 دورهٔ خنک‌شدن: اگه به‌تازگی سوییچ IP انجام شده (خودکار یا دستی)، این دور رو نادیده بگیر —
-    # چون افت موقتِ درصد آنلاین بلافاصله بعد از سوییچ طبیعیه (اتصال‌های در حال reconnect) و
-    # نباید باعث یه سوییچ دیگه بشه.
-    since_switch = await asyncio.to_thread(_db_seconds_since_last_ip_switch)
-    if since_switch < FILTER_DETECT_SWITCH_COOLDOWN_SECONDS:
-        log.debug("پایش فیلتر: در دورهٔ خنک‌شدنِ بعد از آخرین سوییچ (%.0f از %s ثانیه گذشته) — این دور رد شد.",
-                   since_switch, FILTER_DETECT_SWITCH_COOLDOWN_SECONDS)
-        _filter_detect_low_ticks = 0
-        return
+
     if online_pct < threshold:
         _filter_detect_low_ticks += 1
-        log.warning("پایش فیلتر: درصد آنلاین %.1f\u066a — زیر آستانه %.1f\u066a (دفعهٔ %s از %s)", online_pct, threshold, _filter_detect_low_ticks, FILTER_DETECT_CONFIRM_TICKS)
-        if _filter_detect_low_ticks >= FILTER_DETECT_CONFIRM_TICKS:
-            # فیلتر تشخیص داده شد!
-            _filter_detect_low_ticks = 0
-            log.warning("🚨 فیلتر تشخیص داده شد! درصد آنلاین: %.1f\u066a — در حال تغییر IP...", online_pct)
-            # 🆕 ☁️ همان IPای که تا همین لحظه پیش‌فرض بود، احتمالاً همان چیزیه که فیلتر شده —
-            # قبل از هر جابه‌جایی نگهش می‌داریم تا در ادامه، گامِ اولِ Failover و سپس (پس‌زمینه)
-            # فعال‌سازیِ یک Standby دقیقاً همین Edge را هدف بگیرند.
-            old_default_host = await asyncio.to_thread(_db_get_default_host)
-            # 🆕 گامِ اولِ Failover (بندِ ۴): فوراً دامنه را روی خودِ Core می‌بریم — چون طبقِ
-            # طراحیِ Mirroring، کاربرانِ *همهٔ* Edgeها روی Core هم وجود دارند، این تضمین‌شده‌ترین
-            # و سریع‌ترین راهِ نجاتِ آنیِ مشتریان است؛ برخلافِ «سریع‌ترین Edgeِ دیگر» که ممکن است
-            # اصلاً کاربرانِ همین Edgeِ فیلترشده رویش نباشد.
-            core_public_ip = await asyncio.to_thread(_get_core_public_ip_cached)
-            if core_public_ip and core_public_ip != old_default_host:
-                ok_core_reach, _core_detail = await _check_ssh_reachable(core_public_ip, 22)
-                if ok_core_reach:
-                    await asyncio.to_thread(_db_set_default_host, core_public_ip)
-                    await asyncio.to_thread(_db_mark_ip_switch_now)
-                    cf_ok, cf_msg = await _update_cloudflare_dns(core_public_ip)
-                    cf_suffix = f"\n\n☁️ <b>وضعیتِ کلودفلر:</b> {cf_msg}" if cf_ok else f"\n\n⚠️ <b>هشدارِ کلودفلر:</b> {cf_msg}"
-                    await _notify_admins(app,
-                        f"🚨 <b>سرورِ Edge با آی‌پیِ {esc(old_default_host)} فیلتر شد.</b>\n"
-                        f"📊 کاربران آنلاین: {online_count} از {total_active} ({online_pct:.1f}\u066a)\n\n"
-                        f"دامنه موقتاً روی سرورِ Core (<code>{esc(core_public_ip)}</code>) تنظیم شد؛ "
-                        f"مشتریان (که رویِ Core هم Mirror شده‌اند) نباید قطع شوند.{cf_suffix}")
-                    if old_default_host:
-                        spawn_bg_task(_activate_standby_for_filtered_edge(app, old_default_host))
-                    return
-                log.warning("پایش فیلتر: Core (%s) هم SSH زنده نداد (%s) — ادامه با منطقِ قدیمیِ انتخابِ سریع‌ترین Edge.",
-                            core_public_ip, _core_detail)
-            # پیدا کردن سریع‌ترین IP فعال (fallback اگر خودِ Core در دسترس نبود)
-            fastest_host = await asyncio.to_thread(_db_get_fastest_active_host)
-            current_hosts_raw = await asyncio.to_thread(_db_get_setting, 'hosts', '')
-            current_hosts = [h.strip() for h in current_hosts_raw.split(',') if h.strip()]
-            pool = await asyncio.to_thread(_db_get_host_pool)
-            active_hosts = [r[0] for r in pool if r[1]]
-            if not fastest_host and active_hosts:
-                # اگر تست سرعت انجام نشده، اولین IP فعال را بگیر
-                fastest_host = active_hosts[0]
-            if not fastest_host:
-                await _notify_admins(app,
-                    f"🚨 <b>فیلتر IP تشخیص داده شد!</b>\n\n"
-                    f"📊 کاربران آنلاین: {online_count} از {total_active} ({online_pct:.1f}\u066a)\n"
-                    f"❌ هیچ IP فعالی برای تعویض وجود ندارد! لطفاً دستی بررسی کنید.")
-                # 🆕 دقیقاً همین حالت (هیچ IP فعالی نمانده، حتی خودِ Core در گامِ قبل جواب نداد)
-                # بیشترین نیاز به فعال‌سازیِ یک Standby را دارد.
-                if old_default_host:
-                    spawn_bg_task(_activate_standby_for_filtered_edge(app, old_default_host))
-                return
-
-            # 🐛🔧 رفع باگ واقعی: قبلاً بدون هیچ چکی، «سریع‌ترین IP» (که فقط بر اساس آخرین تست
-            # تأخیر انتخاب شده، نه اینکه SSH رویش الان واقعاً زنده است یا نه) به‌عنوان پیش‌فرض
-            # ثبت و همهٔ کاربران کورکورانه بهش منتقل می‌شدند. اگر همان IP به هر دلیلی (پورت هنوز
-            # درست نشده، سرور تازه اضافه شده و ناقص، و ...) واقعاً SSH زنده نداشته باشد، این یعنی
-            # قطعیِ کامل کاربران دقیقاً در بدترین لحظه (وسط یک رخداد فیلترینگ). الان قبل از
-            # سوییچ، هر کاندید را با یک چک زندهٔ سبک (بدون رمز) امتحان می‌کنیم و اگر رد شد، سراغ
-            # کاندید بعدی می‌رویم؛ فقط وقتی یکی واقعاً جواب داد، سوییچ واقعی انجام می‌شود.
-            candidates = [fastest_host] + [h for h in active_hosts if h != fastest_host]
-            chosen_host, chosen_detail = None, ''
-            for cand in candidates:
-                cand_port = await asyncio.to_thread(_db_get_host_service_port, cand, 22)
-                ok_reach, reach_detail = await _check_ssh_reachable(cand, cand_port)
-                if ok_reach:
-                    chosen_host = cand
-                    break
-                log.warning("پایش فیلتر: کاندید %s رد شد (service path زنده نبود): %s", cand, reach_detail)
-                chosen_detail = reach_detail
-            if not chosen_host:
-                await _notify_admins(app,
-                    f"🚨 <b>فیلتر IP تشخیص داده شد، ولی سوییچ خودکار انجام نشد!</b>\n\n"
-                    f"📊 کاربران آنلاین: {online_count} از {total_active} ({online_pct:.1f}\u066a)\n"
-                    f"❌ هیچ‌کدام از {len(candidates)} IP فعال، service path زنده نداشتند (آخرین خطا: {chosen_detail}).\n"
-                    f"لطفاً دستی بررسی کنید — سوییچ به یک IP غیرقابل‌اتصال انجام نشد تا کاربران بی‌دلیل قطع نشوند.")
-                # 🆕 هیچ IP موجودی زنده نبود — این هم دقیقاً یک موردِ نیاز به فعال‌سازیِ Standby است
-                if old_default_host:
-                    spawn_bg_task(_activate_standby_for_filtered_edge(app, old_default_host))
-                return
-            fastest_host = chosen_host
-            # تغییر IP پیش‌فرض کل سیستم
-            await asyncio.to_thread(_db_set_default_host, fastest_host)
-            # انتقال همهٔ کاربران به سریع‌ترین IP
-            await asyncio.to_thread(_db_set_all_accounts_host, fastest_host)
-            await asyncio.to_thread(_db_mark_ip_switch_now)  # 🆕 شروع دورهٔ خنک‌شدن
-            cf_ok, cf_msg = await _update_cloudflare_dns(fastest_host)
-            cf_suffix = f"\n\n☁️ <b>وضعیت کلودفلر:</b> {cf_msg}" if cf_ok else f"\n\n⚠️ <b>هشدار کلودفلر:</b> {cf_msg}"
-            await _notify_admins(app,
-                f"🚨 <b>فیلتر IP تشخیص داده شد و IP تعویض شد!</b>\n\n"
-                f"📊 کاربران آنلاین: {online_count} از {total_active} ({online_pct:.1f}\u066a)\n"
-                f"🔴 آستانه تشخیص: {threshold:.0f}\u066a\n\n"
-                f"✅ سیستم خودکار IP را به <code>{esc(fastest_host)}</code> تغییر داد و همهٔ کاربران منتقل شدند." + cf_suffix + "\n\n"
-                f"⚠️ لطفاً وضعیت شبکه را بررسی کنید و در صورت نیاز، IP جدیدی اضافه کنید.")
-            # 🆕 سوییچِ بالا فقط یک تسکینِ فوری با یک IP از قبل موجود بود؛ حالا (در پس‌زمینه،
-            # بدون معطل‌کردنِ این حلقه) اگر یک Standby سالم ثبت شده باشد، کاربرانِ همان Edgeِ
-            # فیلترشده رویش بازسازی و دامنه به آن منتقل می‌شود (طبقِ auto_failover_mode).
-            if old_default_host and old_default_host != fastest_host:
-                spawn_bg_task(_activate_standby_for_filtered_edge(app, old_default_host))
+        log.warning(
+            "Traffic anomaly signal: online %.1f%% below %.1f%% (%s/%s confirmations).",
+            online_pct,
+            threshold,
+            _filter_detect_low_ticks,
+            FILTER_DETECT_CONFIRM_TICKS,
+        )
+        if _filter_detect_low_ticks == FILTER_DETECT_CONFIRM_TICKS:
+            await _notify_admins(
+                app,
+                "📉 <b>Traffic Anomaly Signal</b>\n\n"
+                f"کاربران آنلاین: {online_count} از {total_active} ({online_pct:.1f}٪)\n"
+                f"آستانه: {threshold:.0f}٪\n\n"
+                "این فقط یک سیگنال کمکی است و <b>به‌تنهایی فیلترینگ محسوب نمی‌شود</b>. "
+                "Phase 6F برای تشخیص، Evidence منطقه‌ای هر Edge را جداگانه بررسی می‌کند.\n"
+                "✅ هیچ DNS، IP، Account یا Standby تغییری انجام نشد."
+            )
     else:
         if _filter_detect_low_ticks > 0:
-            log.info("پایش فیلتر: وضعیت بهبود یافت (%.1f\u066a) — شمارنده ریست شد.", online_pct)
+            log.info(
+                "Traffic anomaly signal recovered: online %.1f%%; counter reset.",
+                online_pct,
+            )
         _filter_detect_low_ticks = 0
+
 
 async def _filter_detect_loop(app):
     log.info("🛡 حلقهٔ پایش فیلتر خودکار آغاز شد (بازهٔ چک: %s ثانیه، آستانه: %s\u066a، تایید: %s بار متوالی).",
@@ -17740,6 +17656,13 @@ async def _filter_detect_loop(app):
         await asyncio.sleep(FILTER_DETECT_CHECK_INTERVAL_SECONDS)
 
 async def _post_init(app):
+    # Phase 6F safety migration: the legacy V89 auto_failover_mode previously allowed
+    # a coarse traffic signal to mutate DNS/accounts. Until Phase 6G/6H reintroduce a
+    # scoped action policy, force this legacy operational switch off.
+    if (await asyncio.to_thread(_db_get_setting, 'auto_failover_mode', '0')) == '1':
+        await asyncio.to_thread(_db_update_setting, 'auto_failover_mode', '0')
+        log.warning("Phase6F disabled legacy auto_failover_mode; monitoring is action-free.")
+
     # 🔧 عمداً از asyncio.create_task به‌جای JobQueue استفاده شده تا وابستگی اضافه‌ای
     # (اکستنشن job-queue / APScheduler) به requirements.txt پروژه اضافه نشود.
     app.bot_data['capacity_monitor_task'] = asyncio.create_task(_capacity_monitor_loop(app))
@@ -17747,6 +17670,7 @@ async def _post_init(app):
     app.bot_data['expiry_monitor_task'] = asyncio.create_task(_expiry_monitor_loop(app))
     app.bot_data['ip_pressure_monitor_task'] = asyncio.create_task(_ip_pressure_monitor_loop(app))
     app.bot_data['host_health_task'] = asyncio.create_task(_host_health_loop(app))
+    app.bot_data['regional_filter_task'] = asyncio.create_task(_regional_filter_loop(app))
     app.bot_data['udpgw_health_task'] = asyncio.create_task(_udpgw_health_loop(app))
     app.bot_data['daily_sales_report_task'] = asyncio.create_task(_daily_sales_report_loop(app))
     app.bot_data['filter_detect_task'] = asyncio.create_task(_filter_detect_loop(app))  # 🆕 V89
@@ -17763,7 +17687,7 @@ async def _post_shutdown(app):
     # قلم افتاده بود — پس هیچ‌وقت cancel نمی‌شد و روی asyncio.sleep(...) منتظر می‌ماند، پروسه
     # واقعاً خارج نمی‌شد تا systemd صبرش تمام شود و به‌زور بکشدش (که همان قطعیِ طولانی و نیازِ
     # نماینده‌ها به ورودِ مجدد را رقم می‌زد).
-    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار')):
+    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 Phase6F Regional Filter Monitor'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار')):
         task = app.bot_data.get(key)
         if task and not task.done():
             task.cancel()

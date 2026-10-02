@@ -357,6 +357,7 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
             "async def _post_shutdown(app):",
         )
         self.assertNotIn("_db_update_setting, 'auto_failover_mode', '0'", post_init)
+        self.assertIn("phase6h_auto_failover_enabled", post_init)
         self.assertIn("Phase6H automatic filtering failover startup state", post_init)
 
     def test_ui_requires_pick_then_confirm(self):

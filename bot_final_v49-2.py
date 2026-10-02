@@ -232,7 +232,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V112-2026-10-02-v2ray-volume-expiry"
+BOT_VERSION_TAG = "V113-2026-10-02-phase6a-port-health-separation"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -936,9 +936,24 @@ def init_db():
         # مقایسهٔ IPهای فعال با هم و پیشنهاد سریع‌ترین‌شان — نه فقط «بالا هست یا نه».
         try: c.execute("ALTER TABLE host_pool ADD COLUMN avg_latency_ms REAL DEFAULT NULL")
         except sqlite3.OperationalError: pass
-        # 🆕 هر IP می‌تواند پورت SSH مستقل داشته باشد. مقدارهای قدیمی از تنظیم سراسری فعلی
-        # پر می‌شوند تا پس از به‌روزرسانی، لینک‌های قبلی و سرورهای موجود بدون تغییر کار کنند.
+        # Legacy ambiguous port. Phase 6A keeps the column for backward compatibility only.
         try: c.execute("ALTER TABLE host_pool ADD COLUMN ssh_port INTEGER DEFAULT NULL")
+        except sqlite3.OperationalError: pass
+        # Phase 6A — separate customer data-plane port from Edge management SSH.
+        try: c.execute("ALTER TABLE host_pool ADD COLUMN service_port INTEGER DEFAULT NULL")
+        except sqlite3.OperationalError: pass
+        try: c.execute("ALTER TABLE host_pool ADD COLUMN admin_ssh_port INTEGER DEFAULT NULL")
+        except sqlite3.OperationalError: pass
+        # Management health is intentionally independent from customer service health.
+        try: c.execute("ALTER TABLE host_pool ADD COLUMN admin_consecutive_fails INTEGER DEFAULT 0")
+        except sqlite3.OperationalError: pass
+        try: c.execute("ALTER TABLE host_pool ADD COLUMN admin_last_check TEXT DEFAULT NULL")
+        except sqlite3.OperationalError: pass
+        try: c.execute("ALTER TABLE host_pool ADD COLUMN admin_last_status TEXT DEFAULT 'بررسی‌نشده'")
+        except sqlite3.OperationalError: pass
+        try: c.execute("ALTER TABLE host_pool ADD COLUMN service_last_check TEXT DEFAULT NULL")
+        except sqlite3.OperationalError: pass
+        try: c.execute("ALTER TABLE host_pool ADD COLUMN service_last_status TEXT DEFAULT 'بررسی‌نشده'")
         except sqlite3.OperationalError: pass
         # 🆕 زمان افزوده‌شدنِ این IP — برای دادن «دورهٔ مهلت» به Edgeهای تازه‌ساخته قبل از اینکه
         # پایش خودکار سلامت (_host_health_tick) سخت‌گیری کند. سرور تازه‌استارت‌شده معمولاً چند
@@ -955,12 +970,49 @@ def init_db():
         except sqlite3.OperationalError: pass
         _legacy_port_row = c.execute("SELECT value FROM settings WHERE key='port'").fetchone()
         try:
-            _legacy_port = int(_legacy_port_row[0]) if _legacy_port_row else 22
+            _legacy_service_port = int(_legacy_port_row[0]) if _legacy_port_row else 22
         except (TypeError, ValueError):
-            _legacy_port = 22
-        if not (1 <= _legacy_port <= 65535):
-            _legacy_port = 22
-        c.execute("UPDATE host_pool SET ssh_port=? WHERE ssh_port IS NULL OR ssh_port < 1 OR ssh_port > 65535", (_legacy_port,))
+            _legacy_service_port = 22
+        if not (1 <= _legacy_service_port <= 65535):
+            _legacy_service_port = 22
+
+        # Phase 6A migration policy:
+        # - customer service_port follows the existing customer-facing settings.port;
+        # - admin_ssh_port becomes 22 when the legacy ssh_port merely mirrored service_port;
+        # - a distinct valid legacy ssh_port is preserved as an explicit management override.
+        c.execute(
+            "UPDATE host_pool SET service_port=? "
+            "WHERE service_port IS NULL OR service_port < 1 OR service_port > 65535",
+            (_legacy_service_port,),
+        )
+        _legacy_rows = c.execute(
+            "SELECT host, ssh_port, admin_ssh_port FROM host_pool"
+        ).fetchall()
+        for _host, _legacy_ssh_raw, _admin_raw in _legacy_rows:
+            try:
+                _admin_port = int(_admin_raw)
+            except (TypeError, ValueError):
+                _admin_port = 0
+            if not (1 <= _admin_port <= 65535):
+                try:
+                    _legacy_ssh = int(_legacy_ssh_raw)
+                except (TypeError, ValueError):
+                    _legacy_ssh = 0
+                if not (1 <= _legacy_ssh <= 65535) or _legacy_ssh == _legacy_service_port:
+                    _admin_port = 22
+                else:
+                    _admin_port = _legacy_ssh
+                c.execute(
+                    "UPDATE host_pool SET admin_ssh_port=? WHERE host=?",
+                    (_admin_port, _host),
+                )
+        # Keep the legacy field populated for rollback compatibility, but new Phase 6A code
+        # must use service_port/admin_ssh_port explicitly.
+        c.execute(
+            "UPDATE host_pool SET ssh_port=? "
+            "WHERE ssh_port IS NULL OR ssh_port < 1 OR ssh_port > 65535",
+            (_legacy_service_port,),
+        )
 
         # 🆕 پیام‌های آمادهٔ «پیام همگانی به نمایندگان» — تا ادمین برای وضعیت‌های تکرارشونده
         # (مثلاً قطعی سرور) لازم نباشد هر بار از نو تایپ کند؛ فقط یک بار می‌سازد، بعد با یک لمس
@@ -1143,33 +1195,89 @@ def _normalize_ssh_port(value, fallback=22):
     return port if 1 <= port <= 65535 else int(fallback)
 
 
-def _db_get_host_ssh_port(host, fallback=None):
-    """پورت واقعی ثبت‌شده برای یک IP؛ در داده‌های قدیمی به پورت سراسری بازمی‌گردد."""
+def _db_get_host_service_port(host, fallback=None):
+    """Customer-facing direct SSH service port for an endpoint."""
     with db_conn() as conn:
         if fallback is None:
             row = conn.execute("SELECT value FROM settings WHERE key='port'").fetchone()
             fallback = row[0] if row else 22
+        fallback_i = _normalize_ssh_port(fallback, 22)
         try:
-            row = conn.execute("SELECT ssh_port FROM host_pool WHERE host=?", (host,)).fetchone()
-            return _normalize_ssh_port(row[0] if row and row[0] is not None else fallback,
-                                       _normalize_ssh_port(fallback, 22))
+            row = conn.execute("SELECT service_port FROM host_pool WHERE host=?", (host,)).fetchone()
+            return _normalize_ssh_port(row[0] if row and row[0] is not None else fallback_i, fallback_i)
         except Exception:
-            return _normalize_ssh_port(fallback, 22)
+            return fallback_i
 
 
-def _db_get_host_ssh_port_map():
-    """نقشهٔ {IP: port} برای پنل‌ها و پایش‌های دسته‌ای."""
+def _db_get_host_service_port_map():
     with db_conn() as conn:
         fallback_row = conn.execute("SELECT value FROM settings WHERE key='port'").fetchone()
         fallback = _normalize_ssh_port(fallback_row[0] if fallback_row else 22, 22)
-        rows = conn.execute("SELECT host, ssh_port FROM host_pool").fetchall()
+        rows = conn.execute("SELECT host, service_port FROM host_pool").fetchall()
         return {host: _normalize_ssh_port(port, fallback) for host, port in rows}
 
 
-def _db_set_host_ssh_port(host, port):
+def _db_set_host_service_port(host, port):
     port = _normalize_ssh_port(port, 22)
     with db_conn() as conn:
-        conn.execute("UPDATE host_pool SET ssh_port=? WHERE host=?", (port, host))
+        conn.execute("UPDATE host_pool SET service_port=? WHERE host=?", (port, host))
+
+
+def _db_get_host_admin_ssh_port(host, fallback=22):
+    """Management-plane SSH port. Never falls back to the customer service port."""
+    fallback_i = _normalize_ssh_port(fallback, 22)
+    with db_conn() as conn:
+        try:
+            row = conn.execute("SELECT admin_ssh_port FROM host_pool WHERE host=?", (host,)).fetchone()
+            return _normalize_ssh_port(row[0] if row and row[0] is not None else fallback_i, fallback_i)
+        except Exception:
+            return fallback_i
+
+
+def _db_get_host_admin_ssh_port_map():
+    with db_conn() as conn:
+        rows = conn.execute("SELECT host, admin_ssh_port FROM host_pool").fetchall()
+        return {host: _normalize_ssh_port(port, 22) for host, port in rows}
+
+
+def _db_set_host_admin_ssh_port(host, port):
+    port = _normalize_ssh_port(port, 22)
+    with db_conn() as conn:
+        conn.execute("UPDATE host_pool SET admin_ssh_port=? WHERE host=?", (port, host))
+
+
+# Backward compatibility for customer-facing call sites while Phase 6A rolls out.
+# New code must name the plane explicitly.
+def _db_get_host_ssh_port(host, fallback=None):
+    return _db_get_host_service_port(host, fallback)
+
+
+def _db_get_host_ssh_port_map():
+    return _db_get_host_service_port_map()
+
+
+def _db_set_host_ssh_port(host, port):
+    return _db_set_host_service_port(host, port)
+
+
+def _db_get_host_port_health_map():
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT host, service_last_check, service_last_status, "
+            "admin_last_check, admin_last_status, admin_consecutive_fails "
+            "FROM host_pool"
+        ).fetchall()
+        return {
+            host: {
+                "service_last_check": service_last_check,
+                "service_last_status": service_last_status,
+                "admin_last_check": admin_last_check,
+                "admin_last_status": admin_last_status,
+                "admin_consecutive_fails": admin_fails or 0,
+            }
+            for host, service_last_check, service_last_status,
+                admin_last_check, admin_last_status, admin_fails in rows
+        }
 
 
 def _db_host_exists(host):
@@ -1188,10 +1296,22 @@ def _db_sync_host_pool():
     with db_conn() as conn:
         raw = conn.execute("SELECT value FROM settings WHERE key='hosts'").fetchone()
         default_row = conn.execute("SELECT value FROM settings WHERE key='port'").fetchone()
-        default_port = _normalize_ssh_port(default_row[0] if default_row else 22, 22)
+        default_service_port = _normalize_ssh_port(default_row[0] if default_row else 22, 22)
         hosts = [h.strip() for h in (raw[0] if raw else '').split(',') if h.strip()]
         for h in hosts:
-            conn.execute("INSERT OR IGNORE INTO host_pool (host, active, ssh_port) VALUES (?, 1, ?)", (h, default_port))
+            conn.execute(
+                "INSERT OR IGNORE INTO host_pool "
+                "(host, active, ssh_port, service_port, admin_ssh_port) "
+                "VALUES (?, 1, ?, ?, 22)",
+                (h, default_service_port, default_service_port),
+            )
+            conn.execute(
+                "UPDATE host_pool SET "
+                "service_port=CASE WHEN service_port IS NULL OR service_port < 1 OR service_port > 65535 THEN ? ELSE service_port END, "
+                "admin_ssh_port=CASE WHEN admin_ssh_port IS NULL OR admin_ssh_port < 1 OR admin_ssh_port > 65535 THEN 22 ELSE admin_ssh_port END "
+                "WHERE host=?",
+                (default_service_port, h),
+            )
 def _db_get_host_pool():
     with db_conn() as conn:
         return conn.execute("SELECT host, active, consecutive_fails, last_check, last_status, disabled_reason, disabled_at, is_default, avg_latency_ms, added_at, is_standby FROM host_pool ORDER BY is_default DESC, active DESC, host").fetchall()
@@ -1255,16 +1375,45 @@ async def _run_speed_test_all_hosts():
     return out
 
 def _db_record_host_check(host, ok, reason=None):
-    """نتیجهٔ یک بار تست را ثبت می‌کند و تعداد شکست‌های متوالیِ فعلی را برمی‌گرداند (۰ یعنی موفق)."""
+    """Record customer service-path health. Legacy last_* columns remain service aliases."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with db_conn() as conn:
         if ok:
-            conn.execute("UPDATE host_pool SET consecutive_fails=0, last_check=?, last_status='🟢 سالم' WHERE host=?", (now, host))
+            conn.execute(
+                "UPDATE host_pool SET consecutive_fails=0, last_check=?, last_status='🟢 سالم', "
+                "service_last_check=?, service_last_status='🟢 سالم' WHERE host=?",
+                (now, now, host),
+            )
             return 0
         row = conn.execute("SELECT consecutive_fails FROM host_pool WHERE host=?", (host,)).fetchone()
         fails = (row[0] if row else 0) + 1
-        conn.execute("UPDATE host_pool SET consecutive_fails=?, last_check=?, last_status=? WHERE host=?",
-                     (fails, now, f"🔴 ناموفق: {str(reason)[:150]}", host))
+        status = f"🔴 ناموفق: {str(reason)[:150]}"
+        conn.execute(
+            "UPDATE host_pool SET consecutive_fails=?, last_check=?, last_status=?, "
+            "service_last_check=?, service_last_status=? WHERE host=?",
+            (fails, now, status, now, status, host),
+        )
+        return fails
+
+
+def _db_record_admin_host_check(host, ok, reason=None):
+    """Record Edge management-plane health without changing service activation."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with db_conn() as conn:
+        if ok:
+            conn.execute(
+                "UPDATE host_pool SET admin_consecutive_fails=0, admin_last_check=?, "
+                "admin_last_status='🟢 سالم' WHERE host=?",
+                (now, host),
+            )
+            return 0
+        row = conn.execute("SELECT admin_consecutive_fails FROM host_pool WHERE host=?", (host,)).fetchone()
+        fails = (row[0] if row and row[0] is not None else 0) + 1
+        conn.execute(
+            "UPDATE host_pool SET admin_consecutive_fails=?, admin_last_check=?, admin_last_status=? "
+            "WHERE host=?",
+            (fails, now, f"🔴 ناموفق: {str(reason)[:150]}", host),
+        )
         return fails
 def _db_set_host_active(host, active: bool, reason=None):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

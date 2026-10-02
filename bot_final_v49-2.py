@@ -1540,6 +1540,16 @@ def _db_recompute_host_observability(host):
             ),
         )
 
+    if previous_diagnostic != diagnostic_reason:
+        log.info(
+            "Phase6C diagnostic transition host=%s previous=%s current=%s "
+            "filter_suspected=%s confidence=%s",
+            host,
+            previous_diagnostic or DIAG_INSUFFICIENT_EVIDENCE,
+            diagnostic_reason,
+            proposed,
+            filter_confidence,
+        )
     if changed:
         log.warning(
             "Phase6C filter evidence transition host=%s previous=%s current=%s "
@@ -8974,6 +8984,10 @@ async def _render_host_pool_panel(query):
             line += f"\n   🌍 External source: <code>{esc(ph['external_probe_source'])}</code>"
         if ph.get("regional_probe_source"):
             line += f"\n   📡 Regional source: <code>{esc(ph['regional_probe_source'])}</code>"
+        if ph.get("external_service_last_check"):
+            line += f"\n   ⏱ External check: {esc(ph['external_service_last_check'])}"
+        if ph.get("regional_service_last_check"):
+            line += f"\n   ⏱ Regional check: {esc(ph['regional_service_last_check'])}"
         if ph.get("health_since"):
             line += f"\n   🕒 وضعیت فعلی از: {esc(ph['health_since'])}"
         if ph.get("last_success_at"):

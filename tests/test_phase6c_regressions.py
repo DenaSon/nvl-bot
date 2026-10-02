@@ -290,7 +290,7 @@ class Phase6CIntegrationRegressionTests(unittest.TestCase):
         self.assertNotIn("filter_suspected", region)
 
     def test_monitoring_panel_surfaces_phase6c_evidence(self):
-        start = self.source.index("async def _render_host_pool_panel(query):")
+        start = self.source.index("async def _render_host_pool_panel(")
         end = self.source.index("async def _host_has_working_persistent_key", start)
         region = self.source[start:end]
         for fragment in (
@@ -305,6 +305,22 @@ class Phase6CIntegrationRegressionTests(unittest.TestCase):
             "Regional check:",
         ):
             self.assertIn(fragment, region)
+
+    def test_monitoring_panel_paginates_before_telegram_message_limit(self):
+        start = self.source.index("async def _render_host_pool_panel(")
+        end = self.source.index("async def _host_has_working_persistent_key", start)
+        region = self.source[start:end]
+        for fragment in (
+            "page_size = 2",
+            "page_pool = pool[page_start:page_end]",
+            'callback_data=f"hppage_{page - 1}"',
+            'callback_data=f"hppage_{page + 1}"',
+            "page_line =",
+            "_panel_value",
+        ):
+            self.assertIn(fragment, region)
+        self.assertIn('elif d.startswith("hppage_")', self.source)
+        self.assertIn("await _render_host_pool_panel(query, page=page)", self.source)
 
     def test_diagnostic_transitions_are_logged_without_operational_actions(self):
         start = self.source.index("def _db_recompute_host_observability(")

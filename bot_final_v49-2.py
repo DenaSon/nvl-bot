@@ -1424,7 +1424,22 @@ def _db_set_host_active(host, active: bool, reason=None):
             conn.execute("UPDATE host_pool SET active=0, disabled_reason=?, disabled_at=? WHERE host=?", (reason, now, host))
 def _db_add_host_pool(host):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with db_conn() as conn: conn.execute("INSERT OR IGNORE INTO host_pool (host, active, added_at) VALUES (?, 1, ?)", (host, now))
+    with db_conn() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key='port'").fetchone()
+        service_port = _normalize_ssh_port(row[0] if row else 22, 22)
+        conn.execute(
+            "INSERT OR IGNORE INTO host_pool "
+            "(host, active, added_at, ssh_port, service_port, admin_ssh_port) "
+            "VALUES (?, 1, ?, ?, ?, 22)",
+            (host, now, service_port, service_port),
+        )
+        conn.execute(
+            "UPDATE host_pool SET "
+            "service_port=CASE WHEN service_port IS NULL OR service_port < 1 OR service_port > 65535 THEN ? ELSE service_port END, "
+            "admin_ssh_port=CASE WHEN admin_ssh_port IS NULL OR admin_ssh_port < 1 OR admin_ssh_port > 65535 THEN 22 ELSE admin_ssh_port END "
+            "WHERE host=?",
+            (service_port, host),
+        )
 def _db_remove_host_pool(host):
     with db_conn() as conn: conn.execute("DELETE FROM host_pool WHERE host=?", (host,))
 
@@ -1976,7 +1991,14 @@ def _db_resync_host_pool_from_full_list(hosts_list):
             if h in existing:
                 conn.execute("UPDATE host_pool SET active=1, consecutive_fails=0, disabled_reason=NULL, disabled_at=NULL WHERE host=?", (h,))
             else:
-                conn.execute("INSERT INTO host_pool (host, active) VALUES (?, 1)", (h,))
+                default_row = conn.execute("SELECT value FROM settings WHERE key='port'").fetchone()
+                service_port = _normalize_ssh_port(default_row[0] if default_row else 22, 22)
+                conn.execute(
+                    "INSERT INTO host_pool "
+                    "(host, active, ssh_port, service_port, admin_ssh_port) "
+                    "VALUES (?, 1, ?, ?, 22)",
+                    (h, service_port, service_port),
+                )
         for h in existing - wanted:
             conn.execute("UPDATE host_pool SET active=0 WHERE host=?", (h,))
 

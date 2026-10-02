@@ -204,8 +204,8 @@ class Phase6FBotIntegrationStaticTests(unittest.TestCase):
             "async def _post_init(app):",
             "async def _post_shutdown(app):",
         )
-        self.assertIn("'auto_failover_mode', '0'", region)
-        self.assertNotIn("_db_update_setting, 'auto_failover_mode', '0'", region)
+        self.assertIn("'phase6h_auto_failover_enabled', '0'", region)
+        self.assertNotIn("_db_update_setting, 'phase6h_auto_failover_enabled', '0'", region)
         self.assertIn("regional_filter_task", region)
 
         legacy = self._region(
@@ -240,8 +240,8 @@ class Phase6FBotIntegrationStaticTests(unittest.TestCase):
             'elif d.startswith("hpdns_")',
         )
         self.assertIn("_db_update_setting, 'auto_failover_mode', '0'", region)
-        self.assertIn("auto_failover_mode', '0'", region)
-        self.assertIn("Auto Failover", region)
+        self.assertIn("_db_update_setting, 'phase6h_auto_failover_enabled', '0'", region)
+        self.assertIn("Automatic Filtering Failover", region)
         self.assertNotIn("_activate_standby_for_filtered_edge(", region)
 
     def test_runtime_uses_actual_service_port(self):

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -23,6 +24,7 @@ from typing import Callable, Iterable, Mapping, Optional
 
 
 CHECK_HOST_BASE_URL = "https://check-host.net"
+CHECK_HOST_USER_AGENT = "NVL-Regional-Probe/6D"
 DEFAULT_COUNTRY_CODE = "ir"
 
 
@@ -130,10 +132,32 @@ Transport = Callable[[str, float], Mapping]
 
 
 def _default_transport(url: str, timeout: float) -> Mapping:
-    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    # Do not use urllib's default Python-urllib/* user agent. Public API endpoints
+    # can sit behind WAF/bot-protection rules that reject generic scripting UAs even
+    # though the API request itself is valid. A stable, descriptive application UA
+    # also makes provider-side diagnostics substantially easier.
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": CHECK_HOST_USER_AGENT,
+        },
+    )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read(512).decode("utf-8", errors="replace")
+            body = " ".join(body.split())[:240]
+        except Exception:
+            body = ""
+        detail = f"Check-Host HTTP {exc.code}: {exc.reason}"
+        if body:
+            detail += f" [{body}]"
+        raise CheckHostError(detail) from exc
+    except urllib.error.URLError as exc:
+        raise CheckHostError(f"Check-Host network error: {exc.reason}") from exc
     except Exception as exc:
         raise CheckHostError(f"Check-Host request failed: {exc}") from exc
 

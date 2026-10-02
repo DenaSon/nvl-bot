@@ -301,8 +301,17 @@ class Phase6CIntegrationRegressionTests(unittest.TestCase):
             "Regional",
             "Filtering:",
             "filter_confidence",
+            "External check:",
+            "Regional check:",
         ):
             self.assertIn(fragment, region)
+
+    def test_diagnostic_transitions_are_logged_without_operational_actions(self):
+        start = self.source.index("def _db_recompute_host_observability(")
+        end = self.source.index("def _db_record_observability_probe(", start)
+        region = self.source[start:end]
+        self.assertIn("Phase6C diagnostic transition", region)
+        self.assertIn("previous_diagnostic != diagnostic_reason", region)
 
 
 if __name__ == "__main__":

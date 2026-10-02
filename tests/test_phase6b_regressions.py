@@ -36,11 +36,12 @@ class Phase6BUnifiedHealthModelTests(unittest.TestCase):
         exec(compile(module, "<phase6b-health-model>", "exec"), cls.ns)
         cls.derive = staticmethod(cls.ns["_derive_host_health_state"])
 
-    def test_v114_marker_is_present(self):
-        self.assertIn(
-            'BOT_VERSION_TAG = "V114-2026-10-02-phase6b-unified-health-model"',
-            self.source,
-        )
+    def test_phase6b_features_survive_current_version(self):
+        self.assertIn("BOT_VERSION_TAG =", self.source)
+        self.assertIn("def _derive_host_health_state(", self.source)
+        self.assertIn("def _db_recompute_host_health(", self.source)
+        self.assertIn("health_state", self.source)
+        self.assertIn("health_reason", self.source)
 
     def test_schema_is_additive_and_typed(self):
         for column in (

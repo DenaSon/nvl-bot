@@ -255,6 +255,18 @@ from filtering_runtime import (
     classify_filter_transition,
     provider_backoff_until,
 )
+from safe_failover import (
+    FAILOVER_MODE_MANUAL,
+    FAILOVER_STATUS_ABORTED_STALE,
+    FAILOVER_STATUS_FAILED,
+    FAILOVER_STATUS_ROLLED_BACK,
+    FAILOVER_STATUS_RUNNING,
+    FAILOVER_STATUS_SUCCEEDED,
+    FailoverValidationError,
+    is_transparent_dns_handoff_safe,
+    parse_helper_summary,
+    validate_complete_rebuild,
+)
 
 # ==========================================
 # ⚙️ پیکربندی امن (از Environment Variables)
@@ -263,7 +275,7 @@ from filtering_runtime import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V116.0-2026-10-03-phase6f-filtering-runtime"
+BOT_VERSION_TAG = "V117.0-2026-10-03-phase6g-safe-manual-failover"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -531,6 +543,11 @@ REGIONAL_FILTER_EDGE_GAP_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROBE_EDGE_GAP
 REGIONAL_FILTER_MAX_NODES = _phase6c_env_int("NVL_REGIONAL_PROBE_MAX_NODES", 8)
 REGIONAL_FILTER_PROVIDER_BACKOFF_BASE_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROVIDER_BACKOFF_BASE", 300)
 REGIONAL_FILTER_PROVIDER_BACKOFF_MAX_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROVIDER_BACKOFF_MAX", 3600)
+
+# Phase 6G — manual failover lock. A crashed RUNNING operation older than this
+# is marked ABORTED_STALE before a new operation may acquire the lock.
+FAILOVER_LOCK_STALE_SECONDS = _phase6c_env_int("NVL_FAILOVER_LOCK_STALE_SECONDS", 1800)
+FAILOVER_HELPER_TIMEOUT_SECONDS = _phase6c_env_int("NVL_FAILOVER_HELPER_TIMEOUT_SECONDS", 300)
 
 # ==========================================
 # 🆕 V89 — سیستم شناسایی خودکار فیلتر شدن بر اساس کاربران آنلاین
@@ -1080,6 +1097,27 @@ def init_db():
                 c.execute(_sql)
             except sqlite3.OperationalError:
                 pass
+
+        c.execute('''CREATE TABLE IF NOT EXISTS failover_operations (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        mode TEXT NOT NULL,
+                        source_host TEXT NOT NULL,
+                        target_host TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        finished_at TEXT DEFAULT NULL,
+                        account_count INTEGER DEFAULT 0,
+                        moved_count INTEGER DEFAULT 0,
+                        previous_default_host TEXT DEFAULT NULL,
+                        previous_dns_ip TEXT DEFAULT NULL,
+                        core_fallback_ip TEXT DEFAULT NULL,
+                        error TEXT DEFAULT NULL,
+                        detail_json TEXT DEFAULT NULL)''')
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_failover_operations_status_started "
+            "ON failover_operations(status, started_at)"
+        )
 
         c.execute('''CREATE TABLE IF NOT EXISTS host_probe_results (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,

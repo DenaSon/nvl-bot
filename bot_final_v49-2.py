@@ -2291,13 +2291,16 @@ def _db_get_failover_host_meta(host):
 
 
 def _db_get_failover_accounts(source_host):
-    """Exact active SSH account snapshot used by the Phase 6G rebuild helper."""
+    """Exact active SSH snapshot for the current default source.
+
+    Legacy host NULL/empty rows inherit the default host and must move with it.
+    """
     with db_conn() as conn:
         return [
             row[0]
             for row in conn.execute(
                 "SELECT username FROM ssh_accounts "
-                "WHERE host=? AND service_type='ssh' "
+                "WHERE (host=? OR host IS NULL OR host='') AND service_type='ssh' "
                 "AND status LIKE '%فعال%' AND status NOT LIKE '%غیر%' "
                 "ORDER BY username",
                 (source_host,),
@@ -2336,7 +2339,7 @@ def _db_move_accounts_host_scoped(usernames, source_host, target_host):
         for username in usernames:
             cur = conn.execute(
                 "UPDATE ssh_accounts SET host=? "
-                "WHERE username=? AND host=? AND service_type='ssh' "
+                "WHERE username=? AND (host=? OR host IS NULL OR host='') AND service_type='ssh' "
                 "AND status != '⏳ درحال ساخت'",
                 (target_host, username, source_host),
             )
@@ -17422,6 +17425,7 @@ async def _run_phase6g_rebuild_helper(source_host, target_host, target_admin_por
         "--target-port", str(target_admin_port),
         "--db-path", DB_PATH,
         "--ssh-key", DO_SSH_KEY_PATH,
+        "--include-unassigned",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )

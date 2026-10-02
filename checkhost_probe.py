@@ -32,6 +32,10 @@ class CheckHostError(RuntimeError):
     """Raised when the Check-Host API returns an invalid or unusable response."""
 
 
+class CheckHostLimitExceeded(CheckHostError):
+    """Raised when Check-Host refuses a new check because its request limit is hit."""
+
+
 @dataclass(frozen=True)
 class CheckHostNode:
     name: str
@@ -339,6 +343,10 @@ class CheckHostClient:
         params.extend(("node", node.name) for node in selected_nodes)
 
         payload = self._get("/check-tcp", params)
+        if payload.get("error") == "limit_exceeded":
+            raise CheckHostLimitExceeded(
+                "Check-Host request limit exceeded; regional evidence is temporarily unavailable"
+            )
         if payload.get("ok") != 1 or not payload.get("request_id"):
             raise CheckHostError(f"Check-Host rejected TCP request: {payload}")
 

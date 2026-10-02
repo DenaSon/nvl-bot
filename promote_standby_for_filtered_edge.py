@@ -52,11 +52,25 @@ def _default_db_path() -> str:
     )
 
 
-def _fetch_accounts(db_path: str, filtered_host: str, include_inactive: bool):
+def _fetch_accounts(
+    db_path: str,
+    filtered_host: str,
+    include_inactive: bool,
+    include_unassigned: bool = False,
+):
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
-        base = "SELECT username, password, expire_date FROM ssh_accounts WHERE host = ? AND service_type='ssh'"
+        if include_unassigned:
+            base = (
+                "SELECT username, password, expire_date FROM ssh_accounts "
+                "WHERE (host = ? OR host IS NULL OR host = '') AND service_type='ssh'"
+            )
+        else:
+            base = (
+                "SELECT username, password, expire_date FROM ssh_accounts "
+                "WHERE host = ? AND service_type='ssh'"
+            )
         if not include_inactive:
             base += " AND status LIKE '%فعال%' AND status NOT LIKE '%غیر%'"
         cur.execute(base, (filtered_host,))
@@ -162,6 +176,11 @@ def main():
     ap.add_argument("--db-path", default=_default_db_path())
     ap.add_argument("--ssh-key", default="/root/.ssh/edge_provision_ed25519")
     ap.add_argument("--include-inactive", action="store_true")
+    ap.add_argument(
+        "--include-unassigned",
+        action="store_true",
+        help="Also rebuild legacy SSH rows with host NULL/empty. Use only when filtered-host is the current default.",
+    )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument(
         "--commit-db",
@@ -174,7 +193,12 @@ def main():
         print(f"❌ دیتابیس پیدا نشد: {args.db_path}", file=sys.stderr)
         sys.exit(2)
 
-    rows = _fetch_accounts(args.db_path, args.filtered_host, args.include_inactive)
+    rows = _fetch_accounts(
+        args.db_path,
+        args.filtered_host,
+        args.include_inactive,
+        include_unassigned=args.include_unassigned,
+    )
     print(f"📋 {len(rows)} اکانتِ متعلق به {args.filtered_host} برای بازسازی روی {args.target_host} پیدا شد.")
 
     if not rows:

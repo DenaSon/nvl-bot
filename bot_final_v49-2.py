@@ -17145,68 +17145,478 @@ async def _mirror_linux_cmd(primary_host, primary_port, *args, input_data: bytes
 
 STANDBY_SCRIPT_PATH = os.path.join(_SCRIPT_DIR, "promote_standby_for_filtered_edge.py")
 
-async def _activate_standby_for_filtered_edge(app, filtered_host: str, target_host: str = None):
-    """
-    گامِ دومِ Failover (بندِ ۴). اگر target_host داده نشود، طبقِ auto_failover_mode تصمیم
-    می‌گیرد: خودکار → اولین Standbyِ سالم؛ دستی → فقط پیام با دکمهٔ «فعال‌سازیِ این Edge»
-    برایِ هر Standby (فراخوانیِ بعدی با target_host مشخص، از هندلرِ همان دکمه می‌آید).
-    گامِ اول (سوییچِ فوریِ دامنه به Core) پیش از این تابع، در _filter_detect_tick انجام شده.
-    """
-    auto_mode = (await asyncio.to_thread(_db_get_setting, 'auto_failover_mode', '0')) == '1'
+async def _safe_manual_failover_preflight(source_host: str, target_host: str):
+    """Fresh Phase 6G preflight. No mutations."""
+    errors = []
 
-    if target_host is None:
-        standbys = await asyncio.to_thread(_db_get_standby_hosts)
-        if not auto_mode:
-            if not standbys:
-                await _notify_admins(app,
-                    "⚠️ حالتِ Failoverِ خودکار خاموش است و هیچ سرورِ Standbyِ سالمی هم ثبت نشده. "
-                    "دامنه فعلاً روی Core باقی می‌ماند تا دستی یک Standby اضافه/فعال کنید.")
-                return
-            kb = [[InlineKeyboardButton(f"⚡️ فعال‌سازیِ این Edge ({h})",
-                                          callback_data=f"standby_act_{filtered_host}_{h}")]
-                  for h in standbys]
-            await _notify_admins_with_markup(app,
-                f"🚨 Edgeِ <code>{esc(filtered_host)}</code> فیلتر شد؛ دامنه موقتاً روی Core تنظیم شد.\n\n"
-                f"برایِ انتقالِ دائمیِ کاربرانِ این Edge به یکی از سرورهایِ Standby، یکی را انتخاب کنید:",
-                InlineKeyboardMarkup(kb))
-            return
-        if not standbys:
-            await _notify_admins(app,
-                "⚠️ حالتِ خودکار روشن است ولی هیچ Standbyِ سالمی پیدا نشد. دامنه رویِ Core باقی می‌ماند.")
-            return
-        target_host = standbys[0]
+    if source_host == target_host:
+        errors.append("SOURCE_EQUALS_TARGET")
+    if await asyncio.to_thread(_is_current_core_host, source_host):
+        errors.append("SOURCE_IS_CORE")
+    if await asyncio.to_thread(_is_current_core_host, target_host):
+        errors.append("TARGET_IS_CORE")
 
-    target_port = await asyncio.to_thread(_db_get_host_admin_ssh_port, target_host, 22)
+    source_meta = await asyncio.to_thread(_db_get_failover_host_meta, source_host)
+    target_meta = await asyncio.to_thread(_db_get_failover_host_meta, target_host)
+    if not source_meta:
+        errors.append("SOURCE_NOT_IN_HOST_POOL")
+    if not target_meta:
+        errors.append("TARGET_NOT_IN_HOST_POOL")
+
+    if errors:
+        return {"ok": False, "errors": errors}
+
+    if not target_meta["active"]:
+        errors.append("TARGET_NOT_ACTIVE")
+    if not target_meta["is_standby"]:
+        errors.append("TARGET_NOT_STANDBY")
+
+    previous_default_host = await asyncio.to_thread(_db_get_default_host)
+    if previous_default_host != source_host:
+        errors.append("SOURCE_NOT_CURRENT_DEFAULT")
+
+    source_service_port = int(source_meta["service_port"])
+    target_service_port = int(target_meta["service_port"])
+    if source_service_port != target_service_port:
+        errors.append("SERVICE_PORT_MISMATCH")
+
+    accounts = await asyncio.to_thread(_db_get_failover_accounts, source_host)
+    if not accounts:
+        errors.append("NO_ACTIVE_SOURCE_ACCOUNTS")
+
+    # public_domain is global in the current architecture. Moving its A record to a
+    # target that only contains this source Edge's accounts is unsafe if another
+    # explicit Edge owns active SSH accounts.
+    other_explicit_accounts = await asyncio.to_thread(
+        _db_count_other_explicit_active_ssh_hosts,
+        source_host,
+    )
+    if other_explicit_accounts:
+        errors.append(f"GLOBAL_DOMAIN_MULTI_EDGE_CONFLICT:{other_explicit_accounts}")
+
+    core_public_ip = await asyncio.to_thread(_get_core_public_ip_cached)
+    if not core_public_ip:
+        errors.append("CORE_PUBLIC_IP_UNKNOWN")
+
+    cf_cfg = await asyncio.to_thread(_cf_get_config)
+    dns_ok, dns_reason = is_transparent_dns_handoff_safe(
+        cloudflare_configured=_cf_configured(cf_cfg),
+        dns_current_ip=cf_cfg.get("dns_current_ip"),
+        source_host=source_host,
+        source_service_port=source_service_port,
+        target_service_port=target_service_port,
+        core_fallback_ip=core_public_ip or None,
+    )
+    if not dns_ok:
+        errors.append(dns_reason)
+
+    health_map = await asyncio.to_thread(_db_get_host_port_health_map)
+    target_health = health_map.get(target_host, {})
+    target_filter_state = target_health.get("filter_state") or FILTER_STATE_UNKNOWN
+    if target_filter_state in {FILTER_STATE_POSSIBLE, FILTER_STATE_LIKELY}:
+        errors.append(f"TARGET_FILTER_STATE_{target_filter_state}")
+
+    # Fresh target customer path.
+    target_service_ok, target_service_err = await _tcp_health_check(
+        target_host,
+        target_service_port,
+        timeout=EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS,
+    )
+    if not target_service_ok:
+        errors.append(f"TARGET_SERVICE_DOWN:{normalize_probe_error(target_service_err)}")
+
+    # Fresh target management plane.
+    target_admin_ok, target_admin_err = await _check_ssh_reachable(
+        target_host,
+        int(target_meta["admin_ssh_port"]),
+    )
+    if not target_admin_ok:
+        errors.append(f"TARGET_ADMIN_DOWN:{normalize_probe_error(target_admin_err)}")
+
+    # Fresh Core<->Standby tunnel/path evidence.
+    target_path = await asyncio.to_thread(_probe_wireguard_edge_sync, target_host)
+    if target_path.get("wg_peer_ok") is not True:
+        errors.append(f"TARGET_WG_NOT_HEALTHY:{target_path.get('wg_reason')}")
+    if target_path.get("core_path_ok") is not True:
+        errors.append(f"TARGET_CORE_PATH_NOT_HEALTHY:{target_path.get('core_path_reason')}")
+
+    # DNS-only fallback preserves the client port. Core must therefore answer on
+    # the same customer-facing service port before we ever point DNS at it.
+    core_service_ok = False
+    core_service_err = None
+    if core_public_ip:
+        core_service_ok, core_service_err = await _tcp_health_check(
+            core_public_ip,
+            source_service_port,
+            timeout=EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS,
+        )
+        if not core_service_ok:
+            errors.append(f"CORE_FALLBACK_SERVICE_DOWN:{normalize_probe_error(core_service_err)}")
+
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "source_meta": source_meta,
+        "target_meta": target_meta,
+        "accounts": accounts,
+        "account_count": len(accounts),
+        "other_explicit_accounts": other_explicit_accounts,
+        "previous_default_host": previous_default_host,
+        "previous_dns_ip": cf_cfg.get("dns_current_ip") or "",
+        "core_public_ip": core_public_ip,
+        "source_service_port": source_service_port,
+        "target_service_port": target_service_port,
+        "target_filter_state": target_filter_state,
+        "target_service_ok": target_service_ok,
+        "target_admin_ok": target_admin_ok,
+        "target_wg_ok": target_path.get("wg_peer_ok"),
+        "target_core_path_ok": target_path.get("core_path_ok"),
+        "core_service_ok": core_service_ok,
+    }
+
+
+async def _run_phase6g_rebuild_helper(source_host, target_host, target_admin_port):
     if not os.path.exists(STANDBY_SCRIPT_PATH):
-        await _notify_admins(app,
-            f"❌ اسکریپتِ promote_standby_for_filtered_edge.py کنارِ خودِ بات پیدا نشد "
-            f"(<code>{esc(STANDBY_SCRIPT_PATH)}</code>). دامنه همچنان رویِ Core باقی می‌ماند.")
-        return
+        raise RuntimeError(f"standby helper missing: {STANDBY_SCRIPT_PATH}")
+
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        STANDBY_SCRIPT_PATH,
+        "--filtered-host", source_host,
+        "--target-host", target_host,
+        "--target-port", str(target_admin_port),
+        "--db-path", DB_PATH,
+        "--ssh-key", DO_SSH_KEY_PATH,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
     try:
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable, STANDBY_SCRIPT_PATH,
-            "--filtered-host", filtered_host, "--target-host", target_host,
-            "--target-port", str(target_port),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        out, err = await proc.communicate()
-        returncode = proc.returncode
-    except Exception as e:
-        await _notify_admins(app, f"❌ اجرایِ اسکریپتِ بازسازیِ Standby شکست خورد: <code>{esc(str(e))}</code>")
-        return
+        out, err = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=FAILOVER_HELPER_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.communicate()
+        raise RuntimeError(
+            f"standby rebuild helper timed out after {FAILOVER_HELPER_TIMEOUT_SECONDS}s"
+        )
 
-    if returncode != 0:
-        await _notify_admins(app,
-            f"❌ بازسازیِ کاربرانِ <code>{esc(filtered_host)}</code> رویِ Standby (<code>{esc(target_host)}</code>) "
-            f"با خطا مواجه شد:\n<code>{esc(err.decode(errors='ignore')[-800:])}</code>\n\n"
-            f"دامنه همچنان رویِ Core باقی می‌ماند (کاربران قطع نیستند).")
-        return
+    summary = parse_helper_summary(out)
+    return proc.returncode, summary, out.decode(errors="ignore"), err.decode(errors="ignore")
 
-    await asyncio.to_thread(_db_set_default_host, target_host)
-    await asyncio.to_thread(_db_set_all_accounts_host, target_host)
-    cf_ok, cf_msg = await _update_cloudflare_dns(target_host)
-    cf_suffix = f"\n\n☁️ <b>وضعیتِ کلودفلر:</b> {cf_msg}" if cf_ok else f"\n\n⚠️ <b>هشدارِ کلودفلر:</b> {cf_msg}"
-    await _notify_admins(app,
-        f"✅ دامنه با موفقیت روی سرورِ Edge با آی‌پیِ <code>{esc(target_host)}</code> تنظیم شد.{cf_suffix}")
+
+async def _safe_manual_failover(app, source_host: str, target_host: str):
+    """Phase 6G manual-only, lock-protected, scoped and rollback-aware failover."""
+    operation_id, busy_operation_id = await asyncio.to_thread(
+        _db_acquire_failover_lock,
+        source_host,
+        target_host,
+        mode=FAILOVER_MODE_MANUAL,
+    )
+    if not operation_id:
+        await _notify_admins(
+            app,
+            f"⛔️ <b>Failover دیگری در حال اجراست.</b>\n"
+            f"Operation ID: <code>{busy_operation_id}</code>\n"
+            "تا پایان آن عملیات، Failover جدید شروع نمی‌شود."
+        )
+        return {"ok": False, "reason": "FAILOVER_BUSY", "operation_id": busy_operation_id}
+
+    preflight = None
+    db_committed = False
+    accounts = []
+    previous_default_host = None
+    core_public_ip = None
+
+    try:
+        preflight = await _safe_manual_failover_preflight(source_host, target_host)
+        if not preflight.get("ok"):
+            errors = preflight.get("errors") or ["UNKNOWN_PREFLIGHT_ERROR"]
+            await asyncio.to_thread(
+                _db_update_failover_operation,
+                operation_id,
+                status=FAILOVER_STATUS_FAILED,
+                error=";".join(errors)[:1000],
+                detail={"phase": "PREFLIGHT", "errors": errors},
+                finished=True,
+            )
+            await _notify_admins(
+                app,
+                "⛔️ <b>Safe Manual Failover شروع نشد.</b>\n\n"
+                f"Source: <code>{esc(source_host)}</code>\n"
+                f"Target: <code>{esc(target_host)}</code>\n"
+                f"Preflight: <code>{esc(' | '.join(errors))}</code>\n\n"
+                "هیچ DB/DNS/Account تغییری انجام نشد."
+            )
+            return {"ok": False, "reason": "PREFLIGHT_FAILED", "errors": errors}
+
+        accounts = list(preflight["accounts"])
+        previous_default_host = preflight["previous_default_host"]
+        previous_dns_ip = preflight["previous_dns_ip"]
+        core_public_ip = preflight["core_public_ip"]
+
+        await asyncio.to_thread(
+            _db_update_failover_operation,
+            operation_id,
+            account_count=len(accounts),
+            previous_default_host=previous_default_host or "",
+            previous_dns_ip=previous_dns_ip,
+            core_fallback_ip=core_public_ip,
+            detail={
+                "phase": "PREFLIGHT_OK",
+                "source_service_port": preflight["source_service_port"],
+                "target_service_port": preflight["target_service_port"],
+                "target_filter_state": preflight["target_filter_state"],
+            },
+        )
+
+        # Step 1: customer-safe temporary route to Core. Retry operations may already
+        # be on Core from a previous failed attempt.
+        if previous_dns_ip != core_public_ip:
+            core_ok, core_msg = await _cf_switch_public_domain(core_public_ip, app=None)
+            if not core_ok:
+                raise RuntimeError(f"CORE_FALLBACK_DNS_FAILED:{core_msg}")
+
+        await asyncio.to_thread(
+            _db_update_failover_operation,
+            operation_id,
+            detail={"phase": "CORE_FALLBACK_ACTIVE", "core_public_ip": core_public_ip},
+        )
+
+        # Step 2: rebuild exactly the source Edge account snapshot on Standby.
+        returncode, summary, helper_stdout, helper_stderr = await _run_phase6g_rebuild_helper(
+            source_host,
+            target_host,
+            int(preflight["target_meta"]["admin_ssh_port"]),
+        )
+        try:
+            validate_complete_rebuild(
+                summary,
+                source_host=source_host,
+                target_host=target_host,
+                expected_usernames=accounts,
+            )
+        except FailoverValidationError as exc:
+            raise RuntimeError(f"REBUILD_VALIDATION_FAILED:{exc}") from exc
+
+        if returncode != 0:
+            raise RuntimeError(
+                f"REBUILD_HELPER_FAILED:rc={returncode}; stderr={helper_stderr[-600:]}"
+            )
+
+        await asyncio.to_thread(
+            _db_update_failover_operation,
+            operation_id,
+            detail={
+                "phase": "REBUILD_COMPLETE",
+                "requested": summary.requested,
+                "rebuilt": summary.rebuilt,
+            },
+        )
+
+        # Step 3: fresh target verification after rebuild.
+        verify_service_ok, verify_service_err = await _tcp_health_check(
+            target_host,
+            int(preflight["target_service_port"]),
+            timeout=EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS,
+        )
+        verify_admin_ok, verify_admin_err = await _check_ssh_reachable(
+            target_host,
+            int(preflight["target_meta"]["admin_ssh_port"]),
+        )
+        if not verify_service_ok or not verify_admin_ok:
+            raise RuntimeError(
+                "POST_REBUILD_TARGET_VERIFY_FAILED:"
+                f"service={verify_service_ok}:{normalize_probe_error(verify_service_err)};"
+                f"admin={verify_admin_ok}:{normalize_probe_error(verify_admin_err)}"
+            )
+
+        # Step 4: scoped DB/default commit. This is the first account-state mutation.
+        moved_count, default_changed = await asyncio.to_thread(
+            _db_commit_failover_account_state,
+            accounts,
+            source_host,
+            target_host,
+            previous_default_host=previous_default_host,
+        )
+        db_committed = True
+
+        await asyncio.to_thread(
+            _db_update_failover_operation,
+            operation_id,
+            moved_count=moved_count,
+            detail={
+                "phase": "DB_COMMITTED",
+                "moved_count": moved_count,
+                "default_changed": default_changed,
+            },
+        )
+
+        # Step 5: final customer route to Standby.
+        dns_ok, dns_msg = await _cf_switch_public_domain(target_host, app=None)
+        if not dns_ok:
+            try:
+                await asyncio.to_thread(
+                    _db_rollback_failover_account_state,
+                    accounts,
+                    source_host,
+                    target_host,
+                    previous_default_host=previous_default_host,
+                )
+                db_committed = False
+            except Exception as rollback_exc:
+                await asyncio.to_thread(
+                    _db_update_failover_operation,
+                    operation_id,
+                    status=FAILOVER_STATUS_FAILED,
+                    error=f"DNS_FINAL_FAILED_AND_DB_ROLLBACK_FAILED:{dns_msg}; {rollback_exc}"[:1000],
+                    detail={
+                        "phase": "ROLLBACK_FAILED",
+                        "dns_error": dns_msg,
+                        "rollback_error": str(rollback_exc),
+                    },
+                    finished=True,
+                )
+                await _notify_admins(
+                    app,
+                    "🚨 <b>Failover نیازمند بررسی فوری است.</b>\n"
+                    "سوییچ نهایی DNS شکست خورد و rollback دیتابیس هم کامل نشد.\n"
+                    f"Operation: <code>{operation_id}</code>\n"
+                    f"DNS همچنان باید روی Core بررسی شود."
+                )
+                return {"ok": False, "reason": "ROLLBACK_FAILED", "operation_id": operation_id}
+
+            await asyncio.to_thread(
+                _db_update_failover_operation,
+                operation_id,
+                status=FAILOVER_STATUS_ROLLED_BACK,
+                error=f"FINAL_DNS_SWITCH_FAILED:{dns_msg}"[:1000],
+                detail={
+                    "phase": "ROLLED_BACK",
+                    "dns_error": dns_msg,
+                    "safe_route": core_public_ip,
+                },
+                finished=True,
+            )
+            await _notify_admins(
+                app,
+                "⚠️ <b>Failover نهایی نشد؛ DB rollback شد.</b>\n\n"
+                f"Source: <code>{esc(source_host)}</code>\n"
+                f"Target: <code>{esc(target_host)}</code>\n"
+                f"Operation: <code>{operation_id}</code>\n"
+                "اکانت‌ها/default به state قبل برگشتند و دامنه روی Core fallback باقی مانده است.\n"
+                f"DNS error: <code>{esc(dns_msg)}</code>"
+            )
+            return {"ok": False, "reason": "FINAL_DNS_FAILED_ROLLED_BACK", "operation_id": operation_id}
+
+        # Step 6: target has become a live Edge, no longer a spare Standby.
+        await asyncio.to_thread(_db_set_host_standby, target_host, False)
+        await asyncio.to_thread(_db_mark_ip_switch_now)
+        await asyncio.to_thread(
+            _db_update_failover_operation,
+            operation_id,
+            status=FAILOVER_STATUS_SUCCEEDED,
+            moved_count=moved_count,
+            detail={
+                "phase": "SUCCEEDED",
+                "moved_count": moved_count,
+                "dns_target": target_host,
+                "source_host": source_host,
+            },
+            finished=True,
+        )
+
+        await _notify_admins(
+            app,
+            "✅ <b>Safe Manual Failover با موفقیت کامل شد.</b>\n\n"
+            f"Operation: <code>{operation_id}</code>\n"
+            f"Source: <code>{esc(source_host)}</code>\n"
+            f"Target: <code>{esc(target_host)}</code>\n"
+            f"Accounts moved: <b>{moved_count}</b>\n"
+            f"DNS: <code>{esc(core_public_ip)}</code> → <code>{esc(target_host)}</code>\n\n"
+            "اکانت‌های Edgeهای دیگر دست‌نخورده باقی ماندند."
+        )
+        return {
+            "ok": True,
+            "operation_id": operation_id,
+            "moved_count": moved_count,
+            "source_host": source_host,
+            "target_host": target_host,
+        }
+
+    except Exception as exc:
+        # If scoped DB state was committed but an unexpected exception happened
+        # before final success, restore it. DNS is intentionally left on Core fallback.
+        rollback_error = None
+        if db_committed and accounts:
+            try:
+                await asyncio.to_thread(
+                    _db_rollback_failover_account_state,
+                    accounts,
+                    source_host,
+                    target_host,
+                    previous_default_host=previous_default_host,
+                )
+                db_committed = False
+            except Exception as rb_exc:
+                rollback_error = str(rb_exc)
+
+        final_status = FAILOVER_STATUS_FAILED if rollback_error else (
+            FAILOVER_STATUS_ROLLED_BACK if preflight and preflight.get("ok") else FAILOVER_STATUS_FAILED
+        )
+        detail = {
+            "phase": "EXCEPTION",
+            "error": str(exc),
+            "db_rollback_error": rollback_error,
+            "safe_route": core_public_ip,
+        }
+        await asyncio.to_thread(
+            _db_update_failover_operation,
+            operation_id,
+            status=final_status,
+            error=(f"{exc}; rollback={rollback_error}" if rollback_error else str(exc))[:1000],
+            detail=detail,
+            finished=True,
+        )
+        await _notify_admins(
+            app,
+            "❌ <b>Safe Manual Failover متوقف شد.</b>\n\n"
+            f"Operation: <code>{operation_id}</code>\n"
+            f"Source: <code>{esc(source_host)}</code>\n"
+            f"Target: <code>{esc(target_host)}</code>\n"
+            f"Error: <code>{esc(str(exc)[:1200])}</code>\n"
+            + (
+                f"🚨 DB rollback error: <code>{esc(rollback_error)}</code>\n"
+                if rollback_error else
+                "✅ DB در state قبلی است.\n"
+            )
+            + (
+                f"🛟 مسیر امن فعلی: Core <code>{esc(core_public_ip)}</code>"
+                if core_public_ip else
+                "⚠️ وضعیت DNS/Core باید دستی بررسی شود."
+            )
+        )
+        return {"ok": False, "reason": "FAILOVER_EXCEPTION", "operation_id": operation_id, "error": str(exc)}
+
+
+async def _activate_standby_for_filtered_edge(app, filtered_host: str, target_host: str = None):
+    """Compatibility wrapper retained for old call sites.
+
+    Phase 6G is manual-only. A target must be explicitly chosen by an admin.
+    Phase 6H will introduce a separate automatic policy gate.
+    """
+    if not target_host:
+        await _notify_admins(
+            app,
+            "🛡 Phase 6G فقط Manual Failover امن را اجازه می‌دهد؛ "
+            "Standby مقصد باید صریحاً توسط ادمین انتخاب شود."
+        )
+        return {"ok": False, "reason": "MANUAL_TARGET_REQUIRED"}
+    return await _safe_manual_failover(app, filtered_host, target_host)
+
 
 async def _ip_pressure_monitor_tick(app):
     """

@@ -16430,11 +16430,11 @@ async def _tcp_health_check(host: str, port: int, timeout: float = HOST_HEALTH_T
                 await writer.wait_closed()
 
 def _probe_wireguard_edge_sync(host):
-    """Collect local Core-side WG peer and tunnel-path evidence for one managed Edge.
+    """Collect passive Core-side WG peer and tunnel-path evidence for one managed Edge.
 
-    The tunnel path is probed before reading latest-handshakes. This deliberately
-    generates traffic so an otherwise healthy but idle peer is not misclassified
-    as stale merely because no customer traffic crossed the tunnel recently.
+    The tunnel IP is probed before judging handshake freshness. This intentionally
+    wakes an otherwise-idle WireGuard peer so an old handshake is not mistaken for
+    a broken tunnel merely because no recent traffic crossed it.
     """
     edge_marker = f"# edge-{str(host).replace('.', '-')}"
     if not os.path.exists(WG_CONF_PATH):
@@ -16486,7 +16486,8 @@ def _probe_wireguard_edge_sync(host):
             "core_path_reason": "WG_PEER_MISSING",
         }
 
-    # Send traffic first. A healthy idle peer should refresh its handshake here.
+    # Generate real tunnel traffic first. An idle, healthy peer may otherwise have
+    # a legitimately old latest-handshake timestamp.
     core_path_ok = None
     core_reason = "WG_ALLOWED_IP_MISSING"
     if tunnel_ip:
@@ -16512,18 +16513,26 @@ def _probe_wireguard_edge_sync(host):
         )
     except Exception as e:
         return {
-            "wg_peer_ok": None,
+            "wg_peer_ok": True if core_path_ok is True else None,
             "wg_last_handshake_at": None,
-            "wg_reason": f"WG_COMMAND_ERROR:{normalize_probe_error(e)}",
+            "wg_reason": (
+                "WG_PATH_PROVEN_BY_TUNNEL"
+                if core_path_ok is True
+                else f"WG_COMMAND_ERROR:{normalize_probe_error(e)}"
+            ),
             "core_path_ok": core_path_ok,
             "core_path_reason": core_reason,
         }
 
     if proc.returncode != 0:
         return {
-            "wg_peer_ok": None,
+            "wg_peer_ok": True if core_path_ok is True else None,
             "wg_last_handshake_at": None,
-            "wg_reason": "WG_COMMAND_FAILED",
+            "wg_reason": (
+                "WG_PATH_PROVEN_BY_TUNNEL"
+                if core_path_ok is True
+                else "WG_COMMAND_FAILED"
+            ),
             "core_path_ok": core_path_ok,
             "core_path_reason": core_reason,
         }
@@ -16540,20 +16549,33 @@ def _probe_wireguard_edge_sync(host):
 
     if handshake_epoch <= 0:
         return {
-            "wg_peer_ok": False,
+            "wg_peer_ok": True if core_path_ok is True else False,
             "wg_last_handshake_at": None,
-            "wg_reason": "WG_HANDSHAKE_MISSING",
+            "wg_reason": (
+                "WG_PATH_PROVEN_BY_TUNNEL"
+                if core_path_ok is True
+                else "WG_HANDSHAKE_MISSING"
+            ),
             "core_path_ok": core_path_ok,
             "core_path_reason": core_reason,
         }
 
     handshake_at = datetime.fromtimestamp(handshake_epoch).strftime("%Y-%m-%d %H:%M:%S")
     age = max(0, int(time.time()) - handshake_epoch)
-    wg_ok = age <= WG_HANDSHAKE_MAX_AGE_SECONDS
+    handshake_fresh = age <= WG_HANDSHAKE_MAX_AGE_SECONDS
+
+    # A successful tunnel probe is direct evidence that the peer/path works even
+    # if the local handshake timestamp is anomalous (for example clock skew).
+    wg_peer_ok = bool(handshake_fresh or core_path_ok is True)
+    if wg_peer_ok:
+        wg_reason = PROBE_REASON_OK if handshake_fresh else "WG_PATH_PROVEN_BY_TUNNEL"
+    else:
+        wg_reason = "WG_HANDSHAKE_STALE"
+
     return {
-        "wg_peer_ok": wg_ok,
+        "wg_peer_ok": wg_peer_ok,
         "wg_last_handshake_at": handshake_at,
-        "wg_reason": PROBE_REASON_OK if wg_ok else "WG_HANDSHAKE_STALE",
+        "wg_reason": wg_reason,
         "core_path_ok": core_path_ok,
         "core_path_reason": core_reason,
     }

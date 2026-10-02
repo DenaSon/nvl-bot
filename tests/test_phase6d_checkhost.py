@@ -9,6 +9,7 @@ from checkhost_probe import (
     CHECK_HOST_USER_AGENT,
     CheckHostClient,
     CheckHostError,
+    CheckHostLimitExceeded,
     CheckHostNode,
     RegionalTcpProbe,
     TcpNodeEvidence,
@@ -151,6 +152,18 @@ class Phase6DCheckHostClientTests(unittest.TestCase):
         )
         self.assertEqual(nodes[0].city, "Tehran")
         self.assertEqual(nodes[0].asn, "AS47430")
+
+    def test_start_tcp_check_surfaces_provider_limit_exhaustion(self):
+        def transport(url, timeout):
+            return {"error": "limit_exceeded"}
+
+        client = CheckHostClient(transport=transport)
+        with self.assertRaises(CheckHostLimitExceeded):
+            client.start_tcp_check(
+                "203.0.113.10",
+                2252,
+                (node(),),
+            )
 
     def test_start_tcp_check_uses_repeated_node_parameters(self):
         captured = {}

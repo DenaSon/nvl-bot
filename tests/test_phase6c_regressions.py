@@ -47,6 +47,15 @@ class Phase6CClassifierTests(unittest.TestCase):
         self.assertEqual(d.diagnostic_reason, DIAG_CORE_PATH_FAILURE)
         self.assertFalse(d.filter_suspected)
 
+    def test_confirmed_filter_remains_unresolved_during_unrelated_wg_failure(self):
+        d = derive_observability(
+            True, True, False, False, True, None,
+            previous_filter_suspected=True,
+        )
+        self.assertEqual(d.diagnostic_reason, DIAG_WIREGUARD_PATH_FAILURE)
+        self.assertTrue(d.filter_suspected)
+        self.assertEqual(d.filter_confidence, FILTER_CONFIDENCE_LOW)
+
     def test_service_failure_is_not_filtering(self):
         d = derive_observability(False, True, True, True, True, False, 5, 0)
         self.assertEqual(d.diagnostic_reason, DIAG_SERVICE_PATH_FAILURE)
@@ -80,6 +89,15 @@ class Phase6CClassifierTests(unittest.TestCase):
         )
         self.assertTrue(d.filter_suspected)
         self.assertEqual(d.filter_confidence, FILTER_CONFIDENCE_MEDIUM)
+
+    def test_external_and_regional_failure_together_do_not_newly_confirm_filtering(self):
+        d = derive_observability(
+            True, True, True, True, False, False,
+            regional_failure_streak=5,
+            confirm_threshold=3,
+        )
+        self.assertEqual(d.diagnostic_reason, DIAG_EXTERNAL_REACHABILITY_FAILURE)
+        self.assertFalse(d.filter_suspected)
 
     def test_confirmed_filter_requires_recovery_threshold(self):
         sticky = derive_observability(

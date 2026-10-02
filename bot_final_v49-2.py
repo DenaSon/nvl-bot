@@ -2272,6 +2272,169 @@ def _db_get_standby_hosts():
         return [r[0] for r in conn.execute(
             "SELECT host FROM host_pool WHERE is_standby=1 AND active=1").fetchall()]
 
+def _db_get_failover_host_meta(host):
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT active, is_standby, is_default, service_port, admin_ssh_port "
+            "FROM host_pool WHERE host=?",
+            (host,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "active": bool(row[0]),
+        "is_standby": bool(row[1]),
+        "is_default": bool(row[2]),
+        "service_port": int(row[3] or 22),
+        "admin_ssh_port": int(row[4] or 22),
+    }
+
+
+def _db_get_failover_accounts(source_host):
+    """Exact active SSH account snapshot used by the Phase 6G rebuild helper."""
+    with db_conn() as conn:
+        return [
+            row[0]
+            for row in conn.execute(
+                "SELECT username FROM ssh_accounts "
+                "WHERE host=? AND service_type='ssh' "
+                "AND status LIKE '%فعال%' AND status NOT LIKE '%غیر%' "
+                "ORDER BY username",
+                (source_host,),
+            ).fetchall()
+        ]
+
+
+def _db_move_accounts_host_scoped(usernames, source_host, target_host):
+    """Atomic compare-and-swap style account move.
+
+    Every username must still belong to source_host. Any concurrent/mismatched row
+    aborts the whole transaction instead of broadening the migration.
+    """
+    usernames = list(dict.fromkeys(str(u) for u in usernames))
+    if not usernames:
+        return 0
+    with db_conn() as conn:
+        moved = 0
+        for username in usernames:
+            cur = conn.execute(
+                "UPDATE ssh_accounts SET host=? "
+                "WHERE username=? AND host=? AND service_type='ssh' "
+                "AND status != '⏳ درحال ساخت'",
+                (target_host, username, source_host),
+            )
+            moved += cur.rowcount
+        if moved != len(usernames):
+            raise RuntimeError(
+                f"scoped account move mismatch: expected={len(usernames)} moved={moved}"
+            )
+        return moved
+
+
+def _db_restore_accounts_host_scoped(usernames, current_host, restore_host):
+    usernames = list(dict.fromkeys(str(u) for u in usernames))
+    if not usernames:
+        return 0
+    with db_conn() as conn:
+        restored = 0
+        for username in usernames:
+            cur = conn.execute(
+                "UPDATE ssh_accounts SET host=? "
+                "WHERE username=? AND host=? AND service_type='ssh'",
+                (restore_host, username, current_host),
+            )
+            restored += cur.rowcount
+        if restored != len(usernames):
+            raise RuntimeError(
+                f"scoped account rollback mismatch: expected={len(usernames)} restored={restored}"
+            )
+        return restored
+
+
+def _db_acquire_failover_lock(source_host, target_host, *, mode=FAILOVER_MODE_MANUAL):
+    """Acquire the single persisted Phase 6G failover lock."""
+    now_dt = datetime.now()
+    now = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    with db_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT id, updated_at FROM failover_operations "
+            "WHERE status=? ORDER BY id DESC LIMIT 1",
+            (FAILOVER_STATUS_RUNNING,),
+        ).fetchone()
+        if row:
+            lock_id, updated_at = row
+            try:
+                age = (now_dt - _parse_flexible_datetime(updated_at)).total_seconds()
+            except Exception:
+                age = FAILOVER_LOCK_STALE_SECONDS + 1
+            if age <= FAILOVER_LOCK_STALE_SECONDS:
+                return None, lock_id
+            conn.execute(
+                "UPDATE failover_operations SET status=?, updated_at=?, finished_at=?, "
+                "error=COALESCE(error, 'stale lock recovered by Phase 6G') WHERE id=?",
+                (FAILOVER_STATUS_ABORTED_STALE, now, now, lock_id),
+            )
+
+        cur = conn.execute(
+            "INSERT INTO failover_operations "
+            "(mode, source_host, target_host, status, started_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (mode, source_host, target_host, FAILOVER_STATUS_RUNNING, now, now),
+        )
+        return cur.lastrowid, None
+
+
+def _db_update_failover_operation(
+    operation_id,
+    *,
+    status=None,
+    account_count=None,
+    moved_count=None,
+    previous_default_host=None,
+    previous_dns_ip=None,
+    core_fallback_ip=None,
+    error=None,
+    detail=None,
+    finished=False,
+):
+    fields = ["updated_at=?"]
+    values = [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
+    updates = {
+        "status": status,
+        "account_count": account_count,
+        "moved_count": moved_count,
+        "previous_default_host": previous_default_host,
+        "previous_dns_ip": previous_dns_ip,
+        "core_fallback_ip": core_fallback_ip,
+        "error": error,
+        "detail_json": None if detail is None else json.dumps(detail, ensure_ascii=False),
+    }
+    for name, value in updates.items():
+        if value is not None:
+            fields.append(f"{name}=?")
+            values.append(value)
+    if finished:
+        fields.append("finished_at=?")
+        values.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    values.append(operation_id)
+    with db_conn() as conn:
+        conn.execute(
+            f"UPDATE failover_operations SET {', '.join(fields)} WHERE id=?",
+            values,
+        )
+
+
+def _db_get_latest_failover_operation():
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT id, mode, source_host, target_host, status, started_at, updated_at, "
+            "finished_at, account_count, moved_count, error "
+            "FROM failover_operations ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    return row
+
+
 def _pick_target_host_for_new_account():
     try:
         pool = _db_get_host_pool()

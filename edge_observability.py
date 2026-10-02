@@ -7,6 +7,13 @@ or customer migration.
 from dataclasses import dataclass
 from typing import Optional
 
+from regional_filtering import (
+    REGIONAL_STATE_CLEAR,
+    REGIONAL_STATE_LIKELY,
+    REGIONAL_STATE_POSSIBLE,
+    REGIONAL_STATE_UNKNOWN,
+)
+
 
 DIAG_ALL_PATHS_HEALTHY = "ALL_PATHS_HEALTHY"
 DIAG_ADMIN_ONLY_FAILURE = "ADMIN_ONLY_FAILURE"
@@ -29,6 +36,11 @@ FILTER_REASON_NONE = "NONE"
 FILTER_REASON_INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
 FILTER_REASON_REGIONAL_REACHABILITY_FAILURE = "REGIONAL_REACHABILITY_FAILURE"
 
+FILTER_STATE_UNKNOWN = REGIONAL_STATE_UNKNOWN
+FILTER_STATE_CLEAR = REGIONAL_STATE_CLEAR
+FILTER_STATE_POSSIBLE = REGIONAL_STATE_POSSIBLE
+FILTER_STATE_LIKELY = REGIONAL_STATE_LIKELY
+
 PROBE_REASON_OK = "OK"
 PROBE_REASON_TIMEOUT = "TIMEOUT"
 PROBE_REASON_CONNECTION_REFUSED = "CONNECTION_REFUSED"
@@ -44,6 +56,7 @@ class ObservabilityDecision:
     filter_suspected: Optional[bool]
     filter_confidence: str
     filter_reason: str
+    filter_state: str = FILTER_STATE_UNKNOWN
 
 
 def normalize_probe_error(error) -> str:
@@ -81,6 +94,7 @@ def derive_observability(
     confirm_threshold: int = 3,
     recovery_threshold: int = 2,
     previous_filter_suspected=None,
+    regional_filter_state=None,
 ) -> ObservabilityDecision:
     """Derive a deterministic Phase 6C diagnostic/filtering decision.
 
@@ -94,6 +108,28 @@ def derive_observability(
     regional_failure_streak = max(0, int(regional_failure_streak or 0))
     regional_success_streak = max(0, int(regional_success_streak or 0))
 
+    regional_state_supplied = regional_filter_state is not None
+    if regional_state_supplied:
+        normalized_regional_state = str(regional_filter_state or "").upper()
+        if normalized_regional_state not in {
+            FILTER_STATE_UNKNOWN,
+            FILTER_STATE_CLEAR,
+            FILTER_STATE_POSSIBLE,
+            FILTER_STATE_LIKELY,
+        }:
+            normalized_regional_state = FILTER_STATE_UNKNOWN
+
+        # Phase 6E state is authoritative for the current regional round. UNKNOWN
+        # must never be silently converted into a failure.
+        if normalized_regional_state == FILTER_STATE_CLEAR:
+            regional_service_ok = True
+        elif normalized_regional_state in {FILTER_STATE_POSSIBLE, FILTER_STATE_LIKELY}:
+            regional_service_ok = False
+        else:
+            regional_service_ok = None
+    else:
+        normalized_regional_state = None
+
     recovery_confirmed = (
         previous_filter_suspected is True
         and service_ok is True
@@ -106,7 +142,15 @@ def derive_observability(
         previous_filter_suspected is True and not recovery_confirmed
     )
 
-    def result(diagnostic, suspected, confidence, filter_reason):
+    def result(diagnostic, suspected, confidence, filter_reason, filter_state=None):
+        if filter_state is None:
+            if suspected is True:
+                filter_state = FILTER_STATE_LIKELY
+            elif suspected is False:
+                filter_state = FILTER_STATE_CLEAR
+            else:
+                filter_state = FILTER_STATE_UNKNOWN
+
         # A previously confirmed filtering condition cannot be cleared by missing
         # evidence, an unrelated WG/Core failure, or a single successful regional
         # check. Only the explicit recovery condition above clears it.
@@ -121,12 +165,14 @@ def derive_observability(
                 True,
                 FILTER_CONFIDENCE_LOW,
                 FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
+                FILTER_STATE_LIKELY,
             )
         return ObservabilityDecision(
             diagnostic,
             suspected,
             confidence,
             filter_reason,
+            filter_state,
         )
 
     if service_ok is None or admin_ok is None:
@@ -190,7 +236,62 @@ def derive_observability(
                 False,
                 FILTER_CONFIDENCE_LOW,
                 FILTER_REASON_NONE,
+                FILTER_STATE_UNKNOWN,
             )
+
+        if regional_state_supplied:
+            # A weak-but-diverse POSSIBLE round remains POSSIBLE even if it repeats.
+            # Temporal repetition cannot manufacture spatial evidence that the
+            # current round does not contain.
+            if normalized_regional_state == FILTER_STATE_POSSIBLE:
+                return result(
+                    DIAG_REGIONAL_REACHABILITY_FAILURE,
+                    False,
+                    FILTER_CONFIDENCE_LOW,
+                    FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
+                    FILTER_STATE_POSSIBLE,
+                )
+
+            if normalized_regional_state == FILTER_STATE_LIKELY:
+                if regional_failure_streak >= confirm_threshold:
+                    confidence = (
+                        FILTER_CONFIDENCE_HIGH
+                        if external_service_ok is True
+                        else FILTER_CONFIDENCE_MEDIUM
+                    )
+                    # Without a successful external control, keep the user-facing
+                    # state at POSSIBLE even though legacy filter_suspected remains
+                    # true/medium for backwards compatibility.
+                    final_state = (
+                        FILTER_STATE_LIKELY
+                        if external_service_ok is True
+                        else FILTER_STATE_POSSIBLE
+                    )
+                    return ObservabilityDecision(
+                        DIAG_FILTER_SUSPECTED,
+                        True,
+                        confidence,
+                        FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
+                        final_state,
+                    )
+                return result(
+                    DIAG_REGIONAL_REACHABILITY_FAILURE,
+                    False,
+                    FILTER_CONFIDENCE_MEDIUM,
+                    FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
+                    FILTER_STATE_POSSIBLE,
+                )
+
+            return result(
+                DIAG_INSUFFICIENT_EVIDENCE,
+                None,
+                FILTER_CONFIDENCE_NONE,
+                FILTER_REASON_INSUFFICIENT_EVIDENCE,
+                FILTER_STATE_UNKNOWN,
+            )
+
+        # Backwards-compatible Phase 6C behaviour for callers that do not yet pass
+        # the richer Phase 6E regional round state.
         if regional_failure_streak >= confirm_threshold:
             confidence = (
                 FILTER_CONFIDENCE_HIGH
@@ -202,12 +303,18 @@ def derive_observability(
                 True,
                 confidence,
                 FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
+                (
+                    FILTER_STATE_LIKELY
+                    if confidence == FILTER_CONFIDENCE_HIGH
+                    else FILTER_STATE_POSSIBLE
+                ),
             )
         return result(
             DIAG_REGIONAL_REACHABILITY_FAILURE,
             False,
             FILTER_CONFIDENCE_LOW,
             FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
+            FILTER_STATE_POSSIBLE,
         )
 
     if external_service_ok is False:
@@ -225,6 +332,7 @@ def derive_observability(
                 True,
                 FILTER_CONFIDENCE_MEDIUM,
                 FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
+                FILTER_STATE_LIKELY,
             )
         # Recovery is complete only after the configured regional success threshold.
         return result(
@@ -232,6 +340,7 @@ def derive_observability(
             False,
             FILTER_CONFIDENCE_NONE,
             FILTER_REASON_NONE,
+            FILTER_STATE_CLEAR,
         )
 
     # Regional evidence is optional. Local diagnostics remain useful while the
@@ -242,5 +351,6 @@ def derive_observability(
         None,
         FILTER_CONFIDENCE_NONE,
         FILTER_REASON_INSUFFICIENT_EVIDENCE,
+        FILTER_STATE_UNKNOWN,
     )
 

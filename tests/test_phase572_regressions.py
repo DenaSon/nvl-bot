@@ -10,11 +10,10 @@ class Phase572V2RayVolumeExpiryRegressionTests(unittest.TestCase):
     def setUpClass(cls):
         cls.source = BOT_PATH.read_text(encoding="utf-8")
 
-    def test_v112_marker_is_present(self):
-        self.assertIn(
-            'BOT_VERSION_TAG = "V112-2026-10-02-v2ray-volume-expiry"',
-            self.source,
-        )
+    def test_phase572_features_survive_current_version(self):
+        self.assertIn("BOT_VERSION_TAG =", self.source)
+        self.assertIn("async def _show_v2_vol_expiry_step", self.source)
+        self.assertIn("v2_vol_expiry_days", self.source)
 
     def test_volume_sale_has_expiry_step(self):
         self.assertIn("async def _show_v2_vol_expiry_step", self.source)

@@ -153,24 +153,26 @@ if [ -n "$SELF_IP" ]; then
     fi
 fi
 
-# 🆕 پورت پیش‌فرضِ مشتری‌ها (که اکثر Edgeها روش SSH را باز نگه می‌دارند، نه لزوماً ۲۲) —
-# چون نمی‌دانیم آیا host_pool در نسخهٔ فعلی ستون پورتِ اختصاصی هر Edge را دارد یا نه، امن‌ترین
-# راه این است که مثل خودِ تابع افزودن خودکار Edge در ربات، چند پورت محتمل را امتحان کنیم.
-DEFAULT_CUSTOMER_PORT=$(sqlite3 "$DB_PATH" "SELECT value FROM settings WHERE key='port';" 2>/dev/null)
-DEFAULT_CUSTOMER_PORT="${DEFAULT_CUSTOMER_PORT:-8443}"
+# Phase 6A: management-plane SSH is independent from customer service ports.
+# Never probe settings.port here: on Relay Edges it can DNAT to Core and prove the wrong host.
+HAS_ADMIN_PORT_COL="$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM pragma_table_info('host_pool') WHERE name='admin_ssh_port';" 2>/dev/null || echo 0)"
 
-# پورتِ واقعاً بازِ یک Edge را با امتحان‌کردن چند کاندید پیدا می‌کند؛ در stdout همان پورت را چاپ می‌کند
 detect_edge_port() {
     local edge="$1"
-    local candidates=(22 "$DEFAULT_CUSTOMER_PORT")
-    local p
-    for p in "${candidates[@]}"; do
-        if ssh -i "$EDGE_SSH_KEY" -p "$p" -o ConnectTimeout=6 -o BatchMode=yes \
-                -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "root@${edge}" "true" 2>/dev/null; then
-            echo "$p"
-            return 0
+    local p="22"
+    if [ "$HAS_ADMIN_PORT_COL" = "1" ]; then
+        local safe_edge="${edge//\'/\'\'}"
+        local db_port
+        db_port="$(sqlite3 "$DB_PATH" "SELECT admin_ssh_port FROM host_pool WHERE host='${safe_edge}' LIMIT 1;" 2>/dev/null)"
+        if [[ "$db_port" =~ ^[0-9]+$ ]] && [ "$db_port" -ge 1 ] && [ "$db_port" -le 65535 ]; then
+            p="$db_port"
         fi
-    done
+    fi
+    if ssh -i "$EDGE_SSH_KEY" -p "$p" -o ConnectTimeout=6 -o BatchMode=yes \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "root@${edge}" "true" 2>/dev/null; then
+        echo "$p"
+        return 0
+    fi
     return 1
 }
 
@@ -185,7 +187,7 @@ for EDGE in "${EDGE_HOSTS[@]}"; do
 
     EDGE_PORT=$(detect_edge_port "$EDGE")
     if [ -z "$EDGE_PORT" ]; then
-        log "   ❌ هیچ‌کدام از پورت‌های امتحان‌شده (22, ${DEFAULT_CUSTOMER_PORT}) روی ${EDGE} پاسخ نداد — رد شد."
+        log "   ❌ SSH مدیریتی ثبت‌شده برای ${EDGE} پاسخ نداد — پورت سرویس مشتری عمداً امتحان نشد؛ رد شد."
         FAIL=$((FAIL+1))
         continue
     fi

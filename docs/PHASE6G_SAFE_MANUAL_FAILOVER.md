@@ -205,6 +205,12 @@ remove this guard while `public_domain` remains global.
 Legacy rows with `host IS NULL` or empty are not considered explicit conflicting
 Edge assignments; they follow the system default.
 
+Because Phase 6G only allows the current default Edge to be the source, those
+legacy unassigned active SSH accounts are included in the source snapshot and
+rebuilt on the Standby as well. On successful commit their `host` becomes the
+explicit target host. If rollback is required, they are restored to the explicit
+source host, safely normalizing the legacy implicit assignment.
+
 ## DNS preflight
 
 Cloudflare fixed-domain configuration must be complete.

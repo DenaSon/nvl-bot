@@ -2404,6 +2404,18 @@ def _db_commit_failover_account_state(
                 f"added={added[:10]} removed={removed[:10]}"
             )
 
+        # The selected target must still be an active Standby at commit time. Consume
+        # the Standby role in this same transaction as account/default ownership so a
+        # crash or uncertain DNS handoff can never leave a live owner selectable as a
+        # spare Standby.
+        cur = conn.execute(
+            "UPDATE host_pool SET is_standby=0 "
+            "WHERE host=? AND active=1 AND is_standby=1",
+            (target_host,),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError("TARGET_STANDBY_STATE_CHANGED")
+
         moved = 0
         for username in usernames:
             cur = conn.execute(
@@ -2463,6 +2475,16 @@ def _db_rollback_failover_account_state(
             )
             if cur.rowcount != 1:
                 raise RuntimeError("previous default host could not be restored")
+
+        # A successful rollback makes the original target a spare again. Restore the
+        # role atomically with ownership/default so metadata never advertises a live
+        # account owner as Standby.
+        cur = conn.execute(
+            "UPDATE host_pool SET is_standby=1 WHERE host=?",
+            (target_host,),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError("target host could not be restored to standby")
 
         return restored
 
@@ -17459,6 +17481,7 @@ async def _safe_manual_failover_preflight(source_host: str, target_host: str):
         if not core_service_ok:
             errors.append(f"CORE_FALLBACK_SERVICE_DOWN:{normalize_probe_error(core_service_err)}")
 
+    errors = list(dict.fromkeys(errors))
     return {
         "ok": not errors,
         "errors": errors,

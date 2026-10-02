@@ -1,12 +1,18 @@
+import io
 import pathlib
 import unittest
+import urllib.error
 import urllib.parse
+from unittest import mock
 
 from checkhost_probe import (
+    CHECK_HOST_USER_AGENT,
     CheckHostClient,
+    CheckHostError,
     CheckHostNode,
     RegionalTcpProbe,
     TcpNodeEvidence,
+    _default_transport,
     normalize_tcp_node_result,
 )
 
@@ -61,6 +67,55 @@ class Phase6DCheckHostParsingTests(unittest.TestCase):
         self.assertIsNone(result.ok)
         self.assertTrue(result.pending)
         self.assertIsNone(result.error)
+
+
+class Phase6DHttpTransportTests(unittest.TestCase):
+    def test_default_transport_uses_descriptive_user_agent(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"nodes": {}}'
+
+        with mock.patch(
+            "checkhost_probe.urllib.request.urlopen",
+            return_value=FakeResponse(),
+        ) as opener:
+            payload = _default_transport(
+                "https://check-host.net/nodes/hosts",
+                6.0,
+            )
+
+        request = opener.call_args.args[0]
+        self.assertEqual(request.get_header("Accept"), "application/json")
+        self.assertEqual(request.get_header("User-agent"), CHECK_HOST_USER_AGENT)
+        self.assertEqual(payload, {"nodes": {}})
+
+    def test_default_transport_surfaces_http_status(self):
+        error = urllib.error.HTTPError(
+            "https://check-host.net/nodes/hosts",
+            403,
+            "Forbidden",
+            hdrs=None,
+            fp=io.BytesIO(b"<html>blocked</html>"),
+        )
+
+        with mock.patch(
+            "checkhost_probe.urllib.request.urlopen",
+            side_effect=error,
+        ):
+            with self.assertRaises(CheckHostError) as raised:
+                _default_transport(
+                    "https://check-host.net/nodes/hosts",
+                    6.0,
+                )
+
+        self.assertIn("HTTP 403", str(raised.exception))
+        self.assertIn("Forbidden", str(raised.exception))
 
 
 class Phase6DCheckHostClientTests(unittest.TestCase):

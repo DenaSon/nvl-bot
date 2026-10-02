@@ -1674,7 +1674,7 @@ def _db_recompute_host_observability(host):
 
     if previous_diagnostic != diagnostic_reason:
         log.info(
-            "Phase6F diagnostic transition host=%s previous=%s current=%s "
+            "Phase6C diagnostic transition (Phase6F state) host=%s previous=%s current=%s "
             "filter_state=%s confidence=%s",
             host,
             previous_diagnostic or DIAG_INSUFFICIENT_EVIDENCE,
@@ -17472,8 +17472,6 @@ async def _regional_filter_probe_edge(app, host, service_port, client, nodes):
         probe,
         regional_decision,
     )
-    await _regional_provider_mark_ok(app)
-
     if recompute_result:
         await _notify_filter_state_transition(
             app,
@@ -17539,6 +17537,7 @@ async def _regional_filter_tick(app):
         log.warning("Phase6F node discovery returned no Iranian nodes.")
         return
 
+    round_provider_ok = True
     for index, (host, service_port, _is_standby) in enumerate(edge_targets):
         result = await _regional_filter_probe_edge(
             app,
@@ -17547,10 +17546,20 @@ async def _regional_filter_tick(app):
             client,
             nodes,
         )
-        if result.get("status") == PROVIDER_STATUS_LIMITED:
+        status = result.get("status")
+        if status == PROVIDER_STATUS_LIMITED:
+            round_provider_ok = False
             break
+        if status != PROVIDER_STATUS_OK:
+            round_provider_ok = False
         if index + 1 < len(edge_targets) and REGIONAL_FILTER_EDGE_GAP_SECONDS > 0:
             await asyncio.sleep(REGIONAL_FILTER_EDGE_GAP_SECONDS)
+
+    # Reset the global provider limit streak only after the entire scheduled round
+    # completed without provider errors/limits. A success on Edge A must not erase
+    # a repeated limit that appears on Edge B.
+    if round_provider_ok:
+        await _regional_provider_mark_ok(app)
 
 
 async def _regional_filter_probe_one_now(app, host):
@@ -17577,13 +17586,16 @@ async def _regional_filter_probe_one_now(app, host):
     except CheckHostError as exc:
         return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": str(exc)}
     nodes = tuple(nodes[:REGIONAL_FILTER_MAX_NODES])
-    return await _regional_filter_probe_edge(
+    result = await _regional_filter_probe_edge(
         app,
         host,
         service_port,
         client,
         nodes,
     )
+    if result.get("status") == PROVIDER_STATUS_OK:
+        await _regional_provider_mark_ok(app)
+    return result
 
 
 async def _regional_filter_loop(app):

@@ -232,7 +232,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V113-2026-10-02-phase6a-port-health-separation"
+BOT_VERSION_TAG = "V114-2026-10-02-phase6b-unified-health-model"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -955,6 +955,22 @@ def init_db():
         except sqlite3.OperationalError: pass
         try: c.execute("ALTER TABLE host_pool ADD COLUMN service_last_status TEXT DEFAULT 'بررسی‌نشده'")
         except sqlite3.OperationalError: pass
+        # Phase 6B — typed probe evidence + canonical overall health state.
+        # Existing rows deliberately remain UNKNOWN until fresh probes populate evidence.
+        try: c.execute("ALTER TABLE host_pool ADD COLUMN service_ok INTEGER DEFAULT NULL")
+        except sqlite3.OperationalError: pass
+        try: c.execute("ALTER TABLE host_pool ADD COLUMN admin_ok INTEGER DEFAULT NULL")
+        except sqlite3.OperationalError: pass
+        try: c.execute("ALTER TABLE host_pool ADD COLUMN health_state TEXT DEFAULT 'UNKNOWN'")
+        except sqlite3.OperationalError: pass
+        try: c.execute("ALTER TABLE host_pool ADD COLUMN health_reason TEXT DEFAULT 'INSUFFICIENT_EVIDENCE'")
+        except sqlite3.OperationalError: pass
+        try: c.execute("ALTER TABLE host_pool ADD COLUMN health_updated_at TEXT DEFAULT NULL")
+        except sqlite3.OperationalError: pass
+        try: c.execute("ALTER TABLE host_pool ADD COLUMN health_since TEXT DEFAULT NULL")
+        except sqlite3.OperationalError: pass
+        try: c.execute("ALTER TABLE host_pool ADD COLUMN last_success_at TEXT DEFAULT NULL")
+        except sqlite3.OperationalError: pass
         # 🆕 زمان افزوده‌شدنِ این IP — برای دادن «دورهٔ مهلت» به Edgeهای تازه‌ساخته قبل از اینکه
         # پایش خودکار سلامت (_host_health_tick) سخت‌گیری کند. سرور تازه‌استارت‌شده معمولاً چند
         # دقیقه طول می‌کشد تا کامل بالا بیاید؛ بدون این مهلت، پایش می‌تواند در همون بازهٔ کوتاه
@@ -1260,23 +1276,99 @@ def _db_set_host_ssh_port(host, port):
     return _db_set_host_service_port(host, port)
 
 
+HEALTH_STATE_UNKNOWN = "UNKNOWN"
+HEALTH_STATE_HEALTHY = "HEALTHY"
+HEALTH_STATE_DEGRADED = "DEGRADED"
+HEALTH_STATE_UNHEALTHY = "UNHEALTHY"
+HEALTH_STATE_OFFLINE = "OFFLINE"
+
+HEALTH_REASON_INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+HEALTH_REASON_ALL_CHECKS_PASS = "ALL_CHECKS_PASS"
+HEALTH_REASON_ADMIN_SSH_DOWN = "ADMIN_SSH_DOWN"
+HEALTH_REASON_SERVICE_DOWN = "SERVICE_DOWN"
+HEALTH_REASON_SERVICE_AND_ADMIN_DOWN = "SERVICE_AND_ADMIN_DOWN"
+
+
+def _derive_host_health_state(service_ok, admin_ok):
+    """Pure Phase 6B classifier. Never parses human-readable status text."""
+    if service_ok is None or admin_ok is None:
+        return HEALTH_STATE_UNKNOWN, HEALTH_REASON_INSUFFICIENT_EVIDENCE
+    service_up = bool(service_ok)
+    admin_up = bool(admin_ok)
+    if service_up and admin_up:
+        return HEALTH_STATE_HEALTHY, HEALTH_REASON_ALL_CHECKS_PASS
+    if service_up and not admin_up:
+        return HEALTH_STATE_DEGRADED, HEALTH_REASON_ADMIN_SSH_DOWN
+    if not service_up and admin_up:
+        return HEALTH_STATE_UNHEALTHY, HEALTH_REASON_SERVICE_DOWN
+    return HEALTH_STATE_OFFLINE, HEALTH_REASON_SERVICE_AND_ADMIN_DOWN
+
+
+def _health_state_icon(state):
+    return {
+        HEALTH_STATE_HEALTHY: "🟢",
+        HEALTH_STATE_DEGRADED: "🟠",
+        HEALTH_STATE_UNHEALTHY: "🔴",
+        HEALTH_STATE_OFFLINE: "⚫️",
+        HEALTH_STATE_UNKNOWN: "⚪️",
+    }.get(state, "⚪️")
+
+
+def _db_recompute_host_health(host):
+    """Persist canonical state; health_since changes only on a state transition."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT service_ok, admin_ok, health_state, health_since "
+            "FROM host_pool WHERE host=?",
+            (host,),
+        ).fetchone()
+        if not row:
+            return HEALTH_STATE_UNKNOWN, HEALTH_REASON_INSUFFICIENT_EVIDENCE, False
+
+        service_ok, admin_ok, previous_state, previous_since = row
+        new_state, new_reason = _derive_host_health_state(service_ok, admin_ok)
+        previous_state = previous_state or HEALTH_STATE_UNKNOWN
+        changed = previous_state != new_state
+        health_since = now if changed or not previous_since else previous_since
+
+        conn.execute(
+            "UPDATE host_pool SET health_state=?, health_reason=?, "
+            "health_updated_at=?, health_since=? WHERE host=?",
+            (new_state, new_reason, now, health_since, host),
+        )
+        return new_state, new_reason, changed
+
+
 def _db_get_host_port_health_map():
     with db_conn() as conn:
         rows = conn.execute(
-            "SELECT host, service_last_check, service_last_status, "
-            "admin_last_check, admin_last_status, admin_consecutive_fails "
+            "SELECT host, service_last_check, service_last_status, service_ok, "
+            "admin_last_check, admin_last_status, admin_ok, admin_consecutive_fails, "
+            "health_state, health_reason, health_updated_at, health_since, last_success_at "
             "FROM host_pool"
         ).fetchall()
         return {
             host: {
                 "service_last_check": service_last_check,
                 "service_last_status": service_last_status,
+                "service_ok": None if service_ok is None else bool(service_ok),
                 "admin_last_check": admin_last_check,
                 "admin_last_status": admin_last_status,
+                "admin_ok": None if admin_ok is None else bool(admin_ok),
                 "admin_consecutive_fails": admin_fails or 0,
+                "health_state": health_state or HEALTH_STATE_UNKNOWN,
+                "health_reason": health_reason or HEALTH_REASON_INSUFFICIENT_EVIDENCE,
+                "health_updated_at": health_updated_at,
+                "health_since": health_since,
+                "last_success_at": last_success_at,
             }
-            for host, service_last_check, service_last_status,
-                admin_last_check, admin_last_status, admin_fails in rows
+            for (
+                host, service_last_check, service_last_status, service_ok,
+                admin_last_check, admin_last_status, admin_ok, admin_fails,
+                health_state, health_reason, health_updated_at, health_since,
+                last_success_at,
+            ) in rows
         }
 
 
@@ -1375,46 +1467,57 @@ async def _run_speed_test_all_hosts():
     return out
 
 def _db_record_host_check(host, ok, reason=None):
-    """Record customer service-path health. Legacy last_* columns remain service aliases."""
+    """Record typed customer service evidence and refresh the Phase 6B health model."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with db_conn() as conn:
         if ok:
+            fails = 0
             conn.execute(
                 "UPDATE host_pool SET consecutive_fails=0, last_check=?, last_status='🟢 سالم', "
-                "service_last_check=?, service_last_status='🟢 سالم' WHERE host=?",
-                (now, now, host),
+                "service_last_check=?, service_last_status='🟢 سالم', service_ok=1, "
+                "last_success_at=? WHERE host=?",
+                (now, now, now, host),
             )
-            return 0
-        row = conn.execute("SELECT consecutive_fails FROM host_pool WHERE host=?", (host,)).fetchone()
-        fails = (row[0] if row else 0) + 1
-        status = f"🔴 ناموفق: {str(reason)[:150]}"
-        conn.execute(
-            "UPDATE host_pool SET consecutive_fails=?, last_check=?, last_status=?, "
-            "service_last_check=?, service_last_status=? WHERE host=?",
-            (fails, now, status, now, status, host),
-        )
-        return fails
+        else:
+            row = conn.execute(
+                "SELECT consecutive_fails FROM host_pool WHERE host=?",
+                (host,),
+            ).fetchone()
+            fails = (row[0] if row else 0) + 1
+            status = f"🔴 ناموفق: {str(reason)[:150]}"
+            conn.execute(
+                "UPDATE host_pool SET consecutive_fails=?, last_check=?, last_status=?, "
+                "service_last_check=?, service_last_status=?, service_ok=0 WHERE host=?",
+                (fails, now, status, now, status, host),
+            )
+    _db_recompute_host_health(host)
+    return fails
 
 
 def _db_record_admin_host_check(host, ok, reason=None):
-    """Record Edge management-plane health without changing service activation."""
+    """Record typed management-plane evidence without changing service activation."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with db_conn() as conn:
         if ok:
+            fails = 0
             conn.execute(
                 "UPDATE host_pool SET admin_consecutive_fails=0, admin_last_check=?, "
-                "admin_last_status='🟢 سالم' WHERE host=?",
+                "admin_last_status='🟢 سالم', admin_ok=1 WHERE host=?",
                 (now, host),
             )
-            return 0
-        row = conn.execute("SELECT admin_consecutive_fails FROM host_pool WHERE host=?", (host,)).fetchone()
-        fails = (row[0] if row and row[0] is not None else 0) + 1
-        conn.execute(
-            "UPDATE host_pool SET admin_consecutive_fails=?, admin_last_check=?, admin_last_status=? "
-            "WHERE host=?",
-            (fails, now, f"🔴 ناموفق: {str(reason)[:150]}", host),
-        )
-        return fails
+        else:
+            row = conn.execute(
+                "SELECT admin_consecutive_fails FROM host_pool WHERE host=?",
+                (host,),
+            ).fetchone()
+            fails = (row[0] if row and row[0] is not None else 0) + 1
+            conn.execute(
+                "UPDATE host_pool SET admin_consecutive_fails=?, admin_last_check=?, "
+                "admin_last_status=?, admin_ok=0 WHERE host=?",
+                (fails, now, f"🔴 ناموفق: {str(reason)[:150]}", host),
+            )
+    _db_recompute_host_health(host)
+    return fails
 def _db_set_host_active(host, active: bool, reason=None):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with db_conn() as conn:
@@ -8487,7 +8590,6 @@ async def _render_host_pool_panel(query):
     lines = []
     kb = []
     for host, active, fails, last_check, last_status, disabled_reason, disabled_at, is_default, avg_latency_ms, added_at, is_standby in pool:
-        icon = "🟢" if active else "🔴"
         star = " ⭐ (پیش‌فرض سیستم)" if is_default else ""
         standby_badge = " 🅢 (Standby)" if is_standby else ""
         # 🆕 «کدام VPS سرعتش بهتره»: تاخیر اتصال TCP (میانگین هموارشده) کنار وضعیت هر IP نشان داده
@@ -8499,14 +8601,27 @@ async def _render_host_pool_panel(query):
         ph = port_health.get(host, {})
         service_status = ph.get("service_last_status") or last_status or "بررسی‌نشده"
         admin_status = ph.get("admin_last_status") or "بررسی‌نشده"
+        overall_state = ph.get("health_state") or HEALTH_STATE_UNKNOWN
+        overall_reason = ph.get("health_reason") or HEALTH_REASON_INSUFFICIENT_EVIDENCE
+        overall_icon = _health_state_icon(overall_state)
+        membership = "ACTIVE" if active else "INACTIVE"
         line = (
-            f"{icon} <code>{esc(host)}</code>{star}{standby_badge}{latency_txt}\n"
+            f"{overall_icon} <code>{esc(host)}</code>{star}{standby_badge}{latency_txt}\n"
+            f"   🧭 Overall: <b>{esc(overall_state)}</b> · <code>{esc(overall_reason)}</code>\n"
+            f"   📍 Membership: <code>{membership}</code>\n"
             f"   🌐 Service <code>{service_port}</code> — {esc(service_status)}\n"
             f"   🔐 Admin SSH <code>{admin_port}</code> — {esc(admin_status)}"
         )
-        if last_check: line += f"\n   ⏱ آخرین Service check: {esc(last_check)}"
-        if ph.get("admin_last_check"): line += f"\n   ⏱ آخرین Admin check: {esc(ph['admin_last_check'])}"
-        if not active and disabled_reason: line += f"\n   🚫 غیرفعال از: {esc(disabled_at)} ({esc(disabled_reason)})"
+        if ph.get("health_since"):
+            line += f"\n   🕒 وضعیت فعلی از: {esc(ph['health_since'])}"
+        if ph.get("last_success_at"):
+            line += f"\n   ✅ آخرین موفقیت Service: {esc(ph['last_success_at'])}"
+        if last_check:
+            line += f"\n   ⏱ آخرین Service check: {esc(last_check)}"
+        if ph.get("admin_last_check"):
+            line += f"\n   ⏱ آخرین Admin check: {esc(ph['admin_last_check'])}"
+        if not active and disabled_reason:
+            line += f"\n   🚫 غیرفعال از: {esc(disabled_at)} ({esc(disabled_reason)})"
         # 🆕 اگر هنوز داخل دورهٔ مهلت تازه‌افزوده‌شدن است، همین‌جا شفاف نشان می‌دهیم — وگرنه
         # «بررسی‌نشده» تنها می‌تواند گیج‌کننده باشد (چرا هنوز تست نشده؟).
         if active and added_at:
@@ -8570,7 +8685,8 @@ async def _render_host_pool_panel(query):
     body = "\n\n".join(lines) if lines else "هیچ IP ای هنوز در استخر پایش ثبت نشده."
     await query.edit_message_text(
         f"🛡 <b>وضعیت پایش سلامت IPها</b>\n\n{body}{dns_line}{cz_line}\n\n"
-        f"🟢 = فعال و در حال سرویس‌دهی | 🔴 = غیرفعال (خودکار یا دستی) | ⚡ = تاخیر اتصال (هرچه کمتر بهتر) | 🏆 = سریع‌ترین فعال\n"
+        f"🟢 HEALTHY | 🟠 DEGRADED | 🔴 UNHEALTHY | ⚫️ OFFLINE | ⚪️ UNKNOWN | ⚡ تاخیر Service | 🏆 سریع‌ترین فعال\n"
+        f"Membership (ACTIVE/INACTIVE) مستقل از Health است و همچنان منطق فعلی سرویس/Failover را کنترل می‌کند.\n"
         f"می‌توانید هر IP سالم را دستی «بلاک» کنید (مثلاً وقتی مشتری گزارش فیلترشدن داده) یا یک IP "
         f"غیرفعال را دوباره تست و فعال کنید.", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 

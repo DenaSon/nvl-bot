@@ -9450,6 +9450,182 @@ async def _render_host_pool_panel(query, page=0):
         f"می‌توانید هر IP سالم را دستی «بلاک» کنید (مثلاً وقتی مشتری گزارش فیلترشدن داده) یا یک IP "
         f"غیرفعال را دوباره تست و فعال کنید.", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
+
+def _filter_state_icon(state):
+    state = str(state or FILTER_STATE_UNKNOWN).upper()
+    if state == FILTER_STATE_CLEAR:
+        return "🟢"
+    if state == FILTER_STATE_POSSIBLE:
+        return "🟡"
+    if state == FILTER_STATE_LIKELY:
+        return "🔴"
+    return "⚪️"
+
+
+async def _render_filtering_monitor_panel(query, page=0):
+    await asyncio.to_thread(_db_sync_host_pool)
+    pool = await asyncio.to_thread(_db_get_host_pool)
+    health = await asyncio.to_thread(_db_get_host_port_health_map)
+    runtime = await asyncio.to_thread(_db_get_regional_provider_runtime)
+    backoff = await asyncio.to_thread(_db_regional_backoff_remaining_seconds)
+
+    edge_rows = []
+    for row in pool:
+        host = row[0]
+        if await asyncio.to_thread(_is_current_core_host, host):
+            continue
+        edge_rows.append(row)
+
+    page_size = 5
+    total = len(edge_rows)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    try:
+        page = int(page)
+    except (TypeError, ValueError):
+        page = 0
+    page = max(0, min(page, total_pages - 1))
+    start = page * page_size
+    end = min(start + page_size, total)
+
+    provider_status = runtime.get("status") or PROVIDER_STATUS_NEVER
+    provider_line = f"Provider: <b>{esc(provider_status)}</b>"
+    if backoff > 0:
+        provider_line += f" · ⏳ Backoff ~{max(1, backoff // 60)} دقیقه"
+
+    lines = [
+        "🛡 <b>Filtering Monitor — Phase 6F</b>",
+        "",
+        "Mode: <b>MONITOR ONLY</b> — هیچ Failover/DNS/Account action خودکاری انجام نمی‌شود.",
+        f"Check interval: <code>{REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS}s</code>",
+        provider_line,
+        "",
+    ]
+    kb = []
+
+    for row in edge_rows[start:end]:
+        host, active, *_rest = row
+        is_standby = bool(row[10]) if len(row) > 10 else False
+        ph = health.get(host, {})
+        state = ph.get("filter_state") or FILTER_STATE_UNKNOWN
+        icon = _filter_state_icon(state)
+        failed = ph.get("regional_failed_nodes", 0)
+        completed = ph.get("regional_completed_nodes", 0)
+        provider = ph.get("regional_provider_status") or PROVIDER_STATUS_NEVER
+        role = "Standby" if is_standby else ("Active" if active else "Inactive")
+        lines.append(
+            f"{icon} <code>{esc(host)}</code> — <b>{esc(state)}</b> · "
+            f"{failed}/{completed} failed · {esc(role)} · Provider {esc(provider)}"
+        )
+        kb.append([
+            InlineKeyboardButton(
+                f"{icon} جزئیات {host}",
+                callback_data=f"flt_detail_{host}",
+            )
+        ])
+
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"flt_page_{page - 1}"))
+        nav.append(InlineKeyboardButton(f"📄 {page + 1}/{total_pages}", callback_data=f"flt_page_{page}"))
+        if page + 1 < total_pages:
+            nav.append(InlineKeyboardButton("بعدی ➡️", callback_data=f"flt_page_{page + 1}"))
+        kb.append(nav)
+
+    if not edge_rows:
+        lines.append("هیچ Edge فعالی برای مانیتورینگ ثبت نشده است.")
+
+    kb.append([InlineKeyboardButton("🔙 بازگشت به وضعیت IPها", callback_data="hp_menu")])
+    await query.edit_message_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="HTML",
+    )
+
+
+async def _render_filtering_edge_detail(query, host):
+    health = await asyncio.to_thread(_db_get_host_port_health_map)
+    ph = health.get(host)
+    if not ph:
+        await query.edit_message_text(
+            "❌ این Edge در host_pool پیدا نشد.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Filtering Monitor", callback_data="hp_filtering")
+            ]]),
+        )
+        return
+
+    service_port = await asyncio.to_thread(_db_get_host_service_port, host, 22)
+    backoff = await asyncio.to_thread(_db_regional_backoff_remaining_seconds)
+    state = ph.get("filter_state") or FILTER_STATE_UNKNOWN
+    icon = _filter_state_icon(state)
+    success_ratio = ph.get("regional_success_ratio")
+    success_pct = "—" if success_ratio is None else f"{success_ratio * 100:.0f}%"
+    failed_asns = ph.get("regional_failed_asns") or "—"
+    failed_cities = ph.get("regional_failed_cities") or "—"
+    provider_error = ph.get("regional_provider_error") or "—"
+
+    text = (
+        f"{icon} <b>Filtering Detail</b>\n\n"
+        f"Edge: <code>{esc(host)}</code>\n"
+        f"Service port: <code>{service_port}</code>\n"
+        f"Final state: <b>{esc(state)}</b>\n"
+        f"Confidence: <b>{esc(ph.get('filter_confidence') or FILTER_CONFIDENCE_NONE)}</b>\n"
+        f"Diagnostic: <code>{esc(ph.get('diagnostic_reason') or DIAG_INSUFFICIENT_EVIDENCE)}</code>\n\n"
+        f"🌐 Service: {_probe_state_text(ph.get('service_ok'))}\n"
+        f"🔐 Admin: {_probe_state_text(ph.get('admin_ok'))}\n"
+        f"🔗 WireGuard: {_probe_state_text(ph.get('wg_peer_ok'))}\n"
+        f"🛣 Core path: {_probe_state_text(ph.get('core_path_ok'))}\n"
+        f"🌍 External (Core→Edge): {_probe_state_text(ph.get('external_service_ok'))}\n\n"
+        f"📡 Regional round: <b>{esc(ph.get('regional_filter_state') or FILTER_STATE_UNKNOWN)}</b>\n"
+        f"Reason: <code>{esc(ph.get('regional_filter_reason') or '—')}</code>\n"
+        f"Nodes: ✅ {ph.get('regional_successful_nodes', 0)} · ❌ {ph.get('regional_failed_nodes', 0)} · "
+        f"⏳ {ph.get('regional_pending_nodes', 0)} / {ph.get('regional_total_nodes', 0)}\n"
+        f"Success ratio: <b>{esc(success_pct)}</b>\n"
+        f"Failed ASNs: <code>{esc(failed_asns)}</code>\n"
+        f"Failed Cities: <code>{esc(failed_cities)}</code>\n"
+        f"Failure streak: <b>{ph.get('filter_consecutive_failures', 0)}</b> · "
+        f"Recovery streak: <b>{ph.get('filter_consecutive_successes', 0)}</b>\n\n"
+        f"Provider: <b>{esc(ph.get('regional_provider_status') or PROVIDER_STATUS_NEVER)}</b>\n"
+        f"Provider error: <code>{esc(provider_error)}</code>\n"
+        f"Request ID: <code>{esc(ph.get('regional_last_request_id') or '—')}</code>\n"
+        f"Last regional check: {esc(ph.get('regional_service_last_check') or '—')}\n"
+        f"Last state update: {esc(ph.get('regional_state_updated_at') or '—')}"
+    )
+    if backoff > 0:
+        text += f"\n⏳ Global provider backoff: ~{max(1, backoff // 60)} دقیقه"
+
+    kb = [
+        [InlineKeyboardButton("🔄 تست مجدد الآن", callback_data=f"flt_check_{host}")],
+        [InlineKeyboardButton("📊 آخرین Probeهای Node", callback_data=f"flt_probe_{host}")],
+        [InlineKeyboardButton("🔙 Filtering Monitor", callback_data="hp_filtering")],
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+
+
+async def _render_filtering_probe_details(query, host):
+    rows = await asyncio.to_thread(_db_get_recent_regional_node_results, host, REGIONAL_FILTER_MAX_NODES)
+    lines = [f"📊 <b>آخرین Node Probeها</b>\nEdge: <code>{esc(host)}</code>\n"]
+    if not rows:
+        lines.append("هنوز Node evidence ثبت نشده است.")
+    else:
+        for source, ok_raw, latency_ms, reason, checked_at in reversed(rows):
+            ok = None if ok_raw is None else bool(ok_raw)
+            badge = _probe_state_text(ok)
+            latency = f" · {latency_ms:.0f}ms" if latency_ms is not None else ""
+            lines.append(
+                f"{badge} <code>{esc(source)}</code>{latency}\n"
+                f"   <code>{esc(reason or '')}</code> · {esc(checked_at or '')}"
+            )
+
+    kb = [[InlineKeyboardButton("🔙 جزئیات Edge", callback_data=f"flt_detail_{host}")]]
+    await query.edit_message_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="HTML",
+    )
+
+
 async def _host_has_working_persistent_key(host, port=22, timeout=8):
     """🆕 تست سریع (بدون اجرای هیچ عملیاتی): آیا همین الان می‌شود با کلید دائمی، بدون رمز،
     روی این هاست لاگین کرد؟ برای نمایشِ ✅/❌ روی دکمهٔ «نصب دسترسی دائمی SSH» استفاده می‌شود."""

@@ -178,7 +178,8 @@ class V119BIntegrationStaticTests(unittest.TestCase):
             "async def _incident_mark_failover_blocked(",
             "async def _phase6h_auto_failover_tick",
         )
-        self.assertIn("standby_safety_failures", region)
+        self.assertIn("readiness_diagnostics", region)
+        self.assertIn("STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS", region)
         self.assertIn("AUTO_FAILOVER_BLOCKED", region)
         self.assertIn("Standby rejection", region)
         self.assertIn("_notify_incident_once", region)

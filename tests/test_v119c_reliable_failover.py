@@ -245,7 +245,7 @@ class V119CIntegrationShapeTests(unittest.TestCase):
 
     def test_phase6h_uses_all_configured_but_only_active_fresh_candidates(self):
         region = self._region(
-            "async def _phase6h_auto_failover_tick(app):",
+            "async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):",
             "async def _regional_filter_tick(app):",
         )
         self.assertIn("_db_get_all_standby_hosts", region)

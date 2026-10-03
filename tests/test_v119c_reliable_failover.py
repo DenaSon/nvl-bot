@@ -35,6 +35,7 @@ def ready_health(now, *, latency=20):
         "core_path_last_check": recent,
         "external_service_last_check": recent,
         "regional_service_last_check": recent,
+        "regional_state_updated_at": recent,
         "avg_latency_ms": latency,
     }
 
@@ -58,7 +59,7 @@ class V119CReadinessPolicyTests(unittest.TestCase):
 
     def test_stale_regional_clear_is_not_ready(self):
         health = ready_health(self.now)
-        health["regional_service_last_check"] = _ts(
+        health["regional_state_updated_at"] = _ts(
             self.now - timedelta(seconds=601)
         )
         verdict = evaluate_standby_readiness(
@@ -159,6 +160,21 @@ class V119CReadinessPolicyTests(unittest.TestCase):
 
     def test_evidence_age_missing_is_infinite(self):
         self.assertEqual(evidence_age_seconds(None, self.now), float("inf"))
+
+    def test_provider_attempt_timestamp_cannot_freshen_regional_evidence(self):
+        health = ready_health(self.now)
+        health["regional_state_updated_at"] = _ts(
+            self.now - timedelta(seconds=900)
+        )
+        health["regional_service_last_check"] = _ts(self.now)
+        verdict = evaluate_standby_readiness(
+            health,
+            now=self.now,
+            local_max_age_seconds=180,
+            regional_max_age_seconds=600,
+        )
+        self.assertFalse(verdict.ready)
+        self.assertIn("REGIONAL_EVIDENCE_STALE", verdict.failures)
 
 
 class V119CIntegrationShapeTests(unittest.TestCase):

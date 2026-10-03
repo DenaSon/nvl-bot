@@ -10187,6 +10187,29 @@ async def _render_filtering_monitor_panel(query, page=0):
             continue
         edge_rows.append(row)
 
+    standby_configured = []
+    standby_active = []
+    for row in edge_rows:
+        host = row[0]
+        is_active = bool(row[1])
+        is_standby = bool(row[10]) if len(row) > 10 else False
+        if host in health:
+            health[host] = dict(health[host])
+            health[host]["active"] = is_active
+            health[host]["avg_latency_ms"] = row[8] if len(row) > 8 else None
+        if is_standby:
+            standby_configured.append(host)
+            if is_active:
+                standby_active.append(host)
+
+    standby_ready = rank_ready_standbys(
+        standby_active,
+        health,
+        now=datetime.now(),
+        local_max_age_seconds=STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS,
+        regional_max_age_seconds=STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS,
+    )
+
     page_size = 5
     total = len(edge_rows)
     total_pages = max(1, (total + page_size - 1) // page_size)
@@ -10228,7 +10251,8 @@ async def _render_filtering_monitor_panel(query, page=0):
         "",
         f"Detection: <b>AUTO MONITOR</b> · Failover: <b>{failover_label}</b> · Auto Failover: <b>{auto_label}</b>",
         f"Check interval: <code>{REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS}s</code>",
-        f"Auto safety: LIKELY + HIGH · switch cooldown <code>{AUTO_FAILOVER_SWITCH_COOLDOWN_SECONDS // 60}m</code>",
+        f"Auto safety: LIKELY + HIGH · switch cooldown <code>{AUTO_FAILOVER_SWITCH_COOLDOWN_SECONDS // 60}m</code> · retry <code>{AUTO_FAILOVER_ATTEMPT_COOLDOWN_SECONDS // 60}m</code>",
+        f"Warm Standby: <b>{len(standby_ready)}/{len(standby_configured)} READY</b> · local ≤<code>{STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS}s</code> · regional ≤<code>{STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS}s</code>",
         provider_line,
         failover_line,
         "",
@@ -10244,7 +10268,16 @@ async def _render_filtering_monitor_panel(query, page=0):
         failed = ph.get("regional_failed_nodes", 0)
         completed = ph.get("regional_completed_nodes", 0)
         provider = ph.get("regional_provider_status") or PROVIDER_STATUS_NEVER
-        role = "Standby" if is_standby else ("Active" if active else "Inactive")
+        if is_standby:
+            verdict = evaluate_standby_readiness(
+                ph,
+                now=datetime.now(),
+                local_max_age_seconds=STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS,
+                regional_max_age_seconds=STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS,
+            )
+            role = "Standby ✅ Ready" if verdict.ready else "Standby ⚠️ Not Ready"
+        else:
+            role = "Active" if active else "Inactive"
         lines.append(
             f"{icon} <code>{esc(host)}</code> — <b>{esc(state)}</b> · "
             f"{failed}/{completed} failed · {esc(role)} · Provider {esc(provider)}"
@@ -10301,6 +10334,27 @@ async def _render_filtering_edge_detail(query, host):
     failed_asns = ph.get("regional_failed_asns") or "—"
     failed_cities = ph.get("regional_failed_cities") or "—"
     provider_error = ph.get("regional_provider_error") or "—"
+    meta = await asyncio.to_thread(_db_get_failover_host_meta, host)
+    standby_readiness_text = ""
+    if meta and meta.get("is_standby"):
+        ph = dict(ph)
+        ph["active"] = bool(meta.get("active"))
+        verdict = evaluate_standby_readiness(
+            ph,
+            now=datetime.now(),
+            local_max_age_seconds=STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS,
+            regional_max_age_seconds=STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS,
+        )
+        standby_readiness_text = (
+            "\n\n🛟 <b>Standby readiness:</b> "
+            + ("✅ READY" if verdict.ready else "⚠️ NOT READY")
+        )
+        if verdict.failures:
+            standby_readiness_text += (
+                "\nReasons: <code>"
+                + esc(", ".join(verdict.failures))
+                + "</code>"
+            )
 
     text = (
         f"{icon} <b>Filtering Detail</b>\n\n"
@@ -10328,6 +10382,7 @@ async def _render_filtering_edge_detail(query, host):
         f"Request ID: <code>{esc(ph.get('regional_last_request_id') or '—')}</code>\n"
         f"Last regional check: {esc(ph.get('regional_service_last_check') or '—')}\n"
         f"Last state update: {esc(ph.get('regional_state_updated_at') or '—')}"
+        f"{standby_readiness_text}"
     )
     if backoff > 0:
         text += f"\n⏳ Global provider backoff: ~{max(1, backoff // 60)} دقیقه"
@@ -20505,6 +20560,7 @@ async def _post_init(app):
     app.bot_data['host_health_task'] = asyncio.create_task(_host_health_loop(app))
     app.bot_data['regional_filter_task'] = asyncio.create_task(_regional_filter_loop(app))
     app.bot_data['fast_default_sentinel_task'] = asyncio.create_task(_fast_default_sentinel_loop(app))
+    app.bot_data['standby_readiness_task'] = asyncio.create_task(_standby_readiness_loop(app))
     app.bot_data['udpgw_health_task'] = asyncio.create_task(_udpgw_health_loop(app))
     app.bot_data['daily_sales_report_task'] = asyncio.create_task(_daily_sales_report_loop(app))
     app.bot_data['filter_detect_task'] = asyncio.create_task(_filter_detect_loop(app))  # 🆕 V89
@@ -20521,7 +20577,7 @@ async def _post_shutdown(app):
     # قلم افتاده بود — پس هیچ‌وقت cancel نمی‌شد و روی asyncio.sleep(...) منتظر می‌ماند، پروسه
     # واقعاً خارج نمی‌شد تا systemd صبرش تمام شود و به‌زور بکشدش (که همان قطعیِ طولانی و نیازِ
     # نماینده‌ها به ورودِ مجدد را رقم می‌زد).
-    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 V119A Regional Filter Monitor'), ('fast_default_sentinel_task', '⚡ V119A Fast Default Sentinel'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار')):
+    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 V119A Regional Filter Monitor'), ('fast_default_sentinel_task', '⚡ V119A Fast Default Sentinel'), ('standby_readiness_task', '🛟 V119C Warm Standby Watchdog'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار')):
         task = app.bot_data.get(key)
         if task and not task.done():
             task.cancel()
@@ -20568,4 +20624,5 @@ if __name__ == '__main__':
     print(f"📉 Traffic Anomaly signal فعال است (هر {FILTER_DETECT_CHECK_INTERVAL_SECONDS}s؛ بدون Failover).")
     auto_state = "ON" if _db_get_setting('phase6h_auto_failover_enabled', '0') == '1' else "OFF"
     print(f"⚡ V119A Fast Detection فعال است (Default Regional هر {REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS}s؛ Sentinel هر {FAST_SENTINEL_INTERVAL_SECONDS}s؛ Auto Failover={auto_state}).")
+    print(f"🛟 V119C Reliable Auto Failover فعال است (Standby Watchdog هر {STANDBY_READINESS_INTERVAL_SECONDS}s؛ Regional refresh هر {STANDBY_REGIONAL_REFRESH_INTERVAL_SECONDS}s؛ retry cooldown={AUTO_FAILOVER_ATTEMPT_COOLDOWN_SECONDS}s).")
     app.run_polling()

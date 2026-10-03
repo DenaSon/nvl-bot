@@ -142,10 +142,10 @@ class Phase6FBotIntegrationStaticTests(unittest.TestCase):
         self.assertNotIn("_db_record_regional_round", region)
         self.assertNotIn("regional_service_ok=0", region)
 
-    def test_provider_limit_streak_resets_only_after_full_scheduled_round(self):
+    def test_provider_state_resets_after_successful_default_probe(self):
         probe_region = self._region(
             "async def _regional_filter_probe_edge(",
-            "async def _regional_filter_tick(app):",
+            "async def _phase6h_auto_failover_tick(app):",
         )
         self.assertNotIn("_regional_provider_mark_ok", probe_region)
 
@@ -153,18 +153,23 @@ class Phase6FBotIntegrationStaticTests(unittest.TestCase):
             "async def _regional_filter_tick(app):",
             "async def _regional_filter_probe_one_now",
         )
-        self.assertIn("round_provider_ok = True", tick_region)
-        self.assertIn("if round_provider_ok:", tick_region)
         self.assertIn("await _regional_provider_mark_ok(app)", tick_region)
+        self.assertNotIn("round_provider_ok", tick_region)
 
-    def test_runtime_targets_exclude_core_before_provider_check(self):
+    def test_runtime_targets_default_and_excludes_core_before_provider_check(self):
+        target_region = self._region(
+            "def _db_get_regional_monitor_targets():",
+            "def _db_get_recent_regional_node_results(",
+        )
+        self.assertIn("active=1 AND is_default=1", target_region)
+
         region = self._region(
             "async def _regional_filter_tick(app):",
             "async def _regional_filter_probe_one_now",
         )
         self.assertIn("_is_current_core_host", region)
-        self.assertIn("client.discover_nodes", region)
-        self.assertIn("REGIONAL_FILTER_EDGE_GAP_SECONDS", region)
+        self.assertIn("provider.discover_nodes", region)
+        self.assertNotIn("REGIONAL_FILTER_EDGE_GAP_SECONDS", region)
 
     def test_phase6f_probe_runtime_has_no_failover_side_effects(self):
         region = self._region(

@@ -189,7 +189,7 @@ class V119CIntegrationShapeTests(unittest.TestCase):
 
     def test_release_marker(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V120D.0-2026-10-03-marzban-alerts-observability"',
+            'BOT_VERSION_TAG = "V120D.1-2026-10-03-monitoring-ui"',
             self.source,
         )
 

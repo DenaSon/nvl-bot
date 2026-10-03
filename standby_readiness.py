@@ -65,6 +65,9 @@ def evaluate_standby_readiness(
     health = health or {}
     failures = []
 
+    if "active" in health and health.get("active") is not True:
+        failures.append("INACTIVE")
+
     required_true = (
         ("service_ok", "SERVICE_NOT_OK"),
         ("admin_ok", "ADMIN_NOT_OK"),

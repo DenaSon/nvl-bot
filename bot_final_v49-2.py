@@ -93,6 +93,7 @@ import aiohttp
 import qrcode
 import v2ray_engine
 import marzban_admin
+import marzban_asset_discovery
 import secrets
 
 import base64
@@ -612,6 +613,10 @@ STANDBY_FAILOVER_TARGET_MAX_AGE_SECONDS = _phase6c_env_int("NVL_STANDBY_FAILOVER
 STANDBY_REGIONAL_MAX_PER_CYCLE = _phase6c_env_int("NVL_STANDBY_REGIONAL_MAX_PER_CYCLE", 1)
 STANDBY_FAILOVER_REFRESH_MAX_TARGETS = _phase6c_env_int("NVL_STANDBY_FAILOVER_REFRESH_MAX_TARGETS", 2)
 
+# V120-A — read-only Marzban infrastructure inventory discovery.
+MARZBAN_ASSET_DISCOVERY_INTERVAL_SECONDS = _phase6c_env_int("NVL_MARZBAN_ASSET_DISCOVERY_INTERVAL", 300)
+MARZBAN_ASSET_DISCOVERY_INITIAL_DELAY_SECONDS = _phase6c_env_int("NVL_MARZBAN_ASSET_DISCOVERY_INITIAL_DELAY", 20, minimum=0)
+
 # ==========================================
 # 🆕 V89 — سیستم شناسایی خودکار فیلتر شدن بر اساس کاربران آنلاین
 # ==========================================
@@ -933,6 +938,9 @@ def init_db():
             "INSERT OR IGNORE INTO settings VALUES (?,?)",
             [(key, value) for key, value in _marzban_bootstrap if value],
         )
+
+        # V120-A — persistent read-only inventory for Marzban Main/Nodes/Public Hosts.
+        marzban_asset_discovery.install_schema(conn)
         # ---------------------------------------------------------
         
 
@@ -5653,6 +5661,63 @@ async def _get_marzban_admin_service():
     m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
     m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
     return marzban_admin.MarzbanAdminService(m_url, m_user, m_pwd)
+
+
+async def _marzban_asset_discovery_tick():
+    """V120-A read-only discovery: API snapshot -> persistent inventory only."""
+    service = await _get_marzban_admin_service()
+    snapshot = await marzban_asset_discovery.discover_from_service(service)
+
+    def _persist():
+        with db_conn() as conn:
+            return marzban_asset_discovery.sync_inventory(
+                conn,
+                snapshot.assets,
+                observed_at=snapshot.observed_at,
+            )
+
+    diff = await asyncio.to_thread(_persist)
+    counts = {}
+    for asset in snapshot.assets:
+        counts[asset.asset_type] = counts.get(asset.asset_type, 0) + 1
+
+    log.info(
+        "V120A Marzban asset discovery assets=%s main=%s nodes=%s public_hosts=%s added=%s changed=%s removed=%s",
+        len(snapshot.assets),
+        counts.get(marzban_asset_discovery.ASSET_MAIN, 0),
+        counts.get(marzban_asset_discovery.ASSET_NODE, 0),
+        counts.get(marzban_asset_discovery.ASSET_PUBLIC_HOST, 0),
+        len(diff.added),
+        len(diff.changed),
+        len(diff.removed),
+    )
+    return {
+        "assets": len(snapshot.assets),
+        "added": diff.added,
+        "changed": diff.changed,
+        "removed": diff.removed,
+    }
+
+
+async def _marzban_asset_discovery_loop(app):
+    if MARZBAN_ASSET_DISCOVERY_INITIAL_DELAY_SECONDS > 0:
+        await asyncio.sleep(MARZBAN_ASSET_DISCOVERY_INITIAL_DELAY_SECONDS)
+
+    log.info(
+        "V120A Marzban Asset Discovery started interval=%ss (read-only inventory; no probes/alerts/mutations).",
+        MARZBAN_ASSET_DISCOVERY_INTERVAL_SECONDS,
+    )
+    while True:
+        try:
+            await _marzban_asset_discovery_tick()
+        except marzban_asset_discovery.AssetDiscoveryError as exc:
+            # Fail closed: an incomplete API snapshot never retires previous inventory.
+            log.warning("V120A Marzban asset discovery skipped: %s", exc)
+        except Exception:
+            log.exception(
+                "V120A Marzban asset discovery failed; previous inventory preserved."
+            )
+        await asyncio.sleep(MARZBAN_ASSET_DISCOVERY_INTERVAL_SECONDS)
 
 
 def _db_mark_reserved_v2ray_sale(username, agent_id, service_type):
@@ -20593,6 +20658,7 @@ async def _post_init(app):
     app.bot_data['regional_filter_task'] = asyncio.create_task(_regional_filter_loop(app))
     app.bot_data['fast_default_sentinel_task'] = asyncio.create_task(_fast_default_sentinel_loop(app))
     app.bot_data['standby_readiness_task'] = asyncio.create_task(_standby_readiness_loop(app))
+    app.bot_data['marzban_asset_discovery_task'] = asyncio.create_task(_marzban_asset_discovery_loop(app))
     app.bot_data['udpgw_health_task'] = asyncio.create_task(_udpgw_health_loop(app))
     app.bot_data['daily_sales_report_task'] = asyncio.create_task(_daily_sales_report_loop(app))
     app.bot_data['filter_detect_task'] = asyncio.create_task(_filter_detect_loop(app))  # 🆕 V89
@@ -20609,7 +20675,7 @@ async def _post_shutdown(app):
     # قلم افتاده بود — پس هیچ‌وقت cancel نمی‌شد و روی asyncio.sleep(...) منتظر می‌ماند، پروسه
     # واقعاً خارج نمی‌شد تا systemd صبرش تمام شود و به‌زور بکشدش (که همان قطعیِ طولانی و نیازِ
     # نماینده‌ها به ورودِ مجدد را رقم می‌زد).
-    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 V119A Regional Filter Monitor'), ('fast_default_sentinel_task', '⚡ V119A Fast Default Sentinel'), ('standby_readiness_task', '🛟 V119C Warm Standby Watchdog'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار')):
+    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 V119A Regional Filter Monitor'), ('fast_default_sentinel_task', '⚡ V119A Fast Default Sentinel'), ('standby_readiness_task', '🛟 V119C Warm Standby Watchdog'), ('marzban_asset_discovery_task', '🧭 V120A Marzban Asset Discovery'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار')):
         task = app.bot_data.get(key)
         if task and not task.done():
             task.cancel()
@@ -20657,4 +20723,5 @@ if __name__ == '__main__':
     auto_state = "ON" if _db_get_setting('phase6h_auto_failover_enabled', '0') == '1' else "OFF"
     print(f"⚡ V119A Fast Detection فعال است (Default Regional هر {REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS}s؛ Sentinel هر {FAST_SENTINEL_INTERVAL_SECONDS}s؛ Auto Failover={auto_state}).")
     print(f"🛟 V119C Reliable Auto Failover فعال است (Standby Watchdog هر {STANDBY_READINESS_INTERVAL_SECONDS}s؛ Regional refresh هر {STANDBY_REGIONAL_REFRESH_INTERVAL_SECONDS}s؛ retry cooldown={AUTO_FAILOVER_ATTEMPT_COOLDOWN_SECONDS}s).")
+    print(f"🧭 V120A Marzban Asset Discovery فعال است (هر {MARZBAN_ASSET_DISCOVERY_INTERVAL_SECONDS}s؛ فقط Inventory و بدون Probe/Alert/Mutation).")
     app.run_polling()

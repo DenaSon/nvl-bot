@@ -608,6 +608,7 @@ STANDBY_READINESS_INITIAL_DELAY_SECONDS = _phase6c_env_int("NVL_STANDBY_READINES
 STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS = _phase6c_env_int("NVL_STANDBY_LOCAL_MAX_AGE", 180)
 STANDBY_REGIONAL_REFRESH_INTERVAL_SECONDS = _phase6c_env_int("NVL_STANDBY_REGIONAL_REFRESH_INTERVAL", 300)
 STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS = _phase6c_env_int("NVL_STANDBY_REGIONAL_MAX_AGE", 600)
+STANDBY_FAILOVER_TARGET_MAX_AGE_SECONDS = _phase6c_env_int("NVL_STANDBY_FAILOVER_TARGET_MAX_AGE", 180)
 STANDBY_REGIONAL_MAX_PER_CYCLE = _phase6c_env_int("NVL_STANDBY_REGIONAL_MAX_PER_CYCLE", 1)
 STANDBY_FAILOVER_REFRESH_MAX_TARGETS = _phase6c_env_int("NVL_STANDBY_FAILOVER_REFRESH_MAX_TARGETS", 2)
 
@@ -10253,6 +10254,7 @@ async def _render_filtering_monitor_panel(query, page=0):
         f"Check interval: <code>{REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS}s</code>",
         f"Auto safety: LIKELY + HIGH · switch cooldown <code>{AUTO_FAILOVER_SWITCH_COOLDOWN_SECONDS // 60}m</code> · retry <code>{AUTO_FAILOVER_ATTEMPT_COOLDOWN_SECONDS // 60}m</code>",
         f"Warm Standby: <b>{len(standby_ready)}/{len(standby_configured)} READY</b> · local ≤<code>{STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS}s</code> · regional ≤<code>{STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS}s</code>",
+        f"Incident target freshness: regional ≤<code>{STANDBY_FAILOVER_TARGET_MAX_AGE_SECONDS}s</code> or immediate refresh",
         provider_line,
         failover_line,
         "",
@@ -18151,6 +18153,27 @@ async def _safe_manual_failover(
                 f"core_path={verify_core_path_ok}:{verify_path.get('core_path_reason')}"
             )
 
+        if automatic:
+            latest_target_health = (
+                await asyncio.to_thread(_db_get_host_port_health_map)
+            ).get(target_host) or {}
+            latest_regional_state = (
+                latest_target_health.get("filter_state") or FILTER_STATE_UNKNOWN
+            )
+            latest_regional_age = evidence_age_seconds(
+                latest_target_health.get("regional_service_last_check"),
+                datetime.now(),
+            )
+            if (
+                latest_regional_state != FILTER_STATE_CLEAR
+                or latest_regional_age > STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS
+            ):
+                raise RuntimeError(
+                    "POST_REBUILD_TARGET_REGIONAL_EVIDENCE_INVALID:"
+                    f"state={latest_regional_state};"
+                    f"age={latest_regional_age}"
+                )
+
         # Step 4: scoped DB/default commit. This is the first account-state mutation.
         moved_count, default_changed = await asyncio.to_thread(
             _db_commit_failover_account_state,
@@ -19539,7 +19562,7 @@ async def _refresh_standbys_for_confirmed_filter(app, source_host, provider, nod
         )
     ) == "1"
     if not enabled:
-        return ()
+        return None
 
     source_health = (
         await asyncio.to_thread(_db_get_host_port_health_map)
@@ -19551,7 +19574,7 @@ async def _refresh_standbys_for_confirmed_filter(app, source_host, provider, nod
         and int(source_health.get("filter_consecutive_failures") or 0) >= EDGE_FILTER_CONFIRM_THRESHOLD
     )
     if not confirmed:
-        return ()
+        return None
 
     configured, active, _health_map = await _standby_health_snapshot()
     if not active:
@@ -19566,7 +19589,7 @@ async def _refresh_standbys_for_confirmed_filter(app, source_host, provider, nod
         health_map,
         now=datetime.now(),
         local_max_age_seconds=STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS,
-        regional_max_age_seconds=STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS,
+        regional_max_age_seconds=STANDBY_FAILOVER_TARGET_MAX_AGE_SECONDS,
     )
     if ready:
         return ready
@@ -19594,7 +19617,7 @@ async def _refresh_standbys_for_confirmed_filter(app, source_host, provider, nod
         )
         regional_state = str(health.get("filter_state") or "").upper()
         needs_regional_refresh = (
-            regional_age > STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS
+            regional_age > STANDBY_FAILOVER_TARGET_MAX_AGE_SECONDS
             or regional_state in {"", "UNKNOWN"}
         )
         if not local_failures and needs_regional_refresh:
@@ -19630,7 +19653,7 @@ async def _refresh_standbys_for_confirmed_filter(app, source_host, provider, nod
             health_map,
             now=datetime.now(),
             local_max_age_seconds=STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS,
-            regional_max_age_seconds=STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS,
+            regional_max_age_seconds=STANDBY_FAILOVER_TARGET_MAX_AGE_SECONDS,
         )
         if ready:
             break
@@ -19738,7 +19761,7 @@ async def _incident_mark_failover_blocked(
     )
 
 
-async def _phase6h_auto_failover_tick(app):
+async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
     """V119-C: evaluate only fresh, warm Standbys and run the shared safe engine."""
     enabled = (await asyncio.to_thread(
         _db_get_setting, 'phase6h_auto_failover_enabled', '0'
@@ -19815,6 +19838,12 @@ async def _phase6h_auto_failover_tick(app):
         local_max_age_seconds=STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS,
         regional_max_age_seconds=STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS,
     )
+    if ready_candidate_override is not None:
+        active_set = set(active_standbys)
+        safe_candidates = tuple(
+            host for host in ready_candidate_override
+            if host in active_set
+        )
     provider_runtime = await asyncio.to_thread(_db_get_regional_provider_runtime)
     switch_age = await asyncio.to_thread(_db_seconds_since_last_ip_switch)
     attempt_age = await asyncio.to_thread(_db_seconds_since_auto_failover_attempt)
@@ -20129,7 +20158,7 @@ async def _regional_filter_tick(app):
 
         # V119-C: once filtering is truly confirmed, use the already-open provider
         # context to refresh only stale/unknown locally healthy Standbys before policy.
-        await _refresh_standbys_for_confirmed_filter(
+        ready_candidate_override = await _refresh_standbys_for_confirmed_filter(
             app,
             host,
             provider,
@@ -20137,7 +20166,10 @@ async def _regional_filter_tick(app):
         )
 
         # Default decision remains independent from unrelated Standby provider errors.
-        await _phase6h_auto_failover_tick(app)
+        await _phase6h_auto_failover_tick(
+            app,
+            ready_candidate_override=ready_candidate_override,
+        )
         return result
 
 async def _regional_filter_probe_one_now(app, host):

@@ -39,6 +39,7 @@ REASON_FAILOVER_SUCCEEDED = "FAILOVER_SUCCEEDED"
 REASON_FILTER_RECOVERED = "FILTER_RECOVERED"
 REASON_EVIDENCE_DEGRADED = "EVIDENCE_DEGRADED"
 REASON_FAILOVER_BLOCKED = "FAILOVER_BLOCKED"
+REASON_FAILOVER_STARTED = "FAILOVER_STARTED"
 
 _AUTO_REASON_MAP = {
     "AUTO_DISABLED": REASON_AUTO_DISABLED,
@@ -155,12 +156,31 @@ def reason_label_fa(reason: str) -> str:
         REASON_FAILOVER_BUSY: "یک Failover دیگر در حال اجراست",
         REASON_FAILOVER_EXCEPTION: "Failover با خطای اجرایی متوقف شد",
         REASON_ROLLBACK_FAILED: "Rollback کامل نشد",
+        REASON_FAILOVER_STARTED: "Failover امن شروع شد",
         REASON_FAILOVER_SUCCEEDED: "Failover با موفقیت کامل شد",
         REASON_FILTER_RECOVERED: "دسترسی منطقه‌ای بازیابی شد",
         REASON_EVIDENCE_DEGRADED: "Evidence منطقه‌ای برای تصمیم قطعی کافی نیست",
     }
     return labels.get(str(reason or ""), str(reason or "UNKNOWN"))
 
+
+
+def standby_safety_failures(health) -> tuple[str, ...]:
+    """Explain why one configured Standby is not an automatic safe candidate."""
+    health = health or {}
+    failures = []
+    if str(health.get("filter_state") or "").upper() != "CLEAR":
+        failures.append("FILTER_NOT_CLEAR")
+    for key, code in (
+        ("service_ok", "SERVICE_NOT_OK"),
+        ("admin_ok", "ADMIN_NOT_OK"),
+        ("wg_peer_ok", "WG_NOT_OK"),
+        ("core_path_ok", "CORE_PATH_NOT_OK"),
+        ("external_service_ok", "EXTERNAL_NOT_OK"),
+    ):
+        if health.get(key) is not True:
+            failures.append(code)
+    return tuple(failures)
 
 def is_terminal_state(state: str) -> bool:
     return str(state or "") in {

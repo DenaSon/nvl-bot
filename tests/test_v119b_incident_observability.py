@@ -122,7 +122,7 @@ class V119BIntegrationStaticTests(unittest.TestCase):
 
     def test_release_marker(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V119B.0-2026-10-03-incident-observability"',
+            'BOT_VERSION_TAG = "V119C.0-2026-10-03-reliable-automatic-failover"',
             self.source,
         )
 
@@ -178,14 +178,15 @@ class V119BIntegrationStaticTests(unittest.TestCase):
             "async def _incident_mark_failover_blocked(",
             "async def _phase6h_auto_failover_tick",
         )
-        self.assertIn("standby_safety_failures", region)
+        self.assertIn("readiness_diagnostics", region)
+        self.assertIn("STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS", region)
         self.assertIn("AUTO_FAILOVER_BLOCKED", region)
         self.assertIn("Standby rejection", region)
         self.assertIn("_notify_incident_once", region)
 
     def test_no_default_edge_is_operator_visible_when_incident_exists(self):
         region = self._region(
-            "async def _phase6h_auto_failover_tick(app):",
+            "async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):",
             "async def _regional_filter_tick(app):",
         )
         self.assertIn("REASON_NO_DEFAULT_EDGE", region)
@@ -194,7 +195,7 @@ class V119BIntegrationStaticTests(unittest.TestCase):
 
     def test_phase6h_only_notifies_block_after_filter_confirmed(self):
         region = self._region(
-            "async def _phase6h_auto_failover_tick(app):",
+            "async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):",
             "async def _regional_filter_tick(app):",
         )
         self.assertIn("filter_confirmed = (", region)
@@ -202,7 +203,7 @@ class V119BIntegrationStaticTests(unittest.TestCase):
 
     def test_auto_failover_links_incident_to_phase6g_operation(self):
         region = self._region(
-            "async def _phase6h_auto_failover_tick(app):",
+            "async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):",
             "async def _regional_filter_tick(app):",
         )
         self.assertIn("incident_id=incident.get", region)

@@ -112,7 +112,7 @@ class V119AFastDetectionStaticTests(unittest.TestCase):
 
     def test_release_marker(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V119B.0-2026-10-03-incident-observability"',
+            'BOT_VERSION_TAG = "V119C.0-2026-10-03-reliable-automatic-failover"',
             self.source,
         )
 
@@ -140,7 +140,7 @@ class V119AFastDetectionStaticTests(unittest.TestCase):
         self.assertIn("build_regional_probe_provider", self.source)
         runtime = self._region(
             "def _new_regional_probe_provider():",
-            "async def _phase6h_auto_failover_tick(app):",
+            "async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):",
         )
         self.assertIn("provider.probe_tcp", runtime)
         self.assertNotIn("CheckHostClient", runtime)
@@ -161,7 +161,7 @@ class V119AFastDetectionStaticTests(unittest.TestCase):
             "async def _regional_filter_tick(app):",
             "async def _regional_filter_probe_one_now",
         )
-        self.assertIn("await _phase6h_auto_failover_tick(app)", region)
+        self.assertIn("await _phase6h_auto_failover_tick(", region)
         self.assertNotIn("round_provider_ok", region)
         self.assertNotIn("for index,", region)
 

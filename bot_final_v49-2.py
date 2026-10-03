@@ -242,7 +242,11 @@ from edge_observability import (
     derive_observability,
     normalize_probe_error,
 )
-from checkhost_probe import CheckHostClient, CheckHostError, CheckHostLimitExceeded
+from regional_probe_provider import (
+    RegionalProbeError,
+    RegionalProbeLimited,
+    build_regional_probe_provider,
+)
 from regional_filtering import classify_regional_evidence
 from filtering_runtime import (
     PROVIDER_STATUS_ERROR,
@@ -281,7 +285,7 @@ from automatic_failover import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V118.0-2026-10-03-phase6h-automatic-filtering-failover"
+BOT_VERSION_TAG = "V119A.0-2026-10-03-fast-detection"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -536,19 +540,26 @@ def _phase6c_env_int(name, default, minimum=1):
 
 EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS = _phase6c_env_int("NVL_OBSERVABILITY_PROBE_TIMEOUT", 3)
 WG_HANDSHAKE_MAX_AGE_SECONDS = _phase6c_env_int("NVL_WG_HANDSHAKE_MAX_AGE", 900)
-EDGE_FILTER_CONFIRM_THRESHOLD = _phase6c_env_int("NVL_FILTER_CONFIRM_THRESHOLD", 3)
+EDGE_FILTER_CONFIRM_THRESHOLD = _phase6c_env_int("NVL_FILTER_CONFIRM_THRESHOLD", 2)
 EDGE_FILTER_RECOVERY_THRESHOLD = _phase6c_env_int("NVL_FILTER_RECOVERY_THRESHOLD", 2)
 EDGE_FILTER_COOLDOWN_SECONDS = _phase6c_env_int("NVL_FILTER_COOLDOWN_SECONDS", 600)
 EDGE_PROBE_HISTORY_RETENTION_DAYS = _phase6c_env_int("NVL_PROBE_HISTORY_RETENTION_DAYS", 14)
 
-# Phase 6F — regional filtering runtime. Defaults are deliberately conservative to
-# respect the public Check-Host provider and avoid bursty per-Edge polling.
-REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROBE_INTERVAL", 600)
-REGIONAL_FILTER_MONITOR_INITIAL_DELAY_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROBE_INITIAL_DELAY", 30, minimum=0)
-REGIONAL_FILTER_EDGE_GAP_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROBE_EDGE_GAP", 15, minimum=0)
+# V119-A — fast regional detection.
+# Routine regional monitoring now targets ONLY the active Default Edge. Local Fast Sentinel
+# probes are cheap and frequent; Check-Host remains the only regional provider for now.
+REGIONAL_PROBE_PROVIDER_NAME = os.getenv("NVL_REGIONAL_PROBE_PROVIDER", "check-host").strip().lower()
+REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROBE_INTERVAL", 60)
+REGIONAL_FILTER_MONITOR_INITIAL_DELAY_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROBE_INITIAL_DELAY", 10, minimum=0)
+REGIONAL_FILTER_EDGE_GAP_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROBE_EDGE_GAP", 0, minimum=0)
 REGIONAL_FILTER_MAX_NODES = _phase6c_env_int("NVL_REGIONAL_PROBE_MAX_NODES", 8)
+REGIONAL_FAST_CONFIRM_DELAY_SECONDS = _phase6c_env_int("NVL_REGIONAL_FAST_CONFIRM_DELAY", 15, minimum=1)
 REGIONAL_FILTER_PROVIDER_BACKOFF_BASE_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROVIDER_BACKOFF_BASE", 300)
 REGIONAL_FILTER_PROVIDER_BACKOFF_MAX_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROVIDER_BACKOFF_MAX", 3600)
+
+FAST_SENTINEL_INTERVAL_SECONDS = _phase6c_env_int("NVL_FAST_SENTINEL_INTERVAL", 15)
+FAST_SENTINEL_CONFIRM_FAILURES = _phase6c_env_int("NVL_FAST_SENTINEL_CONFIRM_FAILURES", 2)
+FAST_SENTINEL_TRIGGER_COOLDOWN_SECONDS = _phase6c_env_int("NVL_FAST_SENTINEL_TRIGGER_COOLDOWN", 60)
 
 # Phase 6G — manual failover lock. A crashed RUNNING operation older than this
 # is marked ABORTED_STALE before a new operation may acquire the lock.
@@ -1843,6 +1854,7 @@ def _db_record_regional_round(host, probe, regional_decision):
     summary = regional_decision.summary
     regional_ok = regional_decision.regional_service_ok
     ok_db = None if regional_ok is None else (1 if regional_ok else 0)
+    provider_name = str(getattr(probe, "provider", "check-host") or "unknown")[:80]
 
     failed_asns = ",".join(summary.failed_asns)
     failed_cities = ",".join(summary.failed_cities)
@@ -1869,7 +1881,7 @@ def _db_record_regional_round(host, probe, regional_decision):
 
         conn.execute(
             "UPDATE host_pool SET "
-            "regional_service_ok=?, regional_service_last_check=?, regional_probe_source='check-host', "
+            "regional_service_ok=?, regional_service_last_check=?, regional_probe_source=?, "
             "regional_filter_state=?, regional_filter_reason=?, "
             "regional_total_nodes=?, regional_completed_nodes=?, regional_successful_nodes=?, "
             "regional_failed_nodes=?, regional_pending_nodes=?, regional_success_ratio=?, "
@@ -1879,6 +1891,7 @@ def _db_record_regional_round(host, probe, regional_decision):
             (
                 ok_db,
                 now,
+                provider_name,
                 regional_decision.state,
                 regional_decision.reason,
                 summary.total_nodes,
@@ -1905,7 +1918,7 @@ def _db_record_regional_round(host, probe, regional_decision):
                 getattr(item, "error", None)
                 or ("PENDING" if getattr(item, "pending", False) else "OK")
             )
-            source = str(getattr(item, "node", "check-host"))[:80]
+            source = str(getattr(item, "node", provider_name))[:80]
             meta = (
                 f"{reason}; city={getattr(item, 'city', '')}; "
                 f"asn={getattr(item, 'asn', '')}"
@@ -1920,9 +1933,10 @@ def _db_record_regional_round(host, probe, regional_decision):
         conn.execute(
             "INSERT INTO host_probe_results "
             "(host, probe_type, source, ok, latency_ms, reason, checked_at) "
-            "VALUES (?, 'regional_service', 'check-host', ?, NULL, ?, ?)",
+            "VALUES (?, 'regional_service', ?, ?, NULL, ?, ?)",
             (
                 host,
+                provider_name,
                 ok_db,
                 (
                     f"{regional_decision.state}:{regional_decision.reason}; "
@@ -1936,26 +1950,36 @@ def _db_record_regional_round(host, probe, regional_decision):
     return _db_recompute_host_observability(host)
 
 
-def _db_record_regional_provider_status(host, status, error=None):
+def _db_record_regional_provider_status(host, status, error=None, provider_name="check-host"):
     """Record provider health without fabricating Edge reachability evidence."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    source = str(provider_name or "unknown")[:80]
     with db_conn() as conn:
         conn.execute(
             "UPDATE host_pool SET regional_provider_status=?, regional_provider_error=?, "
-            "regional_service_last_check=?, regional_probe_source='check-host', evidence_updated_at=? "
+            "regional_service_last_check=?, regional_probe_source=?, evidence_updated_at=? "
             "WHERE host=?",
-            (str(status or PROVIDER_STATUS_ERROR), str(error or "")[:200] or None, now, now, host),
+            (
+                str(status or PROVIDER_STATUS_ERROR),
+                str(error or "")[:200] or None,
+                now,
+                source,
+                now,
+                host,
+            ),
         )
 
-
 def _db_get_regional_monitor_targets():
-    """Return active customer-facing endpoints. Core exclusion happens at runtime."""
+    """V119-A: return only the active Default Edge for regional monitoring.
+
+    Standby/secondary validation is intentionally left to the later failover phase.
+    Filtering detection must never wait for unrelated Edge probes.
+    """
     with db_conn() as conn:
         return conn.execute(
             "SELECT host, service_port, is_standby FROM host_pool "
-            "WHERE active=1 ORDER BY is_default DESC, host"
+            "WHERE active=1 AND is_default=1 LIMIT 1"
         ).fetchall()
-
 
 def _db_get_recent_regional_node_results(host, limit=16):
     with db_conn() as conn:
@@ -18501,12 +18525,28 @@ async def _regional_provider_mark_ok(app):
         )
 
 
-async def _regional_filter_probe_edge(app, host, service_port, client, nodes):
-    """Probe one Edge. Diagnostic-only: no DNS, account or failover mutation."""
+def _new_regional_probe_provider():
+    """Build the configured regional provider behind the V119-A provider interface."""
+    return build_regional_probe_provider(
+        REGIONAL_PROBE_PROVIDER_NAME,
+        request_timeout=max(6.0, float(EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS)),
+        poll_timeout=max(12.0, float(EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS) * 4),
+    )
+
+
+def _regional_probe_lock(app):
+    lock = app.bot_data.get("regional_probe_lock")
+    if lock is None:
+        lock = asyncio.Lock()
+        app.bot_data["regional_probe_lock"] = lock
+    return lock
+
+
+async def _regional_filter_probe_edge(app, host, service_port, provider, nodes):
+    """Probe one Edge through a provider-neutral interface; never mutates routing itself."""
     if await asyncio.to_thread(_is_current_core_host, host):
         return {"status": "SKIPPED_CORE", "host": host}
 
-    # Same-round external control from the Core's public network perspective.
     external_ok, external_err = await _tcp_health_check(
         host,
         service_port,
@@ -18524,31 +18564,23 @@ async def _regional_filter_probe_edge(app, host, service_port, client, nodes):
         False,
     )
 
-    def _run_provider():
-        request_id, permanent_link, request_nodes = client.start_tcp_check(
+    try:
+        probe = await asyncio.to_thread(
+            provider.probe_tcp,
             host,
             service_port,
             nodes,
         )
-        return client.poll_tcp_result(
-            request_id,
-            request_nodes,
-            target_host=host,
-            target_port=service_port,
-            permanent_link=permanent_link,
-        )
-
-    try:
-        probe = await asyncio.to_thread(_run_provider)
-    except CheckHostLimitExceeded as exc:
+    except RegionalProbeLimited as exc:
         await _regional_provider_enter_limited(app, host, exc)
         return {"status": PROVIDER_STATUS_LIMITED, "host": host, "error": str(exc)}
-    except CheckHostError as exc:
+    except RegionalProbeError as exc:
         await asyncio.to_thread(
             _db_record_regional_provider_status,
             host,
             PROVIDER_STATUS_ERROR,
             str(exc),
+            provider.name,
         )
         await asyncio.to_thread(
             _db_set_regional_provider_runtime,
@@ -18557,7 +18589,12 @@ async def _regional_filter_probe_edge(app, host, service_port, client, nodes):
             limit_count=0,
             error=str(exc),
         )
-        log.warning("Phase6F Check-Host provider error host=%s: %s", host, exc)
+        log.warning(
+            "V119A regional provider error provider=%s host=%s error=%s",
+            provider.name,
+            host,
+            exc,
+        )
         return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": str(exc)}
 
     regional_decision = classify_regional_evidence(probe.evidence)
@@ -18575,14 +18612,23 @@ async def _regional_filter_probe_edge(app, host, service_port, client, nodes):
             regional_decision,
         )
 
+    log.info(
+        "V119A regional result provider=%s host=%s state=%s failed=%s completed=%s streak=%s",
+        provider.name,
+        host,
+        regional_decision.state,
+        regional_decision.summary.failed_nodes,
+        regional_decision.summary.completed_nodes,
+        (recompute_result or {}).get("filter_consecutive_failures", 0),
+    )
     return {
         "status": PROVIDER_STATUS_OK,
         "host": host,
+        "provider": provider.name,
         "probe": probe,
         "regional_decision": regional_decision,
         "observability": recompute_result,
     }
-
 
 async def _phase6h_auto_failover_tick(app):
     """Evaluate one automatic failover after a complete successful regional round.
@@ -18671,81 +18717,150 @@ async def _phase6h_auto_failover_tick(app):
 
 
 async def _regional_filter_tick(app):
-    remaining = await asyncio.to_thread(_db_regional_backoff_remaining_seconds)
-    if remaining > 0:
-        log.info(
-            "Phase6F regional monitor in provider backoff (%ss remaining); round skipped.",
-            remaining,
-        )
-        return
+    """V119-A default-first regional round.
 
-    targets = await asyncio.to_thread(_db_get_regional_monitor_targets)
-    edge_targets = []
-    for host, service_port, is_standby in targets:
+    Only the active Default Edge is probed. A first strong LIKELY round receives one
+    accelerated confirmation after REGIONAL_FAST_CONFIRM_DELAY_SECONDS instead of
+    waiting for another minute-long scheduler cycle.
+    """
+    lock = _regional_probe_lock(app)
+    if lock.locked():
+        log.info("V119A regional probe skipped reason=PROBE_ALREADY_RUNNING")
+        return {"status": "BUSY"}
+
+    async with lock:
+        remaining = await asyncio.to_thread(_db_regional_backoff_remaining_seconds)
+        if remaining > 0:
+            log.info(
+                "V119A regional monitor provider-backoff remaining=%ss; probe skipped.",
+                remaining,
+            )
+            return {
+                "status": PROVIDER_STATUS_LIMITED,
+                "backoff_seconds": remaining,
+            }
+
+        targets = await asyncio.to_thread(_db_get_regional_monitor_targets)
+        if not targets:
+            log.warning("V119A regional monitor skipped reason=NO_ACTIVE_DEFAULT_EDGE")
+            return {"status": "NO_DEFAULT_EDGE"}
+
+        host, service_port, _is_standby = targets[0]
         if await asyncio.to_thread(_is_current_core_host, host):
-            continue
+            log.info("V119A regional monitor skipped default=%s reason=DEFAULT_IS_CORE", host)
+            return {"status": "SKIPPED_CORE", "host": host}
+
         try:
-            port = int(service_port)
+            service_port = int(service_port)
         except (TypeError, ValueError):
-            port = 0
-        if not 1 <= port <= 65535:
-            log.warning("Phase6F skip host=%s: invalid service_port=%r", host, service_port)
-            continue
-        edge_targets.append((host, port, bool(is_standby)))
+            service_port = 0
+        if not 1 <= service_port <= 65535:
+            log.warning(
+                "V119A regional monitor skipped host=%s reason=INVALID_SERVICE_PORT port=%r",
+                host,
+                service_port,
+            )
+            return {"status": "INVALID_SERVICE_PORT", "host": host}
 
-    if not edge_targets:
-        return
+        try:
+            provider = _new_regional_probe_provider()
+        except ValueError as exc:
+            log.error("V119A regional provider config invalid: %s", exc)
+            return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": str(exc)}
 
-    client = CheckHostClient(
-        request_timeout=max(6.0, float(EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS)),
-        poll_timeout=max(12.0, float(EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS) * 4),
-    )
-    try:
-        nodes = await asyncio.to_thread(client.discover_nodes, "ir")
-    except CheckHostError as exc:
-        await asyncio.to_thread(
-            _db_set_regional_provider_runtime,
-            PROVIDER_STATUS_ERROR,
-            backoff_until="",
-            limit_count=0,
-            error=str(exc),
-        )
-        log.warning("Phase6F node discovery failed: %s", exc)
-        return
+        try:
+            nodes = await asyncio.to_thread(provider.discover_nodes, "ir")
+        except RegionalProbeLimited as exc:
+            await _regional_provider_enter_limited(app, host, exc)
+            return {"status": PROVIDER_STATUS_LIMITED, "host": host, "error": str(exc)}
+        except RegionalProbeError as exc:
+            await asyncio.to_thread(
+                _db_record_regional_provider_status,
+                host,
+                PROVIDER_STATUS_ERROR,
+                str(exc),
+                provider.name,
+            )
+            await asyncio.to_thread(
+                _db_set_regional_provider_runtime,
+                PROVIDER_STATUS_ERROR,
+                backoff_until="",
+                limit_count=0,
+                error=str(exc),
+            )
+            log.warning(
+                "V119A node discovery failed provider=%s host=%s error=%s",
+                provider.name,
+                host,
+                exc,
+            )
+            return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": str(exc)}
 
-    nodes = tuple(nodes[:REGIONAL_FILTER_MAX_NODES])
-    if not nodes:
-        log.warning("Phase6F node discovery returned no Iranian nodes.")
-        return
+        nodes = tuple(nodes[:REGIONAL_FILTER_MAX_NODES])
+        if not nodes:
+            log.warning(
+                "V119A node discovery returned no Iranian nodes provider=%s",
+                provider.name,
+            )
+            return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": "no regional nodes"}
 
-    round_provider_ok = True
-    for index, (host, service_port, _is_standby) in enumerate(edge_targets):
         result = await _regional_filter_probe_edge(
             app,
             host,
             service_port,
-            client,
+            provider,
             nodes,
         )
-        status = result.get("status")
-        if status == PROVIDER_STATUS_LIMITED:
-            round_provider_ok = False
-            break
-        if status != PROVIDER_STATUS_OK:
-            round_provider_ok = False
-        if index + 1 < len(edge_targets) and REGIONAL_FILTER_EDGE_GAP_SECONDS > 0:
-            await asyncio.sleep(REGIONAL_FILTER_EDGE_GAP_SECONDS)
+        if result.get("status") != PROVIDER_STATUS_OK:
+            return result
 
-    # Reset the global provider limit streak only after the entire scheduled round
-    # completed without provider errors/limits. A success on Edge A must not erase
-    # a repeated limit that appears on Edge B.
-    if round_provider_ok:
         await _regional_provider_mark_ok(app)
-        await _phase6h_auto_failover_tick(app)
 
+        decision = result.get("regional_decision")
+        health = (await asyncio.to_thread(_db_get_host_port_health_map)).get(host, {})
+        streak = int(health.get("filter_consecutive_failures") or 0)
+
+        if (
+            decision is not None
+            and decision.state == FILTER_STATE_LIKELY
+            and 0 < streak < EDGE_FILTER_CONFIRM_THRESHOLD
+        ):
+            log.warning(
+                "V119A fast regional confirmation scheduled host=%s delay=%ss streak=%s/%s",
+                host,
+                REGIONAL_FAST_CONFIRM_DELAY_SECONDS,
+                streak,
+                EDGE_FILTER_CONFIRM_THRESHOLD,
+            )
+            await asyncio.sleep(REGIONAL_FAST_CONFIRM_DELAY_SECONDS)
+
+            current_default = await asyncio.to_thread(_db_get_default_host)
+            if current_default == host:
+                confirm = await _regional_filter_probe_edge(
+                    app,
+                    host,
+                    service_port,
+                    provider,
+                    nodes,
+                )
+                if confirm.get("status") == PROVIDER_STATUS_OK:
+                    result = confirm
+                    await _regional_provider_mark_ok(app)
+                else:
+                    return confirm
+            else:
+                log.info(
+                    "V119A fast confirmation cancelled old_default=%s new_default=%s",
+                    host,
+                    current_default,
+                )
+
+        # With default-only probing this decision is no longer blocked by unrelated Edges.
+        await _phase6h_auto_failover_tick(app)
+        return result
 
 async def _regional_filter_probe_one_now(app, host):
-    """Manual admin recheck, still respecting provider backoff."""
+    """Manual admin recheck through the same provider-neutral path."""
     remaining = await asyncio.to_thread(_db_regional_backoff_remaining_seconds)
     if remaining > 0:
         return {
@@ -18759,42 +18874,132 @@ async def _regional_filter_probe_one_now(app, host):
         return {"status": "SKIPPED_CORE", "host": host}
 
     service_port = await asyncio.to_thread(_db_get_host_service_port, host, 22)
-    client = CheckHostClient(
-        request_timeout=max(6.0, float(EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS)),
-        poll_timeout=max(12.0, float(EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS) * 4),
-    )
     try:
-        nodes = await asyncio.to_thread(client.discover_nodes, "ir")
-    except CheckHostError as exc:
+        provider = _new_regional_probe_provider()
+        nodes = await asyncio.to_thread(provider.discover_nodes, "ir")
+    except RegionalProbeLimited as exc:
+        await _regional_provider_enter_limited(app, host, exc)
+        return {"status": PROVIDER_STATUS_LIMITED, "host": host, "error": str(exc)}
+    except (RegionalProbeError, ValueError) as exc:
         return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": str(exc)}
+
     nodes = tuple(nodes[:REGIONAL_FILTER_MAX_NODES])
     result = await _regional_filter_probe_edge(
         app,
         host,
         service_port,
-        client,
+        provider,
         nodes,
     )
     if result.get("status") == PROVIDER_STATUS_OK:
         await _regional_provider_mark_ok(app)
     return result
 
-
 async def _regional_filter_loop(app):
     if REGIONAL_FILTER_MONITOR_INITIAL_DELAY_SECONDS > 0:
         await asyncio.sleep(REGIONAL_FILTER_MONITOR_INITIAL_DELAY_SECONDS)
     log.info(
-        "🛡 Phase6H regional filtering monitor started (interval=%ss, max_nodes=%s, edge_gap=%ss).",
+        "V119A regional monitor started provider=%s target=DEFAULT_ONLY interval=%ss max_nodes=%s fast_confirm=%ss.",
+        REGIONAL_PROBE_PROVIDER_NAME,
         REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS,
         REGIONAL_FILTER_MAX_NODES,
-        REGIONAL_FILTER_EDGE_GAP_SECONDS,
+        REGIONAL_FAST_CONFIRM_DELAY_SECONDS,
     )
     while True:
         try:
             await _regional_filter_tick(app)
         except Exception:
-            log.exception("Phase6H regional filtering round failed; next round will continue.")
+            log.exception("V119A regional filtering round failed; next round will continue.")
         await asyncio.sleep(REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS)
+
+
+async def _fast_default_sentinel_tick(app):
+    """Cheap 15s local-path sentinel for the current Default Edge.
+
+    It does not classify filtering and never performs failover. Two consecutive local-path
+    failures merely trigger an immediate regional round rather than waiting for the scheduler.
+    """
+    host = await asyncio.to_thread(_db_get_default_host)
+    state = app.bot_data.setdefault(
+        "fast_default_sentinel_state",
+        {"host": None, "failures": 0, "last_trigger_monotonic": 0.0},
+    )
+
+    if not host or await asyncio.to_thread(_is_current_core_host, host):
+        state.update({"host": host, "failures": 0})
+        return
+
+    if state.get("host") != host:
+        state.update({"host": host, "failures": 0, "last_trigger_monotonic": 0.0})
+
+    service_port = await asyncio.to_thread(_db_get_host_service_port, host, 22)
+    admin_port = await asyncio.to_thread(_db_get_host_admin_ssh_port, host, 22)
+
+    service_ok, service_err = await _tcp_health_check(
+        host,
+        service_port,
+        timeout=EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS,
+    )
+    admin_ok, admin_err = await _check_ssh_reachable(host, admin_port)
+    local_path = await asyncio.to_thread(_probe_wireguard_edge_sync, host)
+    wg_ok = local_path.get("wg_peer_ok")
+    core_path_ok = local_path.get("core_path_ok")
+
+    anomaly = (service_ok is False) or (core_path_ok is False)
+    if not anomaly:
+        if int(state.get("failures") or 0) > 0:
+            log.info(
+                "V119A fast sentinel recovered host=%s previous_failures=%s",
+                host,
+                state.get("failures"),
+            )
+        state["failures"] = 0
+        return
+
+    state["failures"] = int(state.get("failures") or 0) + 1
+    log.warning(
+        "V119A fast sentinel anomaly host=%s service_ok=%s admin_ok=%s wg_ok=%s "
+        "core_path_ok=%s streak=%s service_error=%s admin_error=%s",
+        host,
+        service_ok,
+        admin_ok,
+        wg_ok,
+        core_path_ok,
+        state["failures"],
+        service_err,
+        admin_err,
+    )
+
+    if state["failures"] < FAST_SENTINEL_CONFIRM_FAILURES:
+        return
+
+    now_mono = time.monotonic()
+    last_trigger = float(state.get("last_trigger_monotonic") or 0.0)
+    if now_mono - last_trigger < FAST_SENTINEL_TRIGGER_COOLDOWN_SECONDS:
+        return
+
+    state["last_trigger_monotonic"] = now_mono
+    log.warning(
+        "V119A fast sentinel triggering immediate regional probe host=%s failures=%s",
+        host,
+        state["failures"],
+    )
+    await _regional_filter_tick(app)
+
+
+async def _fast_default_sentinel_loop(app):
+    log.info(
+        "V119A Fast Sentinel started interval=%ss confirm_failures=%s trigger_cooldown=%ss.",
+        FAST_SENTINEL_INTERVAL_SECONDS,
+        FAST_SENTINEL_CONFIRM_FAILURES,
+        FAST_SENTINEL_TRIGGER_COOLDOWN_SECONDS,
+    )
+    while True:
+        try:
+            await _fast_default_sentinel_tick(app)
+        except Exception:
+            log.exception("V119A Fast Sentinel failed; next tick will continue.")
+        await asyncio.sleep(FAST_SENTINEL_INTERVAL_SECONDS)
 
 async def _udpgw_health_tick(app):
     """
@@ -19073,6 +19278,7 @@ async def _post_init(app):
     app.bot_data['ip_pressure_monitor_task'] = asyncio.create_task(_ip_pressure_monitor_loop(app))
     app.bot_data['host_health_task'] = asyncio.create_task(_host_health_loop(app))
     app.bot_data['regional_filter_task'] = asyncio.create_task(_regional_filter_loop(app))
+    app.bot_data['fast_default_sentinel_task'] = asyncio.create_task(_fast_default_sentinel_loop(app))
     app.bot_data['udpgw_health_task'] = asyncio.create_task(_udpgw_health_loop(app))
     app.bot_data['daily_sales_report_task'] = asyncio.create_task(_daily_sales_report_loop(app))
     app.bot_data['filter_detect_task'] = asyncio.create_task(_filter_detect_loop(app))  # 🆕 V89
@@ -19089,7 +19295,7 @@ async def _post_shutdown(app):
     # قلم افتاده بود — پس هیچ‌وقت cancel نمی‌شد و روی asyncio.sleep(...) منتظر می‌ماند، پروسه
     # واقعاً خارج نمی‌شد تا systemd صبرش تمام شود و به‌زور بکشدش (که همان قطعیِ طولانی و نیازِ
     # نماینده‌ها به ورودِ مجدد را رقم می‌زد).
-    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 Phase6H Regional Filter Monitor'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار')):
+    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 V119A Regional Filter Monitor'), ('fast_default_sentinel_task', '⚡ V119A Fast Default Sentinel'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار')):
         task = app.bot_data.get(key)
         if task and not task.done():
             task.cancel()
@@ -19135,5 +19341,5 @@ if __name__ == '__main__':
     print(f"🛡️ پایش سلامت IPها فعال است (هر {HOST_HEALTH_CHECK_INTERVAL_SECONDS}s چک، غیرفعال‌سازی خودکار بعد از {HOST_HEALTH_FAIL_THRESHOLD} شکست متوالی).")
     print(f"📉 Traffic Anomaly signal فعال است (هر {FILTER_DETECT_CHECK_INTERVAL_SECONDS}s؛ بدون Failover).")
     auto_state = "ON" if _db_get_setting('phase6h_auto_failover_enabled', '0') == '1' else "OFF"
-    print(f"🛡 Phase6H Filtering Monitor فعال است (هر {REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS}s؛ Auto Failover={auto_state}).")
+    print(f"⚡ V119A Fast Detection فعال است (Default Regional هر {REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS}s؛ Sentinel هر {FAST_SENTINEL_INTERVAL_SECONDS}s؛ Auto Failover={auto_state}).")
     app.run_polling()

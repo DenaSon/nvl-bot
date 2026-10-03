@@ -95,7 +95,7 @@ def evaluate_standby_readiness(
 
     regional_limit = max(1, int(regional_max_age_seconds or 1))
     regional_age = evidence_age_seconds(
-        health.get("regional_service_last_check"),
+        health.get("regional_state_updated_at"),
         now,
     )
     regional_fresh = regional_age <= regional_limit

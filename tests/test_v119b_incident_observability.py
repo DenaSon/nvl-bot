@@ -122,7 +122,7 @@ class V119BIntegrationStaticTests(unittest.TestCase):
 
     def test_release_marker(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V119B.0-2026-10-03-incident-observability"',
+            'BOT_VERSION_TAG = "V119C.0-2026-10-03-reliable-automatic-failover"',
             self.source,
         )
 

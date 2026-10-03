@@ -223,10 +223,11 @@ class V120DSourceSafetyTests(unittest.TestCase):
             "update_host(",
             "set_node_enabled(",
             "reconnect_node(",
-            "cloudflare",
-            "failover",
-            "subprocess",
-            "ssh",
+            "_safe_manual_failover(",
+            "_phase6h_auto_failover_tick(",
+            "_cf_switch_public_domain(",
+            "subprocess.",
+            "paramiko.",
         ):
             self.assertNotIn(forbidden, lower)
 

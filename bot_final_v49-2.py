@@ -18741,6 +18741,29 @@ async def _notify_filter_state_transition(app, host, recompute_result, regional_
     if state == FILTER_STATE_UNKNOWN and not existing:
         return
 
+    # Once failover policy/engine has taken ownership of the incident state, fresh
+    # repeated filtering evidence must not bounce it back to FILTER_CONFIRMED every
+    # minute. Preserve the operational state/reason until a real recovery, a changed
+    # failover decision, or a new failover attempt occurs.
+    operational_states = {
+        INCIDENT_STATE_FAILOVER_BLOCKED,
+        INCIDENT_STATE_FAILOVER_STARTED,
+        INCIDENT_STATE_FAILOVER_FAILED,
+    }
+    if existing and existing.get("state") in operational_states:
+        await asyncio.to_thread(
+            _db_transition_filter_incident,
+            host,
+            existing.get("state"),
+            existing.get("last_reason"),
+            provider=provider_name,
+            filter_state=state,
+            filter_confidence=confidence,
+            failure_streak=failure_streak,
+            open_if_missing=False,
+        )
+        return
+
     incident = await asyncio.to_thread(
         _db_transition_filter_incident,
         host,

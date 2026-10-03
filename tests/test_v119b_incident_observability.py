@@ -186,7 +186,7 @@ class V119BIntegrationStaticTests(unittest.TestCase):
 
     def test_no_default_edge_is_operator_visible_when_incident_exists(self):
         region = self._region(
-            "async def _phase6h_auto_failover_tick(app):",
+            "async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):",
             "async def _regional_filter_tick(app):",
         )
         self.assertIn("REASON_NO_DEFAULT_EDGE", region)
@@ -195,7 +195,7 @@ class V119BIntegrationStaticTests(unittest.TestCase):
 
     def test_phase6h_only_notifies_block_after_filter_confirmed(self):
         region = self._region(
-            "async def _phase6h_auto_failover_tick(app):",
+            "async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):",
             "async def _regional_filter_tick(app):",
         )
         self.assertIn("filter_confirmed = (", region)
@@ -203,7 +203,7 @@ class V119BIntegrationStaticTests(unittest.TestCase):
 
     def test_auto_failover_links_incident_to_phase6g_operation(self):
         region = self._region(
-            "async def _phase6h_auto_failover_tick(app):",
+            "async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):",
             "async def _regional_filter_tick(app):",
         )
         self.assertIn("incident_id=incident.get", region)

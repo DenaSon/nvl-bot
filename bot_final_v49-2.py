@@ -277,6 +277,26 @@ from automatic_failover import (
     evaluate_auto_failover,
     rank_safe_standbys,
 )
+from incident_observability import (
+    INCIDENT_STATE_EVIDENCE_DEGRADED,
+    INCIDENT_STATE_FAILOVER_BLOCKED,
+    INCIDENT_STATE_FAILOVER_FAILED,
+    INCIDENT_STATE_FAILOVER_STARTED,
+    INCIDENT_STATE_FAILOVER_SUCCEEDED,
+    INCIDENT_STATE_FILTER_CONFIRMED,
+    INCIDENT_STATE_RECOVERED,
+    REASON_EVIDENCE_DEGRADED,
+    REASON_FAILOVER_STARTED,
+    REASON_FAILOVER_SUCCEEDED,
+    REASON_FILTER_RECOVERED,
+    REASON_NO_DEFAULT_EDGE,
+    classify_filter_incident,
+    normalize_auto_block_reason,
+    normalize_failover_result_reason,
+    reason_label_fa,
+    should_notify_incident,
+    standby_safety_failures,
+)
 
 # ==========================================
 # ⚙️ پیکربندی امن (از Environment Variables)
@@ -285,7 +305,7 @@ from automatic_failover import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V119A.0-2026-10-03-fast-detection"
+BOT_VERSION_TAG = "V119B.0-2026-10-03-incident-observability"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -1143,6 +1163,43 @@ def init_db():
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_failover_operations_status_started "
             "ON failover_operations(status, started_at)"
+        )
+
+        # V119-B — persistent filtering incident timeline.
+        c.execute('''CREATE TABLE IF NOT EXISTS filter_incidents (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        incident_id TEXT UNIQUE,
+                        source_host TEXT DEFAULT NULL,
+                        state TEXT NOT NULL,
+                        last_reason TEXT DEFAULT NULL,
+                        provider TEXT DEFAULT NULL,
+                        filter_state TEXT DEFAULT NULL,
+                        filter_confidence TEXT DEFAULT NULL,
+                        failure_streak INTEGER DEFAULT 0,
+                        target_host TEXT DEFAULT NULL,
+                        failover_operation_id INTEGER DEFAULT NULL,
+                        opened_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        closed_at TEXT DEFAULT NULL,
+                        last_notified_state TEXT DEFAULT NULL,
+                        last_notified_reason TEXT DEFAULT NULL)''')
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_filter_incidents_open "
+            "ON filter_incidents(closed_at, source_host, updated_at)"
+        )
+        c.execute('''CREATE TABLE IF NOT EXISTS filter_incident_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        incident_id TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        state TEXT DEFAULT NULL,
+                        reason_code TEXT DEFAULT NULL,
+                        source_host TEXT DEFAULT NULL,
+                        target_host TEXT DEFAULT NULL,
+                        detail_json TEXT DEFAULT NULL,
+                        created_at TEXT NOT NULL)''')
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_filter_incident_events_incident "
+            "ON filter_incident_events(incident_id, created_at)"
         )
 
         c.execute('''CREATE TABLE IF NOT EXISTS host_probe_results (
@@ -2611,6 +2668,199 @@ def _db_get_latest_failover_operation():
             "FROM failover_operations ORDER BY id DESC LIMIT 1"
         ).fetchone()
     return row
+
+
+def _db_get_open_filter_incident(source_host=None):
+    with db_conn() as conn:
+        if source_host:
+            row = conn.execute(
+                "SELECT incident_id, source_host, state, last_reason, provider, filter_state, "
+                "filter_confidence, failure_streak, target_host, failover_operation_id, "
+                "opened_at, updated_at, closed_at, last_notified_state, last_notified_reason "
+                "FROM filter_incidents WHERE closed_at IS NULL AND source_host=? "
+                "ORDER BY id DESC LIMIT 1",
+                (source_host,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT incident_id, source_host, state, last_reason, provider, filter_state, "
+                "filter_confidence, failure_streak, target_host, failover_operation_id, "
+                "opened_at, updated_at, closed_at, last_notified_state, last_notified_reason "
+                "FROM filter_incidents WHERE closed_at IS NULL ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+    if not row:
+        return None
+    keys = (
+        "incident_id", "source_host", "state", "last_reason", "provider",
+        "filter_state", "filter_confidence", "failure_streak", "target_host",
+        "failover_operation_id", "opened_at", "updated_at", "closed_at",
+        "last_notified_state", "last_notified_reason",
+    )
+    return dict(zip(keys, row))
+
+
+def _db_transition_filter_incident(
+    source_host,
+    state,
+    reason,
+    *,
+    provider=None,
+    filter_state=None,
+    filter_confidence=None,
+    failure_streak=None,
+    target_host=None,
+    operation_id=None,
+    close=False,
+    open_if_missing=True,
+):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT id, incident_id, state, last_reason, last_notified_state, last_notified_reason "
+            "FROM filter_incidents WHERE closed_at IS NULL AND source_host=? "
+            "ORDER BY id DESC LIMIT 1",
+            (source_host,),
+        ).fetchone()
+        if not row:
+            if not open_if_missing:
+                return None
+            cur = conn.execute(
+                "INSERT INTO filter_incidents "
+                "(incident_id, source_host, state, last_reason, provider, filter_state, "
+                "filter_confidence, failure_streak, target_host, failover_operation_id, "
+                "opened_at, updated_at, closed_at) "
+                "VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    source_host, state, reason, provider, filter_state, filter_confidence,
+                    int(failure_streak or 0), target_host, operation_id,
+                    now, now, now if close else None,
+                ),
+            )
+            row_id = int(cur.lastrowid)
+            incident_id = f"INC-{datetime.now().strftime('%Y%m%d')}-{row_id:06d}"
+            conn.execute(
+                "UPDATE filter_incidents SET incident_id=? WHERE id=?",
+                (incident_id, row_id),
+            )
+            previous_state = None
+            previous_reason = None
+            last_notified_state = None
+            last_notified_reason = None
+        else:
+            row_id, incident_id, previous_state, previous_reason, last_notified_state, last_notified_reason = row
+            fields = [
+                "state=?", "last_reason=?", "updated_at=?",
+                "provider=COALESCE(?, provider)",
+                "filter_state=COALESCE(?, filter_state)",
+                "filter_confidence=COALESCE(?, filter_confidence)",
+                "failure_streak=COALESCE(?, failure_streak)",
+                "target_host=COALESCE(?, target_host)",
+                "failover_operation_id=COALESCE(?, failover_operation_id)",
+            ]
+            values = [
+                state, reason, now, provider, filter_state, filter_confidence,
+                None if failure_streak is None else int(failure_streak),
+                target_host, operation_id,
+            ]
+            if close:
+                fields.append("closed_at=?")
+                values.append(now)
+            values.append(row_id)
+            conn.execute(
+                f"UPDATE filter_incidents SET {', '.join(fields)} WHERE id=?",
+                values,
+            )
+
+    return {
+        "incident_id": incident_id,
+        "source_host": source_host,
+        "state": state,
+        "last_reason": reason,
+        "previous_state": previous_state,
+        "previous_reason": previous_reason,
+        "last_notified_state": last_notified_state,
+        "last_notified_reason": last_notified_reason,
+        "target_host": target_host,
+        "failover_operation_id": operation_id,
+    }
+
+
+def _db_record_filter_incident_event(
+    incident_id,
+    event_type,
+    *,
+    state=None,
+    reason=None,
+    source_host=None,
+    target_host=None,
+    detail=None,
+):
+    if not incident_id:
+        return
+    with db_conn() as conn:
+        conn.execute(
+            "INSERT INTO filter_incident_events "
+            "(incident_id, event_type, state, reason_code, source_host, target_host, detail_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                incident_id,
+                str(event_type or "UNKNOWN"),
+                state,
+                reason,
+                source_host,
+                target_host,
+                None if detail is None else json.dumps(detail, ensure_ascii=False, default=str),
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        )
+
+
+def _db_mark_filter_incident_notified(incident_id, state, reason):
+    if not incident_id:
+        return
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE filter_incidents SET last_notified_state=?, last_notified_reason=?, "
+            "updated_at=? WHERE incident_id=?",
+            (
+                state,
+                reason,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                incident_id,
+            ),
+        )
+
+
+def _incident_log(event, incident_id=None, *, level="info", **fields):
+    payload = {
+        "event": str(event),
+        "incident": incident_id,
+        **{k: v for k, v in fields.items() if v is not None},
+    }
+    line = "NVL_INCIDENT " + json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    getattr(log, level if level in {"debug", "info", "warning", "error", "critical"} else "info")(line)
+
+
+async def _notify_incident_once(app, incident, text):
+    if not incident:
+        return False
+    state = incident.get("state")
+    reason = incident.get("last_reason")
+    if not should_notify_incident(
+        previous_state=incident.get("last_notified_state"),
+        previous_reason=incident.get("last_notified_reason"),
+        new_state=state,
+        new_reason=reason,
+    ):
+        return False
+    await _notify_admins(app, text)
+    await asyncio.to_thread(
+        _db_mark_filter_incident_notified,
+        incident.get("incident_id"),
+        state,
+        reason,
+    )
+    return True
 
 
 def _db_running_failover_id(conn):
@@ -17642,10 +17892,13 @@ async def _safe_manual_failover(
     target_host: str,
     *,
     mode=FAILOVER_MODE_MANUAL,
+    incident_id=None,
 ):
     """Shared Phase 6G/6H lock-protected, scoped and rollback-aware failover engine."""
     automatic = mode == FAILOVER_MODE_AUTO
     failover_label = "Automatic Filtering Failover" if automatic else "Safe Manual Failover"
+    if incident_id:
+        failover_label += f" [{incident_id}]"
     operation_id, busy_operation_id = await asyncio.to_thread(
         _db_acquire_failover_lock,
         source_host,
@@ -17689,7 +17942,7 @@ async def _safe_manual_failover(
                 f"Preflight: <code>{esc(' | '.join(errors))}</code>\n\n"
                 "هیچ DB/DNS/Account تغییری انجام نشد."
             )
-            return {"ok": False, "reason": "PREFLIGHT_FAILED", "errors": errors}
+            return {"ok": False, "reason": "PREFLIGHT_FAILED", "errors": errors, "operation_id": operation_id}
 
         accounts = list(preflight["accounts"])
         previous_default_host = preflight["previous_default_host"]
@@ -18416,52 +18669,188 @@ async def _host_health_loop(app):
         await asyncio.sleep(HOST_HEALTH_CHECK_INTERVAL_SECONDS)
 
 async def _notify_filter_state_transition(app, host, recompute_result, regional_decision):
-    transition = classify_filter_transition(
-        recompute_result.get("previous_filter_state"),
-        recompute_result.get("filter_state"),
-    )
-    if not transition.notify:
-        return
-
     ph = (await asyncio.to_thread(_db_get_host_port_health_map)).get(host, {})
     state = recompute_result.get("filter_state") or FILTER_STATE_UNKNOWN
     confidence = recompute_result.get("filter_confidence") or FILTER_CONFIDENCE_NONE
+    failure_streak = int(ph.get("filter_consecutive_failures") or 0)
+    provider_name = ph.get("regional_probe_source") or REGIONAL_PROBE_PROVIDER_NAME
     summary = regional_decision.summary
 
-    if transition.kind == TRANSITION_CRITICAL:
-        title = "🔴 <b>فیلترینگ با اطمینان بالا</b>"
-    elif transition.kind == TRANSITION_WARNING:
-        title = "🟡 <b>احتمال فیلترینگ</b>"
-    elif transition.kind == TRANSITION_RECOVERED:
-        title = "🟢 <b>دسترسی منطقه‌ای بازیابی شد</b>"
-    else:
-        title = "⚪️ <b>وضعیت فیلترینگ نامطمئن شد</b>"
+    if state == FILTER_STATE_CLEAR:
+        current = await asyncio.to_thread(_db_get_open_filter_incident, host)
+        if not current:
+            return
+        incident = await asyncio.to_thread(
+            _db_transition_filter_incident,
+            host,
+            INCIDENT_STATE_RECOVERED,
+            REASON_FILTER_RECOVERED,
+            provider=provider_name,
+            filter_state=state,
+            filter_confidence=confidence,
+            failure_streak=failure_streak,
+            close=True,
+            open_if_missing=False,
+        )
+        if not incident:
+            return
+        if (
+            incident.get("previous_state") != incident.get("state")
+            or incident.get("previous_reason") != incident.get("last_reason")
+        ):
+            await asyncio.to_thread(
+                _db_record_filter_incident_event,
+                incident["incident_id"],
+                "FILTER_RECOVERED",
+                state=incident["state"],
+                reason=incident["last_reason"],
+                source_host=host,
+                detail={
+                    "regional_failed_nodes": summary.failed_nodes,
+                    "regional_completed_nodes": summary.completed_nodes,
+                },
+            )
+            _incident_log(
+                "filter_recovered",
+                incident["incident_id"],
+                host=host,
+                state=incident["state"],
+                reason=incident["last_reason"],
+            )
+        await _notify_incident_once(
+            app,
+            incident,
+            "🟢 <b>Incident بسته شد — دسترسی منطقه‌ای بازیابی شد</b>\n\n"
+            f"Incident: <code>{esc(incident['incident_id'])}</code>\n"
+            f"Edge: <code>{esc(host)}</code>\n"
+            f"Regional: <b>{summary.successful_nodes}/{summary.completed_nodes} reachable</b>\n"
+            "وضعیت فیلترینگ به <b>CLEAR</b> برگشت."
+        )
+        return
 
+    classification = classify_filter_incident(
+        filter_state=state,
+        confidence=confidence,
+        failure_streak=failure_streak,
+        confirm_threshold=EDGE_FILTER_CONFIRM_THRESHOLD,
+    )
+    if classification is None:
+        return
+
+    existing = await asyncio.to_thread(_db_get_open_filter_incident, host)
+    if state == FILTER_STATE_UNKNOWN and not existing:
+        return
+
+    # Once failover policy/engine has taken ownership of the incident state, fresh
+    # repeated filtering evidence must not bounce it back to FILTER_CONFIRMED every
+    # minute. Preserve the operational state/reason until a real recovery, a changed
+    # failover decision, or a new failover attempt occurs.
+    operational_states = {
+        INCIDENT_STATE_FAILOVER_BLOCKED,
+        INCIDENT_STATE_FAILOVER_STARTED,
+        INCIDENT_STATE_FAILOVER_FAILED,
+    }
+    if existing and existing.get("state") in operational_states:
+        await asyncio.to_thread(
+            _db_transition_filter_incident,
+            host,
+            existing.get("state"),
+            existing.get("last_reason"),
+            provider=provider_name,
+            filter_state=state,
+            filter_confidence=confidence,
+            failure_streak=failure_streak,
+            open_if_missing=False,
+        )
+        return
+
+    incident = await asyncio.to_thread(
+        _db_transition_filter_incident,
+        host,
+        classification.state,
+        classification.reason,
+        provider=provider_name,
+        filter_state=state,
+        filter_confidence=confidence,
+        failure_streak=failure_streak,
+        open_if_missing=(state != FILTER_STATE_UNKNOWN),
+    )
+    if not incident:
+        return
+
+    changed = (
+        incident.get("previous_state") != incident.get("state")
+        or incident.get("previous_reason") != incident.get("last_reason")
+    )
+    if changed:
+        await asyncio.to_thread(
+            _db_record_filter_incident_event,
+            incident["incident_id"],
+            "FILTER_STATE_CHANGED",
+            state=incident["state"],
+            reason=incident["last_reason"],
+            source_host=host,
+            detail={
+                "filter_state": state,
+                "confidence": confidence,
+                "failure_streak": failure_streak,
+                "regional_failed_nodes": summary.failed_nodes,
+                "regional_completed_nodes": summary.completed_nodes,
+                "failed_asns": list(summary.failed_asns),
+                "failed_cities": list(summary.failed_cities),
+            },
+        )
+        _incident_log(
+            "filter_state_changed",
+            incident["incident_id"],
+            level="warning" if classification.actionable else "info",
+            host=host,
+            state=incident["state"],
+            reason=incident["last_reason"],
+            filter_state=state,
+            confidence=confidence,
+            failure_streak=failure_streak,
+            regional_failed=summary.failed_nodes,
+            regional_completed=summary.completed_nodes,
+        )
+
+    if incident["state"] == INCIDENT_STATE_FILTER_CONFIRMED:
+        title = "🔴 <b>فیلترینگ Default Edge تأیید شد</b>"
+    elif incident["state"] == INCIDENT_STATE_EVIDENCE_DEGRADED:
+        title = "⚪️ <b>Evidence حادثه نامطمئن شد</b>"
+    elif incident["state"] == "CONFIRMING":
+        title = "🟠 <b>فیلترینگ در حال تأیید سریع است</b>"
+    else:
+        title = "🟡 <b>اختلال منطقه‌ای مشکوک شناسایی شد</b>"
+
+    auto_enabled = (await asyncio.to_thread(
+        _db_get_setting, 'phase6h_auto_failover_enabled', '0'
+    )) == '1'
     failed_asns = ", ".join(summary.failed_asns) or "—"
     failed_cities = ", ".join(summary.failed_cities) or "—"
 
-    auto_enabled = (await asyncio.to_thread(_db_get_setting, 'phase6h_auto_failover_enabled', '0')) == '1'
-    auto_note = (
-        "🤖 Phase 6H Auto Failover روشن است؛ اقدام فقط بعد از تکمیل کامل round و عبور از همه Safety Gateها بررسی می‌شود."
-        if auto_enabled else
-        "ℹ️ Phase 6H Auto Failover خاموش است؛ هیچ Failover خودکاری انجام نمی‌شود."
-    )
-
-    await _notify_admins(
+    await _notify_incident_once(
         app,
+        incident,
         f"{title}\n\n"
+        f"Incident: <code>{esc(incident['incident_id'])}</code>\n"
         f"Edge: <code>{esc(host)}</code>\n"
-        f"State: <b>{esc(state)}</b> · Confidence: <b>{esc(confidence)}</b>\n"
-        f"Regional: {summary.failed_nodes}/{summary.completed_nodes} failed "
-        f"({(summary.failure_ratio or 0) * 100:.0f}%)\n"
+        f"Incident State: <b>{esc(incident['state'])}</b>\n"
+        f"Reason: <code>{esc(incident['last_reason'])}</code>\n"
+        f"Filtering: <b>{esc(state)} / {esc(confidence)}</b>\n"
+        f"Confirmation: <b>{failure_streak}/{EDGE_FILTER_CONFIRM_THRESHOLD}</b>\n"
+        f"Regional: <b>{summary.failed_nodes}/{summary.completed_nodes} failed</b>\n"
         f"Failed ASN: <code>{esc(failed_asns)}</code>\n"
         f"Failed City: <code>{esc(failed_cities)}</code>\n"
         f"External(Core→Edge): {_probe_state_text(ph.get('external_service_ok'))}\n"
         f"WireGuard: {_probe_state_text(ph.get('wg_peer_ok'))}\n"
         f"Core path: {_probe_state_text(ph.get('core_path_ok'))}\n\n"
-        f"{auto_note}"
+        + (
+            "🤖 Auto Failover روشن است؛ پس از تأیید کامل Safety Gateها فوراً ارزیابی می‌شود."
+            if auto_enabled else
+            "ℹ️ Auto Failover خاموش است؛ Incident ثبت می‌شود اما انتقال خودکار انجام نمی‌شود."
+        )
     )
-
 
 def _probe_state_text(value):
     if value is True:
@@ -18507,6 +18896,50 @@ async def _regional_provider_enter_limited(app, host, error):
     return seconds
 
 
+async def _regional_provider_enter_error(app, host, provider_name, error):
+    state = await asyncio.to_thread(_db_get_regional_provider_runtime)
+    previous_status = state.get("status") or PROVIDER_STATUS_NEVER
+    await asyncio.to_thread(
+        _db_set_regional_provider_runtime,
+        PROVIDER_STATUS_ERROR,
+        backoff_until="",
+        limit_count=0,
+        error=str(error),
+    )
+    await asyncio.to_thread(
+        _db_record_regional_provider_status,
+        host,
+        PROVIDER_STATUS_ERROR,
+        str(error),
+        provider_name,
+    )
+    incident = await asyncio.to_thread(_db_get_open_filter_incident, host)
+    _incident_log(
+        "regional_provider_error",
+        incident.get("incident_id") if incident else None,
+        level="warning",
+        host=host,
+        provider=provider_name,
+        error=str(error),
+        edge_state_preserved=True,
+    )
+    if previous_status != PROVIDER_STATUS_ERROR:
+        incident_line = (
+            f"Incident: <code>{esc(incident['incident_id'])}</code>\n"
+            if incident else ""
+        )
+        await _notify_admins(
+            app,
+            "🟠 <b>Regional Provider خطا داد</b>\n\n"
+            f"{incident_line}"
+            f"Provider: <code>{esc(provider_name)}</code>\n"
+            f"Edge: <code>{esc(host)}</code>\n"
+            f"Error: <code>{esc(str(error)[:500])}</code>\n\n"
+            "این خطا <b>فیلترینگ محسوب نمی‌شود</b> و state قبلی Edge حفظ شد. "
+            "تا دریافت Evidence معتبر، Auto Failover بر اساس این خطا اجرا نمی‌شود."
+        )
+
+
 async def _regional_provider_mark_ok(app):
     state = await asyncio.to_thread(_db_get_regional_provider_runtime)
     previous_status = state.get("status") or PROVIDER_STATUS_NEVER
@@ -18517,11 +18950,12 @@ async def _regional_provider_mark_ok(app):
         limit_count=0,
         error="",
     )
-    if previous_status == PROVIDER_STATUS_LIMITED:
+    if previous_status in {PROVIDER_STATUS_LIMITED, PROVIDER_STATUS_ERROR}:
         await _notify_admins(
             app,
-            "✅ <b>Regional Probe دوباره در دسترس است</b>\n"
-            "Backoff Check-Host پایان یافت و مانیتورینگ Edgeها از سر گرفته شد."
+            "✅ <b>Regional Provider دوباره در دسترس است</b>\n"
+            f"Provider: <code>{esc(REGIONAL_PROBE_PROVIDER_NAME)}</code>\n"
+            "پایش منطقه‌ای با Evidence تازه از سر گرفته شد."
         )
 
 
@@ -18575,26 +19009,7 @@ async def _regional_filter_probe_edge(app, host, service_port, provider, nodes):
         await _regional_provider_enter_limited(app, host, exc)
         return {"status": PROVIDER_STATUS_LIMITED, "host": host, "error": str(exc)}
     except RegionalProbeError as exc:
-        await asyncio.to_thread(
-            _db_record_regional_provider_status,
-            host,
-            PROVIDER_STATUS_ERROR,
-            str(exc),
-            provider.name,
-        )
-        await asyncio.to_thread(
-            _db_set_regional_provider_runtime,
-            PROVIDER_STATUS_ERROR,
-            backoff_until="",
-            limit_count=0,
-            error=str(exc),
-        )
-        log.warning(
-            "V119A regional provider error provider=%s host=%s error=%s",
-            provider.name,
-            host,
-            exc,
-        )
+        await _regional_provider_enter_error(app, host, provider.name, exc)
         return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": str(exc)}
 
     regional_decision = classify_regional_evidence(probe.evidence)
@@ -18630,19 +19045,139 @@ async def _regional_filter_probe_edge(app, host, service_port, provider, nodes):
         "observability": recompute_result,
     }
 
-async def _phase6h_auto_failover_tick(app):
-    """Evaluate one automatic failover after a complete successful regional round.
+async def _incident_mark_failover_blocked(
+    app,
+    incident,
+    source_host,
+    reason,
+    *,
+    standbys,
+    safe_candidates,
+    health_map,
+    extra=None,
+):
+    if not incident:
+        return
+    details = dict(extra or {})
+    details["configured_standby_count"] = len(standbys)
+    details["safe_standby_count"] = len(safe_candidates)
+    rejected = {}
+    for standby in standbys:
+        if standby not in safe_candidates:
+            rejected[standby] = list(standby_safety_failures(health_map.get(standby) or {}))
+    if rejected:
+        details["standby_rejections"] = rejected
 
-    No automatic action is possible unless the admin explicitly enabled Phase 6H.
-    Candidate selection uses strict persisted evidence; the shared Phase 6G engine
-    then repeats fresh preflight checks before the first customer-state mutation.
-    """
-    enabled = (await asyncio.to_thread(_db_get_setting, 'phase6h_auto_failover_enabled', '0')) == '1'
-    if not enabled:
-        return {"eligible": False, "reason": "AUTO_DISABLED"}
+    updated = await asyncio.to_thread(
+        _db_transition_filter_incident,
+        source_host,
+        INCIDENT_STATE_FAILOVER_BLOCKED,
+        reason,
+        filter_state=(health_map.get(source_host) or {}).get("filter_state"),
+        filter_confidence=(health_map.get(source_host) or {}).get("filter_confidence"),
+        failure_streak=(health_map.get(source_host) or {}).get("filter_consecutive_failures", 0),
+        open_if_missing=False,
+    )
+    if not updated:
+        return
+
+    changed = (
+        updated.get("previous_state") != updated.get("state")
+        or updated.get("previous_reason") != updated.get("last_reason")
+    )
+    if changed:
+        await asyncio.to_thread(
+            _db_record_filter_incident_event,
+            updated["incident_id"],
+            "AUTO_FAILOVER_BLOCKED",
+            state=updated["state"],
+            reason=reason,
+            source_host=source_host,
+            detail=details,
+        )
+    _incident_log(
+        "auto_failover_blocked",
+        updated["incident_id"],
+        level="warning",
+        source=source_host,
+        reason=reason,
+        configured_standbys=len(standbys),
+        safe_standbys=len(safe_candidates),
+        **{k: v for k, v in details.items() if k != "standby_rejections"},
+    )
+
+    rejection_lines = []
+    for standby, failures in rejected.items():
+        rejection_lines.append(
+            f"• <code>{esc(standby)}</code>: <code>{esc(', '.join(failures) or 'UNKNOWN')}</code>"
+        )
+    rejection_text = "\n".join(rejection_lines[:5])
+    if rejection_text:
+        rejection_text = "\n\n<b>Standby rejection:</b>\n" + rejection_text
+
+    await _notify_incident_once(
+        app,
+        updated,
+        "⛔️ <b>Auto Failover انجام نشد</b>\n\n"
+        f"Incident: <code>{esc(updated['incident_id'])}</code>\n"
+        f"Source: <code>{esc(source_host or 'NOT_DEFINED')}</code>\n"
+        f"Reason: <code>{esc(reason)}</code>\n"
+        f"توضیح: {esc(reason_label_fa(reason))}\n"
+        f"Standby configured: <b>{len(standbys)}</b>\n"
+        f"Safe Standby: <b>{len(safe_candidates)}</b>"
+        f"{rejection_text}"
+    )
+
+
+async def _phase6h_auto_failover_tick(app):
+    """Evaluate auto failover and persist an operator-readable V119-B decision trail."""
+    enabled = (await asyncio.to_thread(
+        _db_get_setting, 'phase6h_auto_failover_enabled', '0'
+    )) == '1'
 
     source_host = await asyncio.to_thread(_db_get_default_host)
     if not source_host:
+        incident = await asyncio.to_thread(_db_get_open_filter_incident)
+        if incident:
+            reason = REASON_NO_DEFAULT_EDGE
+            updated = await asyncio.to_thread(
+                _db_transition_filter_incident,
+                incident.get("source_host"),
+                INCIDENT_STATE_FAILOVER_BLOCKED,
+                reason,
+                open_if_missing=False,
+            )
+            if updated:
+                changed = (
+                    updated.get("previous_state") != updated.get("state")
+                    or updated.get("previous_reason") != updated.get("last_reason")
+                )
+                if changed:
+                    await asyncio.to_thread(
+                        _db_record_filter_incident_event,
+                        updated["incident_id"],
+                        "AUTO_FAILOVER_BLOCKED",
+                        state=updated["state"],
+                        reason=reason,
+                        source_host=incident.get("source_host"),
+                        detail={"default_edge": None},
+                    )
+                _incident_log(
+                    "auto_failover_blocked",
+                    updated["incident_id"],
+                    level="warning",
+                    reason=reason,
+                    default_edge=None,
+                )
+                await _notify_incident_once(
+                    app,
+                    updated,
+                    "⛔️ <b>Failover امکان‌پذیر نیست</b>\n\n"
+                    f"Incident: <code>{esc(updated['incident_id'])}</code>\n"
+                    "Default Edge: <b>تعریف نشده</b> ❌\n"
+                    f"Reason: <code>{reason}</code>\n"
+                    "فیلترینگ/اختلال قبلاً ثبت شده، اما بدون Default Edge منبع انتقال قابل تعیین نیست."
+                )
         return {"eligible": False, "reason": "NO_DEFAULT_SOURCE"}
 
     source_meta = await asyncio.to_thread(_db_get_failover_host_meta, source_host)
@@ -18653,6 +19188,7 @@ async def _phase6h_auto_failover_tick(app):
         if host in health_map:
             health_map[host] = dict(health_map[host])
             health_map[host]["avg_latency_ms"] = row[8] if len(row) > 8 else None
+
     source_health = health_map.get(source_host) or {}
     standbys = [
         host for host in await asyncio.to_thread(_db_get_standby_hosts)
@@ -18660,6 +19196,8 @@ async def _phase6h_auto_failover_tick(app):
     ]
     safe_candidates = rank_safe_standbys(standbys, health_map)
     provider_runtime = await asyncio.to_thread(_db_get_regional_provider_runtime)
+    switch_age = await asyncio.to_thread(_db_seconds_since_last_ip_switch)
+    attempt_age = await asyncio.to_thread(_db_seconds_since_auto_failover_attempt)
 
     decision = evaluate_auto_failover(
         enabled=enabled,
@@ -18671,50 +19209,178 @@ async def _phase6h_auto_failover_tick(app):
         failure_streak=source_health.get("filter_consecutive_failures", 0),
         confirm_threshold=EDGE_FILTER_CONFIRM_THRESHOLD,
         provider_status=provider_runtime.get("status"),
-        seconds_since_last_switch=await asyncio.to_thread(_db_seconds_since_last_ip_switch),
+        seconds_since_last_switch=switch_age,
         switch_cooldown_seconds=AUTO_FAILOVER_SWITCH_COOLDOWN_SECONDS,
-        seconds_since_last_attempt=await asyncio.to_thread(_db_seconds_since_auto_failover_attempt),
+        seconds_since_last_attempt=attempt_age,
         attempt_cooldown_seconds=AUTO_FAILOVER_ATTEMPT_COOLDOWN_SECONDS,
         safe_standby_count=len(safe_candidates),
     )
+
+    incident = await asyncio.to_thread(_db_get_open_filter_incident, source_host)
+    filter_confirmed = (
+        str(source_health.get("filter_state") or "").upper() == "LIKELY"
+        and str(source_health.get("filter_confidence") or "").upper() == "HIGH"
+        and str(source_health.get("diagnostic_reason") or "").upper() == "FILTER_SUSPECTED"
+        and int(source_health.get("filter_consecutive_failures") or 0) >= EDGE_FILTER_CONFIRM_THRESHOLD
+    )
+
     if not decision.eligible:
+        normalized_reason = normalize_auto_block_reason(
+            decision.reason,
+            configured_standby_count=len(standbys),
+            safe_standby_count=len(safe_candidates),
+        )
         log.info(
             "Phase6H auto failover skipped source=%s reason=%s candidates=%s",
             source_host,
             decision.reason,
             len(safe_candidates),
         )
+        _incident_log(
+            "auto_failover_evaluated",
+            incident.get("incident_id") if incident else None,
+            source=source_host,
+            eligible=False,
+            reason=normalized_reason,
+            raw_reason=decision.reason,
+            configured_standbys=len(standbys),
+            safe_standbys=len(safe_candidates),
+        )
+        if filter_confirmed and incident:
+            extra = {
+                "provider_status": provider_runtime.get("status"),
+                "switch_cooldown_remaining": max(
+                    0,
+                    AUTO_FAILOVER_SWITCH_COOLDOWN_SECONDS - int(switch_age)
+                ) if switch_age != float("inf") else 0,
+                "attempt_cooldown_remaining": max(
+                    0,
+                    AUTO_FAILOVER_ATTEMPT_COOLDOWN_SECONDS - int(attempt_age)
+                ) if attempt_age != float("inf") else 0,
+            }
+            await _incident_mark_failover_blocked(
+                app,
+                incident,
+                source_host,
+                normalized_reason,
+                standbys=standbys,
+                safe_candidates=safe_candidates,
+                health_map=health_map,
+                extra=extra,
+            )
         return {"eligible": False, "reason": decision.reason}
 
     target_host = safe_candidates[0]
-    # Persist before starting network work. If the attempt fails safely, the monitor
-    # will not hammer DNS/SSH/preflight again on every scheduled round.
     await asyncio.to_thread(_db_mark_auto_failover_attempt_now)
 
-    await _notify_admins(
-        app,
-        "🤖 <b>Automatic Filtering Failover شروع شد.</b>\n\n"
-        f"Source: <code>{esc(source_host)}</code>\n"
-        f"Target Standby: <code>{esc(target_host)}</code>\n"
-        f"Evidence: <b>{esc(source_health.get('filter_state'))} / "
-        f"{esc(source_health.get('filter_confidence'))}</b>\n"
-        f"Failure streak: <b>{source_health.get('filter_consecutive_failures', 0)}</b>\n\n"
-        "موتور امن Phase 6G دوباره Preflight زنده، rebuild، DB commit، DNS handoff و rollback را کنترل می‌کند."
-    )
+    if incident:
+        incident = await asyncio.to_thread(
+            _db_transition_filter_incident,
+            source_host,
+            INCIDENT_STATE_FAILOVER_STARTED,
+            REASON_FAILOVER_STARTED,
+            target_host=target_host,
+            filter_state=source_health.get("filter_state"),
+            filter_confidence=source_health.get("filter_confidence"),
+            failure_streak=source_health.get("filter_consecutive_failures", 0),
+            open_if_missing=False,
+        )
+        if incident:
+            await asyncio.to_thread(
+                _db_record_filter_incident_event,
+                incident["incident_id"],
+                "AUTO_FAILOVER_STARTED",
+                state=incident["state"],
+                reason=incident["last_reason"],
+                source_host=source_host,
+                target_host=target_host,
+                detail={
+                    "configured_standbys": len(standbys),
+                    "safe_standbys": len(safe_candidates),
+                },
+            )
+            _incident_log(
+                "auto_failover_started",
+                incident["incident_id"],
+                level="warning",
+                source=source_host,
+                target=target_host,
+            )
+            await _notify_incident_once(
+                app,
+                incident,
+                "🤖 <b>Automatic Filtering Failover شروع شد</b>\n\n"
+                f"Incident: <code>{esc(incident['incident_id'])}</code>\n"
+                f"Source: <code>{esc(source_host)}</code>\n"
+                f"Target Standby: <code>{esc(target_host)}</code>\n"
+                f"Evidence: <b>{esc(source_health.get('filter_state'))} / "
+                f"{esc(source_health.get('filter_confidence'))}</b>\n"
+                f"Failure streak: <b>{source_health.get('filter_consecutive_failures', 0)}</b>\n\n"
+                "Phase 6G اکنون Preflight، rebuild، DB commit، DNS handoff و rollback را کنترل می‌کند."
+            )
 
     result = await _safe_manual_failover(
         app,
         source_host,
         target_host,
         mode=FAILOVER_MODE_AUTO,
+        incident_id=incident.get("incident_id") if incident else None,
     )
+
+    if incident:
+        operation_id = result.get("operation_id")
+        if result.get("ok"):
+            final_state = INCIDENT_STATE_FAILOVER_SUCCEEDED
+            final_reason = REASON_FAILOVER_SUCCEEDED
+            close_incident = True
+            event_type = "AUTO_FAILOVER_SUCCEEDED"
+        else:
+            final_state = INCIDENT_STATE_FAILOVER_FAILED
+            final_reason = normalize_failover_result_reason(result.get("reason"))
+            close_incident = False
+            event_type = "AUTO_FAILOVER_FAILED"
+
+        incident = await asyncio.to_thread(
+            _db_transition_filter_incident,
+            source_host,
+            final_state,
+            final_reason,
+            target_host=target_host,
+            operation_id=operation_id,
+            close=close_incident,
+            open_if_missing=False,
+        )
+        if incident:
+            await asyncio.to_thread(
+                _db_record_filter_incident_event,
+                incident["incident_id"],
+                event_type,
+                state=final_state,
+                reason=final_reason,
+                source_host=source_host,
+                target_host=target_host,
+                detail={
+                    "operation_id": operation_id,
+                    "result": result,
+                },
+            )
+            _incident_log(
+                event_type.lower(),
+                incident["incident_id"],
+                level="info" if result.get("ok") else "error",
+                source=source_host,
+                target=target_host,
+                reason=final_reason,
+                operation_id=operation_id,
+                ok=bool(result.get("ok")),
+            )
+
     return {
         "eligible": True,
         "source_host": source_host,
         "target_host": target_host,
         "result": result,
     }
-
 
 async def _regional_filter_tick(app):
     """V119-A default-first regional round.
@@ -18765,7 +19431,7 @@ async def _regional_filter_tick(app):
         try:
             provider = _new_regional_probe_provider()
         except ValueError as exc:
-            log.error("V119A regional provider config invalid: %s", exc)
+            log.error("V119B regional provider config invalid: %s", exc)
             return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": str(exc)}
 
         try:
@@ -18774,32 +19440,13 @@ async def _regional_filter_tick(app):
             await _regional_provider_enter_limited(app, host, exc)
             return {"status": PROVIDER_STATUS_LIMITED, "host": host, "error": str(exc)}
         except RegionalProbeError as exc:
-            await asyncio.to_thread(
-                _db_record_regional_provider_status,
-                host,
-                PROVIDER_STATUS_ERROR,
-                str(exc),
-                provider.name,
-            )
-            await asyncio.to_thread(
-                _db_set_regional_provider_runtime,
-                PROVIDER_STATUS_ERROR,
-                backoff_until="",
-                limit_count=0,
-                error=str(exc),
-            )
-            log.warning(
-                "V119A node discovery failed provider=%s host=%s error=%s",
-                provider.name,
-                host,
-                exc,
-            )
+            await _regional_provider_enter_error(app, host, provider.name, exc)
             return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": str(exc)}
 
         nodes = tuple(nodes[:REGIONAL_FILTER_MAX_NODES])
         if not nodes:
             log.warning(
-                "V119A node discovery returned no Iranian nodes provider=%s",
+                "V119B node discovery returned no Iranian nodes provider=%s",
                 provider.name,
             )
             return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": "no regional nodes"}

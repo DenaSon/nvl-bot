@@ -189,7 +189,7 @@ class Phase6HIntegrationShapeTests(unittest.TestCase):
 
     def test_6h_uses_phase6g_engine_and_auto_mode(self):
         region = self._region(
-            "async def _phase6h_auto_failover_tick(app):",
+            "async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):",
             "async def _regional_filter_tick(app):",
         )
         self.assertIn("evaluate_auto_failover(", region)

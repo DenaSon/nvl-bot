@@ -19143,6 +19143,452 @@ async def _regional_filter_probe_edge(
         "observability": recompute_result,
     }
 
+
+async def _standby_health_snapshot():
+    """Return configured/active Standbys plus health enriched with pool metadata."""
+    pool_rows = await asyncio.to_thread(_db_get_host_pool)
+    health_map = await asyncio.to_thread(_db_get_host_port_health_map)
+    configured = []
+    active = []
+    for row in pool_rows:
+        host = row[0]
+        is_active = bool(row[1])
+        is_standby = bool(row[10]) if len(row) > 10 else False
+        if not is_standby:
+            continue
+        configured.append(host)
+        if is_active:
+            active.append(host)
+        health = dict(health_map.get(host) or {})
+        health["active"] = is_active
+        health["avg_latency_ms"] = row[8] if len(row) > 8 else None
+        health_map[host] = health
+    return tuple(configured), tuple(active), health_map
+
+
+async def _probe_standby_local_readiness(host):
+    """Refresh cheap local/control-plane evidence for one active Standby."""
+    meta = await asyncio.to_thread(_db_get_failover_host_meta, host)
+    if not meta or not meta.get("active") or not meta.get("is_standby"):
+        return {"host": host, "status": "SKIPPED_NOT_ACTIVE_STANDBY"}
+
+    service_port = int(meta["service_port"])
+    admin_port = int(meta["admin_ssh_port"])
+    t0 = time.monotonic()
+    service_ok, service_err = await _tcp_health_check(
+        host,
+        service_port,
+        timeout=EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS,
+    )
+    if service_ok:
+        await asyncio.to_thread(
+            _db_record_host_latency,
+            host,
+            (time.monotonic() - t0) * 1000,
+        )
+    await asyncio.to_thread(_db_record_host_check, host, service_ok, service_err)
+
+    admin_ok, admin_err = await _check_ssh_reachable(host, admin_port)
+    await asyncio.to_thread(
+        _db_record_admin_host_check,
+        host,
+        admin_ok,
+        admin_err,
+    )
+
+    local_path = await asyncio.to_thread(_probe_wireguard_edge_sync, host)
+    await asyncio.to_thread(
+        _db_record_observability_probe,
+        host,
+        "wireguard",
+        "core",
+        local_path.get("wg_peer_ok"),
+        None,
+        local_path.get("wg_reason"),
+        local_path.get("wg_last_handshake_at"),
+        False,
+    )
+    await asyncio.to_thread(
+        _db_record_observability_probe,
+        host,
+        "core_path",
+        "core",
+        local_path.get("core_path_ok"),
+        None,
+        local_path.get("core_path_reason"),
+        None,
+        True,
+    )
+    await asyncio.to_thread(
+        _db_record_observability_probe,
+        host,
+        "external_service",
+        "core-standby-readiness",
+        service_ok,
+        None,
+        PROBE_REASON_OK if service_ok else normalize_probe_error(service_err),
+        None,
+        False,
+    )
+
+    log.info(
+        "V119C standby local host=%s service=%s admin=%s wg=%s core_path=%s",
+        host,
+        service_ok,
+        admin_ok,
+        local_path.get("wg_peer_ok"),
+        local_path.get("core_path_ok"),
+    )
+    return {
+        "host": host,
+        "status": "OK",
+        "service_ok": service_ok,
+        "admin_ok": admin_ok,
+        "wg_peer_ok": local_path.get("wg_peer_ok"),
+        "core_path_ok": local_path.get("core_path_ok"),
+    }
+
+
+def _standby_readiness_state(configured_count, ready_count):
+    if int(configured_count or 0) <= 0:
+        return READINESS_NO_STANDBY
+    if int(ready_count or 0) <= 0:
+        return READINESS_NO_READY
+    return READINESS_READY
+
+
+async def _publish_standby_readiness_state(app, configured, ready, health_map):
+    state = _standby_readiness_state(len(configured), len(ready))
+    previous = await asyncio.to_thread(
+        _db_get_setting,
+        "phase6h_standby_readiness_state",
+        "",
+    )
+    diagnostics = readiness_diagnostics(
+        configured,
+        health_map,
+        now=datetime.now(),
+        local_max_age_seconds=STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS,
+        regional_max_age_seconds=STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS,
+    )
+    await asyncio.to_thread(
+        _db_update_setting,
+        "phase6h_standby_readiness_state",
+        state,
+    )
+    await asyncio.to_thread(
+        _db_update_setting,
+        "phase6h_standby_ready_count",
+        str(len(ready)),
+    )
+
+    _incident_log(
+        "standby_readiness",
+        None,
+        level="warning" if state != READINESS_READY else "info",
+        state=state,
+        configured=len(configured),
+        ready=len(ready),
+        diagnostics={k: list(v) for k, v in diagnostics.items()},
+    )
+
+    if previous == state:
+        return state
+
+    if state == READINESS_NO_STANDBY:
+        await _notify_admins(
+            app,
+            "🔴 <b>Auto Failover بدون Standby آماده است</b>\n\n"
+            "Auto Failover روشن است اما هیچ Standby تعریف نشده است.\n"
+            "در صورت تأیید فیلترینگ، سیستم Target امنی برای انتقال نخواهد داشت.\n\n"
+            "Status: <code>NO_STANDBY</code>",
+        )
+    elif state == READINESS_NO_READY:
+        detail_lines = []
+        for host, failures in diagnostics.items():
+            detail_lines.append(
+                f"• <code>{esc(host)}</code>: <code>{esc(', '.join(failures))}</code>"
+            )
+        await _notify_admins(
+            app,
+            "🟠 <b>هیچ Safe Standby آماده نیست</b>\n\n"
+            f"Configured Standby: <b>{len(configured)}</b>\n"
+            "Ready Standby: <b>0</b>\n\n"
+            + ("\n".join(detail_lines[:5]) or "دلیل دقیق readiness در لاگ ثبت شد.")
+            + "\n\nتا رفع این وضعیت، Auto Failover به‌صورت fail-closed متوقف می‌شود.",
+        )
+    elif state == READINESS_READY and previous in {READINESS_NO_STANDBY, READINESS_NO_READY}:
+        await _notify_admins(
+            app,
+            "🟢 <b>Safe Standby دوباره آماده است</b>\n\n"
+            f"Ready: <b>{len(ready)}/{len(configured)}</b>\n"
+            f"Candidate: <code>{esc(ready[0])}</code>\n"
+            "Automatic Filtering Failover دوباره Target امن در اختیار دارد.",
+        )
+    return state
+
+
+async def _refresh_standby_regional_slow(app, active_standbys, health_map):
+    """Slow background regional refresh, at most a small number per cycle."""
+    if not active_standbys:
+        return 0
+
+    now = datetime.now()
+    due = []
+    for host in active_standbys:
+        health = health_map.get(host) or {}
+        age = evidence_age_seconds(health.get("regional_service_last_check"), now)
+        if age >= STANDBY_REGIONAL_REFRESH_INTERVAL_SECONDS:
+            due.append((age, host))
+    due.sort(key=lambda item: (-item[0], item[1]))
+    due_hosts = [host for _age, host in due[:STANDBY_REGIONAL_MAX_PER_CYCLE]]
+    if not due_hosts:
+        return 0
+
+    lock = _regional_probe_lock(app)
+    if lock.locked():
+        log.info(
+            "V119C standby regional refresh skipped reason=DEFAULT_PROBE_BUSY due=%s",
+            ",".join(due_hosts),
+        )
+        return 0
+
+    remaining = await asyncio.to_thread(_db_regional_backoff_remaining_seconds)
+    if remaining > 0:
+        return 0
+
+    async with lock:
+        try:
+            provider = _new_regional_probe_provider()
+            nodes = await asyncio.to_thread(provider.discover_nodes, "ir")
+        except RegionalProbeLimited as exc:
+            await _regional_provider_enter_limited(app, due_hosts[0], exc)
+            return 0
+        except (RegionalProbeError, ValueError) as exc:
+            _incident_log(
+                "standby_node_discovery_error",
+                None,
+                level="warning",
+                error=str(exc),
+                global_provider_state_unchanged=True,
+            )
+            return 0
+
+        nodes = tuple(nodes[:REGIONAL_FILTER_MAX_NODES])
+        if not nodes:
+            return 0
+
+        refreshed = 0
+        for host in due_hosts:
+            service_port = await asyncio.to_thread(_db_get_host_service_port, host, 22)
+            result = await _regional_filter_probe_edge(
+                app,
+                host,
+                service_port,
+                provider,
+                nodes,
+                affect_global_provider=False,
+                notify_transition=False,
+            )
+            if result.get("status") == PROVIDER_STATUS_LIMITED:
+                break
+            if result.get("status") == PROVIDER_STATUS_OK:
+                refreshed += 1
+        return refreshed
+
+
+async def _standby_readiness_tick(app):
+    """Keep warm Standbys locally fresh and regionally ready while Auto is enabled."""
+    enabled = (
+        await asyncio.to_thread(
+            _db_get_setting,
+            "phase6h_auto_failover_enabled",
+            "0",
+        )
+    ) == "1"
+    if not enabled:
+        return {"enabled": False}
+
+    configured, active, health_map = await _standby_health_snapshot()
+    if not configured:
+        await _publish_standby_readiness_state(app, configured, (), health_map)
+        return {"enabled": True, "configured": 0, "ready": 0}
+
+    for host in active:
+        try:
+            await _probe_standby_local_readiness(host)
+        except Exception:
+            log.exception("V119C standby local readiness failed host=%s", host)
+
+    configured, active, health_map = await _standby_health_snapshot()
+    await _refresh_standby_regional_slow(app, active, health_map)
+    configured, active, health_map = await _standby_health_snapshot()
+
+    ready = rank_ready_standbys(
+        active,
+        health_map,
+        now=datetime.now(),
+        local_max_age_seconds=STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS,
+        regional_max_age_seconds=STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS,
+    )
+    await _publish_standby_readiness_state(app, configured, ready, health_map)
+    log.info(
+        "V119C standby readiness configured=%s active=%s ready=%s candidates=%s",
+        len(configured),
+        len(active),
+        len(ready),
+        ",".join(ready) or "-",
+    )
+    return {
+        "enabled": True,
+        "configured": len(configured),
+        "active": len(active),
+        "ready": len(ready),
+        "candidates": ready,
+    }
+
+
+async def _standby_readiness_loop(app):
+    if STANDBY_READINESS_INITIAL_DELAY_SECONDS > 0:
+        await asyncio.sleep(STANDBY_READINESS_INITIAL_DELAY_SECONDS)
+    log.info(
+        "V119C Standby Watchdog started interval=%ss local_max_age=%ss regional_refresh=%ss regional_max_age=%ss.",
+        STANDBY_READINESS_INTERVAL_SECONDS,
+        STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS,
+        STANDBY_REGIONAL_REFRESH_INTERVAL_SECONDS,
+        STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS,
+    )
+    while True:
+        try:
+            await _standby_readiness_tick(app)
+        except Exception:
+            log.exception("V119C Standby Watchdog failed; next tick will continue.")
+        await asyncio.sleep(STANDBY_READINESS_INTERVAL_SECONDS)
+
+
+async def _refresh_standbys_for_confirmed_filter(app, source_host, provider, nodes):
+    """On-demand refresh under the already-held Default regional-probe lock.
+
+    Only runs after confirmed filtering and only while Auto Failover is enabled.
+    It refreshes local evidence for all active Standbys, then spends provider calls
+    only on locally healthy candidates whose regional evidence is stale/non-clear.
+    """
+    enabled = (
+        await asyncio.to_thread(
+            _db_get_setting,
+            "phase6h_auto_failover_enabled",
+            "0",
+        )
+    ) == "1"
+    if not enabled:
+        return ()
+
+    source_health = (
+        await asyncio.to_thread(_db_get_host_port_health_map)
+    ).get(source_host) or {}
+    confirmed = (
+        str(source_health.get("filter_state") or "").upper() == "LIKELY"
+        and str(source_health.get("filter_confidence") or "").upper() == "HIGH"
+        and str(source_health.get("diagnostic_reason") or "").upper() == "FILTER_SUSPECTED"
+        and int(source_health.get("filter_consecutive_failures") or 0) >= EDGE_FILTER_CONFIRM_THRESHOLD
+    )
+    if not confirmed:
+        return ()
+
+    configured, active, _health_map = await _standby_health_snapshot()
+    if not active:
+        return ()
+
+    for host in active:
+        await _probe_standby_local_readiness(host)
+
+    configured, active, health_map = await _standby_health_snapshot()
+    ready = rank_ready_standbys(
+        active,
+        health_map,
+        now=datetime.now(),
+        local_max_age_seconds=STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS,
+        regional_max_age_seconds=STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS,
+    )
+    if ready:
+        return ready
+
+    candidates = []
+    now = datetime.now()
+    for host in active:
+        health = health_map.get(host) or {}
+        verdict = evaluate_standby_readiness(
+            health,
+            now=now,
+            local_max_age_seconds=STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS,
+            regional_max_age_seconds=STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS,
+        )
+        local_failures = [
+            failure for failure in verdict.failures
+            if not (
+                failure == "FILTER_NOT_CLEAR"
+                or failure == "REGIONAL_EVIDENCE_STALE"
+            )
+        ]
+        regional_age = evidence_age_seconds(
+            health.get("regional_service_last_check"),
+            now,
+        )
+        regional_state = str(health.get("filter_state") or "").upper()
+        needs_regional_refresh = (
+            regional_age > STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS
+            or regional_state in {"", "UNKNOWN"}
+        )
+        if not local_failures and needs_regional_refresh:
+            latency = health.get("avg_latency_ms")
+            try:
+                latency_key = float(latency)
+            except (TypeError, ValueError):
+                latency_key = float("inf")
+            candidates.append((latency_key, host))
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    attempts = 0
+    for _latency, host in candidates[:STANDBY_FAILOVER_REFRESH_MAX_TARGETS]:
+        service_port = await asyncio.to_thread(_db_get_host_service_port, host, 22)
+        result = await _regional_filter_probe_edge(
+            app,
+            host,
+            service_port,
+            provider,
+            nodes,
+            affect_global_provider=False,
+            notify_transition=False,
+        )
+        attempts += 1
+        if result.get("status") == PROVIDER_STATUS_LIMITED:
+            break
+        if result.get("status") != PROVIDER_STATUS_OK:
+            continue
+
+        configured, active, health_map = await _standby_health_snapshot()
+        ready = rank_ready_standbys(
+            active,
+            health_map,
+            now=datetime.now(),
+            local_max_age_seconds=STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS,
+            regional_max_age_seconds=STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS,
+        )
+        if ready:
+            break
+
+    _incident_log(
+        "standby_on_demand_refresh",
+        None,
+        source=source_host,
+        configured=len(configured),
+        active=len(active),
+        attempts=attempts,
+        ready=list(ready),
+    )
+    return ready
+
+
 async def _incident_mark_failover_blocked(
     app,
     incident,

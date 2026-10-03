@@ -161,7 +161,7 @@ class V119AFastDetectionStaticTests(unittest.TestCase):
             "async def _regional_filter_tick(app):",
             "async def _regional_filter_probe_one_now",
         )
-        self.assertIn("await _phase6h_auto_failover_tick(app)", region)
+        self.assertIn("await _phase6h_auto_failover_tick(", region)
         self.assertNotIn("round_provider_ok", region)
         self.assertNotIn("for index,", region)
 

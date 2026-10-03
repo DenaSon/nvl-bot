@@ -193,7 +193,7 @@ class Phase6HIntegrationShapeTests(unittest.TestCase):
             "async def _regional_filter_tick(app):",
         )
         self.assertIn("evaluate_auto_failover(", region)
-        self.assertIn("rank_safe_standbys(", region)
+        self.assertIn("rank_ready_standbys(", region)
         self.assertIn("_db_mark_auto_failover_attempt_now", region)
         self.assertIn("_safe_manual_failover(", region)
         self.assertIn("mode=FAILOVER_MODE_AUTO", region)

@@ -297,6 +297,15 @@ from incident_observability import (
     should_notify_incident,
     standby_safety_failures,
 )
+from standby_readiness import (
+    READINESS_NO_READY,
+    READINESS_NO_STANDBY,
+    READINESS_READY,
+    evidence_age_seconds,
+    evaluate_standby_readiness,
+    rank_ready_standbys,
+    readiness_diagnostics,
+)
 
 # ==========================================
 # ⚙️ پیکربندی امن (از Environment Variables)
@@ -305,7 +314,7 @@ from incident_observability import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V119B.0-2026-10-03-incident-observability"
+BOT_VERSION_TAG = "V119C.0-2026-10-03-reliable-automatic-failover"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -589,8 +598,18 @@ FAILOVER_HELPER_TIMEOUT_SECONDS = _phase6c_env_int("NVL_FAILOVER_HELPER_TIMEOUT_
 # Phase 6H — automatic filtering failover. Auto mode remains opt-in. The switch
 # cooldown prevents ping-pong after a successful route change; the attempt cooldown
 # prevents a repeatedly failing preflight/provider condition from hammering a Standby.
-AUTO_FAILOVER_ATTEMPT_COOLDOWN_SECONDS = _phase6c_env_int("NVL_AUTO_FAILOVER_ATTEMPT_COOLDOWN_SECONDS", 900)
+AUTO_FAILOVER_ATTEMPT_COOLDOWN_SECONDS = _phase6c_env_int("NVL_AUTO_FAILOVER_ATTEMPT_COOLDOWN_SECONDS", 180)
 AUTO_FAILOVER_SWITCH_COOLDOWN_SECONDS = _phase6c_env_int("NVL_AUTO_FAILOVER_SWITCH_COOLDOWN_SECONDS", 1800)
+
+# V119-C — warm Standby readiness. Local probes are cheap and frequent; regional
+# Standby evidence is refreshed slowly and on-demand only after confirmed filtering.
+STANDBY_READINESS_INTERVAL_SECONDS = _phase6c_env_int("NVL_STANDBY_READINESS_INTERVAL", 60)
+STANDBY_READINESS_INITIAL_DELAY_SECONDS = _phase6c_env_int("NVL_STANDBY_READINESS_INITIAL_DELAY", 25, minimum=0)
+STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS = _phase6c_env_int("NVL_STANDBY_LOCAL_MAX_AGE", 180)
+STANDBY_REGIONAL_REFRESH_INTERVAL_SECONDS = _phase6c_env_int("NVL_STANDBY_REGIONAL_REFRESH_INTERVAL", 300)
+STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS = _phase6c_env_int("NVL_STANDBY_REGIONAL_MAX_AGE", 600)
+STANDBY_REGIONAL_MAX_PER_CYCLE = _phase6c_env_int("NVL_STANDBY_REGIONAL_MAX_PER_CYCLE", 1)
+STANDBY_FAILOVER_REFRESH_MAX_TARGETS = _phase6c_env_int("NVL_STANDBY_FAILOVER_REFRESH_MAX_TARGETS", 2)
 
 # ==========================================
 # 🆕 V89 — سیستم شناسایی خودکار فیلتر شدن بر اساس کاربران آنلاین
@@ -2368,6 +2387,16 @@ def _db_get_standby_hosts():
     with db_conn() as conn:
         return [r[0] for r in conn.execute(
             "SELECT host FROM host_pool WHERE is_standby=1 AND active=1").fetchall()]
+
+def _db_get_all_standby_hosts():
+    """All configured Standbys, including currently inactive ones."""
+    with db_conn() as conn:
+        return [
+            r[0] for r in conn.execute(
+                "SELECT host FROM host_pool WHERE is_standby=1 ORDER BY host"
+            ).fetchall()
+        ]
+
 
 def _db_get_failover_host_meta(host):
     with db_conn() as conn:
@@ -17721,8 +17750,17 @@ async def _mirror_linux_cmd(primary_host, primary_port, *args, input_data: bytes
 
 STANDBY_SCRIPT_PATH = os.path.join(_SCRIPT_DIR, "promote_standby_for_filtered_edge.py")
 
-async def _safe_manual_failover_preflight(source_host: str, target_host: str):
-    """Fresh Phase 6G preflight. No mutations."""
+async def _safe_manual_failover_preflight(
+    source_host: str,
+    target_host: str,
+    *,
+    require_clear_filter: bool = False,
+):
+    """Fresh Phase 6G preflight. No mutations.
+
+    Automatic V119-C failover additionally requires fresh persisted regional CLEAR
+    evidence for the target. Manual failover keeps the existing operator-driven policy.
+    """
     errors = []
 
     if source_host == target_host:
@@ -17789,7 +17827,20 @@ async def _safe_manual_failover_preflight(source_host: str, target_host: str):
     health_map = await asyncio.to_thread(_db_get_host_port_health_map)
     target_health = health_map.get(target_host, {})
     target_filter_state = target_health.get("filter_state") or FILTER_STATE_UNKNOWN
-    if target_filter_state in {FILTER_STATE_POSSIBLE, FILTER_STATE_LIKELY}:
+    target_regional_age = evidence_age_seconds(
+        target_health.get("regional_service_last_check"),
+        datetime.now(),
+    )
+    if require_clear_filter:
+        if target_filter_state != FILTER_STATE_CLEAR:
+            errors.append(f"TARGET_FILTER_STATE_NOT_CLEAR:{target_filter_state}")
+        if target_regional_age > STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS:
+            age_text = (
+                "never" if target_regional_age == float("inf")
+                else str(int(target_regional_age))
+            )
+            errors.append(f"TARGET_REGIONAL_EVIDENCE_STALE:{age_text}")
+    elif target_filter_state in {FILTER_STATE_POSSIBLE, FILTER_STATE_LIKELY}:
         errors.append(f"TARGET_FILTER_STATE_{target_filter_state}")
 
     # Fresh target customer path.
@@ -17844,6 +17895,7 @@ async def _safe_manual_failover_preflight(source_host: str, target_host: str):
         "source_service_port": source_service_port,
         "target_service_port": target_service_port,
         "target_filter_state": target_filter_state,
+        "target_regional_age_seconds": target_regional_age,
         "target_service_ok": target_service_ok,
         "target_admin_ok": target_admin_ok,
         "target_wg_ok": target_path.get("wg_peer_ok"),
@@ -17923,7 +17975,11 @@ async def _safe_manual_failover(
     core_public_ip = None
 
     try:
-        preflight = await _safe_manual_failover_preflight(source_host, target_host)
+        preflight = await _safe_manual_failover_preflight(
+            source_host,
+            target_host,
+            require_clear_filter=automatic,
+        )
         if not preflight.get("ok"):
             errors = preflight.get("errors") or ["UNKNOWN_PREFLIGHT_ERROR"]
             await asyncio.to_thread(
@@ -17962,6 +18018,7 @@ async def _safe_manual_failover(
                 "source_service_port": preflight["source_service_port"],
                 "target_service_port": preflight["target_service_port"],
                 "target_filter_state": preflight["target_filter_state"],
+                "target_regional_age_seconds": preflight.get("target_regional_age_seconds"),
             },
         )
 
@@ -18019,11 +18076,21 @@ async def _safe_manual_failover(
             target_host,
             int(preflight["target_meta"]["admin_ssh_port"]),
         )
-        if not verify_service_ok or not verify_admin_ok:
+        verify_path = await asyncio.to_thread(_probe_wireguard_edge_sync, target_host)
+        verify_wg_ok = verify_path.get("wg_peer_ok") is True
+        verify_core_path_ok = verify_path.get("core_path_ok") is True
+        if (
+            not verify_service_ok
+            or not verify_admin_ok
+            or not verify_wg_ok
+            or not verify_core_path_ok
+        ):
             raise RuntimeError(
                 "POST_REBUILD_TARGET_VERIFY_FAILED:"
                 f"service={verify_service_ok}:{normalize_probe_error(verify_service_err)};"
-                f"admin={verify_admin_ok}:{normalize_probe_error(verify_admin_err)}"
+                f"admin={verify_admin_ok}:{normalize_probe_error(verify_admin_err)};"
+                f"wg={verify_wg_ok}:{verify_path.get('wg_reason')};"
+                f"core_path={verify_core_path_ok}:{verify_path.get('core_path_reason')}"
             )
 
         # Step 4: scoped DB/default commit. This is the first account-state mutation.

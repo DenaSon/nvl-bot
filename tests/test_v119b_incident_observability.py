@@ -151,6 +151,18 @@ class V119BIntegrationStaticTests(unittest.TestCase):
         self.assertIn("classify_filter_incident(", region)
         self.assertIn("_notify_incident_once", region)
 
+    def test_operational_incident_state_is_not_downgraded_by_repeated_probe(self):
+        region = self._region(
+            "async def _notify_filter_state_transition(",
+            "def _probe_state_text",
+        )
+        self.assertIn("operational_states = {", region)
+        self.assertIn("INCIDENT_STATE_FAILOVER_BLOCKED", region)
+        self.assertIn("INCIDENT_STATE_FAILOVER_STARTED", region)
+        self.assertIn("INCIDENT_STATE_FAILOVER_FAILED", region)
+        self.assertIn("existing.get(\"state\") in operational_states", region)
+        self.assertIn("existing.get(\"last_reason\")", region)
+
     def test_provider_error_preserves_edge_state_and_notifies_once(self):
         region = self._region(
             "async def _regional_provider_enter_error(",

@@ -66,7 +66,7 @@ class V120DTransitionPolicyTests(unittest.TestCase):
             ).notify
         )
 
-    def test_recovery_and_degraded_transitions(self):
+    def test_recovery_and_unknown_evidence_gap(self):
         self.assertEqual(
             obs.classify_transition(
                 REGIONAL_STATE_LIKELY,
@@ -74,12 +74,11 @@ class V120DTransitionPolicyTests(unittest.TestCase):
             ).kind,
             obs.TRANSITION_RECOVERED,
         )
-        self.assertEqual(
+        self.assertFalse(
             obs.classify_transition(
                 REGIONAL_STATE_POSSIBLE,
                 REGIONAL_STATE_UNKNOWN,
-            ).kind,
-            obs.TRANSITION_DEGRADED,
+            ).notify
         )
 
 
@@ -123,6 +122,28 @@ class V120DOutboxTests(unittest.TestCase):
             {},
         )
         self.assertEqual(created, ())
+
+    def test_unknown_gap_does_not_create_churn_or_duplicate_likely(self):
+        self._seed_previous(REGIONAL_STATE_LIKELY)
+        gap = obs.record_state_transitions(
+            self.conn,
+            [self.asset],
+            [state(REGIONAL_STATE_UNKNOWN, stamp="2026-10-03T22:00:00Z")],
+            {},
+        )
+        self.assertEqual(gap, ())
+        regional.persist_asset_states(
+            self.conn,
+            [state(REGIONAL_STATE_UNKNOWN, stamp="2026-10-03T22:00:00Z")],
+        )
+        again = obs.record_state_transitions(
+            self.conn,
+            [self.asset],
+            [state(REGIONAL_STATE_LIKELY, stamp="2026-10-03T22:05:00Z")],
+            {},
+        )
+        self.assertEqual(again, ())
+        self.assertEqual(obs.pending_notifications(self.conn), ())
 
     def test_pending_notifications_are_marked_after_delivery(self):
         obs.record_state_transitions(
@@ -191,6 +212,107 @@ class V120DStatusReportTests(unittest.TestCase):
         self.assertIn("CLEAR", report)
         self.assertIn("198.51.100.1:2053", report)
 
+    def test_disabled_public_hosts_are_kept_in_inventory_but_hidden_from_monitor(self):
+        enabled = asset(
+            key="MARZBAN_PUBLIC_HOST:LIVE:0",
+            kind=discovery.ASSET_PUBLIC_HOST,
+            name="Live Host",
+        )
+        disabled = discovery.MarzbanAsset(
+            asset_key="MARZBAN_PUBLIC_HOST:OLD:0",
+            asset_type=discovery.ASSET_PUBLIC_HOST,
+            source_id="OLD:0",
+            name="Old disabled host",
+            address="old.example.test",
+            port=443,
+            resolved_ips=(),
+            metadata={"is_disabled": True},
+        )
+        discovery.sync_inventory(
+            self.conn,
+            [enabled, disabled],
+            observed_at="2026-10-03T21:50:00Z",
+        )
+        local_health.persist_health_snapshot(
+            self.conn,
+            [
+                local_health.AssetHealth(
+                    enabled.asset_key,
+                    enabled.asset_type,
+                    local_health.STATE_LOCAL_HEALTHY,
+                    local_health.REASON_OK,
+                    True,
+                    "2026-10-03T21:59:00Z",
+                    10.0,
+                    {},
+                ),
+                local_health.AssetHealth(
+                    disabled.asset_key,
+                    disabled.asset_type,
+                    local_health.STATE_DISABLED,
+                    local_health.REASON_PUBLIC_HOST_DISABLED,
+                    None,
+                    "2026-10-03T21:59:00Z",
+                    None,
+                    {},
+                ),
+            ],
+        )
+        report = obs.render_status_report(self.conn)
+        self.assertIn("Monitored: <b>1</b> · Inventory: <b>2</b>", report)
+        self.assertIn("Ignored disabled: <b>1</b>", report)
+        self.assertIn("Live Host", report)
+        self.assertNotIn("Old disabled host", report)
+
+    def test_node_without_active_public_host_is_rendered_na_not_unknown(self):
+        node = discovery.MarzbanAsset(
+            asset_key="MARZBAN_NODE:7",
+            asset_type=discovery.ASSET_NODE,
+            source_id="7",
+            name="USA-1",
+            address="216.126.237.205",
+            port=62050,
+            resolved_ips=("216.126.237.205",),
+            metadata={"node_id": 7, "status": "connected", "api_port": 62051},
+        )
+        discovery.sync_inventory(
+            self.conn,
+            [node],
+            observed_at="2026-10-03T21:50:00Z",
+        )
+        local_health.persist_health_snapshot(
+            self.conn,
+            [
+                local_health.AssetHealth(
+                    node.asset_key,
+                    node.asset_type,
+                    local_health.STATE_LOCAL_HEALTHY,
+                    local_health.REASON_OK,
+                    True,
+                    "2026-10-03T21:59:00Z",
+                    8.0,
+                    {},
+                )
+            ],
+        )
+        regional.persist_asset_states(
+            self.conn,
+            [
+                regional.AssetRegionalState(
+                    node.asset_key,
+                    node.asset_type,
+                    REGIONAL_STATE_UNKNOWN,
+                    regional.REASON_NO_PUBLIC_HOST_MAPPING,
+                    "2026-10-03T21:59:00Z",
+                    {},
+                )
+            ],
+        )
+        report = obs.render_status_report(self.conn)
+        self.assertIn("USA-1", report)
+        self.assertIn("Regional: <b>N/A</b>", report)
+        self.assertNotIn("Regional: <b>UNKNOWN</b>", report)
+
     def test_report_is_bounded_for_telegram(self):
         report = obs.render_status_report(self.conn)
         self.assertLessEqual(len(report), 3900)
@@ -233,7 +355,7 @@ class V120DSourceSafetyTests(unittest.TestCase):
 
     def test_bot_version_is_v120d(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V120D.1-2026-10-03-monitoring-ui"',
+            'BOT_VERSION_TAG = "V120D.2-2026-10-04-clean-monitoring-data"',
             self.bot,
         )
 

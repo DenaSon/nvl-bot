@@ -1,8 +1,8 @@
 """V120-D transition alerts and operator observability for Marzban monitoring.
 
-This module is deliberately read-only with respect to Marzban/network state. It
-records monitoring transitions, creates an alert outbox, and renders operator
-status/history. It never changes DNS, hosts, nodes, routes, or failover state.
+Inventory stays complete for audit/debugging, while the operator monitor only
+shows actionable assets. UNKNOWN means evidence is unavailable/stale and is not
+treated as a filtering transition.
 """
 
 from __future__ import annotations
@@ -23,13 +23,22 @@ from regional_filtering import (
 )
 
 
-V120D_VERSION = "V120D.0-2026-10-03-marzban-alerts-observability"
+V120D_VERSION = "V120D.2-2026-10-04-clean-monitoring-data"
 
 TRANSITION_NONE = "NONE"
 TRANSITION_WARNING = "WARNING"
 TRANSITION_CRITICAL = "CRITICAL"
 TRANSITION_RECOVERED = "RECOVERED"
+# Kept only so legacy DB rows remain readable. V120D.2 no longer creates it.
 TRANSITION_DEGRADED = "DEGRADED"
+
+ACTIONABLE_STATES = frozenset(
+    {
+        REGIONAL_STATE_CLEAR,
+        REGIONAL_STATE_POSSIBLE,
+        REGIONAL_STATE_LIKELY,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -62,18 +71,24 @@ def classify_transition(
     previous_state: Optional[str],
     current_state: Optional[str],
 ) -> Transition:
-    previous_missing = previous_state is None or str(previous_state).strip() == ""
+    current = str(current_state or REGIONAL_STATE_UNKNOWN).strip().upper()
+    previous_raw = str(previous_state or "").strip().upper()
+
+    # UNKNOWN is evidence coverage, not a filtering verdict.
+    if current == REGIONAL_STATE_UNKNOWN:
+        previous = previous_raw or None
+        return Transition(TRANSITION_NONE, previous, current)
+
     previous = (
         None
-        if previous_missing
-        else str(previous_state).strip().upper()
+        if not previous_raw or previous_raw == REGIONAL_STATE_UNKNOWN
+        else previous_raw
     )
-    current = str(current_state or REGIONAL_STATE_UNKNOWN).strip().upper()
 
     if previous == current:
         return Transition(TRANSITION_NONE, previous, current)
 
-    if previous_missing:
+    if previous is None:
         if current == REGIONAL_STATE_LIKELY:
             return Transition(TRANSITION_CRITICAL, None, current)
         if current == REGIONAL_STATE_POSSIBLE:
@@ -91,12 +106,6 @@ def classify_transition(
         and previous in {REGIONAL_STATE_POSSIBLE, REGIONAL_STATE_LIKELY}
     ):
         return Transition(TRANSITION_RECOVERED, previous, current)
-
-    if (
-        current == REGIONAL_STATE_UNKNOWN
-        and previous in {REGIONAL_STATE_POSSIBLE, REGIONAL_STATE_LIKELY}
-    ):
-        return Transition(TRANSITION_DEGRADED, previous, current)
 
     return Transition(TRANSITION_NONE, previous, current)
 
@@ -126,14 +135,86 @@ def install_schema(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_marzban_monitor_events_pending "
         "ON marzban_monitor_events(notified_at, event_id)"
     )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS marzban_monitor_state (
+            asset_key TEXT PRIMARY KEY,
+            last_actionable_state TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )"""
+    )
+
+    # Upgrade path: recover the last meaningful verdict from existing event history
+    # before considering current regional rows (which may currently be UNKNOWN/stale).
+    conn.execute(
+        """INSERT OR IGNORE INTO marzban_monitor_state (
+               asset_key, last_actionable_state, updated_at
+           )
+           SELECT e.asset_key, e.current_state, e.created_at
+           FROM marzban_monitor_events e
+           JOIN (
+               SELECT asset_key, MAX(event_id) AS max_event_id
+               FROM marzban_monitor_events
+               WHERE current_state IN ('CLEAR','POSSIBLE','LIKELY')
+                 AND transition_kind != 'DEGRADED'
+               GROUP BY asset_key
+           ) latest ON latest.max_event_id=e.event_id"""
+    )
+    regional.install_schema(conn)
+    conn.execute(
+        """INSERT OR IGNORE INTO marzban_monitor_state (
+               asset_key, last_actionable_state, updated_at
+           )
+           SELECT asset_key, filter_state, checked_at
+           FROM marzban_asset_regional
+           WHERE filter_state IN ('CLEAR','POSSIBLE','LIKELY')"""
+    )
 
 
 def _existing_states(conn) -> dict[str, str]:
-    regional.install_schema(conn)
+    install_schema(conn)
     rows = conn.execute(
-        "SELECT asset_key, filter_state FROM marzban_asset_regional"
+        "SELECT asset_key, last_actionable_state FROM marzban_monitor_state"
     ).fetchall()
-    return {row[0]: str(row[1] or REGIONAL_STATE_UNKNOWN) for row in rows}
+    result = {row[0]: str(row[1]) for row in rows}
+
+    # Supports tests/upgrade races where regional state was written after schema init.
+    for key, value in conn.execute(
+        """SELECT asset_key, filter_state
+           FROM marzban_asset_regional
+           WHERE filter_state IN ('CLEAR','POSSIBLE','LIKELY')"""
+    ).fetchall():
+        result.setdefault(key, str(value))
+    return result
+
+
+def _set_actionable_state(conn, asset_key: str, state: str, stamp: str) -> None:
+    conn.execute(
+        """INSERT INTO marzban_monitor_state (
+               asset_key, last_actionable_state, updated_at
+           ) VALUES (?,?,?)
+           ON CONFLICT(asset_key) DO UPDATE SET
+               last_actionable_state=excluded.last_actionable_state,
+               updated_at=excluded.updated_at""",
+        (asset_key, state, stamp),
+    )
+
+
+def _is_monitorable_asset(
+    asset: discovery.MarzbanAsset,
+    health_map: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    if (
+        asset.asset_type == discovery.ASSET_PUBLIC_HOST
+        and asset.metadata.get("is_disabled") is True
+    ):
+        return False
+    local = health_map.get(asset.asset_key) or {}
+    if (
+        asset.asset_type == discovery.ASSET_NODE
+        and str(local.get("health_state") or "").upper() == local_health.STATE_DISABLED
+    ):
+        return False
+    return True
 
 
 def record_state_transitions(
@@ -142,21 +223,33 @@ def record_state_transitions(
     new_states: Sequence[regional.AssetRegionalState],
     health_map: Mapping[str, Mapping[str, Any]],
 ) -> tuple[MonitorEvent, ...]:
-    """Record meaningful filtering transitions before new state rows are persisted."""
+    """Record only actionable filtering transitions.
+
+    UNKNOWN does not overwrite the last actionable baseline. This prevents
+    LIKELY -> UNKNOWN(stale/provider gap) -> LIKELY from creating false recovery
+    or duplicate critical events.
+    """
     install_schema(conn)
     previous = _existing_states(conn)
     asset_map = {item.asset_key: item for item in assets}
     created: list[MonitorEvent] = []
 
     for state in new_states:
-        transition = classify_transition(
-            previous.get(state.asset_key),
-            state.filter_state,
-        )
+        asset = asset_map.get(state.asset_key)
+        if asset is not None and not _is_monitorable_asset(asset, health_map):
+            continue
+
+        current = str(state.filter_state or REGIONAL_STATE_UNKNOWN).upper()
+        if current not in ACTIONABLE_STATES:
+            continue
+
+        transition = classify_transition(previous.get(state.asset_key), current)
+        _set_actionable_state(conn, state.asset_key, current, state.checked_at)
+        previous[state.asset_key] = current
+
         if not transition.notify:
             continue
 
-        asset = asset_map.get(state.asset_key)
         name = asset.name if asset else state.asset_key
         address = asset.address if asset else ""
         evidence = {
@@ -175,7 +268,7 @@ def record_state_transitions(
                 name,
                 address,
                 transition.previous_state,
-                state.filter_state,
+                current,
                 transition.kind,
                 state.filter_reason,
                 state.checked_at,
@@ -195,7 +288,7 @@ def record_state_transitions(
                 asset_name=name,
                 address=address,
                 previous_state=transition.previous_state,
-                current_state=state.filter_state,
+                current_state=current,
                 transition_kind=transition.kind,
                 filter_reason=state.filter_reason,
                 created_at=state.checked_at,
@@ -229,6 +322,8 @@ def pending_notifications(conn, limit: int = 20) -> tuple[MonitorEvent, ...]:
                   filter_reason, created_at, evidence_json
            FROM marzban_monitor_events
            WHERE notified_at IS NULL
+             AND transition_kind != 'DEGRADED'
+             AND COALESCE(previous_state, '') != 'UNKNOWN'
            ORDER BY event_id
            LIMIT ?""",
         (max(1, int(limit)),),
@@ -256,12 +351,15 @@ def mark_notified(
 
 
 def recent_events(conn, limit: int = 10) -> tuple[MonitorEvent, ...]:
+    """Return meaningful legacy/current events, hiding old UNKNOWN churn."""
     install_schema(conn)
     rows = conn.execute(
         """SELECT event_id, asset_key, asset_type, asset_name, address,
                   previous_state, current_state, transition_kind,
                   filter_reason, created_at, evidence_json
            FROM marzban_monitor_events
+           WHERE transition_kind != 'DEGRADED'
+             AND COALESCE(previous_state, '') != 'UNKNOWN'
            ORDER BY event_id DESC
            LIMIT ?""",
         (max(1, int(limit)),),
@@ -325,40 +423,71 @@ def render_alert_digest(events: Sequence[MonitorEvent]) -> str:
 
 
 def render_status_report(conn, *, max_assets: int = 30, event_limit: int = 8) -> str:
-    assets = discovery.list_active_assets(conn)
+    inventory = discovery.list_active_assets(conn)
     health = local_health.list_health(conn)
     regional_states = regional.list_asset_states(conn)
     provider = regional.get_runtime(conn)
-    history = recent_events(conn, event_limit)
+
+    assets = tuple(
+        item for item in inventory if _is_monitorable_asset(item, health)
+    )
+    ignored_count = len(inventory) - len(assets)
+    visible_keys = {item.asset_key for item in assets}
+    history = tuple(
+        event
+        for event in recent_events(conn, max(event_limit * 4, event_limit))
+        if event.asset_key in visible_keys
+    )[:event_limit]
 
     lines = [
         "🛰️ <b>Marzban Infrastructure Monitor</b>",
         "",
         f"Provider: <code>{html.escape(str(provider.get('provider_status') or 'NEVER'))}</code>",
-        f"Assets: <b>{len(assets)}</b>",
-        "",
+        f"Monitored: <b>{len(assets)}</b> · Inventory: <b>{len(inventory)}</b>",
     ]
+    if ignored_count:
+        lines.append(f"Ignored disabled: <b>{ignored_count}</b>")
+    lines.append("")
 
     if not assets:
-        lines.append("هیچ Asset فعالی هنوز کشف نشده است.")
+        lines.append("هیچ Asset قابل مانیتوری فعالی وجود ندارد.")
     else:
         for item in assets[:max_assets]:
             local = health.get(item.asset_key) or {}
             reg = regional_states.get(item.asset_key) or {}
             reg_state = str(reg.get("filter_state") or REGIONAL_STATE_UNKNOWN)
+            reg_reason = str(reg.get("filter_reason") or "")
             local_state = str(local.get("health_state") or "NO_DATA")
+
+            regional_na = (
+                item.asset_type == discovery.ASSET_NODE
+                and reg_reason == regional.REASON_NO_PUBLIC_HOST_MAPPING
+            )
+            icon = (
+                "🟢"
+                if regional_na and local_state == local_health.STATE_LOCAL_HEALTHY
+                else _state_icon(reg_state)
+            )
+
             lines.append(
-                f"{_state_icon(reg_state)} <b>{html.escape(_type_label(item.asset_type))}</b> "
+                f"{icon} <b>{html.escape(_type_label(item.asset_type))}</b> "
                 f"{html.escape(item.name)}"
             )
             endpoint = item.address
             if item.port:
                 endpoint += f":{item.port}"
             lines.append(f"   <code>{html.escape(endpoint)}</code>")
-            lines.append(
-                f"   Local: <code>{html.escape(local_state)}</code> | "
-                f"Regional: <b>{html.escape(reg_state)}</b>"
-            )
+
+            if regional_na:
+                lines.append(
+                    f"   Local: <code>{html.escape(local_state)}</code> | "
+                    "Regional: <b>N/A</b> <i>(no active Public Host)</i>"
+                )
+            else:
+                lines.append(
+                    f"   Local: <code>{html.escape(local_state)}</code> | "
+                    f"Regional: <b>{html.escape(reg_state)}</b>"
+                )
 
         if len(assets) > max_assets:
             lines.append(f"… {len(assets) - max_assets} Asset دیگر")
@@ -376,5 +505,4 @@ def render_status_report(conn, *, max_assets: int = 30, event_limit: int = 8) ->
             )
             lines.append(f"   <code>{html.escape(event.created_at)}</code>")
 
-    text = "\n".join(lines)
-    return text[:3900]
+    return "\n".join(lines)[:3900]

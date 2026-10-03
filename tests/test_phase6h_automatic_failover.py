@@ -176,7 +176,7 @@ class Phase6HIntegrationShapeTests(unittest.TestCase):
         self.assertIn("_db_update_setting, 'phase6h_auto_failover_enabled', '1'", region)
         self.assertIn("_db_update_setting, 'phase6h_auto_failover_enabled', '0'", region)
 
-    def test_scheduled_round_calls_6h_only_after_provider_success(self):
+    def test_default_round_calls_6h_only_after_provider_success(self):
         region = self._region(
             "async def _regional_filter_tick(app):",
             "async def _regional_filter_probe_one_now",
@@ -184,7 +184,8 @@ class Phase6HIntegrationShapeTests(unittest.TestCase):
         provider_pos = region.index("await _regional_provider_mark_ok(app)")
         auto_pos = region.index("await _phase6h_auto_failover_tick(app)")
         self.assertLess(provider_pos, auto_pos)
-        self.assertIn("if round_provider_ok:", region)
+        self.assertNotIn("round_provider_ok", region)
+        self.assertIn("_db_get_regional_monitor_targets", region)
 
     def test_6h_uses_phase6g_engine_and_auto_mode(self):
         region = self._region(

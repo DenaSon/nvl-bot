@@ -19043,8 +19043,21 @@ def _regional_probe_lock(app):
     return lock
 
 
-async def _regional_filter_probe_edge(app, host, service_port, provider, nodes):
-    """Probe one Edge through a provider-neutral interface; never mutates routing itself."""
+async def _regional_filter_probe_edge(
+    app,
+    host,
+    service_port,
+    provider,
+    nodes,
+    *,
+    affect_global_provider=True,
+    notify_transition=True,
+):
+    """Probe one Edge through a provider-neutral interface; never mutates routing itself.
+
+    Standby readiness probes can opt out of global provider-error state and incident
+    transitions so unrelated Standby noise never suppresses a valid Default decision.
+    """
     if await asyncio.to_thread(_is_current_core_host, host):
         return {"status": "SKIPPED_CORE", "host": host}
 
@@ -19076,7 +19089,25 @@ async def _regional_filter_probe_edge(app, host, service_port, provider, nodes):
         await _regional_provider_enter_limited(app, host, exc)
         return {"status": PROVIDER_STATUS_LIMITED, "host": host, "error": str(exc)}
     except RegionalProbeError as exc:
-        await _regional_provider_enter_error(app, host, provider.name, exc)
+        if affect_global_provider:
+            await _regional_provider_enter_error(app, host, provider.name, exc)
+        else:
+            await asyncio.to_thread(
+                _db_record_regional_provider_status,
+                host,
+                PROVIDER_STATUS_ERROR,
+                str(exc),
+                provider.name,
+            )
+            _incident_log(
+                "standby_regional_provider_error",
+                None,
+                level="warning",
+                host=host,
+                provider=provider.name,
+                error=str(exc),
+                global_provider_state_unchanged=True,
+            )
         return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": str(exc)}
 
     regional_decision = classify_regional_evidence(probe.evidence)
@@ -19086,7 +19117,7 @@ async def _regional_filter_probe_edge(app, host, service_port, provider, nodes):
         probe,
         regional_decision,
     )
-    if recompute_result:
+    if recompute_result and notify_transition:
         await _notify_filter_state_transition(
             app,
             host,

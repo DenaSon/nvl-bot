@@ -193,6 +193,7 @@ class V119CIntegrationShapeTests(unittest.TestCase):
             'NVL_STANDBY_LOCAL_MAX_AGE", 180',
             'NVL_STANDBY_REGIONAL_REFRESH_INTERVAL", 300',
             'NVL_STANDBY_REGIONAL_MAX_AGE", 600',
+            'NVL_STANDBY_FAILOVER_TARGET_MAX_AGE", 180',
             'NVL_STANDBY_REGIONAL_MAX_PER_CYCLE", 1',
             'NVL_STANDBY_FAILOVER_REFRESH_MAX_TARGETS", 2',
         ):
@@ -239,6 +240,7 @@ class V119CIntegrationShapeTests(unittest.TestCase):
         )
         self.assertIn("confirmed = (", region)
         self.assertIn("STANDBY_FAILOVER_REFRESH_MAX_TARGETS", region)
+        self.assertIn("STANDBY_FAILOVER_TARGET_MAX_AGE_SECONDS", region)
         self.assertIn("affect_global_provider=False", region)
         self.assertIn("notify_transition=False", region)
         self.assertIn("needs_regional_refresh", region)
@@ -251,6 +253,7 @@ class V119CIntegrationShapeTests(unittest.TestCase):
         self.assertIn("_db_get_all_standby_hosts", region)
         self.assertIn("_db_get_standby_hosts", region)
         self.assertIn("rank_ready_standbys(", region)
+        self.assertIn("ready_candidate_override", region)
         self.assertIn("STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS", region)
         self.assertIn("STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS", region)
         self.assertNotIn("rank_safe_standbys(", region)
@@ -280,6 +283,8 @@ class V119CIntegrationShapeTests(unittest.TestCase):
         self.assertLess(verify_pos, commit_pos)
         self.assertIn("verify_wg_ok", region)
         self.assertIn("verify_core_path_ok", region)
+        self.assertIn("POST_REBUILD_TARGET_REGIONAL_EVIDENCE_INVALID", region)
+        self.assertIn("latest_regional_age", region)
 
     def test_readiness_notifications_are_state_change_debounced(self):
         region = self._region(

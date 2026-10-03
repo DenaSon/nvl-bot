@@ -95,6 +95,7 @@ import v2ray_engine
 import marzban_admin
 import marzban_asset_discovery
 import marzban_local_health
+import marzban_regional_filtering as marzban_regional
 import secrets
 
 import base64
@@ -622,6 +623,14 @@ MARZBAN_LOCAL_HEALTH_INTERVAL_SECONDS = _phase6c_env_int("NVL_MARZBAN_LOCAL_HEAL
 MARZBAN_LOCAL_HEALTH_INITIAL_DELAY_SECONDS = _phase6c_env_int("NVL_MARZBAN_LOCAL_HEALTH_INITIAL_DELAY", 40, minimum=0)
 MARZBAN_LOCAL_HEALTH_TIMEOUT_SECONDS = _phase6c_env_int("NVL_MARZBAN_LOCAL_HEALTH_TIMEOUT", 5)
 MARZBAN_LOCAL_HEALTH_CONCURRENCY = _phase6c_env_int("NVL_MARZBAN_LOCAL_HEALTH_CONCURRENCY", 10)
+# V120-C — Marzban regional filtering evidence; still monitoring-only.
+MARZBAN_REGIONAL_INTERVAL_SECONDS = _phase6c_env_int("NVL_MARZBAN_REGIONAL_INTERVAL", 300)
+MARZBAN_REGIONAL_INITIAL_DELAY_SECONDS = _phase6c_env_int("NVL_MARZBAN_REGIONAL_INITIAL_DELAY", 70, minimum=0)
+MARZBAN_REGIONAL_MAX_TARGETS_PER_CYCLE = _phase6c_env_int("NVL_MARZBAN_REGIONAL_MAX_TARGETS", 2)
+MARZBAN_REGIONAL_EVIDENCE_MAX_AGE_SECONDS = _phase6c_env_int("NVL_MARZBAN_REGIONAL_EVIDENCE_MAX_AGE", 900)
+MARZBAN_REGIONAL_BACKOFF_BASE_SECONDS = _phase6c_env_int("NVL_MARZBAN_REGIONAL_BACKOFF_BASE", 300)
+MARZBAN_REGIONAL_BACKOFF_MAX_SECONDS = _phase6c_env_int("NVL_MARZBAN_REGIONAL_BACKOFF_MAX", 3600)
+MARZBAN_REGIONAL_ERROR_BACKOFF_SECONDS = _phase6c_env_int("NVL_MARZBAN_REGIONAL_ERROR_BACKOFF", 300)
 
 # ==========================================
 # 🆕 V89 — سیستم شناسایی خودکار فیلتر شدن بر اساس کاربران آنلاین
@@ -948,6 +957,7 @@ def init_db():
         # V120-A — persistent read-only inventory for Marzban Main/Nodes/Public Hosts.
         marzban_asset_discovery.install_schema(conn)
         marzban_local_health.install_schema(conn)
+        marzban_regional.install_schema(conn)
         # ---------------------------------------------------------
         
 
@@ -5779,6 +5789,218 @@ async def _marzban_local_health_loop(app):
                 "V120B Marzban local health failed; previous health snapshot preserved."
             )
         await asyncio.sleep(MARZBAN_LOCAL_HEALTH_INTERVAL_SECONDS)
+
+
+async def _marzban_regional_filter_tick(app):
+    """V120-C regional evidence for Marzban assets; monitoring-only."""
+    def _load():
+        with db_conn() as conn:
+            assets = marzban_asset_discovery.list_active_assets(conn)
+            health = marzban_local_health.list_health(conn)
+            remaining = marzban_regional.backoff_remaining_seconds(conn)
+            return assets, health, remaining
+
+    assets, health_map, backoff_remaining = await asyncio.to_thread(_load)
+    targets = marzban_regional.build_probe_targets(assets, health_map)
+    stamp = marzban_regional.utc_text()
+
+    def _sync_targets():
+        with db_conn() as conn:
+            marzban_regional.sync_target_catalog(conn, targets, observed_at=stamp)
+
+    await asyncio.to_thread(_sync_targets)
+
+    if backoff_remaining > 0:
+        log.info(
+            "V120C Marzban regional provider backoff remaining=%ss; preserving fresh evidence.",
+            backoff_remaining,
+        )
+    elif targets:
+        lock = _regional_probe_lock(app)
+        if lock.locked():
+            log.info("V120C Marzban regional probe skipped reason=PROBE_ALREADY_RUNNING")
+        else:
+            async with lock:
+                cursor = int(app.bot_data.get("marzban_regional_cursor", 0) or 0)
+                selected, next_cursor = marzban_regional.select_rotating_targets(
+                    targets,
+                    cursor,
+                    MARZBAN_REGIONAL_MAX_TARGETS_PER_CYCLE,
+                )
+                app.bot_data["marzban_regional_cursor"] = next_cursor
+
+                try:
+                    provider = _new_regional_probe_provider()
+                    nodes = await asyncio.to_thread(provider.discover_nodes, "ir")
+                    nodes = tuple(nodes[:REGIONAL_FILTER_MAX_NODES])
+                    if not nodes:
+                        raise RegionalProbeError("no regional nodes")
+                except RegionalProbeLimited as exc:
+                    def _limited():
+                        with db_conn() as conn:
+                            return marzban_regional.record_provider_limited(
+                                conn,
+                                str(exc),
+                                base_seconds=MARZBAN_REGIONAL_BACKOFF_BASE_SECONDS,
+                                max_seconds=MARZBAN_REGIONAL_BACKOFF_MAX_SECONDS,
+                            )
+                    delay = await asyncio.to_thread(_limited)
+                    log.warning(
+                        "V120C Marzban regional provider limited backoff=%ss error=%s",
+                        delay,
+                        exc,
+                    )
+                    selected = ()
+                except (RegionalProbeError, ValueError) as exc:
+                    def _provider_error():
+                        with db_conn() as conn:
+                            return marzban_regional.record_provider_error(
+                                conn,
+                                str(exc),
+                                backoff_seconds=MARZBAN_REGIONAL_ERROR_BACKOFF_SECONDS,
+                            )
+                    delay = await asyncio.to_thread(_provider_error)
+                    log.warning(
+                        "V120C Marzban regional provider error backoff=%ss error=%s",
+                        delay,
+                        exc,
+                    )
+                    selected = ()
+
+                provider_failed = False
+                for target in selected:
+                    try:
+                        probe = await asyncio.to_thread(
+                            provider.probe_tcp,
+                            target.host,
+                            target.port,
+                            nodes,
+                        )
+                    except RegionalProbeLimited as exc:
+                        def _limited_target():
+                            with db_conn() as conn:
+                                marzban_regional.persist_probe_attempt_error(
+                                    conn,
+                                    target,
+                                    PROVIDER_STATUS_LIMITED,
+                                    str(exc),
+                                )
+                                return marzban_regional.record_provider_limited(
+                                    conn,
+                                    str(exc),
+                                    base_seconds=MARZBAN_REGIONAL_BACKOFF_BASE_SECONDS,
+                                    max_seconds=MARZBAN_REGIONAL_BACKOFF_MAX_SECONDS,
+                                )
+                        delay = await asyncio.to_thread(_limited_target)
+                        log.warning(
+                            "V120C Marzban target limited target=%s backoff=%ss",
+                            target.target_key,
+                            delay,
+                        )
+                        provider_failed = True
+                        break
+                    except RegionalProbeError as exc:
+                        def _error_target():
+                            with db_conn() as conn:
+                                marzban_regional.persist_probe_attempt_error(
+                                    conn,
+                                    target,
+                                    PROVIDER_STATUS_ERROR,
+                                    str(exc),
+                                )
+                                return marzban_regional.record_provider_error(
+                                    conn,
+                                    str(exc),
+                                    backoff_seconds=MARZBAN_REGIONAL_ERROR_BACKOFF_SECONDS,
+                                )
+                        delay = await asyncio.to_thread(_error_target)
+                        log.warning(
+                            "V120C Marzban target provider error target=%s backoff=%ss",
+                            target.target_key,
+                            delay,
+                        )
+                        provider_failed = True
+                        break
+
+                    decision = classify_regional_evidence(probe.evidence)
+
+                    def _persist_success():
+                        with db_conn() as conn:
+                            marzban_regional.persist_probe_success(
+                                conn,
+                                target,
+                                probe,
+                                decision,
+                            )
+
+                    await asyncio.to_thread(_persist_success)
+                    log.info(
+                        "V120C Marzban regional result target=%s state=%s failed=%s completed=%s",
+                        target.target_key,
+                        decision.state,
+                        decision.summary.failed_nodes,
+                        decision.summary.completed_nodes,
+                    )
+
+                if selected and not provider_failed:
+                    def _provider_ok():
+                        with db_conn() as conn:
+                            marzban_regional.record_provider_ok(conn)
+                    await asyncio.to_thread(_provider_ok)
+
+    def _derive_and_persist():
+        with db_conn() as conn:
+            endpoint_states = marzban_regional.load_endpoint_states(
+                conn,
+                targets,
+                max_age_seconds=MARZBAN_REGIONAL_EVIDENCE_MAX_AGE_SECONDS,
+            )
+            states = marzban_regional.derive_asset_states(
+                assets,
+                health_map,
+                targets,
+                endpoint_states,
+                checked_at=marzban_regional.utc_text(),
+            )
+            marzban_regional.persist_asset_states(conn, states)
+            runtime = marzban_regional.get_runtime(conn)
+            return states, runtime
+
+    states, provider_runtime = await asyncio.to_thread(_derive_and_persist)
+    counts = {}
+    for state in states:
+        counts[state.filter_state] = counts.get(state.filter_state, 0) + 1
+    log.info(
+        "V120C Marzban regional states=%s provider=%s (monitoring-only).",
+        counts,
+        provider_runtime.get("provider_status"),
+    )
+    return {
+        "assets": len(states),
+        "targets": len(targets),
+        "states": counts,
+        "provider_status": provider_runtime.get("provider_status"),
+    }
+
+
+async def _marzban_regional_filter_loop(app):
+    if MARZBAN_REGIONAL_INITIAL_DELAY_SECONDS > 0:
+        await asyncio.sleep(MARZBAN_REGIONAL_INITIAL_DELAY_SECONDS)
+
+    log.info(
+        "V120C Marzban Regional Filtering started interval=%ss max_targets=%s evidence_max_age=%ss.",
+        MARZBAN_REGIONAL_INTERVAL_SECONDS,
+        MARZBAN_REGIONAL_MAX_TARGETS_PER_CYCLE,
+        MARZBAN_REGIONAL_EVIDENCE_MAX_AGE_SECONDS,
+    )
+    while True:
+        try:
+            await _marzban_regional_filter_tick(app)
+        except Exception:
+            log.exception(
+                "V120C Marzban regional filtering failed; previous evidence preserved."
+            )
+        await asyncio.sleep(MARZBAN_REGIONAL_INTERVAL_SECONDS)
 
 
 def _db_mark_reserved_v2ray_sale(username, agent_id, service_type):
@@ -20721,6 +20943,7 @@ async def _post_init(app):
     app.bot_data['standby_readiness_task'] = asyncio.create_task(_standby_readiness_loop(app))
     app.bot_data['marzban_asset_discovery_task'] = asyncio.create_task(_marzban_asset_discovery_loop(app))
     app.bot_data['marzban_local_health_task'] = asyncio.create_task(_marzban_local_health_loop(app))
+    app.bot_data['marzban_regional_task'] = asyncio.create_task(_marzban_regional_filter_loop(app))
     app.bot_data['udpgw_health_task'] = asyncio.create_task(_udpgw_health_loop(app))
     app.bot_data['daily_sales_report_task'] = asyncio.create_task(_daily_sales_report_loop(app))
     app.bot_data['filter_detect_task'] = asyncio.create_task(_filter_detect_loop(app))  # 🆕 V89
@@ -20737,7 +20960,7 @@ async def _post_shutdown(app):
     # قلم افتاده بود — پس هیچ‌وقت cancel نمی‌شد و روی asyncio.sleep(...) منتظر می‌ماند، پروسه
     # واقعاً خارج نمی‌شد تا systemd صبرش تمام شود و به‌زور بکشدش (که همان قطعیِ طولانی و نیازِ
     # نماینده‌ها به ورودِ مجدد را رقم می‌زد).
-    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 V119A Regional Filter Monitor'), ('fast_default_sentinel_task', '⚡ V119A Fast Default Sentinel'), ('standby_readiness_task', '🛟 V119C Warm Standby Watchdog'), ('marzban_asset_discovery_task', '🧭 V120A Marzban Asset Discovery'), ('marzban_local_health_task', '🩺 V120B Marzban Local Health'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار')):
+    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 V119A Regional Filter Monitor'), ('fast_default_sentinel_task', '⚡ V119A Fast Default Sentinel'), ('standby_readiness_task', '🛟 V119C Warm Standby Watchdog'), ('marzban_asset_discovery_task', '🧭 V120A Marzban Asset Discovery'), ('marzban_local_health_task', '🩺 V120B Marzban Local Health'), ('marzban_regional_task', '🌍 V120C Marzban Regional Filtering'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار')):
         task = app.bot_data.get(key)
         if task and not task.done():
             task.cancel()
@@ -20787,4 +21010,5 @@ if __name__ == '__main__':
     print(f"🛟 V119C Reliable Auto Failover فعال است (Standby Watchdog هر {STANDBY_READINESS_INTERVAL_SECONDS}s؛ Regional refresh هر {STANDBY_REGIONAL_REFRESH_INTERVAL_SECONDS}s؛ retry cooldown={AUTO_FAILOVER_ATTEMPT_COOLDOWN_SECONDS}s).")
     print(f"🧭 V120A Marzban Asset Discovery فعال است (هر {MARZBAN_ASSET_DISCOVERY_INTERVAL_SECONDS}s؛ فقط Inventory و بدون Probe/Alert/Mutation).")
     print(f"🩺 V120B Marzban Local Health فعال است (هر {MARZBAN_LOCAL_HEALTH_INTERVAL_SECONDS}s؛ Main/Node/Public Host؛ بدون Regional/Alert/Mutation).")
+    print(f"🌍 V120C Marzban Regional Filtering فعال است (هر {MARZBAN_REGIONAL_INTERVAL_SECONDS}s؛ حداکثر {MARZBAN_REGIONAL_MAX_TARGETS_PER_CYCLE} target در هر دور؛ بدون Alert/Action).")
     app.run_polling()

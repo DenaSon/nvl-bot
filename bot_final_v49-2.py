@@ -96,6 +96,7 @@ import marzban_admin
 import marzban_asset_discovery
 import marzban_local_health
 import marzban_regional_filtering as marzban_regional
+import marzban_observability
 import secrets
 
 import base64
@@ -317,7 +318,7 @@ from standby_readiness import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V119C.0-2026-10-03-reliable-automatic-failover"
+BOT_VERSION_TAG = "V120D.2-2026-10-04-clean-monitoring-data"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -958,6 +959,7 @@ def init_db():
         marzban_asset_discovery.install_schema(conn)
         marzban_local_health.install_schema(conn)
         marzban_regional.install_schema(conn)
+        marzban_observability.install_schema(conn)
         # ---------------------------------------------------------
         
 
@@ -1479,7 +1481,6 @@ def _build_server_settings_kb():
     ساختاری امکان‌پذیر نیست — هر تغییری این‌جا، خودکار در هر دو مسیر ورودی اعمال می‌شود.
     """
     return [[InlineKeyboardButton("🖥 وضعیت و نقش سرورها (Core/Edge)", callback_data="srv_status")],
-            [InlineKeyboardButton("🛡 وضعیت فیلترینگ", callback_data="hp_filtering")],
             [InlineKeyboardButton("✏️ تغییر نام برند", callback_data="srv_brand")],
             [InlineKeyboardButton("🎯 تنظیمات مستقیم", callback_data="srv_direct_menu"), InlineKeyboardButton("🔐 تنظیمات TLS", callback_data="srv_tls")],
             [InlineKeyboardButton("🔌 تنظیمات UDPGW", callback_data="srv_udpgw")],
@@ -5962,6 +5963,13 @@ async def _marzban_regional_filter_tick(app):
                 endpoint_states,
                 checked_at=marzban_regional.utc_text(),
             )
+            # V120-D records transition/outbox rows BEFORE replacing current state.
+            marzban_observability.record_state_transitions(
+                conn,
+                assets,
+                states,
+                health_map,
+            )
             marzban_regional.persist_asset_states(conn, states)
             runtime = marzban_regional.get_runtime(conn)
             return states, runtime
@@ -5975,12 +5983,63 @@ async def _marzban_regional_filter_tick(app):
         counts,
         provider_runtime.get("provider_status"),
     )
+    await _deliver_marzban_monitor_alerts(app)
     return {
         "assets": len(states),
         "targets": len(targets),
         "states": counts,
         "provider_status": provider_runtime.get("provider_status"),
     }
+
+
+async def _deliver_marzban_monitor_alerts(app):
+    """Deliver transition outbox once; repeated identical states stay silent."""
+    def _pending():
+        with db_conn() as conn:
+            return marzban_observability.pending_notifications(conn, limit=20)
+
+    events = await asyncio.to_thread(_pending)
+    if not events:
+        return {"pending": 0, "delivered": 0}
+
+    text = marzban_observability.render_alert_digest(events)
+    admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
+    delivered = 0
+    for chat_id in admin_ids:
+        try:
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            delivered += 1
+        except Exception as exc:
+            if "bot was blocked by the user" in str(exc).lower():
+                log.warning(
+                    "V120D Marzban alert recipient unavailable chat_id=%s reason=BOT_BLOCKED",
+                    chat_id,
+                )
+            else:
+                log.exception(
+                    "V120D Marzban alert delivery failed chat_id=%s",
+                    chat_id,
+                )
+
+    if delivered > 0:
+        event_ids = [event.event_id for event in events]
+
+        def _mark():
+            with db_conn() as conn:
+                marzban_observability.mark_notified(conn, event_ids)
+
+        await asyncio.to_thread(_mark)
+        log.info(
+            "V120D Marzban alert delivered events=%s admins=%s",
+            len(events),
+            delivered,
+        )
+    return {"pending": len(events), "delivered": delivered}
 
 
 async def _marzban_regional_filter_loop(app):
@@ -6159,6 +6218,7 @@ async def show_main_menu(update_or_query, context):
             ['➕ فروش / ساخت اشتراک', '👥 کاربران'],
             ['🤝 نمایندگان', '📊 گزارش‌ها'],
             ['💰 مالی و کارت‌ها', '⚙️ تنظیمات'],
+            ['🛡 بررسی فیلترینگ', '🛰 بررسی مرزبان'],
             ['🛠 V2Ray / Marzban', '📦 بکاپ'],
         ]
         if chat_id == SUPER_ADMIN_ID:
@@ -8998,6 +9058,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Phase 5.6 canonical labels
         '➕ فروش / ساخت اشتراک', '➕ فروش اشتراک', '👥 کاربران', '👥 کاربران من',
         '🤝 نمایندگان', '📊 گزارش‌ها', '💰 مالی و کارت‌ها', '⚙️ تنظیمات',
+        '🛡 بررسی فیلترینگ', '🛰 بررسی مرزبان',
         '🛠 V2Ray / Marzban', '📦 بکاپ', '💳 شارژ حساب', '💰 کیف پول و حساب',
         '✏️ نام برند', '💳 کارت اختصاصی',
         # Backward-compatible aliases from pre-5.6 keyboards/messages
@@ -9079,6 +9140,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if MATPLOTLIB_AVAILABLE and role == 'admin': kb.append([InlineKeyboardButton("📈 نمودار فروش ۷ روز گذشته", callback_data="info_chart")])
             kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="uact_back_to_menu")])
             await update.message.reply_text("📊 <b>پورتال گزارشات سیستم</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML"); return
+        elif text == '🛡 بررسی فیلترینگ' and role == 'admin':
+            await _render_filtering_monitor_panel(update.message)
+            return
+        elif text == '🛰 بررسی مرزبان' and role == 'admin':
+            await _render_marzban_monitor_panel(update.message)
+            return
         elif text in ('⚙️ تنظیمات', '⚙️ تنظیمات سرور') and role == 'admin':
             kb = _build_server_settings_kb()
             await update.message.reply_text("⚙️ <b>تنظیمات سرور</b>\nیکی از گزینه‌های زیر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML"); return
@@ -10655,12 +10722,21 @@ async def _render_filtering_monitor_panel(query, page=0):
         kb.append([InlineKeyboardButton("🛑 غیرفعال‌سازی Failover خودکار", callback_data="flt_auto_disable")])
     else:
         kb.append([InlineKeyboardButton("🤖 فعال‌سازی Failover خودکار", callback_data="flt_auto_enable")])
-    kb.append([InlineKeyboardButton("🔙 بازگشت به تنظیمات", callback_data="srv_menu_back")])
-    await query.edit_message_text(
-        "\n".join(lines),
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="HTML",
-    )
+    kb.append([InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")])
+    payload = "\n".join(lines)
+    markup = InlineKeyboardMarkup(kb)
+    if hasattr(query, "edit_message_text"):
+        await query.edit_message_text(
+            payload,
+            reply_markup=markup,
+            parse_mode="HTML",
+        )
+    else:
+        await query.reply_text(
+            payload,
+            reply_markup=markup,
+            parse_mode="HTML",
+        )
 
 
 async def _render_filtering_edge_detail(query, host):
@@ -16341,6 +16417,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d == "hp_filtering" and role == 'admin':
         await _render_filtering_monitor_panel(query)
 
+    elif d == "mzm_refresh" and role == 'admin':
+        await query.answer("🔄 نمایش با آخرین داده‌های ذخیره‌شده بروزرسانی شد.", show_alert=False)
+        await _render_marzban_monitor_panel(query)
+
     elif d == "flt_auto_enable" and role == 'admin':
         await query.edit_message_text(
             "⚠️ <b>فعال‌سازی Automatic Filtering Failover</b>\n\n"
@@ -16793,7 +16873,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await asyncio.to_thread(_db_update_setting, 'phase6h_auto_failover_enabled', '0')
         await query.message.reply_text(
             "🛡 این دکمه متعلق به پیام قدیمی است. Automatic Filtering Failover خاموش شد؛ "
-            "برای مدیریت آن از «⚙️ تنظیمات → 🛡 وضعیت فیلترینگ» استفاده کنید."
+            "برای مدیریت آن از «🛡 بررسی فیلترینگ» در منوی اصلی استفاده کنید."
         )
         await _render_host_pool_panel(query)
 
@@ -20922,6 +21002,44 @@ async def _filter_detect_loop(app):
             log.exception("Traffic Anomaly monitor failed; next round will continue.")
         await asyncio.sleep(FILTER_DETECT_CHECK_INTERVAL_SECONDS)
 
+async def _render_marzban_monitor_panel(target):
+    """Unified Marzban monitor UI for menu, callbacks and /marzban_monitor."""
+    def _report():
+        with db_conn() as conn:
+            return marzban_observability.render_status_report(conn)
+
+    report = await asyncio.to_thread(_report)
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 بروزرسانی نمایش", callback_data="mzm_refresh")],
+        [InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")],
+    ])
+    if hasattr(target, "edit_message_text"):
+        await target.edit_message_text(
+            report,
+            reply_markup=markup,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    else:
+        await target.reply_text(
+            report,
+            reply_markup=markup,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+
+async def cmd_marzban_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only operator view for V120 A-D state/history."""
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
+    if chat_id is None or chat_id not in set(admin_ids):
+        if update.effective_message:
+            await update.effective_message.reply_text("⛔️ دسترسی فقط برای مدیریت.")
+        return
+    await _render_marzban_monitor_panel(update.effective_message)
+
+
 async def _post_init(app):
     # Phase 6H uses a dedicated explicit admin opt-in key. The legacy V89
     # auto_failover_mode/traffic-anomaly path remains notification-only and cannot call failover.
@@ -20993,6 +21111,7 @@ if __name__ == '__main__':
         store_data=PersistenceInput(bot_data=False, chat_data=False, user_data=True, callback_data=False))
     app = ApplicationBuilder().token(TOKEN).persistence(persistence).post_init(_post_init).post_shutdown(_post_shutdown).build()
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("marzban_monitor", cmd_marzban_monitor))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))
@@ -21010,5 +21129,6 @@ if __name__ == '__main__':
     print(f"🛟 V119C Reliable Auto Failover فعال است (Standby Watchdog هر {STANDBY_READINESS_INTERVAL_SECONDS}s؛ Regional refresh هر {STANDBY_REGIONAL_REFRESH_INTERVAL_SECONDS}s؛ retry cooldown={AUTO_FAILOVER_ATTEMPT_COOLDOWN_SECONDS}s).")
     print(f"🧭 V120A Marzban Asset Discovery فعال است (هر {MARZBAN_ASSET_DISCOVERY_INTERVAL_SECONDS}s؛ فقط Inventory و بدون Probe/Alert/Mutation).")
     print(f"🩺 V120B Marzban Local Health فعال است (هر {MARZBAN_LOCAL_HEALTH_INTERVAL_SECONDS}s؛ Main/Node/Public Host؛ بدون Regional/Alert/Mutation).")
-    print(f"🌍 V120C Marzban Regional Filtering فعال است (هر {MARZBAN_REGIONAL_INTERVAL_SECONDS}s؛ حداکثر {MARZBAN_REGIONAL_MAX_TARGETS_PER_CYCLE} target در هر دور؛ بدون Alert/Action).")
+    print(f"🌍 V120C Marzban Regional Filtering فعال است (هر {MARZBAN_REGIONAL_INTERVAL_SECONDS}s؛ حداکثر {MARZBAN_REGIONAL_MAX_TARGETS_PER_CYCLE} target در هر دور؛ بدون Action).")
+    print("🔔 V120D Marzban Alerts & Observability فعال است (Transition-only alerts + /marzban_monitor؛ بدون Auto-action).")
     app.run_polling()

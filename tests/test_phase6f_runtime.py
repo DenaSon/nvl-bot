@@ -145,7 +145,7 @@ class Phase6FBotIntegrationStaticTests(unittest.TestCase):
     def test_provider_state_resets_after_successful_default_probe(self):
         probe_region = self._region(
             "async def _regional_filter_probe_edge(",
-            "async def _phase6h_auto_failover_tick(app):",
+            "async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):",
         )
         self.assertNotIn("_regional_provider_mark_ok", probe_region)
 

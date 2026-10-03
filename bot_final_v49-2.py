@@ -15954,13 +15954,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d == "flt_auto_enable_yes" and role == 'admin':
         await asyncio.to_thread(_db_update_setting, 'phase6h_auto_failover_enabled', '1')
         await asyncio.to_thread(_db_update_setting, 'phase6h_auto_failover_last_attempt_at', '')
+        await asyncio.to_thread(_db_update_setting, 'phase6h_standby_readiness_state', '')
+        spawn_bg_task(_standby_readiness_tick(context.application))
         await query.message.reply_text(
-            "✅ Automatic Filtering Failover فعال شد. فقط policy سخت‌گیرانه Phase 6H اجازه اجرا می‌دهد."
+            "✅ Automatic Filtering Failover فعال شد. V119-C اکنون Warm Standby readiness را هم به‌صورت پیوسته بررسی می‌کند."
         )
         await _render_filtering_monitor_panel(query)
 
     elif d == "flt_auto_disable" and role == 'admin':
         await asyncio.to_thread(_db_update_setting, 'phase6h_auto_failover_enabled', '0')
+        await asyncio.to_thread(_db_update_setting, 'phase6h_standby_readiness_state', 'DISABLED')
         await query.message.reply_text("🛑 Automatic Filtering Failover غیرفعال شد؛ Monitoring همچنان فعال است.")
         await _render_filtering_monitor_panel(query)
 
@@ -19605,10 +19608,17 @@ async def _incident_mark_failover_blocked(
     details = dict(extra or {})
     details["configured_standby_count"] = len(standbys)
     details["safe_standby_count"] = len(safe_candidates)
-    rejected = {}
-    for standby in standbys:
-        if standby not in safe_candidates:
-            rejected[standby] = list(standby_safety_failures(health_map.get(standby) or {}))
+    rejected = {
+        host: list(failures)
+        for host, failures in readiness_diagnostics(
+            standbys,
+            health_map,
+            now=datetime.now(),
+            local_max_age_seconds=STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS,
+            regional_max_age_seconds=STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS,
+        ).items()
+        if host not in safe_candidates
+    }
     if rejected:
         details["standby_rejections"] = rejected
 
@@ -19674,7 +19684,7 @@ async def _incident_mark_failover_blocked(
 
 
 async def _phase6h_auto_failover_tick(app):
-    """Evaluate auto failover and persist an operator-readable V119-B decision trail."""
+    """V119-C: evaluate only fresh, warm Standbys and run the shared safe engine."""
     enabled = (await asyncio.to_thread(
         _db_get_setting, 'phase6h_auto_failover_enabled', '0'
     )) == '1'
@@ -19731,14 +19741,25 @@ async def _phase6h_auto_failover_tick(app):
         host = row[0]
         if host in health_map:
             health_map[host] = dict(health_map[host])
+            health_map[host]["active"] = bool(row[1])
             health_map[host]["avg_latency_ms"] = row[8] if len(row) > 8 else None
 
     source_health = health_map.get(source_host) or {}
     standbys = [
+        host for host in await asyncio.to_thread(_db_get_all_standby_hosts)
+        if host != source_host
+    ]
+    active_standbys = [
         host for host in await asyncio.to_thread(_db_get_standby_hosts)
         if host != source_host
     ]
-    safe_candidates = rank_safe_standbys(standbys, health_map)
+    safe_candidates = rank_ready_standbys(
+        active_standbys,
+        health_map,
+        now=datetime.now(),
+        local_max_age_seconds=STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS,
+        regional_max_age_seconds=STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS,
+    )
     provider_runtime = await asyncio.to_thread(_db_get_regional_provider_runtime)
     switch_age = await asyncio.to_thread(_db_seconds_since_last_ip_switch)
     attempt_age = await asyncio.to_thread(_db_seconds_since_auto_failover_attempt)
@@ -19788,11 +19809,13 @@ async def _phase6h_auto_failover_tick(app):
             reason=normalized_reason,
             raw_reason=decision.reason,
             configured_standbys=len(standbys),
+            active_standbys=len(active_standbys),
             safe_standbys=len(safe_candidates),
         )
         if filter_confirmed and incident:
             extra = {
                 "provider_status": provider_runtime.get("status"),
+                "active_standby_count": len(active_standbys),
                 "switch_cooldown_remaining": max(
                     0,
                     AUTO_FAILOVER_SWITCH_COOLDOWN_SECONDS - int(switch_age)
@@ -19840,7 +19863,10 @@ async def _phase6h_auto_failover_tick(app):
                 target_host=target_host,
                 detail={
                     "configured_standbys": len(standbys),
+                    "active_standbys": len(active_standbys),
                     "safe_standbys": len(safe_candidates),
+                    "local_freshness_seconds": STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS,
+                    "regional_freshness_seconds": STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS,
                 },
             )
             _incident_log(
@@ -20046,7 +20072,16 @@ async def _regional_filter_tick(app):
                     current_default,
                 )
 
-        # With default-only probing this decision is no longer blocked by unrelated Edges.
+        # V119-C: once filtering is truly confirmed, use the already-open provider
+        # context to refresh only stale/unknown locally healthy Standbys before policy.
+        await _refresh_standbys_for_confirmed_filter(
+            app,
+            host,
+            provider,
+            nodes,
+        )
+
+        # Default decision remains independent from unrelated Standby provider errors.
         await _phase6h_auto_failover_tick(app)
         return result
 

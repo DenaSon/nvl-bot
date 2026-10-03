@@ -17888,7 +17888,7 @@ async def _safe_manual_failover_preflight(
     target_health = health_map.get(target_host, {})
     target_filter_state = target_health.get("filter_state") or FILTER_STATE_UNKNOWN
     target_regional_age = evidence_age_seconds(
-        target_health.get("regional_service_last_check"),
+        target_health.get("regional_state_updated_at"),
         datetime.now(),
     )
     if require_clear_filter:
@@ -18161,7 +18161,7 @@ async def _safe_manual_failover(
                 latest_target_health.get("filter_state") or FILTER_STATE_UNKNOWN
             )
             latest_regional_age = evidence_age_seconds(
-                latest_target_health.get("regional_service_last_check"),
+                latest_target_health.get("regional_state_updated_at"),
                 datetime.now(),
             )
             if (
@@ -19418,7 +19418,7 @@ async def _refresh_standby_regional_slow(app, active_standbys, health_map):
     due = []
     for host in active_standbys:
         health = health_map.get(host) or {}
-        age = evidence_age_seconds(health.get("regional_service_last_check"), now)
+        age = evidence_age_seconds(health.get("regional_state_updated_at"), now)
         if age >= STANDBY_REGIONAL_REFRESH_INTERVAL_SECONDS:
             due.append((age, host))
     due.sort(key=lambda item: (-item[0], item[1]))
@@ -19612,7 +19612,7 @@ async def _refresh_standbys_for_confirmed_filter(app, source_host, provider, nod
             )
         ]
         regional_age = evidence_age_seconds(
-            health.get("regional_service_last_check"),
+            health.get("regional_state_updated_at"),
             now,
         )
         regional_state = str(health.get("filter_state") or "").upper()

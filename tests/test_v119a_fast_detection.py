@@ -140,7 +140,7 @@ class V119AFastDetectionStaticTests(unittest.TestCase):
         self.assertIn("build_regional_probe_provider", self.source)
         runtime = self._region(
             "def _new_regional_probe_provider():",
-            "async def _phase6h_auto_failover_tick(app):",
+            "async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):",
         )
         self.assertIn("provider.probe_tcp", runtime)
         self.assertNotIn("CheckHostClient", runtime)

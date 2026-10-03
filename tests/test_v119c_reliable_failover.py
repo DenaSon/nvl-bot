@@ -127,7 +127,7 @@ class V119CReadinessPolicyTests(unittest.TestCase):
         h1 = ready_health(self.now, latency=50)
         h2 = ready_health(self.now, latency=15)
         h3 = ready_health(self.now, latency=1)
-        h3["regional_service_last_check"] = _ts(
+        h3["regional_state_updated_at"] = _ts(
             self.now - timedelta(seconds=900)
         )
         ranked = rank_ready_standbys(

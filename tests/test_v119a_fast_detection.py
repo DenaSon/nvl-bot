@@ -112,7 +112,7 @@ class V119AFastDetectionStaticTests(unittest.TestCase):
 
     def test_release_marker(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V119A.0-2026-10-03-fast-detection"',
+            'BOT_VERSION_TAG = "V119B.0-2026-10-03-incident-observability"',
             self.source,
         )
 

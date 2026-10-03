@@ -179,7 +179,7 @@ class Phase6CIntegrationRegressionTests(unittest.TestCase):
 
     def test_current_release_marker_is_present(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V120D.0-2026-10-03-marzban-alerts-observability"',
+            'BOT_VERSION_TAG = "V120D.1-2026-10-03-monitoring-ui"',
             self.source,
         )
 

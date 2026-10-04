@@ -299,17 +299,6 @@ def run_phase4(
         )
         source_lock = True
 
-        # Revalidate the destination state after both migration locks are held.
-        # The PLAN_ONLY snapshot is not authoritative once execution starts:
-        # an operator/restart policy could have started Marzban in the gap.
-        if compose_running(
-            destination_executor,
-            marzban_dir=destination.marzban_dir,
-        ):
-            raise Phase4Error(
-                "destination Marzban started after planning; refusing final DB replacement"
-            )
-
         source_was_running = plan.source_running
         source_stopped = False
         destination_backup = ""
@@ -348,6 +337,18 @@ def run_phase4(
                 attempt_id=attempt_id,
                 policy=policy,
             )
+
+            # Revalidate immediately before touching the destination DB.
+            # A restart policy/operator may have started Marzban after PLAN_ONLY
+            # or while the final source snapshot was being relayed.
+            if compose_running(
+                destination_executor,
+                marzban_dir=destination.marzban_dir,
+            ):
+                raise Phase4Error(
+                    "destination Marzban started during final sync; "
+                    "refusing runtime DB replacement"
+                )
 
             destination_backup = backup_destination_database(
                 destination_executor,

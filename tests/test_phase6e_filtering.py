@@ -247,7 +247,7 @@ class Phase6EObservabilityIntegrationTests(unittest.TestCase):
         self.assertEqual(d.filter_confidence, FILTER_CONFIDENCE_HIGH)
         self.assertEqual(d.filter_state, FILTER_STATE_LIKELY)
 
-    def test_repeated_likely_round_without_external_control_stays_possible(self):
+    def test_repeated_likely_round_without_external_control_is_still_high_confidence(self):
         d = derive_observability(
             True,
             True,
@@ -261,10 +261,10 @@ class Phase6EObservabilityIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(d.diagnostic_reason, DIAG_FILTER_SUSPECTED)
         self.assertTrue(d.filter_suspected)
-        self.assertEqual(d.filter_confidence, FILTER_CONFIDENCE_MEDIUM)
-        self.assertEqual(d.filter_state, FILTER_STATE_POSSIBLE)
+        self.assertEqual(d.filter_confidence, FILTER_CONFIDENCE_HIGH)
+        self.assertEqual(d.filter_state, FILTER_STATE_LIKELY)
 
-    def test_external_failure_prevents_filtering_classification(self):
+    def test_external_failure_is_diagnostic_only_and_does_not_erase_regional_filter(self):
         d = derive_observability(
             True,
             True,
@@ -277,8 +277,43 @@ class Phase6EObservabilityIntegrationTests(unittest.TestCase):
             regional_filter_state=REGIONAL_STATE_LIKELY,
         )
         self.assertEqual(d.diagnostic_reason, DIAG_EXTERNAL_REACHABILITY_FAILURE)
+        self.assertTrue(d.filter_suspected)
+        self.assertEqual(d.filter_confidence, FILTER_CONFIDENCE_HIGH)
+        self.assertEqual(d.filter_state, FILTER_STATE_LIKELY)
+
+    def test_wireguard_failure_is_diagnostic_only_for_regional_filter(self):
+        d = derive_observability(
+            True,
+            True,
+            False,
+            False,
+            True,
+            False,
+            regional_failure_streak=3,
+            confirm_threshold=3,
+            regional_filter_state=REGIONAL_STATE_LIKELY,
+        )
+        self.assertEqual(d.diagnostic_reason, "WIREGUARD_PATH_FAILURE")
+        self.assertTrue(d.filter_suspected)
+        self.assertEqual(d.filter_confidence, FILTER_CONFIDENCE_HIGH)
+        self.assertEqual(d.filter_state, FILTER_STATE_LIKELY)
+
+    def test_regional_recovery_does_not_require_local_paths_to_be_healthy(self):
+        d = derive_observability(
+            True,
+            True,
+            False,
+            False,
+            False,
+            True,
+            regional_success_streak=2,
+            recovery_threshold=2,
+            previous_filter_suspected=True,
+            regional_filter_state=REGIONAL_STATE_CLEAR,
+        )
         self.assertFalse(d.filter_suspected)
-        self.assertEqual(d.filter_state, FILTER_STATE_UNKNOWN)
+        self.assertEqual(d.filter_state, FILTER_STATE_CLEAR)
+        self.assertEqual(d.diagnostic_reason, "WIREGUARD_PATH_FAILURE")
 
     def test_unknown_regional_round_stays_unknown(self):
         d = derive_observability(

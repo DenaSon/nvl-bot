@@ -341,7 +341,7 @@ def _evaluate_destination(
             "DEST_DOCKER",
             CHECK_WARN,
             "destination",
-            "Docker exists but Compose plugin was not detected; Phase 2 must install it",
+            "Docker exists but Compose plugin was not detected; restore phase must install it",
         )
     else:
         _check(
@@ -349,7 +349,7 @@ def _evaluate_destination(
             "DEST_DOCKER",
             CHECK_WARN,
             "destination",
-            "Docker is not installed; Phase 2 must install it before restore",
+            "Docker is not installed; restore phase must install it before restore",
         )
 
     destination_has_marzban = bool(

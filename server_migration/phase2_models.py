@@ -89,6 +89,7 @@ class Phase2Result:
 class Phase2Policy:
     remote_root: str = "/root/nvl-migrations"
     local_root: str = "/var/lib/nvl/migrations"
+    minimum_source_free_mb: int = 1024
     minimum_local_reserve_mb: int = 256
     require_preflight_ready: bool = True
     keep_source_snapshot_tree: bool = False

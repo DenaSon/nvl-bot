@@ -3,11 +3,14 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
-import os
 import sys
 
 from .models import ServerCredentials
-from .phase5 import DEFAULT_CLOUDFLARE_TOKEN_ENV, run_phase5
+from .phase5 import (
+    DEFAULT_CLOUDFLARE_TOKEN_ENV,
+    resolve_cloudflare_api_token,
+    run_phase5,
+)
 from .phase5_models import (
     PHASE5_MODE_CUTOVER,
     PHASE5_MODE_PLAN,
@@ -83,9 +86,31 @@ def main() -> int:
     selected_mode = PHASE5_MODE_CUTOVER if args.cutover else PHASE5_MODE_PLAN
 
     token_env = str(args.cloudflare_token_env or "").strip()
-    token = None
+    prompted_token = None
     if args.prompt_cloudflare_token:
-        token = _secret("Cloudflare API token")
+        prompted_token = _secret("Cloudflare API token")
+
+    try:
+        token = resolve_cloudflare_api_token(
+            prompted_token,
+            env_name=token_env,
+        )
+    except Phase5Error as exc:
+        print(
+            json.dumps(
+                {
+                    "phase": 5,
+                    "status": "failed",
+                    "mode": selected_mode,
+                    "job_id": args.job_id,
+                    "error": str(exc),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            file=sys.stderr,
+        )
+        return 5
 
     source = ServerCredentials(
         host=args.source,

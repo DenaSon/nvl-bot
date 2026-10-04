@@ -301,6 +301,60 @@ class ChangeServerPhase5PlanTests(unittest.TestCase):
         self.assertTrue(any("FINAL_SYNC_COMPLETE" in x for x in result.blockers))
         self.assertEqual(cf.patches, [])
 
+    @patch(
+        "server_migration.phase5.verify_tcp_ports",
+        return_value=(80, 443, 1080, 5430, 8080, 8443),
+    )
+    @patch("server_migration.phase5.verify_origin_api", return_value=True)
+    @patch("server_migration.phase5.compose_running", side_effect=[False, True])
+    @patch(
+        "server_migration.phase5._read_json",
+        return_value={
+            "job_id": JOB_ID,
+            "old_ip": OLD_IP,
+            "new_ip": NEW_IP,
+            "dns_cutover_performed": False,
+        },
+    )
+    @patch("server_migration.phase5._exists", return_value=True)
+    @patch("server_migration.phase5.inspect_server")
+    def test_plan_supports_http_only_destination_origin(
+        self,
+        inspect_server,
+        _exists,
+        _marker,
+        _running,
+        origin,
+        _ports,
+    ):
+        destination = replace(
+            facts("destination", NEW_IP),
+            ssl_cert_path="",
+            ssl_key_path="",
+            ssl_cert_exists=False,
+            ssl_key_exists=False,
+        )
+        inspect_server.side_effect = [facts("source", OLD_IP), destination]
+        executors = {
+            OLD_IP: RecordingExecutor(OLD_IP),
+            NEW_IP: RecordingExecutor(NEW_IP),
+        }
+
+        result = run_phase5(
+            ServerCredentials(OLD_IP, password="a"),
+            ServerCredentials(NEW_IP, password="b"),
+            job_id=JOB_ID,
+            hostname=HOSTNAME,
+            zone_name=ZONE,
+            cloudflare_api_token="secret",
+            policy=Phase5Policy(mode=PHASE5_MODE_PLAN),
+            executor_factory=lambda c: executors[c.host],
+            cloudflare_factory=lambda _token: FakeCloudflare(),
+        )
+
+        self.assertTrue(result.cutover_ready)
+        self.assertFalse(origin.call_args.kwargs["use_tls"])
+
 
 class ChangeServerPhase5OrchestrationTests(unittest.TestCase):
     def setUp(self):
@@ -456,6 +510,176 @@ class ChangeServerPhase5OrchestrationTests(unittest.TestCase):
         stop_compose.assert_called_once()
         start_runtime.assert_called_once()
         marker.assert_called_once()
+
+
+    @patch("server_migration.phase5.release_final_sync_lock")
+    @patch("server_migration.phase5.acquire_final_sync_lock")
+    @patch("server_migration.phase5.build_phase5_plan")
+    def test_cutover_revalidates_dns_after_locks(
+        self,
+        build_plan,
+        _acquire,
+        _release,
+    ):
+        build_plan.return_value = (
+            ready_plan(),
+            self.source,
+            self.destination,
+            {"job_id": JOB_ID},
+        )
+        cf = FakeCloudflare()
+        cf.current = replace(record(), content="203.0.113.77")
+
+        with self.assertRaises(Phase5Error) as ctx:
+            run_phase5(
+                ServerCredentials(OLD_IP, password="a"),
+                ServerCredentials(NEW_IP, password="b"),
+                job_id=JOB_ID,
+                hostname=HOSTNAME,
+                zone_name=ZONE,
+                cloudflare_api_token="secret",
+                confirmation="CUTOVER",
+                policy=Phase5Policy(mode=PHASE5_MODE_CUTOVER),
+                executor_factory=self.factory,
+                cloudflare_factory=lambda _token: cf,
+            )
+
+        self.assertIn("changed after planning", str(ctx.exception))
+        self.assertEqual(cf.patches, [])
+
+    @patch("server_migration.phase5.mark_phase4_complete")
+    @patch("server_migration.phase5.start_runtime_and_verify", return_value=(True, True, (80, 443, 2053, 8443)))
+    @patch("server_migration.phase5.stop_compose")
+    @patch("server_migration.phase5.compose_running")
+    @patch("server_migration.phase5.release_final_sync_lock")
+    @patch("server_migration.phase5.acquire_final_sync_lock")
+    @patch("server_migration.phase5.build_phase5_plan")
+    def test_ambiguous_patch_failure_is_reconciled_and_rolled_back(
+        self,
+        build_plan,
+        _acquire,
+        _release,
+        compose_running,
+        stop_compose,
+        start_runtime,
+        marker,
+    ):
+        build_plan.return_value = (
+            ready_plan(),
+            self.source,
+            self.destination,
+            {"job_id": JOB_ID},
+        )
+
+        class AmbiguousPatchCloudflare(FakeCloudflare):
+            def __init__(self):
+                super().__init__()
+                self.failed_once = False
+
+            def patch_record_content(self, snapshot, new_ip):
+                self.patches.append(new_ip)
+                self.current = replace(snapshot, content=new_ip)
+                if new_ip == NEW_IP and not self.failed_once:
+                    self.failed_once = True
+                    raise Phase5Error("simulated timeout after DNS mutation")
+                return self.current
+
+        cf = AmbiguousPatchCloudflare()
+        calls = {OLD_IP: 0, NEW_IP: 0}
+
+        def running(executor, *, marzban_dir):
+            calls[executor.host] += 1
+            if executor.host == NEW_IP:
+                return calls[NEW_IP] == 1
+            if executor.host == OLD_IP:
+                return calls[OLD_IP] >= 2
+            return False
+
+        compose_running.side_effect = running
+
+        with self.assertRaises(Phase5Error) as ctx:
+            run_phase5(
+                ServerCredentials(OLD_IP, password="a"),
+                ServerCredentials(NEW_IP, password="b"),
+                job_id=JOB_ID,
+                hostname=HOSTNAME,
+                zone_name=ZONE,
+                cloudflare_api_token="secret",
+                confirmation="CUTOVER",
+                policy=Phase5Policy(mode=PHASE5_MODE_CUTOVER),
+                executor_factory=self.factory,
+                cloudflare_factory=lambda _token: cf,
+            )
+
+        self.assertEqual(cf.patches, [NEW_IP, OLD_IP])
+        self.assertIn("rollback_record_verified=True", str(ctx.exception))
+        stop_compose.assert_called_once()
+        start_runtime.assert_called_once()
+        marker.assert_called_once()
+
+    @patch("server_migration.phase5.mark_phase4_complete")
+    @patch("server_migration.phase5.start_runtime_and_verify")
+    @patch("server_migration.phase5.stop_compose")
+    @patch("server_migration.phase5.compose_running")
+    @patch("server_migration.phase5.wait_for_hostname_api", return_value=(False, "HTTP 522"))
+    @patch("server_migration.phase5.wait_for_record_content")
+    @patch("server_migration.phase5.release_final_sync_lock")
+    @patch("server_migration.phase5.acquire_final_sync_lock")
+    @patch("server_migration.phase5.build_phase5_plan")
+    def test_failed_dns_rollback_keeps_destination_serving(
+        self,
+        build_plan,
+        _acquire,
+        _release,
+        wait_record,
+        _wait_api,
+        compose_running,
+        stop_compose,
+        start_runtime,
+        marker,
+    ):
+        build_plan.return_value = (
+            ready_plan(),
+            self.source,
+            self.destination,
+            {"job_id": JOB_ID},
+        )
+
+        class RollbackFailureCloudflare(FakeCloudflare):
+            def patch_record_content(self, snapshot, new_ip):
+                self.patches.append(new_ip)
+                if new_ip == OLD_IP:
+                    raise Phase5Error("simulated rollback failure")
+                self.current = replace(snapshot, content=new_ip)
+                return self.current
+
+        cf = RollbackFailureCloudflare()
+        wait_record.side_effect = lambda client, **kwargs: replace(
+            cf.current, content=kwargs["expected_ip"]
+        )
+        compose_running.return_value = True
+
+        with self.assertRaises(Phase5Error) as ctx:
+            run_phase5(
+                ServerCredentials(OLD_IP, password="a"),
+                ServerCredentials(NEW_IP, password="b"),
+                job_id=JOB_ID,
+                hostname=HOSTNAME,
+                zone_name=ZONE,
+                cloudflare_api_token="secret",
+                confirmation="CUTOVER",
+                policy=Phase5Policy(mode=PHASE5_MODE_CUTOVER),
+                executor_factory=self.factory,
+                cloudflare_factory=lambda _token: cf,
+            )
+
+        self.assertEqual(cf.patches, [NEW_IP, OLD_IP])
+        self.assertIn("rollback_record_verified=False", str(ctx.exception))
+        self.assertIn("destination was kept running", str(ctx.exception))
+        stop_compose.assert_not_called()
+        start_runtime.assert_not_called()
+        marker.assert_called_once()
+
 
 
 if __name__ == "__main__":

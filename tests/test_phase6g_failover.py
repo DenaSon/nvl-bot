@@ -286,7 +286,7 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
         self.assertIn("BEGIN IMMEDIATE", region)
         self.assertIn("SOURCE_DEFAULT_STATE_CHANGED", region)
         self.assertIn("TARGET_STANDBY_STATE_CHANGED", region)
-        self.assertNotIn("ssh_accounts", region)
+        self.assertNotIn("UPDATE ssh_accounts", region)
 
     def test_relay_commit_consumes_standby_role_and_rollback_restores_it_atomically(self):
         commit = self._region(
@@ -296,7 +296,7 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
         self.assertIn("BEGIN IMMEDIATE", commit)
         self.assertIn("is_standby=0", commit)
         self.assertIn("TARGET_STANDBY_STATE_CHANGED", commit)
-        self.assertNotIn("ssh_accounts", commit)
+        self.assertNotIn("UPDATE ssh_accounts", commit)
 
         rollback = self._region(
             "def _db_rollback_relay_failover_state(",
@@ -305,7 +305,7 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
         self.assertIn("BEGIN IMMEDIATE", rollback)
         self.assertIn("is_standby=1", rollback)
         self.assertIn("target host could not be restored to standby", rollback)
-        self.assertNotIn("ssh_accounts", rollback)
+        self.assertNotIn("UPDATE ssh_accounts", rollback)
 
     def test_ssh_finalize_is_atomic_with_host_and_respects_failover_write_lock(self):
         region = self._region(

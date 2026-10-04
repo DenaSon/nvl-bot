@@ -236,7 +236,7 @@ class Phase6HIntegrationShapeTests(unittest.TestCase):
         self.assertIn("mode=mode", region)
         self.assertIn('_db_acquire_failover_lock', region)
         self.assertIn("target_route_active", region)
-        self.assertIn("_db_rollback_failover_account_state", region)
+        self.assertIn("_db_rollback_relay_failover_state", region)
 
     def test_legacy_traffic_anomaly_cannot_trigger_6h(self):
         region = self._region(

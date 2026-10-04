@@ -323,16 +323,25 @@ def run_phase5(
             record_verified = current.content == plan.new_ip
 
             api_port = int(destination.api_port or 0)
-            hostname_api_healthy = bool(api_port) and wait_for_hostname_api(
-                hostname=plan.hostname,
-                port=api_port,
-                attempts=policy.verify_attempts,
-                interval_seconds=policy.verify_interval_seconds,
-                timeout=policy.connect_timeout_seconds,
-            )
+            if api_port:
+                (
+                    hostname_api_healthy,
+                    hostname_api_detail,
+                ) = wait_for_hostname_api(
+                    hostname=plan.hostname,
+                    port=api_port,
+                    attempts=policy.verify_attempts,
+                    interval_seconds=policy.verify_interval_seconds,
+                    timeout=policy.connect_timeout_seconds,
+                )
+            else:
+                hostname_api_healthy = False
+                hostname_api_detail = "destination API port is missing"
+
             if not hostname_api_healthy:
                 raise Phase5Error(
-                    "Cloudflare hostname API verification failed after cutover"
+                    "Cloudflare hostname API verification failed after cutover: "
+                    + hostname_api_detail
                 )
 
             expected_ports = tuple(sorted(set(int(p) for p in destination.xray_ports)))

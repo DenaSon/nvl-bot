@@ -1,9 +1,15 @@
+import io
+import json
+import sys
 import unittest
+from contextlib import redirect_stderr
 from unittest.mock import patch
 
 from server_migration.final_sync import rewrite_hosts_address
 from server_migration.models import CommandResult, ServerCredentials, ServerFacts
 from server_migration.phase4 import build_phase4_plan, run_phase4
+from server_migration.phase4_cli import main as phase4_cli_main
+from server_migration.ssh import SSHConnectionError
 from server_migration.phase4_models import (
     PHASE4_MODE_FINALIZE,
     PHASE4_MODE_PLAN,
@@ -118,6 +124,42 @@ class RewriteExecutor(RecordingExecutor):
         if "UPDATE hosts SET address=?" in command:
             return CommandResult(command, 0, "1\n", "")
         return CommandResult(command, 0, "", "")
+
+
+class ChangeServerPhase4CliTests(unittest.TestCase):
+    @patch("server_migration.phase4_cli._password", return_value="secret")
+    @patch(
+        "server_migration.phase4_cli.run_phase4",
+        side_effect=SSHConnectionError(
+            "SSH connection failed for 107.189.22.94:22: TimeoutError: timed out"
+        ),
+    )
+    def test_ssh_failure_is_clean_json_without_traceback(
+        self,
+        _run,
+        _password,
+    ):
+        argv = [
+            "phase4_cli",
+            "--source",
+            OLD_IP,
+            "--destination",
+            NEW_IP,
+            "--job-id",
+            JOB_ID,
+            "--plan-only",
+        ]
+        buffer = io.StringIO()
+        with patch.object(sys, "argv", argv), redirect_stderr(buffer):
+            code = phase4_cli_main()
+
+        self.assertEqual(code, 4)
+        output = buffer.getvalue()
+        self.assertNotIn("Traceback", output)
+        payload = json.loads(output)
+        self.assertEqual(payload["phase"], 4)
+        self.assertEqual(payload["status"], "failed")
+        self.assertIn("SSH connection failed", payload["error"])
 
 
 class ChangeServerPhase4SafetyTests(unittest.TestCase):

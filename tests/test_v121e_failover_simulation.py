@@ -142,18 +142,28 @@ class V121EIntegrationShapeTests(unittest.TestCase):
         self.assertIn("source_request_id", region)
         self.assertIn("ORDER BY id DESC LIMIT 1", region)
 
-    def test_auto_failover_binds_confirmation_to_current_round(self):
+    def test_auto_failover_requires_fresh_confirmed_differential_without_retry_deadlock(self):
         region = self._region(
             "async def _phase6h_auto_failover_tick",
             "async def _regional_filter_tick",
         )
-        self.assertIn("differential_matches_current_round", region)
+        self.assertNotIn("differential_matches_current_round", region)
         self.assertIn('source_health.get("regional_last_request_id")', region)
         self.assertIn("differential_confirmed=differential_confirmed", region)
+        self.assertIn("differential_request_id", region)
         self.assertIn(
             "differential_max_age_seconds=DIFFERENTIAL_CONFIRMATION_MAX_AGE_SECONDS",
             region,
         )
+
+    def test_relay_engine_does_not_touch_account_ownership(self):
+        region = self._region(
+            "async def _safe_manual_failover(",
+            "async def _activate_standby_for_filtered_edge",
+        )
+        self.assertIn("_db_commit_relay_failover_state", region)
+        self.assertNotIn("_db_commit_failover_account_state", region)
+        self.assertNotIn("_run_phase6g_rebuild_helper(", region)
 
     def test_operator_filtering_panel_has_no_development_labels(self):
         region = self._region(

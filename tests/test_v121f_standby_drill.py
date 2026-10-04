@@ -52,6 +52,8 @@ class StandbyDrillSafetyTests(unittest.TestCase):
         self.assertNotIn("_safe_manual_failover(", region)
         self.assertNotIn("_cf_switch_public_domain", region)
         self.assertNotIn("_db_commit_failover_account_state", region)
+        self.assertNotIn("_db_commit_relay_failover_state", region)
+        self.assertIn("target_relay_ok", region)
 
     def test_drill_reports_readable_persian_safety_failures(self):
         helper = self._region(
@@ -62,6 +64,23 @@ class StandbyDrillSafetyTests(unittest.TestCase):
         self.assertIn("دسترسی مدیریتی سرور جایگزین در دسترس نیست", helper)
         self.assertIn("ارتباط WireGuard سرور جایگزین سالم نیست", helper)
         self.assertIn("مسیر ارتباط سرور جایگزین با هسته سالم نیست", helper)
+        self.assertIn("مسیر رلهٔ سرور جایگزین به سرور هسته کامل یا معتبر نیست", helper)
+        self.assertNotIn("حساب فعال صریح", helper)
+
+    def test_drill_reports_relay_not_account_migration(self):
+        region = self._region(
+            'elif d.startswith("flt_drill_pick_")',
+            'elif d.startswith("flt_drill_")',
+        )
+        self.assertIn("مسیر رله به هسته", region)
+        self.assertNotIn("حساب‌های قابل انتقال", region)
+
+        manual = self._region(
+            'elif d.startswith("flt_failover_pick_")',
+            'elif d.startswith("flt_failover_") and role == \'admin\':',
+        )
+        self.assertIn("حساب‌های کاربران روی سرور هسته باقی می‌مانند", manual)
+        self.assertNotIn("بازسازی کامل حساب‌ها", manual)
 
     def test_relevant_telegram_paths_do_not_show_development_phase_labels(self):
         host_panel = self._region(

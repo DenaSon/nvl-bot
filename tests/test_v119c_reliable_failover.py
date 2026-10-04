@@ -289,17 +289,19 @@ class V119CIntegrationShapeTests(unittest.TestCase):
         )
         self.assertIn("require_clear_filter=automatic", engine)
 
-    def test_post_rebuild_verify_rechecks_wg_and_core_before_db_commit(self):
+    def test_relay_verify_rechecks_wg_core_and_dnat_before_metadata_commit(self):
         region = self._region(
             "async def _safe_manual_failover(",
             "async def _activate_standby_for_filtered_edge",
         )
         verify_pos = region.index("verify_path = await asyncio.to_thread")
-        commit_pos = region.index("_db_commit_failover_account_state")
+        commit_pos = region.index("_db_commit_relay_failover_state")
         self.assertLess(verify_pos, commit_pos)
         self.assertIn("verify_wg_ok", region)
         self.assertIn("verify_core_path_ok", region)
-        self.assertIn("POST_REBUILD_TARGET_REGIONAL_EVIDENCE_INVALID", region)
+        self.assertIn("verify_relay_ok", region)
+        self.assertIn("POST_RELAY_TARGET_VERIFY_FAILED", region)
+        self.assertIn("POST_RELAY_TARGET_REGIONAL_EVIDENCE_INVALID", region)
         self.assertIn("latest_regional_age", region)
 
     def test_readiness_notifications_are_state_change_debounced(self):

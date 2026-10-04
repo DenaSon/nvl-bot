@@ -333,6 +333,12 @@ def inspect_docker_image_archive(
     metadata: Mapping,
 ) -> tuple[bool, bool]:
     archive = f"{incoming_dir}/docker-images.tar.gz"
+    _run_checked(
+        executor,
+        f"gzip -t {shlex.quote(archive)}",
+        timeout=300,
+        label="verify Docker image gzip stream",
+    )
     code = (
         "import json,os,sys,tarfile;"
         "p=sys.argv[1];"

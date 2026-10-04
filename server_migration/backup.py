@@ -327,6 +327,17 @@ def create_source_bundle(
     job_id = validate_job_id(job_id or new_job_id())
 
     config_dir, database_path, data_dir, database_name = _validate_source(source)
+
+    required_source_free_mb = max(
+        int(policy.minimum_source_free_mb),
+        int(source.payload_size_mb) * 3 + 512,
+    )
+    if int(source.root_free_mb) < required_source_free_mb:
+        raise Phase2Error(
+            f"insufficient source staging disk: free={source.root_free_mb} MB "
+            f"required={required_source_free_mb} MB"
+        )
+
     config_parent = str(PurePosixPath(config_dir).parent)
     config_basename = PurePosixPath(config_dir).name
     data_parent = str(PurePosixPath(data_dir).parent)
@@ -471,6 +482,16 @@ def create_source_bundle(
     )
     artifact_names.append("docker-images.tar.gz")
 
+    _run_checked(
+        executor,
+        "chmod 600 "
+        + " ".join(
+            shlex.quote(f"{remote_bundle_dir}/{name}") for name in artifact_names
+        ),
+        timeout=30,
+        label="secure source bundle permissions",
+    )
+
     for name in artifact_names:
         _run_checked(
             executor,
@@ -491,6 +512,12 @@ def create_source_bundle(
         checksum_command,
         timeout=300,
         label="source checksum verification",
+    )
+    _run_checked(
+        executor,
+        f"chmod 600 {shlex.quote(checksum_path)}",
+        timeout=20,
+        label="secure source checksum permissions",
     )
 
     manifest_text = _run_text(

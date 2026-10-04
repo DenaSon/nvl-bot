@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from server_migration.final_sync import rewrite_hosts_address
 from server_migration.models import CommandResult, ServerCredentials, ServerFacts
+from server_migration.phase3_models import Phase3Error
 from server_migration.phase4 import build_phase4_plan, run_phase4
 from server_migration.phase4_cli import main as phase4_cli_main
 from server_migration.ssh import SSHConnectionError
@@ -229,6 +230,32 @@ class ChangeServerPhase4SafetyTests(unittest.TestCase):
         self.assertNotIn("docker compose up", joined)
         self.assertNotIn("update hosts", joined)
 
+
+    @patch("server_migration.phase4.inspect_server")
+    @patch(
+        "server_migration.phase4.verify_incoming_bundle",
+        side_effect=Phase3Error("checksum mismatch"),
+    )
+    def test_phase3_bundle_failure_is_translated_to_phase4_error(
+        self,
+        _verify_bundle,
+        inspect_server,
+    ):
+        inspect_server.side_effect = [
+            facts("source", OLD_IP),
+            facts("destination", NEW_IP),
+        ]
+        with self.assertRaises(Phase4Error) as ctx:
+            build_phase4_plan(
+                RecordingExecutor(OLD_IP),
+                RecordingExecutor(NEW_IP),
+                ServerCredentials(OLD_IP, password="a"),
+                ServerCredentials(NEW_IP, password="b"),
+                job_id=JOB_ID,
+                policy=Phase4Policy(mode=PHASE4_MODE_PLAN),
+            )
+        self.assertIn("Phase 3 bundle verification failed", str(ctx.exception))
+
     @patch("server_migration.phase4.build_phase4_plan")
     def test_finalize_requires_exact_confirmation_before_mutation(
         self,
@@ -423,6 +450,114 @@ class ChangeServerPhase4OrchestrationTests(unittest.TestCase):
         # Destination start was never reached; this invocation is source recovery.
         start_runtime.assert_called_once()
         marker.assert_called_once()
+
+
+    @patch("server_migration.phase4.mark_phase4_complete")
+    @patch("server_migration.phase4.start_runtime_and_verify")
+    @patch("server_migration.phase4.backup_destination_database")
+    @patch("server_migration.phase4.relay_final_database", return_value="/var/lib/nvl/migrations/job/final.sqlite3")
+    @patch("server_migration.phase4.create_final_source_snapshot", return_value="c" * 64)
+    @patch("server_migration.phase4.stop_compose")
+    @patch("server_migration.phase4.compose_running")
+    @patch("server_migration.phase4.release_final_sync_lock")
+    @patch("server_migration.phase4.acquire_final_sync_lock")
+    @patch("server_migration.phase4.new_attempt_id", return_value="attempt-raceguard1234")
+    @patch("server_migration.phase4.build_phase4_plan")
+    def test_finalize_rechecks_destination_stopped_before_db_backup(
+        self,
+        build_plan,
+        _attempt,
+        _acquire,
+        _release,
+        compose_running,
+        _stop,
+        _snapshot,
+        _relay,
+        backup,
+        start_runtime,
+        marker,
+    ):
+        build_plan.return_value = (
+            self.plan,
+            metadata(),
+            self.src,
+            self.dst,
+        )
+        # source stopped check -> False (stopped), then destination race check -> True.
+        compose_running.side_effect = [False, True]
+
+        with self.assertRaises(Phase4Error) as ctx:
+            run_phase4(
+                ServerCredentials(OLD_IP, password="a"),
+                ServerCredentials(NEW_IP, password="b"),
+                job_id=JOB_ID,
+                confirmation="FINAL-SYNC",
+                policy=Phase4Policy(mode=PHASE4_MODE_FINALIZE),
+                executor_factory=self.factory,
+            )
+
+        self.assertIn("destination Marzban started during final sync", str(ctx.exception))
+        backup.assert_not_called()
+        start_runtime.assert_called_once()  # source recovery only
+        marker.assert_called_once()  # failed marker
+
+    @patch("server_migration.phase4.mark_phase4_complete")
+    @patch("server_migration.phase4.start_runtime_and_verify", return_value=(True, False, (80, 443, 8443)))
+    @patch("server_migration.phase4.database_integrity", return_value="ok")
+    @patch("server_migration.phase4.scan_runtime_configs_for_old_ip", return_value=())
+    @patch("server_migration.phase4.scan_database_for_old_ip", return_value=())
+    @patch("server_migration.phase4.rewrite_hosts_address", return_value=1)
+    @patch("server_migration.phase4.install_final_database")
+    @patch("server_migration.phase4.backup_destination_database", return_value="/root/nvl-migrations/job/final-sync/backup.sqlite3")
+    @patch("server_migration.phase4.relay_final_database", return_value="/var/lib/nvl/migrations/job/final.sqlite3")
+    @patch("server_migration.phase4.create_final_source_snapshot", return_value="d" * 64)
+    @patch("server_migration.phase4.stop_compose")
+    @patch("server_migration.phase4.compose_running", return_value=False)
+    @patch("server_migration.phase4.release_final_sync_lock")
+    @patch("server_migration.phase4.acquire_final_sync_lock")
+    @patch("server_migration.phase4.new_attempt_id", return_value="attempt-healthgate1234")
+    @patch("server_migration.phase4.build_phase4_plan")
+    def test_finalize_requires_verified_destination_api_health(
+        self,
+        build_plan,
+        _attempt,
+        _acquire,
+        _release,
+        _running,
+        _stop,
+        _snapshot,
+        _relay,
+        _backup,
+        _install,
+        _rewrite,
+        _scan_db,
+        _scan_configs,
+        _integrity,
+        start_runtime,
+        marker,
+    ):
+        build_plan.return_value = (
+            self.plan,
+            metadata(),
+            self.src,
+            self.dst,
+        )
+
+        with self.assertRaises(Phase4Error) as ctx:
+            run_phase4(
+                ServerCredentials(OLD_IP, password="a"),
+                ServerCredentials(NEW_IP, password="b"),
+                job_id=JOB_ID,
+                confirmation="FINAL-SYNC",
+                policy=Phase4Policy(mode=PHASE4_MODE_FINALIZE),
+                executor_factory=self.factory,
+            )
+
+        self.assertIn("destination API health verification", str(ctx.exception))
+        # first call is destination verification, second is source recovery
+        self.assertEqual(start_runtime.call_count, 2)
+        marker.assert_called_once()  # failed marker only
+
 
 
 if __name__ == "__main__":

@@ -10752,9 +10752,10 @@ async def _render_host_pool_panel(query, page=0):
             kb.append([InlineKeyboardButton(f"📍 دامنهٔ ثابت را به این IP بزن", callback_data=f"hpdns_{host}")])
             # 🆕 Standby (بندِ ۴): این Edge می‌تواند عمداً بدونِ مشتریِ فعال نگه داشته شود تا در
             # Failover، کاربرانِ یک Edgeِ فیلترشده رویش بازسازی شوند.
-            kb.append([InlineKeyboardButton(
-                "◽️ برداشتن نقش جایگزین" if is_standby else "🅢 ثبت به‌عنوان سرور جایگزین",
-                callback_data=f"hpstandby_{host}")])
+            if not is_default and diagnostic_reason != DIAG_CORE_LOCAL:
+                kb.append([InlineKeyboardButton(
+                    "◽️ برداشتن نقش جایگزین" if is_standby else "🅢 ثبت به‌عنوان سرور جایگزین",
+                    callback_data=f"hpstandby_{host}")])
             kb.append([InlineKeyboardButton(f"🗑 حذف کامل: {host}", callback_data=f"hpdelconfirm_{host}")])
         else:
             kb.append([InlineKeyboardButton(f"✅ تست و فعال‌سازی مجدد: {host}", callback_data=f"hpact_{host}")])
@@ -16813,6 +16814,117 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("ℹ️ سرور هسته در این بررسی منطقه‌ای ارزیابی نمی‌شود.")
         await _render_filtering_edge_detail(query, host)
 
+    elif d.startswith("flt_drill_pick_") and role == 'admin':
+        payload = d[len("flt_drill_pick_"):]
+        source_host, sep, target_host = payload.partition("_")
+        if not sep or not source_host or not target_host:
+            await query.message.reply_text("❌ مقصد آزمون نامعتبر است.")
+            return
+
+        await query.edit_message_text(
+            "⏳ <b>در حال آزمون آمادگی انتقال...</b>\n\n"
+            f"مبدأ: <code>{esc(source_host)}</code>\n"
+            f"سرور جایگزین: <code>{esc(target_host)}</code>\n\n"
+            "هیچ تغییری در مسیر، حساب‌ها یا دیتابیس انجام نمی‌شود.",
+            parse_mode="HTML",
+        )
+
+        preflight = await _safe_manual_failover_preflight(
+            source_host,
+            target_host,
+            require_clear_filter=True,
+        )
+
+        if not preflight.get("ok"):
+            errors = preflight.get("errors") or ["UNKNOWN_PREFLIGHT_ERROR"]
+            error_lines = "\n".join(
+                f"• {esc(_failover_preflight_error_label_fa(error))}"
+                for error in errors
+            )
+            await query.edit_message_text(
+                "⛔️ <b>سرور جایگزین هنوز برای انتقال آماده نیست</b>\n\n"
+                f"مبدأ: <code>{esc(source_host)}</code>\n"
+                f"سرور جایگزین: <code>{esc(target_host)}</code>\n\n"
+                f"{error_lines}\n\n"
+                "🧪 این فقط آزمون آمادگی بود؛ هیچ تغییری در DNS، حساب‌ها یا دیتابیس انجام نشد.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "🔙 بازگشت به جزئیات",
+                        callback_data=f"flt_detail_{source_host}",
+                    )
+                ]]),
+                parse_mode="HTML",
+            )
+            return
+
+        regional_age = preflight.get("target_regional_age_seconds")
+        regional_age_text = (
+            "—"
+            if regional_age in (None, float("inf"))
+            else f"{int(regional_age)} ثانیه"
+        )
+        await query.edit_message_text(
+            "✅ <b>سرور جایگزین برای انتقال آماده است</b>\n\n"
+            f"مبدأ: <code>{esc(source_host)}</code>\n"
+            f"سرور جایگزین: <code>{esc(target_host)}</code>\n"
+            f"حساب‌های قابل انتقال: <b>{preflight.get('account_count', 0)}</b>\n"
+            f"پورت سرویس: <code>{preflight.get('source_service_port')}</code>\n\n"
+            f"🌐 سرویس کاربران: {_probe_state_text(preflight.get('target_service_ok'))}\n"
+            f"🔐 دسترسی مدیریتی: {_probe_state_text(preflight.get('target_admin_ok'))}\n"
+            f"🔗 WireGuard: {_probe_state_text(preflight.get('target_wg_ok'))}\n"
+            f"🛣 مسیر هسته: {_probe_state_text(preflight.get('target_core_path_ok'))}\n"
+            f"🛟 مسیر پشتیبان هسته: {_probe_state_text(preflight.get('core_service_ok'))}\n"
+            f"📡 وضعیت منطقه‌ای: <b>{_filter_state_label_fa(preflight.get('target_filter_state'))}</b>\n"
+            f"⏱ تازگی بررسی منطقه‌ای: <b>{regional_age_text}</b>\n\n"
+            "🧪 آزمون با موفقیت تمام شد و هیچ تغییری در DNS، حساب‌ها یا دیتابیس انجام نشد.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "⚡ ادامه به انتقال دستی امن",
+                    callback_data=f"flt_failover_pick_{source_host}_{target_host}",
+                )],
+                [InlineKeyboardButton(
+                    "🔙 بازگشت به جزئیات",
+                    callback_data=f"flt_detail_{source_host}",
+                )],
+            ]),
+            parse_mode="HTML",
+        )
+
+    elif d.startswith("flt_drill_") and role == 'admin':
+        source_host = d[len("flt_drill_"):]
+        standbys = [
+            h for h in await asyncio.to_thread(_db_get_standby_hosts)
+            if h != source_host
+        ]
+        if not standbys:
+            await query.message.reply_text(
+                "⚠️ هیچ سرور جایگزین فعال و ثبت‌شده‌ای برای آزمون وجود ندارد."
+            )
+            await _render_filtering_edge_detail(query, source_host)
+            return
+
+        kb = [
+            [InlineKeyboardButton(
+                f"🧪 آزمون {target}",
+                callback_data=f"flt_drill_pick_{source_host}_{target}",
+            )]
+            for target in standbys
+        ]
+        kb.append([
+            InlineKeyboardButton(
+                "↩️ انصراف",
+                callback_data=f"flt_detail_{source_host}",
+            )
+        ])
+        await query.edit_message_text(
+            "🧪 <b>آزمون آمادگی انتقال</b>\n\n"
+            f"سرور مبدأ: <code>{esc(source_host)}</code>\n"
+            "سرور جایگزین را انتخاب کنید. همهٔ بررسی‌های ایمنی به‌صورت زنده انجام می‌شوند، "
+            "اما هیچ جابه‌جایی یا تغییری در مسیر انجام نخواهد شد.",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode="HTML",
+        )
+
     elif d.startswith("flt_failover_confirm_") and role == 'admin':
         payload = d[len("flt_failover_confirm_"):]
         source_host, sep, target_host = payload.partition("_")
@@ -16838,11 +16950,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         payload = d[len("flt_failover_pick_"):]
         source_host, sep, target_host = payload.partition("_")
         if not sep or not source_host or not target_host:
-            await query.message.reply_text("❌ Failover target نامعتبر است.")
+            await query.message.reply_text("❌ سرور مقصد نامعتبر است.")
             return
 
         await query.edit_message_text(
-            f"⏳ Preflight امن <code>{esc(source_host)}</code> → "
+            f"⏳ در حال بررسی ایمنی <code>{esc(source_host)}</code> → "
             f"<code>{esc(target_host)}</code>...",
             parse_mode="HTML",
         )
@@ -16850,14 +16962,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not preflight.get("ok"):
             errors = preflight.get("errors") or ["UNKNOWN_PREFLIGHT_ERROR"]
             await query.edit_message_text(
-                "⛔️ <b>Preflight رد شد؛ Failover قابل اجرا نیست.</b>\n\n"
-                f"Source: <code>{esc(source_host)}</code>\n"
-                f"Target: <code>{esc(target_host)}</code>\n"
-                f"Errors: <code>{esc(' | '.join(errors))}</code>\n\n"
-                "هیچ تغییری روی DNS/DB/Account انجام نشد.",
+                "⛔️ <b>بررسی ایمنی تأیید نشد؛ انتقال قابل اجرا نیست.</b>\n\n"
+                f"مبدأ: <code>{esc(source_host)}</code>\n"
+                f"مقصد: <code>{esc(target_host)}</code>\n"
+                + "\n".join(
+                    f"• {esc(_failover_preflight_error_label_fa(error))}"
+                    for error in errors
+                )
+                + "\n\nهیچ تغییری در DNS، حساب‌ها یا دیتابیس انجام نشد.",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton(
-                        "🔙 جزئیات Edge",
+                        "🔙 بازگشت به جزئیات",
                         callback_data=f"flt_detail_{source_host}",
                     )
                 ]]),
@@ -16866,16 +16981,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         await query.edit_message_text(
-            "⚠️ <b>تأیید Safe Manual Failover</b>\n\n"
-            f"Source: <code>{esc(source_host)}</code>\n"
-            f"Standby: <code>{esc(target_host)}</code>\n"
-            f"Accounts: <b>{preflight['account_count']}</b>\n"
-            f"Service port: <code>{preflight['source_service_port']}</code>\n"
-            f"DNS فعلی: <code>{esc(preflight['previous_dns_ip'])}</code>\n"
-            f"Core fallback: <code>{esc(preflight['core_public_ip'])}</code>\n"
-            f"Target filtering: <b>{esc(preflight['target_filter_state'])}</b>\n\n"
-            "ترتیب اجرا: DNS→Core، rebuild کامل، verify، DB scoped commit، DNS→Standby.\n"
-            "اگر مرحلهٔ نهایی DNS شکست بخورد، DB/default rollback می‌شود.",
+            "⚠️ <b>تأیید انتقال دستی امن</b>\n\n"
+            f"مبدأ: <code>{esc(source_host)}</code>\n"
+            f"سرور جایگزین: <code>{esc(target_host)}</code>\n"
+            f"حساب‌ها: <b>{preflight['account_count']}</b>\n"
+            f"پورت سرویس: <code>{preflight['source_service_port']}</code>\n"
+            f"مقصد فعلی دامنه: <code>{esc(preflight['previous_dns_ip'])}</code>\n"
+            f"مسیر پشتیبان هسته: <code>{esc(preflight['core_public_ip'])}</code>\n"
+            f"وضعیت منطقه‌ای مقصد: <b>{_filter_state_label_fa(preflight['target_filter_state'])}</b>\n\n"
+            "ترتیب اجرا: انتقال موقت مسیر به هسته، بازسازی کامل حساب‌ها، بررسی صحت، "
+            "ثبت وضعیت و سپس انتقال مسیر به سرور جایگزین.\n"
+            "اگر مرحلهٔ نهایی ناموفق باشد، وضعیت قبلی به‌صورت کنترل‌شده بازیابی می‌شود.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(
                     "✅ تأیید و اجرا",
@@ -16896,7 +17012,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if h != source_host
         ]
         if not standbys:
-            await query.message.reply_text("⚠️ هیچ Standby فعال و آماده‌ای ثبت نشده است.")
+            await query.message.reply_text("⚠️ هیچ سرور جایگزین فعال و آماده‌ای ثبت نشده است.")
             await _render_filtering_edge_detail(query, source_host)
             return
 
@@ -16914,9 +17030,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         ])
         await query.edit_message_text(
-            "⚡ <b>Safe Manual Failover — Phase 6G</b>\n\n"
-            f"Source Edge: <code>{esc(source_host)}</code>\n"
-            "Standby مقصد را انتخاب کنید. قبل از نمایش تأیید نهایی، Preflight زنده انجام می‌شود.",
+            "⚡ <b>انتقال دستی امن</b>\n\n"
+            f"سرور مبدأ: <code>{esc(source_host)}</code>\n"
+            "سرور جایگزین را انتخاب کنید. قبل از تأیید نهایی، بررسی‌های ایمنی به‌صورت زنده انجام می‌شوند.",
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode="HTML",
         )

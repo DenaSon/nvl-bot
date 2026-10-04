@@ -169,8 +169,10 @@ class V119BIntegrationStaticTests(unittest.TestCase):
             "async def _regional_provider_mark_ok",
         )
         self.assertIn("PROVIDER_STATUS_ERROR", region)
-        self.assertIn("previous_status != PROVIDER_STATUS_ERROR", region)
-        self.assertIn("فیلترینگ محسوب نمی‌شود", region)
+        self.assertIn("provider_error_alert_due", region)
+        self.assertIn("REGIONAL_PROVIDER_ERROR_ALERT_THRESHOLD", region)
+        self.assertIn("edge_state_preserved=True", region)
+        self.assertIn("فیلترینگ Edge محسوب نمی‌شود", region)
         self.assertNotIn("_db_record_regional_round", region)
 
     def test_confirmed_filter_block_records_exact_reason(self):

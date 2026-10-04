@@ -20817,7 +20817,13 @@ async def _regional_filter_tick(app):
         return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": str(exc)}
 
     try:
-        nodes = await asyncio.to_thread(provider.discover_nodes, "ir")
+        nodes = await _regional_provider_call(
+            app,
+            PROBE_PRIORITY_DEFAULT,
+            "default-node-discovery",
+            provider.discover_nodes,
+            "ir",
+        )
     except RegionalProbeLimited as exc:
         await _regional_provider_enter_limited(app, host, exc)
         return {"status": PROVIDER_STATUS_LIMITED, "host": host, "error": str(exc)}
@@ -21158,7 +21164,13 @@ async def _regional_filter_probe_one_now(app, host):
     service_port = await asyncio.to_thread(_db_get_host_service_port, host, 22)
     try:
         provider = _new_regional_probe_provider()
-        nodes = await asyncio.to_thread(provider.discover_nodes, "ir")
+        nodes = await _regional_provider_call(
+            app,
+            PROBE_PRIORITY_DEFAULT,
+            f"manual-node-discovery:{host}",
+            provider.discover_nodes,
+            "ir",
+        )
     except RegionalProbeLimited as exc:
         await _regional_provider_enter_limited(app, host, exc)
         return {"status": PROVIDER_STATUS_LIMITED, "host": host, "error": str(exc)}
@@ -21172,6 +21184,8 @@ async def _regional_filter_probe_one_now(app, host):
         service_port,
         provider,
         nodes,
+        probe_priority=PROBE_PRIORITY_DEFAULT,
+        probe_label=f"manual-regional:{host}",
     )
     if result.get("status") == PROVIDER_STATUS_OK:
         await _regional_provider_mark_ok(app, result.get("regional_decision"))

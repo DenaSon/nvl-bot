@@ -263,6 +263,8 @@ from filtering_runtime import (
     TRANSITION_WARNING,
     classify_filter_transition,
     provider_backoff_until,
+    provider_error_alert_due,
+    provider_recovery_ready,
 )
 from safe_failover import (
     FAILOVER_MODE_AUTO,
@@ -589,6 +591,17 @@ REGIONAL_FILTER_MAX_NODES = _phase6c_env_int("NVL_REGIONAL_PROBE_MAX_NODES", 8)
 REGIONAL_FAST_CONFIRM_DELAY_SECONDS = _phase6c_env_int("NVL_REGIONAL_FAST_CONFIRM_DELAY", 15, minimum=1)
 REGIONAL_FILTER_PROVIDER_BACKOFF_BASE_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROVIDER_BACKOFF_BASE", 300)
 REGIONAL_FILTER_PROVIDER_BACKOFF_MAX_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROVIDER_BACKOFF_MAX", 3600)
+# V121-A / Filtering V3.1 — provider health is operational metadata, not Edge
+# filtering evidence. Telegram alerts are deliberately less sensitive than logs.
+REGIONAL_PROVIDER_ERROR_ALERT_THRESHOLD = _phase6c_env_int(
+    "NVL_REGIONAL_PROVIDER_ERROR_ALERT_THRESHOLD", 3
+)
+REGIONAL_PROVIDER_RECOVERY_SUCCESS_THRESHOLD = _phase6c_env_int(
+    "NVL_REGIONAL_PROVIDER_RECOVERY_SUCCESS_THRESHOLD", 2
+)
+REGIONAL_PROVIDER_ALERT_REPEAT_SECONDS = _phase6c_env_int(
+    "NVL_REGIONAL_PROVIDER_ALERT_REPEAT_SECONDS", 1800
+)
 
 FAST_SENTINEL_INTERVAL_SECONDS = _phase6c_env_int("NVL_FAST_SENTINEL_INTERVAL", 15)
 FAST_SENTINEL_CONFIRM_FAILURES = _phase6c_env_int("NVL_FAST_SENTINEL_CONFIRM_FAILURES", 2)
@@ -1948,10 +1961,11 @@ def _db_record_observability_probe(
 
 
 def _db_record_regional_round(host, probe, regional_decision):
-    """Persist ONE aggregated Phase 6D/6E regional round, then recompute final state.
+    """Persist one regional attempt without letting no-evidence rounds erase state.
 
-    Raw per-node evidence is retained in host_probe_results for audit/detail views.
-    Pending nodes remain NULL evidence and never count as failed.
+    V121-A: UNKNOWN means the provider did not return enough usable regional
+    evidence. The attempt is still audited, but we preserve the last valid regional
+    evidence, its freshness timestamp, and both confirmation/recovery streaks.
     """
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     summary = regional_decision.summary
@@ -1963,55 +1977,74 @@ def _db_record_regional_round(host, probe, regional_decision):
     failed_cities = ",".join(summary.failed_cities)
 
     with db_conn() as conn:
-        if regional_decision.state == FILTER_STATE_CLEAR:
-            streak_sql = (
-                "filter_consecutive_successes=COALESCE(filter_consecutive_successes,0)+1, "
-                "filter_consecutive_failures=0"
-            )
-        elif regional_decision.state == FILTER_STATE_LIKELY:
-            # Temporal confirmation counts consecutive STRONG rounds only.
-            # POSSIBLE evidence must never pre-fill the LIKELY confirmation streak.
-            streak_sql = (
-                "filter_consecutive_failures=COALESCE(filter_consecutive_failures,0)+1, "
-                "filter_consecutive_successes=0"
+        if regional_decision.state == FILTER_STATE_UNKNOWN:
+            # No/insufficient evidence is not a new Edge verdict. In particular,
+            # regional_state_updated_at is intentionally untouched so stale-evidence
+            # guards keep working and the previous LIKELY/CLEAR streak is preserved.
+            conn.execute(
+                "UPDATE host_pool SET "
+                "regional_service_last_check=?, regional_probe_source=?, "
+                "regional_provider_status=?, regional_provider_error=NULL "
+                "WHERE host=?",
+                (
+                    now,
+                    provider_name,
+                    PROVIDER_STATUS_OK,
+                    host,
+                ),
             )
         else:
-            # POSSIBLE/UNKNOWN break a LIKELY streak and are not recovery evidence.
-            streak_sql = (
-                "filter_consecutive_failures=0, "
-                "filter_consecutive_successes=0"
-            )
+            if regional_decision.state == FILTER_STATE_CLEAR:
+                streak_sql = (
+                    "filter_consecutive_successes=COALESCE(filter_consecutive_successes,0)+1, "
+                    "filter_consecutive_failures=0"
+                )
+            elif regional_decision.state == FILTER_STATE_LIKELY:
+                # Temporal confirmation counts consecutive STRONG rounds only.
+                # POSSIBLE evidence must never pre-fill the LIKELY confirmation streak.
+                streak_sql = (
+                    "filter_consecutive_failures=COALESCE(filter_consecutive_failures,0)+1, "
+                    "filter_consecutive_successes=0"
+                )
+            else:
+                # POSSIBLE is real-but-weak evidence, so it breaks both qualified
+                # CLEAR recovery and LIKELY confirmation streaks. UNKNOWN is handled
+                # above and never mutates either streak.
+                streak_sql = (
+                    "filter_consecutive_failures=0, "
+                    "filter_consecutive_successes=0"
+                )
 
-        conn.execute(
-            "UPDATE host_pool SET "
-            "regional_service_ok=?, regional_service_last_check=?, regional_probe_source=?, "
-            "regional_filter_state=?, regional_filter_reason=?, "
-            "regional_total_nodes=?, regional_completed_nodes=?, regional_successful_nodes=?, "
-            "regional_failed_nodes=?, regional_pending_nodes=?, regional_success_ratio=?, "
-            "regional_failed_asns=?, regional_failed_cities=?, regional_last_request_id=?, "
-            "regional_provider_status=?, regional_provider_error=NULL, regional_state_updated_at=?, "
-            "evidence_updated_at=?, " + streak_sql + " WHERE host=?",
-            (
-                ok_db,
-                now,
-                provider_name,
-                regional_decision.state,
-                regional_decision.reason,
-                summary.total_nodes,
-                summary.completed_nodes,
-                summary.successful_nodes,
-                summary.failed_nodes,
-                summary.pending_nodes,
-                summary.success_ratio,
-                failed_asns or None,
-                failed_cities or None,
-                getattr(probe, "request_id", None),
-                PROVIDER_STATUS_OK,
-                now,
-                now,
-                host,
-            ),
-        )
+            conn.execute(
+                "UPDATE host_pool SET "
+                "regional_service_ok=?, regional_service_last_check=?, regional_probe_source=?, "
+                "regional_filter_state=?, regional_filter_reason=?, "
+                "regional_total_nodes=?, regional_completed_nodes=?, regional_successful_nodes=?, "
+                "regional_failed_nodes=?, regional_pending_nodes=?, regional_success_ratio=?, "
+                "regional_failed_asns=?, regional_failed_cities=?, regional_last_request_id=?, "
+                "regional_provider_status=?, regional_provider_error=NULL, regional_state_updated_at=?, "
+                "evidence_updated_at=?, " + streak_sql + " WHERE host=?",
+                (
+                    ok_db,
+                    now,
+                    provider_name,
+                    regional_decision.state,
+                    regional_decision.reason,
+                    summary.total_nodes,
+                    summary.completed_nodes,
+                    summary.successful_nodes,
+                    summary.failed_nodes,
+                    summary.pending_nodes,
+                    summary.success_ratio,
+                    failed_asns or None,
+                    failed_cities or None,
+                    getattr(probe, "request_id", None),
+                    PROVIDER_STATUS_OK,
+                    now,
+                    now,
+                    host,
+                ),
+            )
 
         for item in getattr(probe, "evidence", ()) or ():
             item_ok = getattr(item, "ok", None)
@@ -2096,18 +2129,23 @@ def _db_get_recent_regional_node_results(host, limit=16):
 
 
 def _db_get_regional_provider_runtime():
+    def _int_setting(key, default="0"):
+        try:
+            return max(0, int(_db_get_setting(key, default)))
+        except (TypeError, ValueError):
+            return 0
+
     until = _db_get_setting("regional_provider_backoff_until", "")
-    try:
-        count = max(0, int(_db_get_setting("regional_provider_limit_count", "0")))
-    except (TypeError, ValueError):
-        count = 0
     status = _db_get_setting("regional_provider_global_status", PROVIDER_STATUS_NEVER)
     error = _db_get_setting("regional_provider_last_error", "")
     return {
         "backoff_until": until or "",
-        "limit_count": count,
+        "limit_count": _int_setting("regional_provider_limit_count"),
         "status": status or PROVIDER_STATUS_NEVER,
         "error": error or "",
+        "error_streak": _int_setting("regional_provider_error_streak"),
+        "success_streak": _int_setting("regional_provider_success_streak"),
+        "last_alert_at": _db_get_setting("regional_provider_last_alert_at", "") or "",
     }
 
 
@@ -2116,6 +2154,18 @@ def _db_set_regional_provider_runtime(status, *, backoff_until="", limit_count=0
     _db_update_setting("regional_provider_backoff_until", backoff_until or "")
     _db_update_setting("regional_provider_limit_count", str(max(0, int(limit_count or 0))))
     _db_update_setting("regional_provider_last_error", str(error or "")[:300])
+
+
+def _regional_provider_timestamp_age_seconds(raw):
+    if not raw:
+        return None
+    try:
+        return max(
+            0.0,
+            (datetime.now() - _parse_flexible_datetime(raw)).total_seconds(),
+        )
+    except (TypeError, ValueError):
+        return None
 
 
 def _db_regional_backoff_remaining_seconds():
@@ -19454,6 +19504,8 @@ async def _regional_provider_enter_limited(app, host, error):
         limit_count=count,
         error=str(error),
     )
+    await asyncio.to_thread(_db_update_setting, "regional_provider_success_streak", "0")
+    await asyncio.to_thread(_db_update_setting, "regional_provider_error_streak", "0")
     await asyncio.to_thread(
         _db_record_regional_provider_status,
         host,
@@ -19462,6 +19514,12 @@ async def _regional_provider_enter_limited(app, host, error):
     )
     seconds = max(0, int((until_dt - datetime.now()).total_seconds()))
     if previous_status != PROVIDER_STATUS_LIMITED:
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        await asyncio.to_thread(
+            _db_update_setting,
+            "regional_provider_last_alert_at",
+            now_text,
+        )
         await _notify_admins(
             app,
             "⚠️ <b>Regional Probe موقتاً محدود شد</b>\n\n"
@@ -19475,6 +19533,7 @@ async def _regional_provider_enter_limited(app, host, error):
 async def _regional_provider_enter_error(app, host, provider_name, error):
     state = await asyncio.to_thread(_db_get_regional_provider_runtime)
     previous_status = state.get("status") or PROVIDER_STATUS_NEVER
+    error_streak = max(0, int(state.get("error_streak") or 0)) + 1
     await asyncio.to_thread(
         _db_set_regional_provider_runtime,
         PROVIDER_STATUS_ERROR,
@@ -19483,6 +19542,12 @@ async def _regional_provider_enter_error(app, host, provider_name, error):
         error=str(error),
     )
     await asyncio.to_thread(
+        _db_update_setting,
+        "regional_provider_error_streak",
+        str(error_streak),
+    )
+    await asyncio.to_thread(_db_update_setting, "regional_provider_success_streak", "0")
+    await asyncio.to_thread(
         _db_record_regional_provider_status,
         host,
         PROVIDER_STATUS_ERROR,
@@ -19490,6 +19555,13 @@ async def _regional_provider_enter_error(app, host, provider_name, error):
         provider_name,
     )
     incident = await asyncio.to_thread(_db_get_open_filter_incident, host)
+    alert_age = _regional_provider_timestamp_age_seconds(state.get("last_alert_at"))
+    notify_due = provider_error_alert_due(
+        error_streak,
+        seconds_since_last_alert=alert_age,
+        threshold=REGIONAL_PROVIDER_ERROR_ALERT_THRESHOLD,
+        repeat_seconds=REGIONAL_PROVIDER_ALERT_REPEAT_SECONDS,
+    )
     _incident_log(
         "regional_provider_error",
         incident.get("incident_id") if incident else None,
@@ -19497,28 +19569,70 @@ async def _regional_provider_enter_error(app, host, provider_name, error):
         host=host,
         provider=provider_name,
         error=str(error),
+        error_streak=error_streak,
+        notify_due=notify_due,
         edge_state_preserved=True,
     )
-    if previous_status != PROVIDER_STATUS_ERROR:
+    if notify_due:
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        await asyncio.to_thread(
+            _db_update_setting,
+            "regional_provider_last_alert_at",
+            now_text,
+        )
         incident_line = (
             f"Incident: <code>{esc(incident['incident_id'])}</code>\n"
             if incident else ""
         )
         await _notify_admins(
             app,
-            "🟠 <b>Regional Provider خطا داد</b>\n\n"
+            "🟠 <b>Regional Provider ناپایدار است</b>\n\n"
             f"{incident_line}"
             f"Provider: <code>{esc(provider_name)}</code>\n"
             f"Edge: <code>{esc(host)}</code>\n"
+            f"Consecutive errors: <b>{error_streak}</b>\n"
             f"Error: <code>{esc(str(error)[:500])}</code>\n\n"
-            "این خطا <b>فیلترینگ محسوب نمی‌شود</b> و state قبلی Edge حفظ شد. "
-            "تا دریافت Evidence معتبر، Auto Failover بر اساس این خطا اجرا نمی‌شود."
+            "این خطا <b>فیلترینگ Edge محسوب نمی‌شود</b> و آخرین Evidence معتبر حفظ شده است. "
+            "هشدار فقط پس از خطاهای متوالی و با cooldown ارسال می‌شود."
         )
 
 
-async def _regional_provider_mark_ok(app):
+async def _regional_provider_mark_ok(app, regional_decision=None):
+    # A transport/API success without a usable regional verdict must not declare
+    # recovery. It is audited by _db_record_regional_round but does not advance the
+    # provider recovery streak.
+    if (
+        regional_decision is None
+        or regional_decision.state == FILTER_STATE_UNKNOWN
+    ):
+        log.info(
+            "V121A provider success without valid regional evidence; recovery streak unchanged."
+        )
+        return False
+
     state = await asyncio.to_thread(_db_get_regional_provider_runtime)
     previous_status = state.get("status") or PROVIDER_STATUS_NEVER
+    success_streak = max(0, int(state.get("success_streak") or 0)) + 1
+    await asyncio.to_thread(
+        _db_update_setting,
+        "regional_provider_success_streak",
+        str(success_streak),
+    )
+    await asyncio.to_thread(_db_update_setting, "regional_provider_error_streak", "0")
+
+    if not provider_recovery_ready(
+        previous_status,
+        success_streak,
+        threshold=REGIONAL_PROVIDER_RECOVERY_SUCCESS_THRESHOLD,
+    ):
+        log.info(
+            "V121A provider recovery pending status=%s success_streak=%s/%s",
+            previous_status,
+            success_streak,
+            REGIONAL_PROVIDER_RECOVERY_SUCCESS_THRESHOLD,
+        )
+        return False
+
     await asyncio.to_thread(
         _db_set_regional_provider_runtime,
         PROVIDER_STATUS_OK,
@@ -19529,10 +19643,12 @@ async def _regional_provider_mark_ok(app):
     if previous_status in {PROVIDER_STATUS_LIMITED, PROVIDER_STATUS_ERROR}:
         await _notify_admins(
             app,
-            "✅ <b>Regional Provider دوباره در دسترس است</b>\n"
+            "✅ <b>Regional Provider پایدار شد</b>\n"
             f"Provider: <code>{esc(REGIONAL_PROBE_PROVIDER_NAME)}</code>\n"
-            "پایش منطقه‌ای با Evidence تازه از سر گرفته شد."
+            f"Valid successes: <b>{success_streak}</b>\n"
+            "پایش منطقه‌ای پس از Evidence معتبر متوالی دوباره در وضعیت عادی قرار گرفت."
         )
+    return True
 
 
 def _new_regional_probe_provider():
@@ -20543,7 +20659,7 @@ async def _regional_filter_tick(app):
         if result.get("status") != PROVIDER_STATUS_OK:
             return result
 
-        await _regional_provider_mark_ok(app)
+        await _regional_provider_mark_ok(app, result.get("regional_decision"))
 
         decision = result.get("regional_decision")
         health = (await asyncio.to_thread(_db_get_host_port_health_map)).get(host, {})
@@ -20574,7 +20690,7 @@ async def _regional_filter_tick(app):
                 )
                 if confirm.get("status") == PROVIDER_STATUS_OK:
                     result = confirm
-                    await _regional_provider_mark_ok(app)
+                    await _regional_provider_mark_ok(app, confirm.get("regional_decision"))
                 else:
                     return confirm
             else:
@@ -20633,7 +20749,7 @@ async def _regional_filter_probe_one_now(app, host):
         nodes,
     )
     if result.get("status") == PROVIDER_STATUS_OK:
-        await _regional_provider_mark_ok(app)
+        await _regional_provider_mark_ok(app, result.get("regional_decision"))
     return result
 
 async def _regional_filter_loop(app):

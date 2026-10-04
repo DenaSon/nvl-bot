@@ -8,7 +8,7 @@ from dataclasses import replace
 from unittest.mock import patch
 
 from server_migration.models import CommandResult, ServerCredentials, ServerFacts
-from server_migration.phase5 import run_phase5
+from server_migration.phase5 import resolve_cloudflare_api_token, run_phase5
 from server_migration.phase5_cli import (
     DEFAULT_CLOUDFLARE_TOKEN_ENV,
     main as phase5_cli_main,
@@ -131,6 +131,25 @@ class FakeCloudflare:
         self.patches.append(new_ip)
         self.current = replace(snapshot, content=new_ip)
         return self.current
+
+
+class ChangeServerPhase5EnvironmentTests(unittest.TestCase):
+    def test_core_resolves_default_cloudflare_token_from_environment(self):
+        with patch.dict(
+            os.environ,
+            {"NVL_CLOUDFLARE_API_TOKEN": "cf-from-service-env"},
+            clear=False,
+        ):
+            token = resolve_cloudflare_api_token()
+
+        self.assertEqual(token, "cf-from-service-env")
+
+    def test_core_fails_closed_when_cloudflare_token_is_missing(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(Phase5Error) as ctx:
+                resolve_cloudflare_api_token()
+
+        self.assertIn("NVL_CLOUDFLARE_API_TOKEN", str(ctx.exception))
 
 
 class ChangeServerPhase5CliTests(unittest.TestCase):

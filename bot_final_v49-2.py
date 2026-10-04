@@ -256,6 +256,13 @@ from differential_filtering import (
     DIFF_TARGET_SPECIFIC,
     evaluate_differential_confirmation,
 )
+from regional_probe_coordinator import (
+    PROBE_PRIORITY_CONFIRMATION,
+    PROBE_PRIORITY_DEFAULT,
+    PROBE_PRIORITY_MARZBAN,
+    PROBE_PRIORITY_STANDBY,
+    RegionalProbeCoordinator,
+)
 from filtering_runtime import (
     PROVIDER_STATUS_ERROR,
     PROVIDER_STATUS_LIMITED,
@@ -19783,12 +19790,12 @@ def _new_regional_probe_provider():
     )
 
 
-def _regional_probe_lock(app):
-    lock = app.bot_data.get("regional_probe_lock")
-    if lock is None:
-        lock = asyncio.Lock()
-        app.bot_data["regional_probe_lock"] = lock
-    return lock
+def _regional_probe_coordinator(app):
+    coordinator = app.bot_data.get("regional_probe_coordinator")
+    if coordinator is None:
+        coordinator = RegionalProbeCoordinator()
+        app.bot_data["regional_probe_coordinator"] = coordinator
+    return coordinator
 
 
 async def _regional_filter_collect_raw(host, service_port, provider, nodes):

@@ -32,7 +32,7 @@ class Phase3Result:
     database_integrity: str
     compose_valid: bool
     docker_archive_valid: bool
-    image_ids_match: bool
+    image_identity_verified: bool
     runtime_restored: bool
     docker_images_loaded: bool
     runtime_started: bool

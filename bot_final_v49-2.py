@@ -18693,7 +18693,7 @@ async def _safe_manual_failover(
 ):
     """Shared Phase 6G/6H lock-protected, scoped and rollback-aware failover engine."""
     automatic = mode == FAILOVER_MODE_AUTO
-    failover_label = "Automatic Filtering Failover" if automatic else "Safe Manual Failover"
+    failover_label = "انتقال خودکار" if automatic else "انتقال دستی امن"
     if incident_id:
         failover_label += f" [{incident_id}]"
     operation_id, busy_operation_id = await asyncio.to_thread(
@@ -18705,9 +18705,9 @@ async def _safe_manual_failover(
     if not operation_id:
         await _notify_admins(
             app,
-            f"⛔️ <b>Failover دیگری در حال اجراست.</b>\n"
-            f"Operation ID: <code>{busy_operation_id}</code>\n"
-            "تا پایان آن عملیات، Failover جدید شروع نمی‌شود."
+            "⛔️ <b>یک انتقال دیگر در حال اجراست.</b>\n"
+            f"شناسه عملیات: <code>{busy_operation_id}</code>\n"
+            "تا پایان آن عملیات، انتقال جدید شروع نمی‌شود."
         )
         return {"ok": False, "reason": "FAILOVER_BUSY", "operation_id": busy_operation_id}
 
@@ -18738,10 +18738,10 @@ async def _safe_manual_failover(
             await _notify_admins(
                 app,
                 f"⛔️ <b>{failover_label} شروع نشد.</b>\n\n"
-                f"Source: <code>{esc(source_host)}</code>\n"
-                f"Target: <code>{esc(target_host)}</code>\n"
-                f"Preflight: <code>{esc(' | '.join(errors))}</code>\n\n"
-                "هیچ DB/DNS/Account تغییری انجام نشد."
+                f"مبدأ: <code>{esc(source_host)}</code>\n"
+                f"مقصد: <code>{esc(target_host)}</code>\n"
+                f"نتیجه بررسی ایمنی: <code>{esc(' | '.join(errors))}</code>\n\n"
+                "هیچ تغییری در حساب‌ها، دیتابیس یا مسیر دامنه انجام نشد."
             )
             return {"ok": False, "reason": "PREFLIGHT_FAILED", "errors": errors, "operation_id": operation_id}
 
@@ -18907,10 +18907,10 @@ async def _safe_manual_failover(
                 )
                 await _notify_admins(
                     app,
-                    "🚨 <b>Failover نیازمند بررسی فوری است.</b>\n"
-                    "سوییچ نهایی DNS شکست خورد و بازگردانی مسیر به Core هم تأیید نشد.\n"
-                    f"Operation: <code>{operation_id}</code>\n"
-                    "برای جلوگیری از split-brain، DB/default روی Target نگه داشته شد."
+                    "🚨 <b>انتقال نیازمند بررسی فوری است.</b>\n"
+                    "تغییر نهایی مسیر دامنه ناموفق بود و بازگردانی مسیر به سرور هسته نیز تأیید نشد.\n"
+                    f"شناسه عملیات: <code>{operation_id}</code>\n"
+                    "برای جلوگیری از ناسازگاری، وضعیت داخلی روی سرور مقصد حفظ شد."
                 )
                 return {
                     "ok": False,
@@ -18943,9 +18943,9 @@ async def _safe_manual_failover(
                 )
                 await _notify_admins(
                     app,
-                    "🚨 <b>Failover نیازمند بررسی فوری است.</b>\n"
-                    "مسیر به Core برگشت، اما rollback دیتابیس کامل نشد.\n"
-                    f"Operation: <code>{operation_id}</code>"
+                    "🚨 <b>انتقال نیازمند بررسی فوری است.</b>\n"
+                    "مسیر به سرور هسته برگشت، اما بازگردانی دیتابیس کامل نشد.\n"
+                    f"شناسه عملیات: <code>{operation_id}</code>"
                 )
                 return {"ok": False, "reason": "ROLLBACK_FAILED", "operation_id": operation_id}
 
@@ -18964,12 +18964,12 @@ async def _safe_manual_failover(
             )
             await _notify_admins(
                 app,
-                "⚠️ <b>Failover نهایی نشد؛ مسیر و DB rollback شدند.</b>\n\n"
-                f"Source: <code>{esc(source_host)}</code>\n"
-                f"Target: <code>{esc(target_host)}</code>\n"
-                f"Operation: <code>{operation_id}</code>\n"
-                "دامنه روی Core fallback تأیید شد و اکانت‌ها/default به state قبل برگشتند.\n"
-                f"DNS error: <code>{esc(dns_msg)}</code>"
+                "⚠️ <b>انتقال نهایی نشد؛ وضعیت قبلی بازیابی شد.</b>\n\n"
+                f"مبدأ: <code>{esc(source_host)}</code>\n"
+                f"مقصد: <code>{esc(target_host)}</code>\n"
+                f"شناسه عملیات: <code>{operation_id}</code>\n"
+                "مسیر دامنه روی سرور هسته تأیید شد و حساب‌ها به وضعیت قبلی برگشتند.\n"
+                f"خطای تغییر مسیر: <code>{esc(dns_msg)}</code>"
             )
             return {"ok": False, "reason": "FINAL_DNS_FAILED_ROLLED_BACK", "operation_id": operation_id}
 
@@ -18994,12 +18994,12 @@ async def _safe_manual_failover(
         await _notify_admins(
             app,
             f"✅ <b>{failover_label} با موفقیت کامل شد.</b>\n\n"
-            f"Operation: <code>{operation_id}</code>\n"
-            f"Source: <code>{esc(source_host)}</code>\n"
-            f"Target: <code>{esc(target_host)}</code>\n"
-            f"Accounts moved: <b>{moved_count}</b>\n"
-            f"DNS: <code>{esc(core_public_ip)}</code> → <code>{esc(target_host)}</code>\n\n"
-            "اکانت‌های Edgeهای دیگر دست‌نخورده باقی ماندند."
+            f"شناسه عملیات: <code>{operation_id}</code>\n"
+            f"مبدأ: <code>{esc(source_host)}</code>\n"
+            f"مقصد: <code>{esc(target_host)}</code>\n"
+            f"حساب‌های منتقل‌شده: <b>{moved_count}</b>\n"
+            f"مسیر دامنه: <code>{esc(core_public_ip)}</code> → <code>{esc(target_host)}</code>\n\n"
+            "حساب‌های سایر سرورها بدون تغییر باقی ماندند."
         )
         return {
             "ok": True,
@@ -19068,29 +19068,29 @@ async def _safe_manual_failover(
         await _notify_admins(
             app,
             f"❌ <b>{failover_label} متوقف شد.</b>\n\n"
-            f"Operation: <code>{operation_id}</code>\n"
-            f"Source: <code>{esc(source_host)}</code>\n"
-            f"Target: <code>{esc(target_host)}</code>\n"
-            f"Error: <code>{esc(str(exc)[:1200])}</code>\n"
+            f"شناسه عملیات: <code>{operation_id}</code>\n"
+            f"مبدأ: <code>{esc(source_host)}</code>\n"
+            f"مقصد: <code>{esc(target_host)}</code>\n"
+            f"خطا: <code>{esc(str(exc)[:1200])}</code>\n"
             + (
-                f"🚨 DB rollback error: <code>{esc(rollback_error)}</code>\n"
+                f"🚨 خطا در بازگردانی دیتابیس: <code>{esc(rollback_error)}</code>\n"
                 if rollback_error else
                 (
-                    "⚠️ DB/default روی Target نگه داشته شد تا با مسیر نهایی ناسازگار نشود.\n"
+                    "⚠️ وضعیت داخلی روی سرور مقصد حفظ شد تا با مسیر نهایی ناسازگار نشود.\n"
                     if retained_target_state else
-                    "✅ DB در state قبلی است.\n"
+                    "✅ دیتابیس در وضعیت قبلی است.\n"
                 )
             )
             + (
-                f"🚨 Core route recovery error: <code>{esc(route_recovery_error)}</code>"
+                f"🚨 خطا در بازیابی مسیر هسته: <code>{esc(route_recovery_error)}</code>"
                 if route_recovery_error else
                 (
-                    f"✅ مسیر Target فعال باقی مانده است: <code>{esc(target_host)}</code>"
+                    f"✅ مسیر سرور مقصد فعال باقی مانده است: <code>{esc(target_host)}</code>"
                     if retained_target_state and target_route_active else
                     (
-                        f"🛟 مسیر امن فعلی: Core <code>{esc(core_public_ip)}</code>"
+                        f"🛟 مسیر امن فعلی: سرور هسته <code>{esc(core_public_ip)}</code>"
                         if core_public_ip else
-                        "⚠️ وضعیت DNS/Core باید دستی بررسی شود."
+                        "⚠️ وضعیت مسیر دامنه و سرور هسته باید دستی بررسی شود."
                     )
                 )
             )

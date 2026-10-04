@@ -292,13 +292,13 @@ class Phase6FBotIntegrationStaticTests(unittest.TestCase):
 
     def test_filtering_monitor_ui_exists(self):
         for fragment in (
-            "Filtering Monitor",
+            "پایش اختلال و فیلترینگ",
             'callback_data="hp_filtering"',
             'd == "hp_filtering"',
             'd.startswith("flt_detail_")',
             'd.startswith("flt_check_")',
             'd.startswith("flt_probe_")',
-            "Auto Failover",
+            "انتقال خودکار",
         ):
             self.assertIn(fragment, self.source)
 
@@ -309,7 +309,7 @@ class Phase6FBotIntegrationStaticTests(unittest.TestCase):
         )
         self.assertIn("_db_update_setting, 'auto_failover_mode', '0'", region)
         self.assertIn("_db_update_setting, 'phase6h_auto_failover_enabled', '0'", region)
-        self.assertIn("Automatic Filtering Failover", region)
+        self.assertIn("انتقال خودکار خاموش شد", region)
         self.assertNotIn("_activate_standby_for_filtered_edge(", region)
 
     def test_runtime_uses_actual_service_port(self):

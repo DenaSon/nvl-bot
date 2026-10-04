@@ -312,6 +312,7 @@ from incident_observability import (
     normalize_failover_result_reason,
     reason_label_fa,
     should_notify_incident,
+    standby_failure_label_fa,
     standby_safety_failures,
 )
 from standby_readiness import (
@@ -331,7 +332,7 @@ from standby_readiness import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V121D-2026-10-04-probe-priority"
+BOT_VERSION_TAG = "V121E-2026-10-04-failover-simulation"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -606,6 +607,9 @@ REGIONAL_DIFF_MIN_TARGET_SPECIFIC_NODES = _phase6c_env_int(
 )
 REGIONAL_DIFF_MIN_TARGET_SPECIFIC_ASNS = _phase6c_env_int(
     "NVL_REGIONAL_DIFF_MIN_TARGET_SPECIFIC_ASNS", 2
+)
+DIFFERENTIAL_CONFIRMATION_MAX_AGE_SECONDS = _phase6c_env_int(
+    "NVL_DIFFERENTIAL_CONFIRM_MAX_AGE", 120, minimum=30, maximum=600
 )
 REGIONAL_FILTER_PROVIDER_BACKOFF_BASE_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROVIDER_BACKOFF_BASE", 300)
 REGIONAL_FILTER_PROVIDER_BACKOFF_MAX_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROVIDER_BACKOFF_MAX", 3600)
@@ -2245,6 +2249,30 @@ def _db_record_differential_check(
                 now,
             ),
         )
+
+
+def _db_get_latest_differential_confirmation(source_host):
+    """Return the newest differential verdict for one source Edge."""
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT control_host, provider, verdict, confirmed, target_specific_nodes, "
+            "target_specific_asns, shared_failed_nodes, checked_at "
+            "FROM regional_differential_checks "
+            "WHERE source_host=? ORDER BY id DESC LIMIT 1",
+            (source_host,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "control_host": row[0],
+        "provider": row[1],
+        "verdict": row[2],
+        "confirmed": bool(row[3]),
+        "target_specific_nodes": int(row[4] or 0),
+        "target_specific_asns": row[5] or "",
+        "shared_failed_nodes": int(row[6] or 0),
+        "checked_at": row[7],
+    }
 
 
 def _db_get_recent_regional_node_results(host, limit=16):
@@ -20579,6 +20607,19 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
             if host in active_set
         )
     provider_runtime = await asyncio.to_thread(_db_get_regional_provider_runtime)
+    differential = await asyncio.to_thread(
+        _db_get_latest_differential_confirmation,
+        source_host,
+    )
+    differential_confirmed = bool(
+        differential and differential.get("confirmed")
+    )
+    differential_age = (
+        _regional_provider_timestamp_age_seconds(differential.get("checked_at"))
+        if differential else None
+    )
+    if differential_age is None:
+        differential_age = float("inf")
     switch_age = await asyncio.to_thread(_db_seconds_since_last_ip_switch)
     attempt_age = await asyncio.to_thread(_db_seconds_since_auto_failover_attempt)
 
@@ -20589,6 +20630,9 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
         filter_state=source_health.get("filter_state"),
         filter_confidence=source_health.get("filter_confidence"),
         diagnostic_reason=source_health.get("diagnostic_reason"),
+        differential_confirmed=differential_confirmed,
+        differential_age_seconds=differential_age,
+        differential_max_age_seconds=DIFFERENTIAL_CONFIRMATION_MAX_AGE_SECONDS,
         failure_streak=source_health.get("filter_consecutive_failures", 0),
         confirm_threshold=EDGE_FILTER_CONFIRM_THRESHOLD,
         provider_status=provider_runtime.get("status"),
@@ -20629,10 +20673,17 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
             configured_standbys=len(standbys),
             active_standbys=len(active_standbys),
             safe_standbys=len(safe_candidates),
+            differential_confirmed=differential_confirmed,
+            differential_age_seconds=differential_age,
+            differential_verdict=differential.get("verdict") if differential else None,
         )
         if filter_confirmed and incident:
             extra = {
                 "provider_status": provider_runtime.get("status"),
+                "differential_confirmed": differential_confirmed,
+                "differential_age_seconds": differential_age,
+                "differential_verdict": differential.get("verdict") if differential else None,
+                "differential_control": differential.get("control_host") if differential else None,
                 "active_standby_count": len(active_standbys),
                 "switch_cooldown_remaining": max(
                     0,

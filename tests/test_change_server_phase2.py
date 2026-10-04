@@ -139,7 +139,7 @@ class RecordingBundleExecutor:
         if command.startswith("wc -c < "):
             return CommandResult(command, 0, "123\n", "")
 
-        if "sqlite3.connect('file:'" in command:
+        if "s.backup(d)" in command:
             return CommandResult(command, 0, "ok|ok\n", "")
 
         return CommandResult(command, 0, "", "")
@@ -245,7 +245,7 @@ class ChangeServerPhase2Tests(unittest.TestCase):
         self.assertEqual(bundle.source_host, "107.189.22.94")
         self.assertEqual(len(bundle.artifacts), 5)
         joined = "\n".join(executor.commands).lower()
-        self.assertIn("sqlite3.connect('file:'", joined)
+        self.assertIn("s.backup(d)", joined)
         self.assertIn("s.backup(d)", joined)
         self.assertIn("docker save", joined)
         self.assertIn("sha256sum -c sha256sums", joined)

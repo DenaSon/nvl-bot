@@ -778,33 +778,57 @@ def load_docker_images(
     )
 
     marzban = dict(metadata.get("marzban") or {})
-    expected = {}
+    expected_platforms: dict[str, tuple[str, str]] = {}
     for row in marzban.get("local_image_details") or []:
         match = _IMAGE_DETAIL_RE.fullmatch(str(row))
         if not match:
             raise Phase3Error(f"invalid bundle image detail: {row!r}")
-        expected[match.group("tag")] = (
-            match.group("id").lower(),
+        expected_platforms[match.group("tag")] = (
             match.group("arch").lower(),
             match.group("os").lower(),
         )
 
+    compatible_arch = {
+        ("x86_64", "amd64"),
+        ("amd64", "x86_64"),
+        ("aarch64", "arm64"),
+        ("arm64", "aarch64"),
+    }
+
     for tag in marzban.get("compose_images") or []:
-        if tag not in expected:
-            raise Phase3Error(f"missing expected image metadata for {tag}")
+        tag = str(tag)
+        expected = expected_platforms.get(tag)
+        if expected is None:
+            raise Phase3Error(f"missing expected image platform metadata for {tag}")
+
         actual = _run_text(
             executor,
             "docker image inspect "
-            "--format '{{.Id}}|{{.Architecture}}|{{.Os}}' "
-            f"{shlex.quote(str(tag))}",
+            "--format '{{.Architecture}}|{{.Os}}' "
+            f"{shlex.quote(tag)}",
             timeout=30,
             label=f"inspect loaded image {tag}",
         ).lower()
-        expected_text = "|".join(expected[str(tag)])
-        if actual != expected_text:
+        parts = actual.split("|", 1)
+        if len(parts) != 2:
             raise Phase3Error(
-                f"loaded Docker image mismatch for {tag}: "
-                f"{actual!r} != {expected_text!r}"
+                f"unexpected loaded image inspection for {tag}: {actual!r}"
+            )
+        actual_arch, actual_os = parts
+        expected_arch, expected_os = expected
+
+        if (
+            actual_arch != expected_arch
+            and (actual_arch, expected_arch) not in compatible_arch
+        ):
+            raise Phase3Error(
+                f"loaded Docker image architecture mismatch for {tag}: "
+                f"{actual_arch!r} != {expected_arch!r}"
+            )
+        if actual_os != expected_os:
+            raise Phase3Error(
+                f"loaded Docker image OS mismatch for {tag}: "
+                f"{actual_os!r} != {expected_os!r}"
             )
 
     return True

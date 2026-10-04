@@ -1,9 +1,18 @@
+import io
+import json
+import os
+import sys
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from unittest.mock import patch
 
 from server_migration.models import CommandResult, ServerCredentials, ServerFacts
 from server_migration.phase5 import run_phase5
+from server_migration.phase5_cli import (
+    DEFAULT_CLOUDFLARE_TOKEN_ENV,
+    main as phase5_cli_main,
+)
 from server_migration.phase5_models import (
     PHASE5_MODE_CUTOVER,
     PHASE5_MODE_PLAN,
@@ -122,6 +131,116 @@ class FakeCloudflare:
         self.patches.append(new_ip)
         self.current = replace(snapshot, content=new_ip)
         return self.current
+
+
+class ChangeServerPhase5CliTests(unittest.TestCase):
+    @patch("server_migration.phase5_cli.run_phase5")
+    @patch(
+        "server_migration.phase5_cli._secret",
+        side_effect=["source-secret", "destination-secret"],
+    )
+    def test_cli_uses_default_cloudflare_env_without_token_prompt(
+        self,
+        secret,
+        run,
+    ):
+        run.return_value = ready_plan()
+        argv = [
+            "phase5_cli",
+            "--source", OLD_IP,
+            "--destination", NEW_IP,
+            "--job-id", JOB_ID,
+            "--hostname", HOSTNAME,
+            "--zone", ZONE,
+            "--plan-only",
+        ]
+        stdout = io.StringIO()
+        with patch.object(sys, "argv", argv), patch.dict(
+            os.environ,
+            {DEFAULT_CLOUDFLARE_TOKEN_ENV: "cf-secret"},
+            clear=False,
+        ), redirect_stdout(stdout):
+            code = phase5_cli_main()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(secret.call_count, 2)
+        labels = [call.args[0] for call in secret.call_args_list]
+        self.assertEqual(
+            labels,
+            ["Source SSH password", "Destination SSH password"],
+        )
+        kwargs = run.call_args.kwargs
+        self.assertEqual(kwargs["cloudflare_api_token"], "cf-secret")
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["status"], "completed")
+
+    @patch("server_migration.phase5_cli._secret")
+    def test_cli_missing_default_env_fails_before_ssh_prompts(self, secret):
+        argv = [
+            "phase5_cli",
+            "--source", OLD_IP,
+            "--destination", NEW_IP,
+            "--job-id", JOB_ID,
+            "--hostname", HOSTNAME,
+            "--zone", ZONE,
+            "--plan-only",
+        ]
+        stderr = io.StringIO()
+        with patch.object(sys, "argv", argv), patch.dict(
+            os.environ,
+            {},
+            clear=True,
+        ), redirect_stderr(stderr):
+            code = phase5_cli_main()
+
+        self.assertEqual(code, 5)
+        secret.assert_not_called()
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(payload["status"], "failed")
+        self.assertIn(DEFAULT_CLOUDFLARE_TOKEN_ENV, payload["error"])
+
+    @patch("server_migration.phase5_cli.run_phase5")
+    @patch(
+        "server_migration.phase5_cli._secret",
+        side_effect=[
+            "cf-prompt-secret",
+            "source-secret",
+            "destination-secret",
+        ],
+    )
+    def test_cli_token_prompt_requires_explicit_flag(self, secret, run):
+        run.return_value = ready_plan()
+        argv = [
+            "phase5_cli",
+            "--source", OLD_IP,
+            "--destination", NEW_IP,
+            "--job-id", JOB_ID,
+            "--hostname", HOSTNAME,
+            "--zone", ZONE,
+            "--plan-only",
+            "--prompt-cloudflare-token",
+        ]
+        with patch.object(sys, "argv", argv), patch.dict(
+            os.environ,
+            {},
+            clear=True,
+        ), redirect_stdout(io.StringIO()):
+            code = phase5_cli_main()
+
+        self.assertEqual(code, 0)
+        labels = [call.args[0] for call in secret.call_args_list]
+        self.assertEqual(
+            labels,
+            [
+                "Cloudflare API token",
+                "Source SSH password",
+                "Destination SSH password",
+            ],
+        )
+        self.assertEqual(
+            run.call_args.kwargs["cloudflare_api_token"],
+            "cf-prompt-secret",
+        )
 
 
 class ChangeServerPhase5PlanTests(unittest.TestCase):

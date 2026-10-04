@@ -20151,56 +20151,55 @@ async def _refresh_standby_regional_slow(app, active_standbys, health_map):
     if not due_hosts:
         return 0
 
-    lock = _regional_probe_lock(app)
-    if lock.locked():
-        log.info(
-            "V119C standby regional refresh skipped reason=DEFAULT_PROBE_BUSY due=%s",
-            ",".join(due_hosts),
-        )
-        return 0
-
     remaining = await asyncio.to_thread(_db_regional_backoff_remaining_seconds)
     if remaining > 0:
         return 0
 
-    async with lock:
-        try:
-            provider = _new_regional_probe_provider()
-            nodes = await asyncio.to_thread(provider.discover_nodes, "ir")
-        except RegionalProbeLimited as exc:
-            await _regional_provider_enter_limited(app, due_hosts[0], exc)
-            return 0
-        except (RegionalProbeError, ValueError) as exc:
-            _incident_log(
-                "standby_node_discovery_error",
-                None,
-                level="warning",
-                error=str(exc),
-                global_provider_state_unchanged=True,
-            )
-            return 0
+    try:
+        provider = _new_regional_probe_provider()
+        nodes = await _regional_provider_call(
+            app,
+            PROBE_PRIORITY_STANDBY,
+            "standby-node-discovery",
+            provider.discover_nodes,
+            "ir",
+        )
+    except RegionalProbeLimited as exc:
+        await _regional_provider_enter_limited(app, due_hosts[0], exc)
+        return 0
+    except (RegionalProbeError, ValueError) as exc:
+        _incident_log(
+            "standby_node_discovery_error",
+            None,
+            level="warning",
+            error=str(exc),
+            global_provider_state_unchanged=True,
+        )
+        return 0
 
-        nodes = tuple(nodes[:REGIONAL_FILTER_MAX_NODES])
-        if not nodes:
-            return 0
+    nodes = tuple(nodes[:REGIONAL_FILTER_MAX_NODES])
+    if not nodes:
+        return 0
 
-        refreshed = 0
-        for host in due_hosts:
-            service_port = await asyncio.to_thread(_db_get_host_service_port, host, 22)
-            result = await _regional_filter_probe_edge(
-                app,
-                host,
-                service_port,
-                provider,
-                nodes,
-                affect_global_provider=False,
-                notify_transition=False,
-            )
-            if result.get("status") == PROVIDER_STATUS_LIMITED:
-                break
-            if result.get("status") == PROVIDER_STATUS_OK:
-                refreshed += 1
-        return refreshed
+    refreshed = 0
+    for host in due_hosts:
+        service_port = await asyncio.to_thread(_db_get_host_service_port, host, 22)
+        result = await _regional_filter_probe_edge(
+            app,
+            host,
+            service_port,
+            provider,
+            nodes,
+            affect_global_provider=False,
+            notify_transition=False,
+            probe_priority=PROBE_PRIORITY_STANDBY,
+            probe_label=f"standby:{host}",
+        )
+        if result.get("status") == PROVIDER_STATUS_LIMITED:
+            break
+        if result.get("status") == PROVIDER_STATUS_OK:
+            refreshed += 1
+    return refreshed
 
 
 async def _standby_readiness_tick(app):
@@ -20365,6 +20364,8 @@ async def _refresh_standbys_for_confirmed_filter(app, source_host, provider, nod
             nodes,
             affect_global_provider=False,
             notify_transition=False,
+            probe_priority=PROBE_PRIORITY_STANDBY,
+            probe_label=f"standby-confirmed:{host}",
         )
         attempts += 1
         if result.get("status") == PROVIDER_STATUS_LIMITED:

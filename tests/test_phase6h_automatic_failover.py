@@ -189,10 +189,11 @@ class Phase6HIntegrationShapeTests(unittest.TestCase):
             "async def _render_filtering_monitor_panel",
             "async def _render_filtering_edge_detail",
         )
-        self.assertIn("Filtering Monitor — Phase 6H", region)
+        self.assertIn("پایش اختلال و فیلترینگ", region)
         self.assertIn("flt_auto_enable", region)
         self.assertIn("flt_auto_disable", region)
-        self.assertIn("LIKELY + HIGH", region)
+        self.assertIn("تأیید مقایسه‌ای تازه", region)
+        self.assertNotIn("Phase 6", region)
 
     def test_admin_confirmation_is_required_to_enable_auto(self):
         region = self._region(

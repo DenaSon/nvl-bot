@@ -97,7 +97,7 @@ class TelegramWizardFlowTests(unittest.TestCase):
             side_effect=[phase4_plan, phase4_result],
         ) as phase4, patch(
             "server_migration.telegram_wizard.run_phase5",
-            side_effect=[phase5_plan, phase5_result],
+            side_effect=[phase5_precheck, phase5_plan, phase5_result],
         ) as phase5:
             self.assertTrue(run_preflight_step(self.session).ready)
             self.assertEqual(self.session.stage, "PREFLIGHT_READY")

@@ -2851,6 +2851,86 @@ def _db_rollback_failover_account_state(
         return restored
 
 
+def _db_commit_relay_failover_state(
+    source_host,
+    target_host,
+    *,
+    previous_default_host=None,
+):
+    """Atomically move only active/default relay metadata.
+
+    Production traffic terminates on Core. Edge hosts are network relays, so a
+    relay failover must never rewrite ssh_accounts ownership or rebuild users.
+    """
+    with db_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        source = conn.execute(
+            "SELECT active, is_default FROM host_pool WHERE host=?",
+            (source_host,),
+        ).fetchone()
+        target = conn.execute(
+            "SELECT active, is_standby FROM host_pool WHERE host=?",
+            (target_host,),
+        ).fetchone()
+
+        if not source or not bool(source[0]) or not bool(source[1]):
+            raise RuntimeError("SOURCE_DEFAULT_STATE_CHANGED")
+        if previous_default_host != source_host:
+            raise RuntimeError("SOURCE_DEFAULT_STATE_CHANGED")
+        if not target or not bool(target[0]) or not bool(target[1]):
+            raise RuntimeError("TARGET_STANDBY_STATE_CHANGED")
+
+        conn.execute("UPDATE host_pool SET is_default=0 WHERE is_default=1")
+        cur = conn.execute(
+            "UPDATE host_pool SET is_default=1, is_standby=0 "
+            "WHERE host=? AND active=1 AND is_standby=1",
+            (target_host,),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError("TARGET_STANDBY_STATE_CHANGED")
+        return True
+
+
+def _db_rollback_relay_failover_state(
+    source_host,
+    target_host,
+    *,
+    previous_default_host=None,
+):
+    """Restore relay default/Standby metadata after Core route is confirmed."""
+    with db_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        source = conn.execute(
+            "SELECT active FROM host_pool WHERE host=?",
+            (source_host,),
+        ).fetchone()
+        target = conn.execute(
+            "SELECT 1 FROM host_pool WHERE host=?",
+            (target_host,),
+        ).fetchone()
+        if not source or not bool(source[0]):
+            raise RuntimeError("SOURCE_NOT_ACTIVE_DURING_ROLLBACK")
+        if not target:
+            raise RuntimeError("TARGET_MISSING_DURING_ROLLBACK")
+        if previous_default_host != source_host:
+            raise RuntimeError("PREVIOUS_DEFAULT_CHANGED")
+
+        conn.execute("UPDATE host_pool SET is_default=0 WHERE is_default=1")
+        cur = conn.execute(
+            "UPDATE host_pool SET is_default=1 WHERE host=? AND active=1",
+            (source_host,),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError("previous default host could not be restored")
+        cur = conn.execute(
+            "UPDATE host_pool SET is_default=0, is_standby=1 WHERE host=?",
+            (target_host,),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError("target host could not be restored to standby")
+        return True
+
+
 def _db_acquire_failover_lock(source_host, target_host, *, mode=FAILOVER_MODE_MANUAL):
     """Acquire the single persisted Phase 6G failover lock."""
     now_dt = datetime.now()
@@ -18493,6 +18573,63 @@ async def _mirror_linux_cmd(primary_host, primary_port, *args, input_data: bytes
     return ok, err, kind
 
 
+def _probe_edge_core_relay_rules_sync(host, admin_port, relay_ports):
+    """Verify that the target Edge forwards customer ports to Core over WireGuard."""
+    ports = tuple(sorted({int(p) for p in relay_ports if p}))
+    if not ports:
+        return False, "NO_RELAY_PORTS"
+    if paramiko is None:
+        return False, "PARAMIKO_UNAVAILABLE"
+    if not os.path.exists(DO_SSH_KEY_PATH):
+        return False, "EDGE_SSH_KEY_MISSING"
+
+    ssh = None
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        pkey = paramiko.Ed25519Key.from_private_key_file(DO_SSH_KEY_PATH)
+        ssh.connect(
+            host,
+            port=int(admin_port or 22),
+            username="root",
+            pkey=pkey,
+            timeout=12,
+            banner_timeout=12,
+        )
+        _stdin, stdout, stderr = ssh.exec_command(
+            "iptables -t nat -S PREROUTING",
+            timeout=12,
+        )
+        out = stdout.read().decode(errors="ignore")
+        err = stderr.read().decode(errors="ignore").strip()
+        rc = stdout.channel.recv_exit_status()
+        if rc != 0:
+            return False, f"IPTABLES_READ_FAILED:{normalize_probe_error(err or rc)}"
+
+        lines = [line.strip() for line in out.splitlines()]
+        missing = []
+        for port in ports:
+            dport = f"--dport {port}"
+            destination = f"--to-destination 10.77.0.1:{port}"
+            matched = any(
+                dport in line
+                and "-j DNAT" in line
+                and destination in line
+                for line in lines
+            )
+            if not matched:
+                missing.append(str(port))
+        if missing:
+            return False, "RELAY_DNAT_MISSING:" + ",".join(missing)
+        return True, "OK"
+    except Exception as exc:
+        return False, f"RELAY_RULE_CHECK_ERROR:{normalize_probe_error(exc)}"
+    finally:
+        if ssh is not None:
+            with contextlib.suppress(Exception):
+                ssh.close()
+
+
 STANDBY_SCRIPT_PATH = os.path.join(_SCRIPT_DIR, "promote_standby_for_filtered_edge.py")
 
 async def _safe_manual_failover_preflight(
@@ -18501,10 +18638,10 @@ async def _safe_manual_failover_preflight(
     *,
     require_clear_filter: bool = False,
 ):
-    """Fresh Phase 6G preflight. No mutations.
+    """Fresh failover preflight for the audited Core-termination relay topology.
 
-    Automatic V119-C failover additionally requires fresh persisted regional CLEAR
-    evidence for the target. Manual failover keeps the existing operator-driven policy.
+    Edge hosts only relay customer traffic to Core. Account ownership metadata is
+    therefore not a routing safety gate and no user rebuild belongs in this path.
     """
     errors = []
 
@@ -18525,6 +18662,8 @@ async def _safe_manual_failover_preflight(
     if errors:
         return {"ok": False, "errors": errors}
 
+    if not source_meta["active"]:
+        errors.append("SOURCE_NOT_ACTIVE")
     if not target_meta["active"]:
         errors.append("TARGET_NOT_ACTIVE")
     if not target_meta["is_standby"]:
@@ -18539,19 +18678,18 @@ async def _safe_manual_failover_preflight(
     if source_service_port != target_service_port:
         errors.append("SERVICE_PORT_MISMATCH")
 
-    accounts = await asyncio.to_thread(_db_get_failover_accounts, source_host)
-    if not accounts:
-        errors.append("NO_ACTIVE_SOURCE_ACCOUNTS")
-
-    # public_domain is global in the current architecture. Moving its A record to a
-    # target that only contains this source Edge's accounts is unsafe if another
-    # explicit Edge owns active SSH accounts.
-    other_explicit_accounts = await asyncio.to_thread(
-        _db_count_other_explicit_active_ssh_hosts,
-        source_host,
-    )
-    if other_explicit_accounts:
-        errors.append(f"GLOBAL_DOMAIN_MULTI_EDGE_CONFLICT:{other_explicit_accounts}")
+    tls_enabled = (
+        await asyncio.to_thread(_db_get_setting, "tls_passthrough", "1")
+    ) == "1"
+    tls_port = None
+    if tls_enabled:
+        try:
+            tls_port = int(await asyncio.to_thread(_db_get_setting, "tls_port", "2088"))
+            if tls_port < 1 or tls_port > 65535:
+                raise ValueError("out of range")
+        except Exception:
+            errors.append("TLS_PORT_INVALID")
+            tls_port = None
 
     core_public_ip = await asyncio.to_thread(_get_core_public_ip_cached)
     if not core_public_ip:
@@ -18588,7 +18726,6 @@ async def _safe_manual_failover_preflight(
     elif target_filter_state in {FILTER_STATE_POSSIBLE, FILTER_STATE_LIKELY}:
         errors.append(f"TARGET_FILTER_STATE_{target_filter_state}")
 
-    # Fresh target customer path.
     target_service_ok, target_service_err = await _tcp_health_check(
         target_host,
         target_service_port,
@@ -18597,7 +18734,17 @@ async def _safe_manual_failover_preflight(
     if not target_service_ok:
         errors.append(f"TARGET_SERVICE_DOWN:{normalize_probe_error(target_service_err)}")
 
-    # Fresh target management plane.
+    target_tls_ok = True
+    target_tls_err = None
+    if tls_port and tls_port != target_service_port:
+        target_tls_ok, target_tls_err = await _tcp_health_check(
+            target_host,
+            tls_port,
+            timeout=EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS,
+        )
+        if not target_tls_ok:
+            errors.append(f"TARGET_TLS_DOWN:{normalize_probe_error(target_tls_err)}")
+
     target_admin_ok, target_admin_err = await _check_ssh_reachable(
         target_host,
         int(target_meta["admin_ssh_port"]),
@@ -18605,17 +18752,28 @@ async def _safe_manual_failover_preflight(
     if not target_admin_ok:
         errors.append(f"TARGET_ADMIN_DOWN:{normalize_probe_error(target_admin_err)}")
 
-    # Fresh Core<->Standby tunnel/path evidence.
     target_path = await asyncio.to_thread(_probe_wireguard_edge_sync, target_host)
     if target_path.get("wg_peer_ok") is not True:
         errors.append(f"TARGET_WG_NOT_HEALTHY:{target_path.get('wg_reason')}")
     if target_path.get("core_path_ok") is not True:
         errors.append(f"TARGET_CORE_PATH_NOT_HEALTHY:{target_path.get('core_path_reason')}")
 
-    # DNS-only fallback preserves the client port. Core must therefore answer on
-    # the same customer-facing service port before we ever point DNS at it.
+    relay_ports = [target_service_port]
+    if tls_port and tls_port != target_service_port:
+        relay_ports.append(tls_port)
+    target_relay_ok, target_relay_reason = await asyncio.to_thread(
+        _probe_edge_core_relay_rules_sync,
+        target_host,
+        int(target_meta["admin_ssh_port"]),
+        relay_ports,
+    )
+    if not target_relay_ok:
+        errors.append(f"TARGET_NOT_CORE_RELAY:{target_relay_reason}")
+
     core_service_ok = False
     core_service_err = None
+    core_tls_ok = True
+    core_tls_err = None
     if core_public_ip:
         core_service_ok, core_service_err = await _tcp_health_check(
             core_public_ip,
@@ -18624,30 +18782,42 @@ async def _safe_manual_failover_preflight(
         )
         if not core_service_ok:
             errors.append(f"CORE_FALLBACK_SERVICE_DOWN:{normalize_probe_error(core_service_err)}")
+        if tls_port and tls_port != source_service_port:
+            core_tls_ok, core_tls_err = await _tcp_health_check(
+                core_public_ip,
+                tls_port,
+                timeout=EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS,
+            )
+            if not core_tls_ok:
+                errors.append(f"CORE_FALLBACK_TLS_DOWN:{normalize_probe_error(core_tls_err)}")
 
     errors = list(dict.fromkeys(errors))
     return {
         "ok": not errors,
         "errors": errors,
+        "topology": "relay_core_termination",
         "source_meta": source_meta,
         "target_meta": target_meta,
-        "accounts": accounts,
-        "account_count": len(accounts),
-        "other_explicit_accounts": other_explicit_accounts,
+        "account_count": 0,
         "previous_default_host": previous_default_host,
         "previous_dns_ip": cf_cfg.get("dns_current_ip") or "",
         "core_public_ip": core_public_ip,
         "source_service_port": source_service_port,
         "target_service_port": target_service_port,
+        "tls_enabled": tls_enabled,
+        "tls_port": tls_port,
         "target_filter_state": target_filter_state,
         "target_regional_age_seconds": target_regional_age,
         "target_service_ok": target_service_ok,
+        "target_tls_ok": target_tls_ok,
         "target_admin_ok": target_admin_ok,
         "target_wg_ok": target_path.get("wg_peer_ok"),
         "target_core_path_ok": target_path.get("core_path_ok"),
+        "target_relay_ok": target_relay_ok,
+        "target_relay_reason": target_relay_reason,
         "core_service_ok": core_service_ok,
+        "core_tls_ok": core_tls_ok,
     }
-
 
 async def _run_phase6g_rebuild_helper(source_host, target_host, target_admin_port):
     if not os.path.exists(STANDBY_SCRIPT_PATH):
@@ -18691,11 +18861,12 @@ async def _safe_manual_failover(
     mode=FAILOVER_MODE_MANUAL,
     incident_id=None,
 ):
-    """Shared Phase 6G/6H lock-protected, scoped and rollback-aware failover engine."""
+    """Lock-protected failover for the production Edge-relay -> Core topology."""
     automatic = mode == FAILOVER_MODE_AUTO
     failover_label = "انتقال خودکار" if automatic else "انتقال دستی امن"
     if incident_id:
         failover_label += f" [{incident_id}]"
+
     operation_id, busy_operation_id = await asyncio.to_thread(
         _db_acquire_failover_lock,
         source_host,
@@ -18715,7 +18886,6 @@ async def _safe_manual_failover(
     db_committed = False
     final_dns_started = False
     target_route_active = False
-    accounts = []
     previous_default_host = None
     core_public_ip = None
 
@@ -18732,7 +18902,7 @@ async def _safe_manual_failover(
                 operation_id,
                 status=FAILOVER_STATUS_FAILED,
                 error=";".join(errors)[:1000],
-                detail={"phase": "PREFLIGHT", "errors": errors},
+                detail={"phase": "PREFLIGHT", "topology": "relay_core_termination", "errors": errors},
                 finished=True,
             )
             await _notify_admins(
@@ -18743,9 +18913,13 @@ async def _safe_manual_failover(
                 f"نتیجه بررسی ایمنی: <code>{esc(' | '.join(errors))}</code>\n\n"
                 "هیچ تغییری در حساب‌ها، دیتابیس یا مسیر دامنه انجام نشد."
             )
-            return {"ok": False, "reason": "PREFLIGHT_FAILED", "errors": errors, "operation_id": operation_id}
+            return {
+                "ok": False,
+                "reason": "PREFLIGHT_FAILED",
+                "errors": errors,
+                "operation_id": operation_id,
+            }
 
-        accounts = list(preflight["accounts"])
         previous_default_host = preflight["previous_default_host"]
         previous_dns_ip = preflight["previous_dns_ip"]
         core_public_ip = preflight["core_public_ip"]
@@ -18753,22 +18927,26 @@ async def _safe_manual_failover(
         await asyncio.to_thread(
             _db_update_failover_operation,
             operation_id,
-            account_count=len(accounts),
+            account_count=0,
+            moved_count=0,
             previous_default_host=previous_default_host or "",
             previous_dns_ip=previous_dns_ip,
             core_fallback_ip=core_public_ip,
             detail={
                 "phase": "PREFLIGHT_OK",
+                "topology": "relay_core_termination",
                 "mode": mode,
                 "source_service_port": preflight["source_service_port"],
                 "target_service_port": preflight["target_service_port"],
+                "tls_port": preflight.get("tls_port"),
                 "target_filter_state": preflight["target_filter_state"],
                 "target_regional_age_seconds": preflight.get("target_regional_age_seconds"),
+                "target_relay_ok": preflight.get("target_relay_ok"),
             },
         )
 
-        # Step 1: customer-safe temporary route to Core. Retry operations may already
-        # be on Core from a previous failed attempt.
+        # Step 1: temporarily route customers directly to Core. The authentication
+        # endpoint does not change; only the public relay hop is bypassed.
         if previous_dns_ip != core_public_ip:
             core_ok, core_msg = await _cf_switch_public_domain(core_public_ip, app=None)
             if not core_ok:
@@ -18777,46 +18955,28 @@ async def _safe_manual_failover(
         await asyncio.to_thread(
             _db_update_failover_operation,
             operation_id,
-            detail={"phase": "CORE_FALLBACK_ACTIVE", "core_public_ip": core_public_ip},
-        )
-
-        # Step 2: rebuild exactly the source Edge account snapshot on Standby.
-        returncode, summary, helper_stdout, helper_stderr = await _run_phase6g_rebuild_helper(
-            source_host,
-            target_host,
-            int(preflight["target_meta"]["admin_ssh_port"]),
-        )
-        try:
-            validate_complete_rebuild(
-                summary,
-                source_host=source_host,
-                target_host=target_host,
-                expected_usernames=accounts,
-            )
-        except FailoverValidationError as exc:
-            raise RuntimeError(f"REBUILD_VALIDATION_FAILED:{exc}") from exc
-
-        if returncode != 0:
-            raise RuntimeError(
-                f"REBUILD_HELPER_FAILED:rc={returncode}; stderr={helper_stderr[-600:]}"
-            )
-
-        await asyncio.to_thread(
-            _db_update_failover_operation,
-            operation_id,
             detail={
-                "phase": "REBUILD_COMPLETE",
-                "requested": summary.requested,
-                "rebuilt": summary.rebuilt,
+                "phase": "CORE_FALLBACK_ACTIVE",
+                "topology": "relay_core_termination",
+                "core_public_ip": core_public_ip,
             },
         )
 
-        # Step 3: fresh target verification after rebuild.
+        # Step 2: re-verify the target while customers are safely on Core.
         verify_service_ok, verify_service_err = await _tcp_health_check(
             target_host,
             int(preflight["target_service_port"]),
             timeout=EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS,
         )
+        verify_tls_ok = True
+        verify_tls_err = None
+        tls_port = preflight.get("tls_port")
+        if tls_port and int(tls_port) != int(preflight["target_service_port"]):
+            verify_tls_ok, verify_tls_err = await _tcp_health_check(
+                target_host,
+                int(tls_port),
+                timeout=EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS,
+            )
         verify_admin_ok, verify_admin_err = await _check_ssh_reachable(
             target_host,
             int(preflight["target_meta"]["admin_ssh_port"]),
@@ -18824,18 +18984,31 @@ async def _safe_manual_failover(
         verify_path = await asyncio.to_thread(_probe_wireguard_edge_sync, target_host)
         verify_wg_ok = verify_path.get("wg_peer_ok") is True
         verify_core_path_ok = verify_path.get("core_path_ok") is True
+        relay_ports = [int(preflight["target_service_port"])]
+        if tls_port and int(tls_port) != int(preflight["target_service_port"]):
+            relay_ports.append(int(tls_port))
+        verify_relay_ok, verify_relay_reason = await asyncio.to_thread(
+            _probe_edge_core_relay_rules_sync,
+            target_host,
+            int(preflight["target_meta"]["admin_ssh_port"]),
+            relay_ports,
+        )
         if (
             not verify_service_ok
+            or not verify_tls_ok
             or not verify_admin_ok
             or not verify_wg_ok
             or not verify_core_path_ok
+            or not verify_relay_ok
         ):
             raise RuntimeError(
-                "POST_REBUILD_TARGET_VERIFY_FAILED:"
+                "POST_RELAY_TARGET_VERIFY_FAILED:"
                 f"service={verify_service_ok}:{normalize_probe_error(verify_service_err)};"
+                f"tls={verify_tls_ok}:{normalize_probe_error(verify_tls_err)};"
                 f"admin={verify_admin_ok}:{normalize_probe_error(verify_admin_err)};"
                 f"wg={verify_wg_ok}:{verify_path.get('wg_reason')};"
-                f"core_path={verify_core_path_ok}:{verify_path.get('core_path_reason')}"
+                f"core_path={verify_core_path_ok}:{verify_path.get('core_path_reason')};"
+                f"relay={verify_relay_ok}:{verify_relay_reason}"
             )
 
         if automatic:
@@ -18854,15 +19027,14 @@ async def _safe_manual_failover(
                 or latest_regional_age > STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS
             ):
                 raise RuntimeError(
-                    "POST_REBUILD_TARGET_REGIONAL_EVIDENCE_INVALID:"
-                    f"state={latest_regional_state};"
-                    f"age={latest_regional_age}"
+                    "POST_RELAY_TARGET_REGIONAL_EVIDENCE_INVALID:"
+                    f"state={latest_regional_state};age={latest_regional_age}"
                 )
 
-        # Step 4: scoped DB/default commit. This is the first account-state mutation.
-        moved_count, default_changed = await asyncio.to_thread(
-            _db_commit_failover_account_state,
-            accounts,
+        # Step 3: atomically consume Standby + move only default relay metadata.
+        # ssh_accounts is intentionally untouched because sessions terminate on Core.
+        default_changed = await asyncio.to_thread(
+            _db_commit_relay_failover_state,
             source_host,
             target_host,
             previous_default_host=previous_default_host,
@@ -18872,22 +19044,24 @@ async def _safe_manual_failover(
         await asyncio.to_thread(
             _db_update_failover_operation,
             operation_id,
-            moved_count=moved_count,
+            moved_count=0,
             detail={
-                "phase": "DB_COMMITTED",
-                "moved_count": moved_count,
-                "default_changed": default_changed,
+                "phase": "RELAY_METADATA_COMMITTED",
+                "topology": "relay_core_termination",
+                "moved_count": 0,
+                "default_changed": bool(default_changed),
             },
         )
 
-        # Step 5: final customer route to Standby.
-        # A failed multi-record Cloudflare update may already have changed the public
-        # A record. Never roll DB ownership back until Core routing is re-established.
+        # Step 4: route the public domain to the verified replacement relay.
         final_dns_started = True
         dns_ok, dns_msg = await _cf_switch_public_domain(target_host, app=None)
         target_route_active = bool(dns_ok)
         if not dns_ok:
-            core_restore_ok, core_restore_msg = await _cf_switch_public_domain(core_public_ip, app=None)
+            core_restore_ok, core_restore_msg = await _cf_switch_public_domain(
+                core_public_ip,
+                app=None,
+            )
             if not core_restore_ok:
                 await asyncio.to_thread(
                     _db_update_failover_operation,
@@ -18899,6 +19073,7 @@ async def _safe_manual_failover(
                     )[:1000],
                     detail={
                         "phase": "ROUTE_RECOVERY_FAILED",
+                        "topology": "relay_core_termination",
                         "dns_error": dns_msg,
                         "core_restore_error": core_restore_msg,
                         "db_state_retained": "target",
@@ -18910,7 +19085,7 @@ async def _safe_manual_failover(
                     "🚨 <b>انتقال نیازمند بررسی فوری است.</b>\n"
                     "تغییر نهایی مسیر دامنه ناموفق بود و بازگردانی مسیر به سرور هسته نیز تأیید نشد.\n"
                     f"شناسه عملیات: <code>{operation_id}</code>\n"
-                    "برای جلوگیری از ناسازگاری، وضعیت داخلی روی سرور مقصد حفظ شد."
+                    "برای جلوگیری از ناسازگاری، نقش مقصد به‌عنوان مسیر فعال حفظ شد."
                 )
                 return {
                     "ok": False,
@@ -18920,8 +19095,7 @@ async def _safe_manual_failover(
 
             try:
                 await asyncio.to_thread(
-                    _db_rollback_failover_account_state,
-                    accounts,
+                    _db_rollback_relay_failover_state,
                     source_host,
                     target_host,
                     previous_default_host=previous_default_host,
@@ -18935,6 +19109,7 @@ async def _safe_manual_failover(
                     error=f"DNS_FINAL_FAILED_AND_DB_ROLLBACK_FAILED:{dns_msg}; {rollback_exc}"[:1000],
                     detail={
                         "phase": "ROLLBACK_FAILED",
+                        "topology": "relay_core_termination",
                         "dns_error": dns_msg,
                         "core_restore": core_restore_msg,
                         "rollback_error": str(rollback_exc),
@@ -18944,7 +19119,7 @@ async def _safe_manual_failover(
                 await _notify_admins(
                     app,
                     "🚨 <b>انتقال نیازمند بررسی فوری است.</b>\n"
-                    "مسیر به سرور هسته برگشت، اما بازگردانی دیتابیس کامل نشد.\n"
+                    "مسیر به سرور هسته برگشت، اما بازگردانی نقش سرورها کامل نشد.\n"
                     f"شناسه عملیات: <code>{operation_id}</code>"
                 )
                 return {"ok": False, "reason": "ROLLBACK_FAILED", "operation_id": operation_id}
@@ -18956,6 +19131,7 @@ async def _safe_manual_failover(
                 error=f"FINAL_DNS_SWITCH_FAILED:{dns_msg}"[:1000],
                 detail={
                     "phase": "ROLLED_BACK",
+                    "topology": "relay_core_termination",
                     "dns_error": dns_msg,
                     "core_restore": core_restore_msg,
                     "safe_route": core_public_ip,
@@ -18968,23 +19144,26 @@ async def _safe_manual_failover(
                 f"مبدأ: <code>{esc(source_host)}</code>\n"
                 f"مقصد: <code>{esc(target_host)}</code>\n"
                 f"شناسه عملیات: <code>{operation_id}</code>\n"
-                "مسیر دامنه روی سرور هسته تأیید شد و حساب‌ها به وضعیت قبلی برگشتند.\n"
+                "مسیر دامنه روی سرور هسته تأیید شد و نقش سرورها به وضعیت قبلی برگشت.\n"
                 f"خطای تغییر مسیر: <code>{esc(dns_msg)}</code>"
             )
-            return {"ok": False, "reason": "FINAL_DNS_FAILED_ROLLED_BACK", "operation_id": operation_id}
+            return {
+                "ok": False,
+                "reason": "FINAL_DNS_FAILED_ROLLED_BACK",
+                "operation_id": operation_id,
+            }
 
-        # Step 6: target has become a live Edge, no longer a spare Standby.
-        await asyncio.to_thread(_db_set_host_standby, target_host, False)
         await asyncio.to_thread(_db_mark_ip_switch_now)
         await asyncio.to_thread(
             _db_update_failover_operation,
             operation_id,
             status=FAILOVER_STATUS_SUCCEEDED,
-            moved_count=moved_count,
+            moved_count=0,
             detail={
                 "phase": "SUCCEEDED",
+                "topology": "relay_core_termination",
                 "mode": mode,
-                "moved_count": moved_count,
+                "moved_count": 0,
                 "dns_target": target_host,
                 "source_host": source_host,
             },
@@ -18997,32 +19176,31 @@ async def _safe_manual_failover(
             f"شناسه عملیات: <code>{operation_id}</code>\n"
             f"مبدأ: <code>{esc(source_host)}</code>\n"
             f"مقصد: <code>{esc(target_host)}</code>\n"
-            f"حساب‌های منتقل‌شده: <b>{moved_count}</b>\n"
             f"مسیر دامنه: <code>{esc(core_public_ip)}</code> → <code>{esc(target_host)}</code>\n\n"
-            "حساب‌های سایر سرورها بدون تغییر باقی ماندند."
+            "حساب‌های کاربران روی سرور هسته باقی ماندند و تغییری نکردند."
         )
         return {
             "ok": True,
             "operation_id": operation_id,
-            "moved_count": moved_count,
+            "moved_count": 0,
             "source_host": source_host,
             "target_host": target_host,
         }
 
     except Exception as exc:
-        # After DB commit, rollback is allowed only when routing is known to be on
-        # Core. If the final Target handoff succeeded, retain the committed Target
-        # ownership instead of creating a DNS/DB split-brain.
         rollback_error = None
         route_recovery_error = None
         retained_target_state = False
-        if db_committed and accounts:
+        if db_committed:
             if target_route_active:
                 retained_target_state = True
             else:
                 if final_dns_started and core_public_ip:
                     try:
-                        core_ok, core_msg = await _cf_switch_public_domain(core_public_ip, app=None)
+                        core_ok, core_msg = await _cf_switch_public_domain(
+                            core_public_ip,
+                            app=None,
+                        )
                         if not core_ok:
                             route_recovery_error = str(core_msg)
                     except Exception as route_exc:
@@ -19031,8 +19209,7 @@ async def _safe_manual_failover(
                 if route_recovery_error is None:
                     try:
                         await asyncio.to_thread(
-                            _db_rollback_failover_account_state,
-                            accounts,
+                            _db_rollback_relay_failover_state,
                             source_host,
                             target_host,
                             previous_default_host=previous_default_host,
@@ -19046,10 +19223,13 @@ async def _safe_manual_failover(
         final_status = FAILOVER_STATUS_FAILED if (
             rollback_error or route_recovery_error or retained_target_state
         ) else (
-            FAILOVER_STATUS_ROLLED_BACK if preflight and preflight.get("ok") else FAILOVER_STATUS_FAILED
+            FAILOVER_STATUS_ROLLED_BACK
+            if preflight and preflight.get("ok")
+            else FAILOVER_STATUS_FAILED
         )
         detail = {
             "phase": "EXCEPTION",
+            "topology": "relay_core_termination",
             "error": str(exc),
             "db_rollback_error": rollback_error,
             "route_recovery_error": route_recovery_error,
@@ -19076,9 +19256,9 @@ async def _safe_manual_failover(
                 f"🚨 خطا در بازگردانی دیتابیس: <code>{esc(rollback_error)}</code>\n"
                 if rollback_error else
                 (
-                    "⚠️ وضعیت داخلی روی سرور مقصد حفظ شد تا با مسیر نهایی ناسازگار نشود.\n"
+                    "⚠️ نقش مقصد حفظ شد تا با مسیر نهایی ناسازگار نشود.\n"
                     if retained_target_state else
-                    "✅ دیتابیس در وضعیت قبلی است.\n"
+                    "✅ وضعیت داخلی در حالت امن قرار دارد.\n"
                 )
             )
             + (
@@ -19095,8 +19275,12 @@ async def _safe_manual_failover(
                 )
             )
         )
-        return {"ok": False, "reason": "FAILOVER_EXCEPTION", "operation_id": operation_id, "error": str(exc)}
-
+        return {
+            "ok": False,
+            "reason": "FAILOVER_EXCEPTION",
+            "operation_id": operation_id,
+            "error": str(exc),
+        }
 
 async def _activate_standby_for_filtered_edge(app, filtered_host: str, target_host: str = None):
     """Compatibility wrapper retained for old call sites.
@@ -20661,15 +20845,9 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
     current_regional_request_id = str(
         source_health.get("regional_last_request_id") or ""
     )
-    differential_matches_current_round = bool(
-        differential_request_id
-        and current_regional_request_id
-        and differential_request_id == current_regional_request_id
-    )
     differential_confirmed = bool(
         differential
         and differential.get("confirmed")
-        and differential_matches_current_round
     )
     differential_age = (
         _regional_provider_timestamp_age_seconds(differential.get("checked_at"))
@@ -20733,7 +20911,8 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
             differential_confirmed=differential_confirmed,
             differential_age_seconds=differential_age,
             differential_verdict=differential.get("verdict") if differential else None,
-            differential_matches_current_round=differential_matches_current_round,
+            differential_request_id=differential_request_id,
+            current_regional_request_id=current_regional_request_id,
         )
         if filter_confirmed and incident:
             extra = {
@@ -20742,7 +20921,8 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
                 "differential_age_seconds": differential_age,
                 "differential_verdict": differential.get("verdict") if differential else None,
                 "differential_control": differential.get("control_host") if differential else None,
-                "differential_matches_current_round": differential_matches_current_round,
+                "differential_request_id": differential_request_id,
+                "current_regional_request_id": current_regional_request_id,
                 "active_standby_count": len(active_standbys),
                 "switch_cooldown_remaining": max(
                     0,
@@ -20813,7 +20993,7 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
                 f"مقصد: <code>{esc(target_host)}</code>\n"
                 f"وضعیت اختلال: <b>{_filter_state_label_fa(source_health.get('filter_state'))}</b>\n"
                 f"اطمینان: <b>{_confidence_label_fa(source_health.get('filter_confidence'))}</b>\n\n"
-                "بررسی‌های ایمنی، بازسازی حساب‌ها و تغییر مسیر به‌صورت کنترل‌شده انجام می‌شوند."
+                "بررسی‌های ایمنی و تغییر مسیر Relay به‌صورت کنترل‌شده انجام می‌شوند؛ حساب‌ها روی سرور هسته باقی می‌مانند."
             )
 
     result = await _safe_manual_failover(

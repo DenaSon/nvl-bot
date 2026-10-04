@@ -235,13 +235,16 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
         self.assertIn("TARGET_NOT_STANDBY", region)
         self.assertIn("errors = list(dict.fromkeys(errors))", region)
 
-    def test_preflight_fails_closed_on_global_domain_multi_edge_conflict(self):
+    def test_relay_preflight_ignores_account_ownership_and_requires_core_relay(self):
         region = self._region(
             "async def _safe_manual_failover_preflight(",
             "async def _run_phase6g_rebuild_helper(",
         )
-        self.assertIn("_db_count_other_explicit_active_ssh_hosts", region)
-        self.assertIn("GLOBAL_DOMAIN_MULTI_EDGE_CONFLICT", region)
+        self.assertNotIn("_db_get_failover_accounts", region)
+        self.assertNotIn("_db_count_other_explicit_active_ssh_hosts", region)
+        self.assertNotIn("GLOBAL_DOMAIN_MULTI_EDGE_CONFLICT", region)
+        self.assertIn("_probe_edge_core_relay_rules_sync", region)
+        self.assertIn("TARGET_NOT_CORE_RELAY", region)
 
     def test_legacy_unassigned_accounts_follow_default_source_safely(self):
         snapshot = self._region(
@@ -251,8 +254,8 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
         self.assertIn("(host=? OR host IS NULL OR host='')", snapshot)
 
         commit = self._region(
-            "def _db_commit_failover_account_state(",
-            "def _db_rollback_failover_account_state(",
+            "def _db_commit_relay_failover_state(",
+            "def _db_rollback_relay_failover_state(",
         )
         self.assertIn("(host=? OR host IS NULL OR host='')", commit)
 
@@ -262,25 +265,28 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
         )
         self.assertIn('"--include-unassigned"', helper_runner)
 
-    def test_manual_engine_never_uses_broad_account_move(self):
+    def test_relay_engine_never_rebuilds_or_moves_accounts(self):
         region = self._region(
             "async def _safe_manual_failover(",
             "async def _activate_standby_for_filtered_edge",
         )
         self.assertNotIn("_db_set_all_accounts_host", region)
-        self.assertIn("_db_commit_failover_account_state", region)
-        self.assertIn("_db_rollback_failover_account_state", region)
-        self.assertIn("validate_complete_rebuild", region)
+        self.assertNotIn("_db_commit_failover_account_state", region)
+        self.assertNotIn("_db_rollback_failover_account_state", region)
+        self.assertNotIn("_run_phase6g_rebuild_helper(", region)
+        self.assertNotIn("validate_complete_rebuild", region)
+        self.assertIn("_db_commit_relay_failover_state", region)
+        self.assertIn("_db_rollback_relay_failover_state", region)
 
-    def test_commit_revalidates_exact_source_set_inside_immediate_transaction(self):
+    def test_relay_commit_is_atomic_and_account_agnostic(self):
         region = self._region(
-            "def _db_commit_failover_account_state(",
-            "def _db_rollback_failover_account_state(",
+            "def _db_commit_relay_failover_state(",
+            "def _db_rollback_relay_failover_state(",
         )
         self.assertIn("BEGIN IMMEDIATE", region)
-        self.assertIn("SOURCE_ACCOUNT_SET_CHANGED", region)
-        self.assertIn("current_usernames", region)
-        self.assertIn("expected_usernames", region)
+        self.assertIn("SOURCE_DEFAULT_STATE_CHANGED", region)
+        self.assertIn("TARGET_STANDBY_STATE_CHANGED", region)
+        self.assertNotIn("ssh_accounts", region)
 
     def test_commit_consumes_standby_role_and_rollback_restores_it_atomically(self):
         commit = self._region(
@@ -292,7 +298,7 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
         self.assertIn("TARGET_STANDBY_STATE_CHANGED", commit)
 
         rollback = self._region(
-            "def _db_rollback_failover_account_state(",
+            "def _db_rollback_relay_failover_state(",
             "def _db_acquire_failover_lock(",
         )
         self.assertIn("BEGIN IMMEDIATE", rollback)
@@ -319,7 +325,7 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
             "async def _activate_standby_for_filtered_edge",
         )
         core_pos = region.index("_cf_switch_public_domain(core_public_ip")
-        db_pos = region.index("_db_commit_failover_account_state")
+        db_pos = region.index("_db_commit_relay_failover_state")
         target_pos = region.index("_cf_switch_public_domain(target_host")
         self.assertLess(core_pos, db_pos)
         self.assertLess(db_pos, target_pos)
@@ -330,7 +336,7 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
             "async def _activate_standby_for_filtered_edge",
         )
         self.assertIn("FAILOVER_STATUS_ROLLED_BACK", region)
-        self.assertIn("_db_rollback_failover_account_state", region)
+        self.assertIn("_db_rollback_relay_failover_state", region)
         self.assertIn("FINAL_DNS_SWITCH_FAILED", region)
         self.assertIn("FINAL_DNS_FAILED_AND_CORE_RESTORE_FAILED", region)
         self.assertIn("core_restore_ok", region)

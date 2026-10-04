@@ -16,7 +16,7 @@ It:
 - re-verifies SHA256SUMS on the destination
 - validates bundle.json schema/job identity
 - validates archive member paths against traversal/special-file attacks
-- validates the Docker image archive and exact image ID
+- validates the Docker image archive, expected image tag, config blob, architecture, and OS
 - extracts only into the migration job directory
 - checks SQLite integrity from the extracted preview
 - reads Xray ports from the preview
@@ -57,7 +57,7 @@ Only after those checks pass does it:
 1. prepare Docker/Compose when missing and allowed by policy
 2. validate Compose from the preview
 3. load the exact Docker image archive
-4. verify loaded image ID/architecture/OS
+4. verify the loaded image tag resolves with the expected architecture/OS
 5. copy preview data into runtime paths without overwrite
 6. verify restored SQLite integrity
 7. verify restored Docker Compose configuration
@@ -172,7 +172,7 @@ Successful offline RESTORE means:
 
     Bundle verified
     -> Restore verified
-    -> Exact image verified
+    -> Docker archive identity verified
     -> SQLite verified
     -> Compose verified
     -> READY FOR FINAL SYNC

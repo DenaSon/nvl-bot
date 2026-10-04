@@ -13,8 +13,8 @@ class Phase5Policy:
     remote_root: str = "/root/nvl-migrations"
     mode: str = PHASE5_MODE_PLAN
     confirmation_phrase: str = "CUTOVER"
-    verify_attempts: int = 6
-    verify_interval_seconds: float = 2.0
+    verify_attempts: int = 60
+    verify_interval_seconds: float = 5.0
     connect_timeout_seconds: float = 5.0
     rollback_on_failure: bool = True
     stop_destination_on_rollback: bool = True

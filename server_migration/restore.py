@@ -332,6 +332,20 @@ def inspect_docker_image_archive(
     incoming_dir: str,
     metadata: Mapping,
 ) -> tuple[bool, bool]:
+    """Validate docker-save content without assuming Docker .Id semantics.
+
+    Docker Engine 29 uses the containerd image store by default on fresh
+    installs. In that store, docker image inspect .Id can identify a top-level
+    OCI index/manifest rather than the image config digest. Therefore the
+    Config member name in docker-save output is not required to equal the
+    Phase 2 docker image inspect ID.
+
+    Identity is instead bound by:
+      1. Phase 2 end-to-end SHA256 of the whole docker-images.tar.gz,
+      2. the expected RepoTag in manifest.json,
+      3. a readable image config blob,
+      4. matching architecture/OS from the config payload.
+    """
     archive = f"{incoming_dir}/docker-images.tar.gz"
     _run_checked(
         executor,
@@ -340,7 +354,7 @@ def inspect_docker_image_archive(
         label="verify Docker image gzip stream",
     )
     code = (
-        "import json,os,sys,tarfile;"
+        "import hashlib,json,sys,tarfile;"
         "p=sys.argv[1];"
         "tf=tarfile.open(p,'r:gz');"
         "m=tf.extractfile('manifest.json');"
@@ -349,9 +363,17 @@ def inspect_docker_image_archive(
         "\nif not isinstance(data,list) or not data: raise SystemExit('invalid manifest')"
         "\nout={}"
         "\nfor row in data:"
-        "\n cfg=os.path.basename(str(row.get('Config') or ''))"
-        "\n if cfg.endswith('.json'): cfg=cfg[:-5]"
-        "\n for tag in row.get('RepoTags') or []: out[str(tag)]=cfg"
+        "\n cfg_name=str(row.get('Config') or '')"
+        "\n if not cfg_name: raise SystemExit('missing-config-member')"
+        "\n cfg_member=tf.extractfile(cfg_name)"
+        "\n if cfg_member is None: raise SystemExit('config-member-missing:'+cfg_name)"
+        "\n cfg_bytes=cfg_member.read()"
+        "\n cfg=json.loads(cfg_bytes.decode('utf-8'))"
+        "\n item={'config_sha256':hashlib.sha256(cfg_bytes).hexdigest(),"
+        "'architecture':str(cfg.get('architecture') or ''),"
+        "'os':str(cfg.get('os') or '')}"
+        "\n for tag in row.get('RepoTags') or []: out[str(tag)]=item"
+        "\ntf.close()"
         "\nprint(json.dumps(out,sort_keys=True))"
     )
     raw = _run_text(
@@ -371,22 +393,52 @@ def inspect_docker_image_archive(
     expected_images = [str(x) for x in marzban.get("compose_images") or []]
     detail_rows = [str(x) for x in marzban.get("local_image_details") or []]
 
-    expected_ids: dict[str, str] = {}
+    expected_platforms: dict[str, tuple[str, str]] = {}
     for row in detail_rows:
         match = _IMAGE_DETAIL_RE.fullmatch(row)
         if not match:
             raise Phase3Error(f"invalid bundle image detail: {row!r}")
-        expected_ids[match.group("tag")] = match.group("id").split(":", 1)[1].lower()
+        expected_platforms[match.group("tag")] = (
+            match.group("arch").lower(),
+            match.group("os").lower(),
+        )
 
     for tag in expected_images:
-        if tag not in tag_to_config:
+        item = tag_to_config.get(tag)
+        if not isinstance(item, dict):
             raise Phase3Error(f"Docker archive is missing expected image tag: {tag}")
-        expected_id = expected_ids.get(tag)
-        actual_id = str(tag_to_config[tag] or "").lower()
-        if expected_id and actual_id != expected_id:
+
+        config_sha = str(item.get("config_sha256") or "").lower()
+        architecture = str(item.get("architecture") or "").lower()
+        operating_system = str(item.get("os") or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", config_sha):
             raise Phase3Error(
-                f"Docker archive image ID mismatch for {tag}: "
-                f"{actual_id} != {expected_id}"
+                f"Docker archive has invalid config digest for {tag}: {config_sha!r}"
+            )
+
+        expected = expected_platforms.get(tag)
+        if expected is None:
+            raise Phase3Error(f"missing expected image platform metadata for {tag}")
+        expected_arch, expected_os = expected
+
+        compatible_arch = {
+            ("x86_64", "amd64"),
+            ("amd64", "x86_64"),
+            ("aarch64", "arm64"),
+            ("arm64", "aarch64"),
+        }
+        if (
+            architecture != expected_arch
+            and (architecture, expected_arch) not in compatible_arch
+        ):
+            raise Phase3Error(
+                f"Docker archive architecture mismatch for {tag}: "
+                f"{architecture!r} != {expected_arch!r}"
+            )
+        if operating_system != expected_os:
+            raise Phase3Error(
+                f"Docker archive OS mismatch for {tag}: "
+                f"{operating_system!r} != {expected_os!r}"
             )
 
     return True, True

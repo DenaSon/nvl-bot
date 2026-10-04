@@ -187,7 +187,7 @@ class Phase6HIntegrationShapeTests(unittest.TestCase):
             "async def _regional_filter_tick(app):",
             "async def _regional_filter_probe_one_now",
         )
-        provider_pos = region.index("await _regional_provider_mark_ok(app)")
+        provider_pos = region.index('await _regional_provider_mark_ok(app, result.get("regional_decision"))')
         auto_pos = region.index("await _phase6h_auto_failover_tick(")
         self.assertLess(provider_pos, auto_pos)
         self.assertNotIn("round_provider_ok", region)

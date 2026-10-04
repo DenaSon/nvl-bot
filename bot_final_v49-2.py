@@ -19553,11 +19553,11 @@ async def _notify_filter_state_transition(app, host, recompute_result, regional_
         await _notify_incident_once(
             app,
             incident,
-            "🟢 <b>Incident بسته شد — دسترسی منطقه‌ای بازیابی شد</b>\n\n"
-            f"Incident: <code>{esc(incident['incident_id'])}</code>\n"
+            "🟢 <b>اختلال پایان یافت — دسترسی منطقه‌ای بازیابی شد</b>\n\n"
+            f"شناسه رخداد: <code>{esc(incident['incident_id'])}</code>\n"
             f"سرور: <code>{esc(host)}</code>\n"
-            f"Regional: <b>{summary.successful_nodes}/{summary.completed_nodes} reachable</b>\n"
-            "وضعیت فیلترینگ به <b>CLEAR</b> برگشت."
+            f"گره‌های در دسترس: <b>{summary.successful_nodes}/{summary.completed_nodes}</b>\n"
+            "وضعیت دسترسی منطقه‌ای دوباره سالم است."
         )
         return
 
@@ -19574,10 +19574,6 @@ async def _notify_filter_state_transition(app, host, recompute_result, regional_
     if state == FILTER_STATE_UNKNOWN and not existing:
         return
 
-    # Once failover policy/engine has taken ownership of the incident state, fresh
-    # repeated filtering evidence must not bounce it back to FILTER_CONFIRMED every
-    # minute. Preserve the operational state/reason until a real recovery, a changed
-    # failover decision, or a new failover attempt occurs.
     operational_states = {
         INCIDENT_STATE_FAILOVER_BLOCKED,
         INCIDENT_STATE_FAILOVER_STARTED,
@@ -19648,11 +19644,11 @@ async def _notify_filter_state_transition(app, host, recompute_result, regional_
         )
 
     if incident["state"] == INCIDENT_STATE_FILTER_CONFIRMED:
-        title = "🔴 <b>فیلترینگ Default Edge تأیید شد</b>"
+        title = "🔴 <b>اختلال منطقه‌ای سرور اصلی تأیید شد</b>"
     elif incident["state"] == INCIDENT_STATE_EVIDENCE_DEGRADED:
-        title = "⚪️ <b>Evidence حادثه نامطمئن شد</b>"
+        title = "⚪️ <b>اطلاعات فعلی برای تصمیم قطعی کافی نیست</b>"
     elif incident["state"] == "CONFIRMING":
-        title = "🟠 <b>فیلترینگ در حال تأیید سریع است</b>"
+        title = "🟠 <b>اختلال در حال بررسی تکمیلی است</b>"
     else:
         title = "🟡 <b>اختلال منطقه‌ای مشکوک شناسایی شد</b>"
 
@@ -19666,31 +19662,23 @@ async def _notify_filter_state_transition(app, host, recompute_result, regional_
         app,
         incident,
         f"{title}\n\n"
-        f"Incident: <code>{esc(incident['incident_id'])}</code>\n"
-        f"Edge: <code>{esc(host)}</code>\n"
-        f"Incident State: <b>{esc(incident['state'])}</b>\n"
-        f"Reason: <code>{esc(incident['last_reason'])}</code>\n"
-        f"Filtering: <b>{esc(state)} / {esc(confidence)}</b>\n"
-        f"Confirmation: <b>{failure_streak}/{EDGE_FILTER_CONFIRM_THRESHOLD}</b>\n"
-        f"Regional: <b>{summary.failed_nodes}/{summary.completed_nodes} failed</b>\n"
-        f"Failed ASN: <code>{esc(failed_asns)}</code>\n"
-        f"Failed City: <code>{esc(failed_cities)}</code>\n"
-        f"External(Core→Edge): {_probe_state_text(ph.get('external_service_ok'))}\n"
+        f"شناسه رخداد: <code>{esc(incident['incident_id'])}</code>\n"
+        f"سرور: <code>{esc(host)}</code>\n"
+        f"وضعیت: <b>{_filter_state_label_fa(state)}</b>\n"
+        f"اطمینان: <b>{_confidence_label_fa(confidence)}</b>\n"
+        f"تأییدهای متوالی: <b>{failure_streak}/{EDGE_FILTER_CONFIRM_THRESHOLD}</b>\n"
+        f"گره‌های ناموفق: <b>{summary.failed_nodes}/{summary.completed_nodes}</b>\n"
+        f"ASNهای ناموفق: <code>{esc(failed_asns)}</code>\n"
+        f"شهرهای ناموفق: <code>{esc(failed_cities)}</code>\n"
+        f"دسترسی بیرونی: {_probe_state_text(ph.get('external_service_ok'))}\n"
         f"WireGuard: {_probe_state_text(ph.get('wg_peer_ok'))}\n"
-        f"Core path: {_probe_state_text(ph.get('core_path_ok'))}\n\n"
+        f"مسیر هسته: {_probe_state_text(ph.get('core_path_ok'))}\n\n"
         + (
-            "🤖 Auto Failover روشن است؛ پس از تأیید کامل Safety Gateها فوراً ارزیابی می‌شود."
+            "🤖 انتقال خودکار روشن است؛ پس از تکمیل تأیید مقایسه‌ای و بررسی‌های ایمنی ارزیابی می‌شود."
             if auto_enabled else
-            "ℹ️ Auto Failover خاموش است؛ Incident ثبت می‌شود اما انتقال خودکار انجام نمی‌شود."
+            "ℹ️ انتقال خودکار خاموش است؛ رخداد ثبت می‌شود اما جابه‌جایی خودکار انجام نمی‌شود."
         )
     )
-
-def _probe_state_text(value):
-    if value is True:
-        return "✅ سالم"
-    if value is False:
-        return "❌ قطع"
-    return "⚪ نامشخص"
 
 
 async def _regional_provider_enter_limited(app, host, error):
@@ -20181,32 +20169,37 @@ async def _publish_standby_readiness_state(app, configured, ready, health_map):
     if state == READINESS_NO_STANDBY:
         await _notify_admins(
             app,
-            "🔴 <b>Auto Failover بدون Standby آماده است</b>\n\n"
-            "Auto Failover روشن است اما هیچ Standby تعریف نشده است.\n"
-            "در صورت تأیید فیلترینگ، سیستم Target امنی برای انتقال نخواهد داشت.\n\n"
-            "Status: <code>NO_STANDBY</code>",
+            "🔴 <b>سرور جایگزین تعریف نشده است</b>\n\n"
+            "انتقال خودکار روشن است، اما هیچ سرور جایگزینی تعریف نشده است. "
+            "در صورت تأیید اختلال، سیستم مقصد امنی برای انتقال نخواهد داشت.",
         )
     elif state == READINESS_NO_READY:
         detail_lines = []
         for host, failures in diagnostics.items():
+            readable = "، ".join(
+                standby_failure_label_fa(item) for item in failures
+            )
             detail_lines.append(
-                f"• <code>{esc(host)}</code>: <code>{esc(', '.join(failures))}</code>"
+                f"• <code>{esc(host)}</code>: {esc(readable)}"
             )
         await _notify_admins(
             app,
-            "🟠 <b>هیچ Safe Standby آماده نیست</b>\n\n"
-            f"Configured Standby: <b>{len(configured)}</b>\n"
-            "Ready Standby: <b>0</b>\n\n"
-            + ("\n".join(detail_lines[:5]) or "دلیل دقیق readiness در لاگ ثبت شد.")
-            + "\n\nتا رفع این وضعیت، Auto Failover به‌صورت fail-closed متوقف می‌شود.",
+            "🟠 <b>هیچ سرور جایگزین آماده‌ای وجود ندارد</b>\n\n"
+            f"سرورهای جایگزین تعریف‌شده: <b>{len(configured)}</b>\n"
+            "سرور آماده: <b>0</b>\n\n"
+            + ("\n".join(detail_lines[:5]) or "جزئیات بیشتر در گزارش داخلی ثبت شد.")
+            + "\n\nتا برطرف‌شدن این وضعیت، انتقال خودکار انجام نمی‌شود.",
         )
-    elif state == READINESS_READY and previous in {READINESS_NO_STANDBY, READINESS_NO_READY}:
+    elif state == READINESS_READY and previous in {
+        READINESS_NO_STANDBY,
+        READINESS_NO_READY,
+    }:
         await _notify_admins(
             app,
-            "🟢 <b>Safe Standby دوباره آماده است</b>\n\n"
-            f"Ready: <b>{len(ready)}/{len(configured)}</b>\n"
-            f"Candidate: <code>{esc(ready[0])}</code>\n"
-            "Automatic Filtering Failover دوباره Target امن در اختیار دارد.",
+            "🟢 <b>سرور جایگزین آماده است</b>\n\n"
+            f"آماده: <b>{len(ready)}/{len(configured)}</b>\n"
+            f"اولین گزینه: <code>{esc(ready[0])}</code>\n"
+            "در صورت تأیید اختلال و عبور از بررسی‌های ایمنی، انتقال خودکار امکان‌پذیر است.",
         )
     return state
 

@@ -7,7 +7,7 @@ import os
 import sys
 
 from .models import ServerCredentials
-from .phase5 import run_phase5
+from .phase5 import DEFAULT_CLOUDFLARE_TOKEN_ENV, run_phase5
 from .phase5_models import (
     PHASE5_MODE_CUTOVER,
     PHASE5_MODE_PLAN,
@@ -15,9 +15,6 @@ from .phase5_models import (
     Phase5Policy,
 )
 from .ssh import SSHConnectionError
-
-
-DEFAULT_CLOUDFLARE_TOKEN_ENV = "NVL_CLOUDFLARE_API_TOKEN"
 
 
 def _secret(label: str) -> str:
@@ -86,28 +83,9 @@ def main() -> int:
     selected_mode = PHASE5_MODE_CUTOVER if args.cutover else PHASE5_MODE_PLAN
 
     token_env = str(args.cloudflare_token_env or "").strip()
-    token = str(os.environ.get(token_env) or "").strip() if token_env else ""
-    if not token and args.prompt_cloudflare_token:
+    token = None
+    if args.prompt_cloudflare_token:
         token = _secret("Cloudflare API token")
-    if not token:
-        print(
-            json.dumps(
-                {
-                    "phase": 5,
-                    "status": "failed",
-                    "mode": selected_mode,
-                    "job_id": args.job_id,
-                    "error": (
-                        f"Cloudflare API token is not configured in environment "
-                        f"variable {token_env!r}"
-                    ),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            file=sys.stderr,
-        )
-        return 5
 
     source = ServerCredentials(
         host=args.source,
@@ -137,6 +115,7 @@ def main() -> int:
             hostname=args.hostname,
             zone_name=args.zone,
             cloudflare_api_token=token,
+            cloudflare_token_env=token_env,
             confirmation=args.confirm,
             policy=policy,
         )

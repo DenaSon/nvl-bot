@@ -19798,9 +19798,42 @@ def _regional_probe_coordinator(app):
     return coordinator
 
 
-async def _regional_filter_collect_raw(host, service_port, provider, nodes):
+async def _regional_provider_call(
+    app,
+    priority,
+    label,
+    func,
+    *args,
+):
+    """Run exactly one provider operation through the priority coordinator."""
+    coordinator = _regional_probe_coordinator(app)
+    async with coordinator.slot(priority, label) as lease:
+        if lease.waited_seconds >= 0.05:
+            log.info(
+                "V121D regional probe queued label=%s priority=%s waited=%.3fs queued=%s",
+                label,
+                priority,
+                lease.waited_seconds,
+                coordinator.queued,
+            )
+        return await asyncio.to_thread(func, *args)
+
+
+async def _regional_filter_collect_raw(
+    app,
+    host,
+    service_port,
+    provider,
+    nodes,
+    *,
+    priority=PROBE_PRIORITY_DEFAULT,
+    label=None,
+):
     """Collect and classify one regional round without mutating Edge state."""
-    probe = await asyncio.to_thread(
+    probe = await _regional_provider_call(
+        app,
+        priority,
+        label or f"regional-raw:{host}",
         provider.probe_tcp,
         host,
         service_port,
@@ -19819,6 +19852,8 @@ async def _regional_filter_probe_edge(
     affect_global_provider=True,
     notify_transition=True,
     confirmation_validated=False,
+    probe_priority=PROBE_PRIORITY_DEFAULT,
+    probe_label=None,
 ):
     """Probe one Edge through a provider-neutral interface; never mutates routing itself.
 
@@ -19846,7 +19881,10 @@ async def _regional_filter_probe_edge(
     )
 
     try:
-        probe = await asyncio.to_thread(
+        probe = await _regional_provider_call(
+            app,
+            probe_priority,
+            probe_label or f"regional-edge:{host}",
             provider.probe_tcp,
             host,
             service_port,

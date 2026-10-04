@@ -82,6 +82,53 @@ def normalize_probe_error(error) -> str:
     return PROBE_REASON_UNKNOWN_ERROR
 
 
+def _infrastructure_diagnostic(
+    service_ok,
+    admin_ok,
+    wg_peer_ok,
+    core_path_ok,
+    external_service_ok=None,
+) -> str:
+    """Classify non-regional infrastructure health only.
+
+    V121-B deliberately keeps this dimension separate from filtering. These probes
+    originate outside Iran, so they may explain an outage but must never vote a
+    regional filtering verdict CLEAR or suppress regional evidence.
+    """
+    if service_ok is None or admin_ok is None:
+        return DIAG_INSUFFICIENT_EVIDENCE
+
+    if not bool(service_ok) and not bool(admin_ok):
+        return DIAG_EDGE_UNREACHABLE
+
+    if wg_peer_ok is None or core_path_ok is None:
+        return DIAG_INSUFFICIENT_EVIDENCE
+
+    if not bool(wg_peer_ok):
+        return DIAG_WIREGUARD_PATH_FAILURE
+
+    if not bool(core_path_ok):
+        return DIAG_CORE_PATH_FAILURE
+
+    if not bool(service_ok):
+        return DIAG_SERVICE_PATH_FAILURE
+
+    if external_service_ok is False:
+        return DIAG_EXTERNAL_REACHABILITY_FAILURE
+
+    return DIAG_ADMIN_ONLY_FAILURE if not bool(admin_ok) else DIAG_ALL_PATHS_HEALTHY
+
+
+def _regional_diagnostic(infrastructure_diagnostic: str, confirmed: bool) -> str:
+    """Overlay a regional diagnosis only when infrastructure itself is not failing."""
+    if infrastructure_diagnostic in {
+        DIAG_ALL_PATHS_HEALTHY,
+        DIAG_ADMIN_ONLY_FAILURE,
+    }:
+        return DIAG_FILTER_SUSPECTED if confirmed else DIAG_REGIONAL_REACHABILITY_FAILURE
+    return infrastructure_diagnostic
+
+
 def derive_observability(
     service_ok,
     admin_ok,
@@ -96,17 +143,32 @@ def derive_observability(
     previous_filter_suspected=None,
     regional_filter_state=None,
 ) -> ObservabilityDecision:
-    """Derive a deterministic Phase 6C diagnostic/filtering decision.
+    """Derive infrastructure diagnostics and filtering as independent dimensions.
 
-    Filtering is confirmed only from repeated regional failures while the local
-    Service/WireGuard/Core path remains healthy. Once confirmed, the filtering
-    dimension is sticky until *regional* recovery reaches recovery_threshold;
-    unrelated infrastructure failures are diagnostics, not proof of recovery.
+    V121-B / Filtering V3.2:
+      * When a Phase 6E regional state is supplied, filtering state/confidence are
+        derived ONLY from regional evidence and its temporal streaks.
+      * Service/Admin/WireGuard/Core/external checks remain infrastructure
+        diagnostics. They can explain a simultaneous outage but cannot turn
+        regional LIKELY/POSSIBLE evidence into CLEAR/UNKNOWN.
+      * A previously confirmed filter remains sticky until qualified regional CLEAR
+        evidence reaches recovery_threshold. Local/core recovery is irrelevant to
+        that filtering recovery decision.
+      * Callers that do not supply regional_filter_state keep the legacy Phase 6C
+        behavior for backwards compatibility.
     """
     confirm_threshold = max(1, int(confirm_threshold))
     recovery_threshold = max(1, int(recovery_threshold))
     regional_failure_streak = max(0, int(regional_failure_streak or 0))
     regional_success_streak = max(0, int(regional_success_streak or 0))
+
+    infrastructure_diagnostic = _infrastructure_diagnostic(
+        service_ok,
+        admin_ok,
+        wg_peer_ok,
+        core_path_ok,
+        external_service_ok,
+    )
 
     regional_state_supplied = regional_filter_state is not None
     if regional_state_supplied:
@@ -119,17 +181,89 @@ def derive_observability(
         }:
             normalized_regional_state = FILTER_STATE_UNKNOWN
 
-        # Phase 6E state is authoritative for the current regional round. UNKNOWN
-        # must never be silently converted into a failure.
-        if normalized_regional_state == FILTER_STATE_CLEAR:
-            regional_service_ok = True
-        elif normalized_regional_state in {FILTER_STATE_POSSIBLE, FILTER_STATE_LIKELY}:
-            regional_service_ok = False
-        else:
-            regional_service_ok = None
-    else:
-        normalized_regional_state = None
+        previous_confirmed = previous_filter_suspected is True
+        recovery_confirmed = (
+            previous_confirmed
+            and normalized_regional_state == FILTER_STATE_CLEAR
+            and regional_success_streak >= recovery_threshold
+        )
 
+        # Once confirmed, only repeated valid regional CLEAR evidence may clear the
+        # filtering dimension. UNKNOWN/provider gaps, local failures, WG failures,
+        # Core-path failures and external probes do not mutate that decision.
+        if previous_confirmed and not recovery_confirmed:
+            if (
+                normalized_regional_state == FILTER_STATE_LIKELY
+                and regional_failure_streak >= confirm_threshold
+            ):
+                confidence = FILTER_CONFIDENCE_HIGH
+            elif normalized_regional_state in {
+                FILTER_STATE_CLEAR,
+                FILTER_STATE_POSSIBLE,
+                FILTER_STATE_LIKELY,
+            }:
+                confidence = FILTER_CONFIDENCE_MEDIUM
+            else:
+                confidence = FILTER_CONFIDENCE_LOW
+
+            return ObservabilityDecision(
+                _regional_diagnostic(infrastructure_diagnostic, confirmed=True),
+                True,
+                confidence,
+                FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
+                FILTER_STATE_LIKELY,
+            )
+
+        if normalized_regional_state == FILTER_STATE_CLEAR:
+            return ObservabilityDecision(
+                infrastructure_diagnostic,
+                False,
+                FILTER_CONFIDENCE_NONE,
+                FILTER_REASON_NONE,
+                FILTER_STATE_CLEAR,
+            )
+
+        if normalized_regional_state == FILTER_STATE_POSSIBLE:
+            return ObservabilityDecision(
+                _regional_diagnostic(infrastructure_diagnostic, confirmed=False),
+                False,
+                FILTER_CONFIDENCE_LOW,
+                FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
+                FILTER_STATE_POSSIBLE,
+            )
+
+        if normalized_regional_state == FILTER_STATE_LIKELY:
+            if regional_failure_streak >= confirm_threshold:
+                return ObservabilityDecision(
+                    _regional_diagnostic(infrastructure_diagnostic, confirmed=True),
+                    True,
+                    FILTER_CONFIDENCE_HIGH,
+                    FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
+                    FILTER_STATE_LIKELY,
+                )
+            return ObservabilityDecision(
+                _regional_diagnostic(infrastructure_diagnostic, confirmed=False),
+                False,
+                FILTER_CONFIDENCE_MEDIUM,
+                FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
+                FILTER_STATE_POSSIBLE,
+            )
+
+        # UNKNOWN means no new regional verdict. V121-A persistence normally keeps
+        # the last valid regional state before this helper is called, but the pure
+        # helper remains fail-closed for direct/legacy callers.
+        return ObservabilityDecision(
+            infrastructure_diagnostic,
+            None,
+            FILTER_CONFIDENCE_NONE,
+            FILTER_REASON_INSUFFICIENT_EVIDENCE,
+            FILTER_STATE_UNKNOWN,
+        )
+
+    # ------------------------------------------------------------------
+    # Legacy Phase 6C path: no richer regional state was supplied.
+    # Preserve previous behavior for older callers/tests.
+    # ------------------------------------------------------------------
     recovery_confirmed = (
         previous_filter_suspected is True
         and service_ok is True
@@ -151,9 +285,6 @@ def derive_observability(
             else:
                 filter_state = FILTER_STATE_UNKNOWN
 
-        # A previously confirmed filtering condition cannot be cleared by missing
-        # evidence, an unrelated WG/Core failure, or a single successful regional
-        # check. Only the explicit recovery condition above clears it.
         if sticky_confirmed_filter and suspected is not True:
             sticky_diagnostic = (
                 DIAG_FILTER_SUSPECTED
@@ -232,8 +363,6 @@ def derive_observability(
     )
 
     if regional_service_ok is False:
-        # If the independent external probe is also down, the evidence no longer
-        # isolates a regional path. Never newly confirm filtering from that pattern.
         if external_service_ok is False:
             return result(
                 DIAG_EXTERNAL_REACHABILITY_FAILURE,
@@ -243,59 +372,6 @@ def derive_observability(
                 FILTER_STATE_UNKNOWN,
             )
 
-        if regional_state_supplied:
-            # A weak-but-diverse POSSIBLE round remains POSSIBLE even if it repeats.
-            # Temporal repetition cannot manufacture spatial evidence that the
-            # current round does not contain.
-            if normalized_regional_state == FILTER_STATE_POSSIBLE:
-                return result(
-                    DIAG_REGIONAL_REACHABILITY_FAILURE,
-                    False,
-                    FILTER_CONFIDENCE_LOW,
-                    FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
-                    FILTER_STATE_POSSIBLE,
-                )
-
-            if normalized_regional_state == FILTER_STATE_LIKELY:
-                if regional_failure_streak >= confirm_threshold:
-                    confidence = (
-                        FILTER_CONFIDENCE_HIGH
-                        if external_service_ok is True
-                        else FILTER_CONFIDENCE_MEDIUM
-                    )
-                    # Without a successful external control, keep the user-facing
-                    # state at POSSIBLE even though legacy filter_suspected remains
-                    # true/medium for backwards compatibility.
-                    final_state = (
-                        FILTER_STATE_LIKELY
-                        if external_service_ok is True
-                        else FILTER_STATE_POSSIBLE
-                    )
-                    return ObservabilityDecision(
-                        DIAG_FILTER_SUSPECTED,
-                        True,
-                        confidence,
-                        FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
-                        final_state,
-                    )
-                return result(
-                    DIAG_REGIONAL_REACHABILITY_FAILURE,
-                    False,
-                    FILTER_CONFIDENCE_MEDIUM,
-                    FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
-                    FILTER_STATE_POSSIBLE,
-                )
-
-            return result(
-                DIAG_INSUFFICIENT_EVIDENCE,
-                None,
-                FILTER_CONFIDENCE_NONE,
-                FILTER_REASON_INSUFFICIENT_EVIDENCE,
-                FILTER_STATE_UNKNOWN,
-            )
-
-        # Backwards-compatible Phase 6C behaviour for callers that do not yet pass
-        # the richer Phase 6E regional round state.
         if regional_failure_streak >= confirm_threshold:
             confidence = (
                 FILTER_CONFIDENCE_HIGH
@@ -339,7 +415,6 @@ def derive_observability(
                 FILTER_REASON_REGIONAL_REACHABILITY_FAILURE,
                 FILTER_STATE_LIKELY,
             )
-        # Recovery is complete only after the configured regional success threshold.
         return result(
             base_reason,
             False,
@@ -348,9 +423,6 @@ def derive_observability(
             FILTER_STATE_CLEAR,
         )
 
-    # Regional evidence is optional. Local diagnostics remain useful while the
-    # filtering dimension stays explicitly unknown unless a previous confirmation
-    # is still waiting for a qualified recovery.
     return result(
         base_reason,
         None,
@@ -358,4 +430,3 @@ def derive_observability(
         FILTER_REASON_INSUFFICIENT_EVIDENCE,
         FILTER_STATE_UNKNOWN,
     )
-

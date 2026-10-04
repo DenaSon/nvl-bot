@@ -252,6 +252,10 @@ from regional_probe_provider import (
     build_regional_probe_provider,
 )
 from regional_filtering import classify_regional_evidence
+from differential_filtering import (
+    DIFF_TARGET_SPECIFIC,
+    evaluate_differential_confirmation,
+)
 from filtering_runtime import (
     PROVIDER_STATUS_ERROR,
     PROVIDER_STATUS_LIMITED,
@@ -589,6 +593,13 @@ REGIONAL_FILTER_MONITOR_INITIAL_DELAY_SECONDS = _phase6c_env_int("NVL_REGIONAL_P
 REGIONAL_FILTER_EDGE_GAP_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROBE_EDGE_GAP", 0, minimum=0)
 REGIONAL_FILTER_MAX_NODES = _phase6c_env_int("NVL_REGIONAL_PROBE_MAX_NODES", 8)
 REGIONAL_FAST_CONFIRM_DELAY_SECONDS = _phase6c_env_int("NVL_REGIONAL_FAST_CONFIRM_DELAY", 15, minimum=1)
+# V121-C / Filtering V3.3 — same-node Default-vs-Control confirmation.
+REGIONAL_DIFF_MIN_TARGET_SPECIFIC_NODES = _phase6c_env_int(
+    "NVL_REGIONAL_DIFF_MIN_TARGET_SPECIFIC_NODES", 2
+)
+REGIONAL_DIFF_MIN_TARGET_SPECIFIC_ASNS = _phase6c_env_int(
+    "NVL_REGIONAL_DIFF_MIN_TARGET_SPECIFIC_ASNS", 2
+)
 REGIONAL_FILTER_PROVIDER_BACKOFF_BASE_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROVIDER_BACKOFF_BASE", 300)
 REGIONAL_FILTER_PROVIDER_BACKOFF_MAX_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROVIDER_BACKOFF_MAX", 3600)
 # V121-A / Filtering V3.1 — provider health is operational metadata, not Edge
@@ -1276,6 +1287,28 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_host_probe_results_host_checked "
             "ON host_probe_results(host, checked_at)"
         )
+
+        # V121-C — audit trail for same-node Default-vs-Control confirmations.
+        c.execute('''CREATE TABLE IF NOT EXISTS regional_differential_checks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        source_host TEXT NOT NULL,
+                        control_host TEXT DEFAULT NULL,
+                        provider TEXT NOT NULL,
+                        source_request_id TEXT DEFAULT NULL,
+                        control_request_id TEXT DEFAULT NULL,
+                        source_state TEXT DEFAULT NULL,
+                        control_state TEXT DEFAULT NULL,
+                        verdict TEXT NOT NULL,
+                        confirmed INTEGER NOT NULL DEFAULT 0,
+                        target_specific_nodes INTEGER DEFAULT 0,
+                        target_specific_asns TEXT DEFAULT NULL,
+                        shared_failed_nodes INTEGER DEFAULT 0,
+                        detail_json TEXT DEFAULT NULL,
+                        checked_at TEXT NOT NULL)''')
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_regional_diff_source_checked "
+            "ON regional_differential_checks(source_host, checked_at)"
+        )
         # 🆕 زمان افزوده‌شدنِ این IP — برای دادن «دورهٔ مهلت» به Edgeهای تازه‌ساخته قبل از اینکه
         # پایش خودکار سلامت (_host_health_tick) سخت‌گیری کند. سرور تازه‌استارت‌شده معمولاً چند
         # دقیقه طول می‌کشد تا کامل بالا بیاید؛ بدون این مهلت، پایش می‌تواند در همون بازهٔ کوتاه
@@ -1960,7 +1993,13 @@ def _db_record_observability_probe(
 
 
 
-def _db_record_regional_round(host, probe, regional_decision):
+def _db_record_regional_round(
+    host,
+    probe,
+    regional_decision,
+    *,
+    confirmation_validated=False,
+):
     """Persist one regional attempt without letting no-evidence rounds erase state.
 
     V121-A: UNKNOWN means the provider did not return enough usable regional
@@ -2000,12 +2039,22 @@ def _db_record_regional_round(host, probe, regional_decision):
                     "filter_consecutive_failures=0"
                 )
             elif regional_decision.state == FILTER_STATE_LIKELY:
-                # Temporal confirmation counts consecutive STRONG rounds only.
-                # POSSIBLE evidence must never pre-fill the LIKELY confirmation streak.
-                streak_sql = (
-                    "filter_consecutive_failures=COALESCE(filter_consecutive_failures,0)+1, "
-                    "filter_consecutive_successes=0"
-                )
+                # V121-C: a routine strong round may open/maintain suspicion but it
+                # cannot advance confirmation beyond the current streak. Only a
+                # same-node differential round validated against a CLEAR control
+                # target is allowed to increment the confirmation streak.
+                if confirmation_validated:
+                    streak_sql = (
+                        "filter_consecutive_failures=COALESCE(filter_consecutive_failures,0)+1, "
+                        "filter_consecutive_successes=0"
+                    )
+                else:
+                    streak_sql = (
+                        "filter_consecutive_failures=CASE "
+                        "WHEN COALESCE(filter_consecutive_failures,0)=0 THEN 1 "
+                        "ELSE COALESCE(filter_consecutive_failures,0) END, "
+                        "filter_consecutive_successes=0"
+                    )
             else:
                 # POSSIBLE is real-but-weak evidence, so it breaks both qualified
                 # CLEAR recovery and LIKELY confirmation streaks. UNKNOWN is handled
@@ -2116,6 +2165,80 @@ def _db_get_regional_monitor_targets():
             "SELECT host, service_port, is_standby FROM host_pool "
             "WHERE active=1 AND is_default=1 LIMIT 1"
         ).fetchall()
+
+def _db_get_differential_control_candidate(source_host):
+    """Pick a live non-default public Edge as the differential control target."""
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT host, service_port FROM host_pool "
+            "WHERE active=1 AND is_default=0 AND host<>? AND service_ok=1 "
+            "ORDER BY CASE WHEN is_standby=1 THEN 0 ELSE 1 END, "
+            "CASE WHEN avg_latency_ms IS NULL THEN 1 ELSE 0 END, avg_latency_ms ASC, host ASC",
+            (source_host,),
+        ).fetchall()
+    for host, service_port in rows:
+        if _is_current_core_host(host):
+            continue
+        try:
+            port = int(service_port)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= port <= 65535:
+            return host, port
+    return None
+
+
+def _db_record_differential_check(
+    source_host,
+    control_host,
+    provider_name,
+    source_probe,
+    control_probe,
+    source_decision,
+    control_decision,
+    differential,
+    *,
+    verdict_override=None,
+    detail=None,
+):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    verdict = str(
+        verdict_override
+        or getattr(differential, "verdict", None)
+        or "INCONCLUSIVE"
+    )
+    confirmed = bool(getattr(differential, "confirmed", False))
+    target_nodes = int(getattr(differential, "target_specific_count", 0) or 0)
+    target_asns = ",".join(
+        getattr(differential, "target_specific_failed_asns", ()) or ()
+    )
+    shared_failed = int(getattr(differential, "shared_failure_count", 0) or 0)
+    detail_json = json.dumps(detail or {}, ensure_ascii=False, sort_keys=True)[:4000]
+    with db_conn() as conn:
+        conn.execute(
+            "INSERT INTO regional_differential_checks "
+            "(source_host, control_host, provider, source_request_id, control_request_id, "
+            "source_state, control_state, verdict, confirmed, target_specific_nodes, "
+            "target_specific_asns, shared_failed_nodes, detail_json, checked_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                source_host,
+                control_host,
+                str(provider_name or "unknown")[:80],
+                getattr(source_probe, "request_id", None),
+                getattr(control_probe, "request_id", None) if control_probe else None,
+                getattr(source_decision, "state", None),
+                getattr(control_decision, "state", None) if control_decision else None,
+                verdict[:100],
+                1 if confirmed else 0,
+                target_nodes,
+                target_asns or None,
+                shared_failed,
+                detail_json,
+                now,
+            ),
+        )
+
 
 def _db_get_recent_regional_node_results(host, limit=16):
     with db_conn() as conn:

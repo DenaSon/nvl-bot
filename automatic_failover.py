@@ -18,6 +18,8 @@ AUTO_FAILOVER_REASON_SOURCE_IS_STANDBY = "SOURCE_IS_STANDBY"
 AUTO_FAILOVER_REASON_FILTER_NOT_LIKELY = "FILTER_NOT_LIKELY"
 AUTO_FAILOVER_REASON_CONFIDENCE_NOT_HIGH = "CONFIDENCE_NOT_HIGH"
 AUTO_FAILOVER_REASON_DIAGNOSTIC_NOT_FILTER = "DIAGNOSTIC_NOT_FILTER"
+AUTO_FAILOVER_REASON_DIFFERENTIAL_NOT_CONFIRMED = "DIFFERENTIAL_NOT_CONFIRMED"
+AUTO_FAILOVER_REASON_DIFFERENTIAL_STALE = "DIFFERENTIAL_STALE"
 AUTO_FAILOVER_REASON_FAILURE_STREAK_LOW = "FAILURE_STREAK_LOW"
 AUTO_FAILOVER_REASON_PROVIDER_NOT_OK = "PROVIDER_NOT_OK"
 AUTO_FAILOVER_REASON_SWITCH_COOLDOWN = "SWITCH_COOLDOWN_ACTIVE"
@@ -39,6 +41,9 @@ def evaluate_auto_failover(
     filter_state: str,
     filter_confidence: str,
     diagnostic_reason: str,
+    differential_confirmed: bool,
+    differential_age_seconds: float,
+    differential_max_age_seconds: int,
     failure_streak: int,
     confirm_threshold: int,
     provider_status: str,
@@ -66,6 +71,14 @@ def evaluate_auto_failover(
         return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_CONFIDENCE_NOT_HIGH)
     if str(diagnostic_reason or "").upper() != "FILTER_SUSPECTED":
         return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_DIAGNOSTIC_NOT_FILTER)
+    if not bool(differential_confirmed):
+        return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_DIFFERENTIAL_NOT_CONFIRMED)
+    try:
+        differential_age = float(differential_age_seconds)
+    except (TypeError, ValueError):
+        differential_age = float("inf")
+    if differential_age < 0 or differential_age > max(1, int(differential_max_age_seconds or 1)):
+        return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_DIFFERENTIAL_STALE)
     if int(failure_streak or 0) < max(1, int(confirm_threshold or 1)):
         return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_FAILURE_STREAK_LOW)
     if str(provider_status or "").upper() != "OK":

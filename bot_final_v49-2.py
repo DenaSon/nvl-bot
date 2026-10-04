@@ -2255,7 +2255,7 @@ def _db_get_latest_differential_confirmation(source_host):
     """Return the newest differential verdict for one source Edge."""
     with db_conn() as conn:
         row = conn.execute(
-            "SELECT control_host, provider, verdict, confirmed, target_specific_nodes, "
+            "SELECT source_request_id, control_host, provider, verdict, confirmed, target_specific_nodes, "
             "target_specific_asns, shared_failed_nodes, checked_at "
             "FROM regional_differential_checks "
             "WHERE source_host=? ORDER BY id DESC LIMIT 1",
@@ -2264,14 +2264,15 @@ def _db_get_latest_differential_confirmation(source_host):
     if not row:
         return None
     return {
-        "control_host": row[0],
-        "provider": row[1],
-        "verdict": row[2],
-        "confirmed": bool(row[3]),
-        "target_specific_nodes": int(row[4] or 0),
-        "target_specific_asns": row[5] or "",
-        "shared_failed_nodes": int(row[6] or 0),
-        "checked_at": row[7],
+        "source_request_id": row[0],
+        "control_host": row[1],
+        "provider": row[2],
+        "verdict": row[3],
+        "confirmed": bool(row[4]),
+        "target_specific_nodes": int(row[5] or 0),
+        "target_specific_asns": row[6] or "",
+        "shared_failed_nodes": int(row[7] or 0),
+        "checked_at": row[8],
     }
 
 
@@ -20611,8 +20612,21 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
         _db_get_latest_differential_confirmation,
         source_host,
     )
+    differential_request_id = str(
+        differential.get("source_request_id") if differential else ""
+    )
+    current_regional_request_id = str(
+        source_health.get("regional_last_request_id") or ""
+    )
+    differential_matches_current_round = bool(
+        differential_request_id
+        and current_regional_request_id
+        and differential_request_id == current_regional_request_id
+    )
     differential_confirmed = bool(
-        differential and differential.get("confirmed")
+        differential
+        and differential.get("confirmed")
+        and differential_matches_current_round
     )
     differential_age = (
         _regional_provider_timestamp_age_seconds(differential.get("checked_at"))
@@ -20676,6 +20690,7 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
             differential_confirmed=differential_confirmed,
             differential_age_seconds=differential_age,
             differential_verdict=differential.get("verdict") if differential else None,
+            differential_matches_current_round=differential_matches_current_round,
         )
         if filter_confirmed and incident:
             extra = {
@@ -20684,6 +20699,7 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
                 "differential_age_seconds": differential_age,
                 "differential_verdict": differential.get("verdict") if differential else None,
                 "differential_control": differential.get("control_host") if differential else None,
+                "differential_matches_current_round": differential_matches_current_round,
                 "active_standby_count": len(active_standbys),
                 "switch_cooldown_remaining": max(
                     0,

@@ -210,7 +210,7 @@ class ChangeServerPhase3SafetyTests(unittest.TestCase):
 
     def test_docker_archive_verifies_tag_config_and_platform(self):
         executor = IncomingExecutor()
-        valid, ids_match = inspect_docker_image_archive(
+        valid, identity_verified = inspect_docker_image_archive(
             executor,
             INCOMING,
             metadata(),

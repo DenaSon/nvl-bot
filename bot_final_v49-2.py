@@ -320,7 +320,7 @@ from standby_readiness import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V120D.2-2026-10-04-clean-monitoring-data"
+BOT_VERSION_TAG = "V121A-2026-10-04-provider-isolation"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)

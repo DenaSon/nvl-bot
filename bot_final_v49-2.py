@@ -10996,9 +10996,9 @@ async def _render_filtering_edge_detail(query, host):
     ph = health.get(host)
     if not ph:
         await query.edit_message_text(
-            "❌ این Edge در host_pool پیدا نشد.",
+            "❌ این سرور در فهرست پایش پیدا نشد.",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Filtering Monitor", callback_data="hp_filtering")
+                InlineKeyboardButton("🔙 بازگشت به پایش", callback_data="hp_filtering")
             ]]),
         )
         return
@@ -11013,6 +11013,7 @@ async def _render_filtering_edge_detail(query, host):
     failed_cities = ph.get("regional_failed_cities") or "—"
     provider_error = ph.get("regional_provider_error") or "—"
     meta = await asyncio.to_thread(_db_get_failover_host_meta, host)
+
     standby_readiness_text = ""
     if meta and meta.get("is_standby"):
         ph = dict(ph)
@@ -11024,71 +11025,76 @@ async def _render_filtering_edge_detail(query, host):
             regional_max_age_seconds=STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS,
         )
         standby_readiness_text = (
-            "\n\n🛟 <b>Standby readiness:</b> "
-            + ("✅ READY" if verdict.ready else "⚠️ NOT READY")
+            "\n\n🛟 <b>آمادگی سرور جایگزین:</b> "
+            + ("✅ آماده" if verdict.ready else "⚠️ آماده نیست")
         )
         if verdict.failures:
             standby_readiness_text += (
-                "\nReasons: <code>"
-                + esc(", ".join(verdict.failures))
-                + "</code>"
+                "\nدلایل: "
+                + "، ".join(standby_failure_label_fa(x) for x in verdict.failures)
             )
 
     text = (
-        f"{icon} <b>Filtering Detail</b>\n\n"
-        f"Edge: <code>{esc(host)}</code>\n"
-        f"Service port: <code>{service_port}</code>\n"
-        f"Final state: <b>{esc(state)}</b>\n"
-        f"Confidence: <b>{esc(ph.get('filter_confidence') or FILTER_CONFIDENCE_NONE)}</b>\n"
-        f"Diagnostic: <code>{esc(ph.get('diagnostic_reason') or DIAG_INSUFFICIENT_EVIDENCE)}</code>\n\n"
-        f"🌐 Service: {_probe_state_text(ph.get('service_ok'))}\n"
-        f"🔐 Admin: {_probe_state_text(ph.get('admin_ok'))}\n"
+        f"{icon} <b>جزئیات پایش اختلال</b>\n\n"
+        f"سرور: <code>{esc(host)}</code>\n"
+        f"پورت سرویس: <code>{service_port}</code>\n"
+        f"وضعیت نهایی: <b>{_filter_state_label_fa(state)}</b>\n"
+        f"اطمینان: <b>{_confidence_label_fa(ph.get('filter_confidence'))}</b>\n\n"
+        f"🌐 سرویس کاربران: {_probe_state_text(ph.get('service_ok'))}\n"
+        f"🔐 دسترسی مدیریتی: {_probe_state_text(ph.get('admin_ok'))}\n"
         f"🔗 WireGuard: {_probe_state_text(ph.get('wg_peer_ok'))}\n"
-        f"🛣 Core path: {_probe_state_text(ph.get('core_path_ok'))}\n"
-        f"🌍 External (Core→Edge): {_probe_state_text(ph.get('external_service_ok'))}\n\n"
-        f"📡 Regional round: <b>{esc(ph.get('regional_filter_state') or FILTER_STATE_UNKNOWN)}</b>\n"
-        f"Reason: <code>{esc(ph.get('regional_filter_reason') or '—')}</code>\n"
-        f"Nodes: ✅ {ph.get('regional_successful_nodes', 0)} · ❌ {ph.get('regional_failed_nodes', 0)} · "
+        f"🛣 مسیر هسته: {_probe_state_text(ph.get('core_path_ok'))}\n"
+        f"🌍 دسترسی بیرونی: {_probe_state_text(ph.get('external_service_ok'))}\n\n"
+        f"📡 نتیجه بررسی منطقه‌ای: <b>{_filter_state_label_fa(ph.get('regional_filter_state'))}</b>\n"
+        f"گره‌ها: ✅ {ph.get('regional_successful_nodes', 0)} · "
+        f"❌ {ph.get('regional_failed_nodes', 0)} · "
         f"⏳ {ph.get('regional_pending_nodes', 0)} / {ph.get('regional_total_nodes', 0)}\n"
-        f"Success ratio: <b>{esc(success_pct)}</b>\n"
-        f"Failed ASNs: <code>{esc(failed_asns)}</code>\n"
-        f"Failed Cities: <code>{esc(failed_cities)}</code>\n"
-        f"Failure streak: <b>{ph.get('filter_consecutive_failures', 0)}</b> · "
-        f"Recovery streak: <b>{ph.get('filter_consecutive_successes', 0)}</b>\n\n"
-        f"Provider: <b>{esc(ph.get('regional_provider_status') or PROVIDER_STATUS_NEVER)}</b>\n"
-        f"Provider error: <code>{esc(provider_error)}</code>\n"
-        f"Request ID: <code>{esc(ph.get('regional_last_request_id') or '—')}</code>\n"
-        f"Last regional check: {esc(ph.get('regional_service_last_check') or '—')}\n"
-        f"Last state update: {esc(ph.get('regional_state_updated_at') or '—')}"
+        f"نرخ موفقیت: <b>{esc(success_pct)}</b>\n"
+        f"ASNهای ناموفق: <code>{esc(failed_asns)}</code>\n"
+        f"شهرهای ناموفق: <code>{esc(failed_cities)}</code>\n"
+        f"تأییدهای متوالی اختلال: <b>{ph.get('filter_consecutive_failures', 0)}</b>\n"
+        f"تأییدهای متوالی بازیابی: <b>{ph.get('filter_consecutive_successes', 0)}</b>\n\n"
+        f"سرویس بررسی منطقه‌ای: <b>{_provider_status_label_fa(ph.get('regional_provider_status'))}</b>\n"
+        f"خطای آخر سرویس: <code>{esc(provider_error)}</code>\n"
+        f"شناسه درخواست: <code>{esc(ph.get('regional_last_request_id') or '—')}</code>\n"
+        f"آخرین بررسی منطقه‌ای: {esc(ph.get('regional_service_last_check') or '—')}\n"
+        f"آخرین تغییر وضعیت: {esc(ph.get('regional_state_updated_at') or '—')}"
         f"{standby_readiness_text}"
     )
     if backoff > 0:
-        text += f"\n⏳ Global provider backoff: ~{max(1, backoff // 60)} دقیقه"
+        text += f"\n⏳ توقف موقت بررسی‌ها: حدود {max(1, backoff // 60)} دقیقه"
 
     standbys = [
         h for h in await asyncio.to_thread(_db_get_standby_hosts)
         if h != host
     ]
     kb = [
-        [InlineKeyboardButton("🔄 تست مجدد الآن", callback_data=f"flt_check_{host}")],
-        [InlineKeyboardButton("📊 آخرین Probeهای Node", callback_data=f"flt_probe_{host}")],
+        [InlineKeyboardButton("🔄 بررسی مجدد", callback_data=f"flt_check_{host}")],
+        [InlineKeyboardButton("📊 جزئیات گره‌های منطقه‌ای", callback_data=f"flt_probe_{host}")],
     ]
     if standbys:
         kb.append([
             InlineKeyboardButton(
-                "⚡ Safe Manual Failover",
+                "⚡ انتقال دستی امن",
                 callback_data=f"flt_failover_{host}",
             )
         ])
-    kb.append([InlineKeyboardButton("🔙 Filtering Monitor", callback_data="hp_filtering")])
+    kb.append([InlineKeyboardButton("🔙 بازگشت به پایش", callback_data="hp_filtering")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
 
 async def _render_filtering_probe_details(query, host):
-    rows = await asyncio.to_thread(_db_get_recent_regional_node_results, host, REGIONAL_FILTER_MAX_NODES)
-    lines = [f"📊 <b>آخرین Node Probeها</b>\nEdge: <code>{esc(host)}</code>\n"]
+    rows = await asyncio.to_thread(
+        _db_get_recent_regional_node_results,
+        host,
+        REGIONAL_FILTER_MAX_NODES,
+    )
+    lines = [
+        f"📊 <b>آخرین بررسی گره‌های منطقه‌ای</b>\n"
+        f"سرور: <code>{esc(host)}</code>\n"
+    ]
     if not rows:
-        lines.append("هنوز Node evidence ثبت نشده است.")
+        lines.append("هنوز نتیجه‌ای برای گره‌های منطقه‌ای ثبت نشده است.")
     else:
         for source, ok_raw, latency_ms, reason, checked_at in reversed(rows):
             ok = None if ok_raw is None else bool(ok_raw)
@@ -11099,7 +11105,7 @@ async def _render_filtering_probe_details(query, host):
                 f"   <code>{esc(reason or '')}</code> · {esc(checked_at or '')}"
             )
 
-    kb = [[InlineKeyboardButton("🔙 جزئیات Edge", callback_data=f"flt_detail_{host}")]]
+    kb = [[InlineKeyboardButton("🔙 بازگشت به جزئیات", callback_data=f"flt_detail_{host}")]]
     await query.edit_message_text(
         "\n".join(lines),
         reply_markup=InlineKeyboardMarkup(kb),
@@ -20537,23 +20543,25 @@ async def _incident_mark_failover_blocked(
 
     rejection_lines = []
     for standby, failures in rejected.items():
+        readable = "، ".join(
+            standby_failure_label_fa(item) for item in failures
+        ) or "شرایط ایمنی کامل نیست"
         rejection_lines.append(
-            f"• <code>{esc(standby)}</code>: <code>{esc(', '.join(failures) or 'UNKNOWN')}</code>"
+            f"• <code>{esc(standby)}</code>: {esc(readable)}"
         )
     rejection_text = "\n".join(rejection_lines[:5])
     if rejection_text:
-        rejection_text = "\n\n<b>Standby rejection:</b>\n" + rejection_text
+        rejection_text = "\n\n<b>دلایل آماده نبودن سرورهای جایگزین:</b>\n" + rejection_text
 
     await _notify_incident_once(
         app,
         updated,
-        "⛔️ <b>Auto Failover انجام نشد</b>\n\n"
-        f"Incident: <code>{esc(updated['incident_id'])}</code>\n"
-        f"Source: <code>{esc(source_host or 'NOT_DEFINED')}</code>\n"
-        f"Reason: <code>{esc(reason)}</code>\n"
-        f"توضیح: {esc(reason_label_fa(reason))}\n"
-        f"Standby configured: <b>{len(standbys)}</b>\n"
-        f"Safe Standby: <b>{len(safe_candidates)}</b>"
+        "⛔️ <b>انتقال خودکار انجام نشد</b>\n\n"
+        f"شناسه رخداد: <code>{esc(updated['incident_id'])}</code>\n"
+        f"سرور مبدأ: <code>{esc(source_host or 'تعریف‌نشده')}</code>\n"
+        f"علت: {esc(reason_label_fa(reason))}\n"
+        f"سرور جایگزین تعریف‌شده: <b>{len(standbys)}</b>\n"
+        f"سرور جایگزین آماده: <b>{len(safe_candidates)}</b>"
         f"{rejection_text}"
     )
 
@@ -20601,11 +20609,11 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
                 await _notify_incident_once(
                     app,
                     updated,
-                    "⛔️ <b>Failover امکان‌پذیر نیست</b>\n\n"
-                    f"Incident: <code>{esc(updated['incident_id'])}</code>\n"
-                    "Default Edge: <b>تعریف نشده</b> ❌\n"
-                    f"Reason: <code>{reason}</code>\n"
-                    "فیلترینگ/اختلال قبلاً ثبت شده، اما بدون Default Edge منبع انتقال قابل تعیین نیست."
+                    "⛔️ <b>انتقال خودکار امکان‌پذیر نیست</b>\n\n"
+                    f"شناسه رخداد: <code>{esc(updated['incident_id'])}</code>\n"
+                    "سرور اصلی: <b>تعریف نشده</b> ❌\n"
+                    f"علت: {esc(reason_label_fa(reason))}\n"
+                    "اختلال ثبت شده است، اما بدون سرور اصلی، مبدأ انتقال قابل تعیین نیست."
                 )
         return {"eligible": False, "reason": "NO_DEFAULT_SOURCE"}
 
@@ -20798,14 +20806,13 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
             await _notify_incident_once(
                 app,
                 incident,
-                "🤖 <b>Automatic Filtering Failover شروع شد</b>\n\n"
-                f"Incident: <code>{esc(incident['incident_id'])}</code>\n"
-                f"Source: <code>{esc(source_host)}</code>\n"
-                f"Target Standby: <code>{esc(target_host)}</code>\n"
-                f"Evidence: <b>{esc(source_health.get('filter_state'))} / "
-                f"{esc(source_health.get('filter_confidence'))}</b>\n"
-                f"Failure streak: <b>{source_health.get('filter_consecutive_failures', 0)}</b>\n\n"
-                "Phase 6G اکنون Preflight، rebuild، DB commit، DNS handoff و rollback را کنترل می‌کند."
+                "🤖 <b>انتقال خودکار شروع شد</b>\n\n"
+                f"شناسه رخداد: <code>{esc(incident['incident_id'])}</code>\n"
+                f"مبدأ: <code>{esc(source_host)}</code>\n"
+                f"مقصد: <code>{esc(target_host)}</code>\n"
+                f"وضعیت اختلال: <b>{_filter_state_label_fa(source_health.get('filter_state'))}</b>\n"
+                f"اطمینان: <b>{_confidence_label_fa(source_health.get('filter_confidence'))}</b>\n\n"
+                "بررسی‌های ایمنی، بازسازی حساب‌ها و تغییر مسیر به‌صورت کنترل‌شده انجام می‌شوند."
             )
 
     result = await _safe_manual_failover(

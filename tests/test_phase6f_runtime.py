@@ -129,6 +129,20 @@ class Phase6FBotIntegrationStaticTests(unittest.TestCase):
         ):
             self.assertIn(f"ADD COLUMN {column}", self.source)
 
+    def test_differential_audit_schema_exists(self):
+        self.assertIn(
+            "CREATE TABLE IF NOT EXISTS regional_differential_checks",
+            self.source,
+        )
+        self.assertIn(
+            "def _db_record_differential_check(",
+            self.source,
+        )
+        self.assertIn(
+            "def _db_get_differential_control_candidate(",
+            self.source,
+        )
+
     def test_phase6e_state_is_fed_into_observability_runtime(self):
         region = self._region(
             "def _db_recompute_host_observability(",

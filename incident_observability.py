@@ -40,6 +40,8 @@ REASON_FILTER_RECOVERED = "FILTER_RECOVERED"
 REASON_EVIDENCE_DEGRADED = "EVIDENCE_DEGRADED"
 REASON_FAILOVER_BLOCKED = "FAILOVER_BLOCKED"
 REASON_FAILOVER_STARTED = "FAILOVER_STARTED"
+REASON_DIFFERENTIAL_NOT_CONFIRMED = "DIFFERENTIAL_NOT_CONFIRMED"
+REASON_DIFFERENTIAL_STALE = "DIFFERENTIAL_STALE"
 
 _AUTO_REASON_MAP = {
     "AUTO_DISABLED": REASON_AUTO_DISABLED,
@@ -47,6 +49,8 @@ _AUTO_REASON_MAP = {
     "NO_SAFE_STANDBY": REASON_NO_SAFE_STANDBY,
     "SWITCH_COOLDOWN_ACTIVE": REASON_SWITCH_COOLDOWN,
     "ATTEMPT_COOLDOWN_ACTIVE": REASON_ATTEMPT_COOLDOWN,
+    "DIFFERENTIAL_NOT_CONFIRMED": REASON_DIFFERENTIAL_NOT_CONFIRMED,
+    "DIFFERENTIAL_STALE": REASON_DIFFERENTIAL_STALE,
 }
 
 _FAILOVER_RESULT_REASON_MAP = {
@@ -142,27 +146,45 @@ def should_notify_incident(
 def reason_label_fa(reason: str) -> str:
     labels = {
         REASON_REGIONAL_SUSPECTED: "اختلال منطقه‌ای مشکوک شناسایی شد",
-        REASON_CONFIRMATION_PENDING: "منتظر تأیید سریع فیلترینگ",
-        REASON_FILTER_CONFIRMED: "فیلترینگ با اطمینان بالا تأیید شد",
-        REASON_NO_DEFAULT_EDGE: "Default Edge تعریف نشده است",
-        REASON_AUTO_DISABLED: "Auto Failover غیرفعال است",
-        REASON_PROVIDER_ERROR: "Regional Provider در دسترس نیست",
-        REASON_PROVIDER_LIMITED: "Regional Provider موقتاً Rate Limited شده است",
-        REASON_NO_STANDBY: "هیچ Standby تعریف نشده است",
-        REASON_NO_SAFE_STANDBY: "Standby وجود دارد اما هیچ‌کدام Safety Gate را پاس نکرده‌اند",
-        REASON_SWITCH_COOLDOWN: "Switch cooldown هنوز فعال است",
-        REASON_ATTEMPT_COOLDOWN: "Attempt cooldown هنوز فعال است",
-        REASON_PREFLIGHT_FAILED: "Preflight امن Failover رد شد",
-        REASON_FAILOVER_BUSY: "یک Failover دیگر در حال اجراست",
-        REASON_FAILOVER_EXCEPTION: "Failover با خطای اجرایی متوقف شد",
-        REASON_ROLLBACK_FAILED: "Rollback کامل نشد",
-        REASON_FAILOVER_STARTED: "Failover امن شروع شد",
-        REASON_FAILOVER_SUCCEEDED: "Failover با موفقیت کامل شد",
+        REASON_CONFIRMATION_PENDING: "بررسی تکمیلی برای تأیید اختلال در حال انجام است",
+        REASON_FILTER_CONFIRMED: "اختلال منطقه‌ای با اطمینان بالا تأیید شد",
+        REASON_NO_DEFAULT_EDGE: "سرور اصلی تعریف نشده است",
+        REASON_AUTO_DISABLED: "انتقال خودکار غیرفعال است",
+        REASON_PROVIDER_ERROR: "سرویس بررسی منطقه‌ای در دسترس نیست",
+        REASON_PROVIDER_LIMITED: "سرویس بررسی منطقه‌ای موقتاً محدود شده است",
+        REASON_NO_STANDBY: "هیچ سرور جایگزینی تعریف نشده است",
+        REASON_NO_SAFE_STANDBY: "هیچ سرور جایگزین آماده و ایمنی در دسترس نیست",
+        REASON_SWITCH_COOLDOWN: "زمان ایمنی پس از آخرین انتقال هنوز تمام نشده است",
+        REASON_ATTEMPT_COOLDOWN: "فاصلهٔ ایمنی تا تلاش بعدی هنوز تمام نشده است",
+        REASON_PREFLIGHT_FAILED: "بررسی‌های ایمنی پیش از انتقال تأیید نشد",
+        REASON_FAILOVER_BUSY: "یک انتقال دیگر در حال اجراست",
+        REASON_FAILOVER_EXCEPTION: "انتقال به‌دلیل خطای اجرایی متوقف شد",
+        REASON_ROLLBACK_FAILED: "بازگردانی کامل نشد",
+        REASON_FAILOVER_STARTED: "انتقال امن شروع شد",
+        REASON_FAILOVER_SUCCEEDED: "انتقال با موفقیت کامل شد",
         REASON_FILTER_RECOVERED: "دسترسی منطقه‌ای بازیابی شد",
-        REASON_EVIDENCE_DEGRADED: "Evidence منطقه‌ای برای تصمیم قطعی کافی نیست",
+        REASON_EVIDENCE_DEGRADED: "اطلاعات فعلی برای تصمیم قطعی کافی نیست",
+        REASON_DIFFERENTIAL_NOT_CONFIRMED: "تأیید مقایسه‌ای کافی برای انتقال خودکار وجود ندارد",
+        REASON_DIFFERENTIAL_STALE: "تأیید مقایسه‌ای قدیمی شده و باید دوباره بررسی شود",
     }
-    return labels.get(str(reason or ""), str(reason or "UNKNOWN"))
+    return labels.get(str(reason or ""), "علت نامشخص")
 
+
+def standby_failure_label_fa(reason: str) -> str:
+    raw = str(reason or "")
+    if raw.startswith("LOCAL_EVIDENCE_STALE:"):
+        return "اطلاعات سلامت محلی قدیمی است"
+    labels = {
+        "INACTIVE": "سرور غیرفعال است",
+        "SERVICE_NOT_OK": "سرویس کاربران آماده نیست",
+        "ADMIN_NOT_OK": "دسترسی مدیریتی آماده نیست",
+        "WG_NOT_OK": "ارتباط WireGuard آماده نیست",
+        "CORE_PATH_NOT_OK": "مسیر ارتباط با هسته آماده نیست",
+        "EXTERNAL_NOT_OK": "دسترسی بیرونی سرویس تأیید نشده است",
+        "FILTER_NOT_CLEAR": "وضعیت دسترسی منطقه‌ای سرور شفاف نیست",
+        "REGIONAL_EVIDENCE_STALE": "نتیجهٔ بررسی منطقه‌ای قدیمی است",
+    }
+    return labels.get(raw, "شرایط ایمنی کامل نیست")
 
 
 def standby_safety_failures(health) -> tuple[str, ...]:

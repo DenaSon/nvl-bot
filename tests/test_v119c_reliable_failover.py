@@ -189,7 +189,7 @@ class V119CIntegrationShapeTests(unittest.TestCase):
 
     def test_release_marker(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V121D-2026-10-04-probe-priority"',
+            'BOT_VERSION_TAG = "V121E-2026-10-04-failover-simulation"',
             self.source,
         )
 
@@ -310,7 +310,7 @@ class V119CIntegrationShapeTests(unittest.TestCase):
         self.assertIn('phase6h_standby_readiness_state', region)
         self.assertIn("if previous == state:", region)
         self.assertIn("NO_STANDBY", region)
-        self.assertIn("Safe Standby", region)
+        self.assertIn("سرور جایگزین", region)
 
     def test_enabling_auto_immediately_kicks_readiness_check(self):
         region = self._region(
@@ -337,10 +337,10 @@ class V119CIntegrationShapeTests(unittest.TestCase):
             "async def _render_filtering_monitor_panel",
             "async def _render_filtering_edge_detail",
         )
-        self.assertIn("Warm Standby:", region)
+        self.assertIn("سرور جایگزین آماده:", region)
         self.assertIn("standby_ready", region)
-        self.assertIn("Standby ✅ Ready", region)
-        self.assertIn("Standby ⚠️ Not Ready", region)
+        self.assertIn("جایگزین آماده", region)
+        self.assertIn("جایگزین آماده نیست", region)
 
 
 if __name__ == "__main__":

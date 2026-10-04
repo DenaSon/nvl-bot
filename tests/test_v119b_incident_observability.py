@@ -122,7 +122,7 @@ class V119BIntegrationStaticTests(unittest.TestCase):
 
     def test_release_marker(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V121D-2026-10-04-probe-priority"',
+            'BOT_VERSION_TAG = "V121E-2026-10-04-failover-simulation"',
             self.source,
         )
 
@@ -172,7 +172,7 @@ class V119BIntegrationStaticTests(unittest.TestCase):
         self.assertIn("provider_error_alert_due", region)
         self.assertIn("REGIONAL_PROVIDER_ERROR_ALERT_THRESHOLD", region)
         self.assertIn("edge_state_preserved=True", region)
-        self.assertIn("فیلترینگ Edge محسوب نمی‌شود", region)
+        self.assertIn("به معنی فیلترشدن سرور نیست", region)
         self.assertNotIn("_db_record_regional_round", region)
 
     def test_confirmed_filter_block_records_exact_reason(self):
@@ -183,7 +183,7 @@ class V119BIntegrationStaticTests(unittest.TestCase):
         self.assertIn("readiness_diagnostics", region)
         self.assertIn("STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS", region)
         self.assertIn("AUTO_FAILOVER_BLOCKED", region)
-        self.assertIn("Standby rejection", region)
+        self.assertIn("دلایل آماده نبودن سرورهای جایگزین", region)
         self.assertIn("_notify_incident_once", region)
 
     def test_no_default_edge_is_operator_visible_when_incident_exists(self):
@@ -192,7 +192,7 @@ class V119BIntegrationStaticTests(unittest.TestCase):
             "async def _regional_filter_tick(app):",
         )
         self.assertIn("REASON_NO_DEFAULT_EDGE", region)
-        self.assertIn("Default Edge: <b>تعریف نشده</b>", region)
+        self.assertIn("سرور اصلی: <b>تعریف نشده</b>", region)
         self.assertIn("_db_get_open_filter_incident", region)
 
     def test_phase6h_only_notifies_block_after_filter_confirmed(self):

@@ -312,6 +312,7 @@ from incident_observability import (
     normalize_failover_result_reason,
     reason_label_fa,
     should_notify_incident,
+    standby_failure_label_fa,
     standby_safety_failures,
 )
 from standby_readiness import (
@@ -331,7 +332,7 @@ from standby_readiness import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V121D-2026-10-04-probe-priority"
+BOT_VERSION_TAG = "V121E-2026-10-04-failover-simulation"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -606,6 +607,9 @@ REGIONAL_DIFF_MIN_TARGET_SPECIFIC_NODES = _phase6c_env_int(
 )
 REGIONAL_DIFF_MIN_TARGET_SPECIFIC_ASNS = _phase6c_env_int(
     "NVL_REGIONAL_DIFF_MIN_TARGET_SPECIFIC_ASNS", 2
+)
+DIFFERENTIAL_CONFIRMATION_MAX_AGE_SECONDS = _phase6c_env_int(
+    "NVL_DIFFERENTIAL_CONFIRM_MAX_AGE", 120, minimum=30, maximum=600
 )
 REGIONAL_FILTER_PROVIDER_BACKOFF_BASE_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROVIDER_BACKOFF_BASE", 300)
 REGIONAL_FILTER_PROVIDER_BACKOFF_MAX_SECONDS = _phase6c_env_int("NVL_REGIONAL_PROVIDER_BACKOFF_MAX", 3600)
@@ -2245,6 +2249,31 @@ def _db_record_differential_check(
                 now,
             ),
         )
+
+
+def _db_get_latest_differential_confirmation(source_host):
+    """Return the newest differential verdict for one source Edge."""
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT source_request_id, control_host, provider, verdict, confirmed, target_specific_nodes, "
+            "target_specific_asns, shared_failed_nodes, checked_at "
+            "FROM regional_differential_checks "
+            "WHERE source_host=? ORDER BY id DESC LIMIT 1",
+            (source_host,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "source_request_id": row[0],
+        "control_host": row[1],
+        "provider": row[2],
+        "verdict": row[3],
+        "confirmed": bool(row[4]),
+        "target_specific_nodes": int(row[5] or 0),
+        "target_specific_asns": row[6] or "",
+        "shared_failed_nodes": int(row[7] or 0),
+        "checked_at": row[8],
+    }
 
 
 def _db_get_recent_regional_node_results(host, limit=16):
@@ -10777,6 +10806,51 @@ def _filter_state_icon(state):
     return "⚪️"
 
 
+def _filter_state_label_fa(state):
+    labels = {
+        FILTER_STATE_CLEAR: "سالم",
+        FILTER_STATE_POSSIBLE: "مشکوک",
+        FILTER_STATE_LIKELY: "اختلال محتمل",
+        FILTER_STATE_UNKNOWN: "نامشخص",
+    }
+    return labels.get(str(state or FILTER_STATE_UNKNOWN).upper(), "نامشخص")
+
+
+def _confidence_label_fa(value):
+    labels = {
+        "HIGH": "بالا",
+        "MEDIUM": "متوسط",
+        "LOW": "کم",
+        "NONE": "نامشخص",
+    }
+    return labels.get(str(value or "NONE").upper(), "نامشخص")
+
+
+def _provider_status_label_fa(value):
+    labels = {
+        PROVIDER_STATUS_OK: "✅ پایدار",
+        PROVIDER_STATUS_LIMITED: "⏳ موقتاً محدود",
+        PROVIDER_STATUS_ERROR: "❌ دارای خطا",
+        PROVIDER_STATUS_NEVER: "⚪ بدون داده",
+    }
+    return labels.get(str(value or PROVIDER_STATUS_NEVER).upper(), "⚪ نامشخص")
+
+
+def _failover_mode_label_fa(value):
+    return "خودکار" if str(value or "").upper() == "AUTO" else "دستی"
+
+
+def _failover_status_label_fa(value):
+    labels = {
+        FAILOVER_STATUS_RUNNING: "در حال اجرا",
+        FAILOVER_STATUS_SUCCEEDED: "موفق",
+        FAILOVER_STATUS_FAILED: "ناموفق",
+        FAILOVER_STATUS_ROLLED_BACK: "بازگردانی‌شده",
+        FAILOVER_STATUS_ABORTED_STALE: "متوقف‌شده",
+    }
+    return labels.get(str(value or "").upper(), "نامشخص")
+
+
 async def _render_filtering_monitor_panel(query, page=0):
     await asyncio.to_thread(_db_sync_host_pool)
     pool = await asyncio.to_thread(_db_get_host_pool)
@@ -10826,38 +10900,36 @@ async def _render_filtering_monitor_panel(query, page=0):
     end = min(start + page_size, total)
 
     provider_status = runtime.get("status") or PROVIDER_STATUS_NEVER
-    provider_line = f"Provider: <b>{esc(provider_status)}</b>"
+    provider_line = f"سرویس بررسی منطقه‌ای: <b>{_provider_status_label_fa(provider_status)}</b>"
     if backoff > 0:
-        provider_line += f" · ⏳ Backoff ~{max(1, backoff // 60)} دقیقه"
+        provider_line += f" · ⏳ حدود {max(1, backoff // 60)} دقیقه توقف موقت"
 
     latest_failover = await asyncio.to_thread(_db_get_latest_failover_operation)
-    failover_line = "Last failover: <code>none</code>"
+    failover_line = "آخرین انتقال: <b>هنوز انتقالی ثبت نشده است</b>"
     if latest_failover:
         (
             op_id, op_mode, op_source, op_target, op_status, op_started,
             op_updated, op_finished, op_accounts, op_moved, op_error,
         ) = latest_failover
         failover_line = (
-            f"Last failover: <code>#{op_id}</code> · <b>{esc(op_mode)}</b> · "
-            f"<b>{esc(op_status)}</b> · "
+            f"آخرین انتقال: <code>#{op_id}</code> · "
+            f"<b>{_failover_mode_label_fa(op_mode)}</b> · "
+            f"<b>{_failover_status_label_fa(op_status)}</b> · "
             f"<code>{esc(op_source)}</code> → <code>{esc(op_target)}</code> · "
-            f"{op_moved or 0}/{op_accounts or 0}"
+            f"{op_moved or 0}/{op_accounts or 0} حساب"
         )
-        if op_error:
-            failover_line += f" · ⚠️ <code>{esc(str(op_error)[:120])}</code>"
 
-    auto_enabled = (await asyncio.to_thread(_db_get_setting, 'phase6h_auto_failover_enabled', '0')) == '1'
-    auto_label = "ON" if auto_enabled else "OFF"
-    failover_label = "AUTO + MANUAL" if auto_enabled else "MANUAL ONLY"
+    auto_enabled = (await asyncio.to_thread(
+        _db_get_setting, 'phase6h_auto_failover_enabled', '0'
+    )) == '1'
 
     lines = [
-        "🛡 <b>Filtering Monitor — Phase 6H</b>",
+        "🛡 <b>پایش اختلال و فیلترینگ</b>",
         "",
-        f"Detection: <b>AUTO MONITOR</b> · Failover: <b>{failover_label}</b> · Auto Failover: <b>{auto_label}</b>",
-        f"Check interval: <code>{REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS}s</code>",
-        f"Auto safety: LIKELY + HIGH · switch cooldown <code>{AUTO_FAILOVER_SWITCH_COOLDOWN_SECONDS // 60}m</code> · retry <code>{AUTO_FAILOVER_ATTEMPT_COOLDOWN_SECONDS // 60}m</code>",
-        f"Warm Standby: <b>{len(standby_ready)}/{len(standby_configured)} READY</b> · local ≤<code>{STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS}s</code> · regional ≤<code>{STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS}s</code>",
-        f"Incident target freshness: regional ≤<code>{STANDBY_FAILOVER_TARGET_MAX_AGE_SECONDS}s</code> or immediate refresh",
+        f"پایش خودکار: <b>فعال</b> · انتقال خودکار: <b>{'روشن' if auto_enabled else 'خاموش'}</b>",
+        f"بازه بررسی: <b>{REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS} ثانیه</b>",
+        "شرط انتقال خودکار: <b>اختلال تأییدشده + تأیید مقایسه‌ای تازه + سرور جایگزین آماده</b>",
+        f"سرور جایگزین آماده: <b>{len(standby_ready)}/{len(standby_configured)}</b>",
         provider_line,
         failover_line,
         "",
@@ -10872,7 +10944,6 @@ async def _render_filtering_monitor_panel(query, page=0):
         icon = _filter_state_icon(state)
         failed = ph.get("regional_failed_nodes", 0)
         completed = ph.get("regional_completed_nodes", 0)
-        provider = ph.get("regional_provider_status") or PROVIDER_STATUS_NEVER
         if is_standby:
             verdict = evaluate_standby_readiness(
                 ph,
@@ -10880,12 +10951,12 @@ async def _render_filtering_monitor_panel(query, page=0):
                 local_max_age_seconds=STANDBY_LOCAL_EVIDENCE_MAX_AGE_SECONDS,
                 regional_max_age_seconds=STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS,
             )
-            role = "Standby ✅ Ready" if verdict.ready else "Standby ⚠️ Not Ready"
+            role = "جایگزین آماده" if verdict.ready else "جایگزین آماده نیست"
         else:
-            role = "Active" if active else "Inactive"
+            role = "فعال" if active else "غیرفعال"
         lines.append(
-            f"{icon} <code>{esc(host)}</code> — <b>{esc(state)}</b> · "
-            f"{failed}/{completed} failed · {esc(role)} · Provider {esc(provider)}"
+            f"{icon} <code>{esc(host)}</code> — <b>{_filter_state_label_fa(state)}</b> · "
+            f"{failed}/{completed} ناموفق · {role}"
         )
         kb.append([
             InlineKeyboardButton(
@@ -10904,27 +10975,20 @@ async def _render_filtering_monitor_panel(query, page=0):
         kb.append(nav)
 
     if not edge_rows:
-        lines.append("هیچ Edge فعالی برای مانیتورینگ ثبت نشده است.")
+        lines.append("هیچ سرور لبه‌ای برای پایش ثبت نشده است.")
 
     if auto_enabled:
-        kb.append([InlineKeyboardButton("🛑 غیرفعال‌سازی Failover خودکار", callback_data="flt_auto_disable")])
+        kb.append([InlineKeyboardButton("🛑 غیرفعال‌سازی انتقال خودکار", callback_data="flt_auto_disable")])
     else:
-        kb.append([InlineKeyboardButton("🤖 فعال‌سازی Failover خودکار", callback_data="flt_auto_enable")])
+        kb.append([InlineKeyboardButton("🤖 فعال‌سازی انتقال خودکار", callback_data="flt_auto_enable")])
     kb.append([InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")])
+
     payload = "\n".join(lines)
     markup = InlineKeyboardMarkup(kb)
     if hasattr(query, "edit_message_text"):
-        await query.edit_message_text(
-            payload,
-            reply_markup=markup,
-            parse_mode="HTML",
-        )
+        await query.edit_message_text(payload, reply_markup=markup, parse_mode="HTML")
     else:
-        await query.reply_text(
-            payload,
-            reply_markup=markup,
-            parse_mode="HTML",
-        )
+        await query.reply_text(payload, reply_markup=markup, parse_mode="HTML")
 
 
 async def _render_filtering_edge_detail(query, host):
@@ -10932,9 +10996,9 @@ async def _render_filtering_edge_detail(query, host):
     ph = health.get(host)
     if not ph:
         await query.edit_message_text(
-            "❌ این Edge در host_pool پیدا نشد.",
+            "❌ این سرور در فهرست پایش پیدا نشد.",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Filtering Monitor", callback_data="hp_filtering")
+                InlineKeyboardButton("🔙 بازگشت به پایش", callback_data="hp_filtering")
             ]]),
         )
         return
@@ -10949,6 +11013,7 @@ async def _render_filtering_edge_detail(query, host):
     failed_cities = ph.get("regional_failed_cities") or "—"
     provider_error = ph.get("regional_provider_error") or "—"
     meta = await asyncio.to_thread(_db_get_failover_host_meta, host)
+
     standby_readiness_text = ""
     if meta and meta.get("is_standby"):
         ph = dict(ph)
@@ -10960,71 +11025,76 @@ async def _render_filtering_edge_detail(query, host):
             regional_max_age_seconds=STANDBY_REGIONAL_EVIDENCE_MAX_AGE_SECONDS,
         )
         standby_readiness_text = (
-            "\n\n🛟 <b>Standby readiness:</b> "
-            + ("✅ READY" if verdict.ready else "⚠️ NOT READY")
+            "\n\n🛟 <b>آمادگی سرور جایگزین:</b> "
+            + ("✅ آماده" if verdict.ready else "⚠️ آماده نیست")
         )
         if verdict.failures:
             standby_readiness_text += (
-                "\nReasons: <code>"
-                + esc(", ".join(verdict.failures))
-                + "</code>"
+                "\nدلایل: "
+                + "، ".join(standby_failure_label_fa(x) for x in verdict.failures)
             )
 
     text = (
-        f"{icon} <b>Filtering Detail</b>\n\n"
-        f"Edge: <code>{esc(host)}</code>\n"
-        f"Service port: <code>{service_port}</code>\n"
-        f"Final state: <b>{esc(state)}</b>\n"
-        f"Confidence: <b>{esc(ph.get('filter_confidence') or FILTER_CONFIDENCE_NONE)}</b>\n"
-        f"Diagnostic: <code>{esc(ph.get('diagnostic_reason') or DIAG_INSUFFICIENT_EVIDENCE)}</code>\n\n"
-        f"🌐 Service: {_probe_state_text(ph.get('service_ok'))}\n"
-        f"🔐 Admin: {_probe_state_text(ph.get('admin_ok'))}\n"
+        f"{icon} <b>جزئیات پایش اختلال</b>\n\n"
+        f"سرور: <code>{esc(host)}</code>\n"
+        f"پورت سرویس: <code>{service_port}</code>\n"
+        f"وضعیت نهایی: <b>{_filter_state_label_fa(state)}</b>\n"
+        f"اطمینان: <b>{_confidence_label_fa(ph.get('filter_confidence'))}</b>\n\n"
+        f"🌐 سرویس کاربران: {_probe_state_text(ph.get('service_ok'))}\n"
+        f"🔐 دسترسی مدیریتی: {_probe_state_text(ph.get('admin_ok'))}\n"
         f"🔗 WireGuard: {_probe_state_text(ph.get('wg_peer_ok'))}\n"
-        f"🛣 Core path: {_probe_state_text(ph.get('core_path_ok'))}\n"
-        f"🌍 External (Core→Edge): {_probe_state_text(ph.get('external_service_ok'))}\n\n"
-        f"📡 Regional round: <b>{esc(ph.get('regional_filter_state') or FILTER_STATE_UNKNOWN)}</b>\n"
-        f"Reason: <code>{esc(ph.get('regional_filter_reason') or '—')}</code>\n"
-        f"Nodes: ✅ {ph.get('regional_successful_nodes', 0)} · ❌ {ph.get('regional_failed_nodes', 0)} · "
+        f"🛣 مسیر هسته: {_probe_state_text(ph.get('core_path_ok'))}\n"
+        f"🌍 دسترسی بیرونی: {_probe_state_text(ph.get('external_service_ok'))}\n\n"
+        f"📡 نتیجه بررسی منطقه‌ای: <b>{_filter_state_label_fa(ph.get('regional_filter_state'))}</b>\n"
+        f"گره‌ها: ✅ {ph.get('regional_successful_nodes', 0)} · "
+        f"❌ {ph.get('regional_failed_nodes', 0)} · "
         f"⏳ {ph.get('regional_pending_nodes', 0)} / {ph.get('regional_total_nodes', 0)}\n"
-        f"Success ratio: <b>{esc(success_pct)}</b>\n"
-        f"Failed ASNs: <code>{esc(failed_asns)}</code>\n"
-        f"Failed Cities: <code>{esc(failed_cities)}</code>\n"
-        f"Failure streak: <b>{ph.get('filter_consecutive_failures', 0)}</b> · "
-        f"Recovery streak: <b>{ph.get('filter_consecutive_successes', 0)}</b>\n\n"
-        f"Provider: <b>{esc(ph.get('regional_provider_status') or PROVIDER_STATUS_NEVER)}</b>\n"
-        f"Provider error: <code>{esc(provider_error)}</code>\n"
-        f"Request ID: <code>{esc(ph.get('regional_last_request_id') or '—')}</code>\n"
-        f"Last regional check: {esc(ph.get('regional_service_last_check') or '—')}\n"
-        f"Last state update: {esc(ph.get('regional_state_updated_at') or '—')}"
+        f"نرخ موفقیت: <b>{esc(success_pct)}</b>\n"
+        f"ASNهای ناموفق: <code>{esc(failed_asns)}</code>\n"
+        f"شهرهای ناموفق: <code>{esc(failed_cities)}</code>\n"
+        f"تأییدهای متوالی اختلال: <b>{ph.get('filter_consecutive_failures', 0)}</b>\n"
+        f"تأییدهای متوالی بازیابی: <b>{ph.get('filter_consecutive_successes', 0)}</b>\n\n"
+        f"سرویس بررسی منطقه‌ای: <b>{_provider_status_label_fa(ph.get('regional_provider_status'))}</b>\n"
+        f"خطای آخر سرویس: <code>{esc(provider_error)}</code>\n"
+        f"شناسه درخواست: <code>{esc(ph.get('regional_last_request_id') or '—')}</code>\n"
+        f"آخرین بررسی منطقه‌ای: {esc(ph.get('regional_service_last_check') or '—')}\n"
+        f"آخرین تغییر وضعیت: {esc(ph.get('regional_state_updated_at') or '—')}"
         f"{standby_readiness_text}"
     )
     if backoff > 0:
-        text += f"\n⏳ Global provider backoff: ~{max(1, backoff // 60)} دقیقه"
+        text += f"\n⏳ توقف موقت بررسی‌ها: حدود {max(1, backoff // 60)} دقیقه"
 
     standbys = [
         h for h in await asyncio.to_thread(_db_get_standby_hosts)
         if h != host
     ]
     kb = [
-        [InlineKeyboardButton("🔄 تست مجدد الآن", callback_data=f"flt_check_{host}")],
-        [InlineKeyboardButton("📊 آخرین Probeهای Node", callback_data=f"flt_probe_{host}")],
+        [InlineKeyboardButton("🔄 بررسی مجدد", callback_data=f"flt_check_{host}")],
+        [InlineKeyboardButton("📊 جزئیات گره‌های منطقه‌ای", callback_data=f"flt_probe_{host}")],
     ]
     if standbys:
         kb.append([
             InlineKeyboardButton(
-                "⚡ Safe Manual Failover",
+                "⚡ انتقال دستی امن",
                 callback_data=f"flt_failover_{host}",
             )
         ])
-    kb.append([InlineKeyboardButton("🔙 Filtering Monitor", callback_data="hp_filtering")])
+    kb.append([InlineKeyboardButton("🔙 بازگشت به پایش", callback_data="hp_filtering")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
 
 async def _render_filtering_probe_details(query, host):
-    rows = await asyncio.to_thread(_db_get_recent_regional_node_results, host, REGIONAL_FILTER_MAX_NODES)
-    lines = [f"📊 <b>آخرین Node Probeها</b>\nEdge: <code>{esc(host)}</code>\n"]
+    rows = await asyncio.to_thread(
+        _db_get_recent_regional_node_results,
+        host,
+        REGIONAL_FILTER_MAX_NODES,
+    )
+    lines = [
+        f"📊 <b>آخرین بررسی گره‌های منطقه‌ای</b>\n"
+        f"سرور: <code>{esc(host)}</code>\n"
+    ]
     if not rows:
-        lines.append("هنوز Node evidence ثبت نشده است.")
+        lines.append("هنوز نتیجه‌ای برای گره‌های منطقه‌ای ثبت نشده است.")
     else:
         for source, ok_raw, latency_ms, reason, checked_at in reversed(rows):
             ok = None if ok_raw is None else bool(ok_raw)
@@ -11035,7 +11105,7 @@ async def _render_filtering_probe_details(query, host):
                 f"   <code>{esc(reason or '')}</code> · {esc(checked_at or '')}"
             )
 
-    kb = [[InlineKeyboardButton("🔙 جزئیات Edge", callback_data=f"flt_detail_{host}")]]
+    kb = [[InlineKeyboardButton("🔙 بازگشت به جزئیات", callback_data=f"flt_detail_{host}")]]
     await query.edit_message_text(
         "\n".join(lines),
         reply_markup=InlineKeyboardMarkup(kb),
@@ -16611,12 +16681,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d == "flt_auto_enable" and role == 'admin':
         await query.edit_message_text(
-            "⚠️ <b>فعال‌سازی Automatic Filtering Failover</b>\n\n"
-            "پس از فعال‌سازی، فقط وقتی Edge پیش‌فرض با Evidence منطقه‌ای تکرارشونده "
-            "<b>LIKELY + HIGH</b> تشخیص داده شود و یک Standby با Evidence سالم و CLEAR وجود داشته باشد، "
-            "ربات می‌تواند بدون تأیید دوم Failover را اجرا کند.\n\n"
-            "همان Preflight، persisted lock، Core fallback، rebuild کامل و rollback امن Phase 6G "
-            "در هر اجرای خودکار نیز اجباری است.",
+            "⚠️ <b>فعال‌سازی انتقال خودکار</b>\n\n"
+            "پس از فعال‌سازی، انتقال فقط زمانی انجام می‌شود که اختلال منطقه‌ای با اطمینان بالا "
+            "و با تأیید مقایسه‌ای تازه تأیید شده باشد و حداقل یک سرور جایگزین آماده و سالم وجود داشته باشد.\n\n"
+            "پیش از هر انتقال، همهٔ بررسی‌های ایمنی دوباره انجام می‌شوند؛ اگر حتی یکی از شرط‌ها "
+            "تأیید نشود، هیچ تغییری در مسیر یا حساب‌ها انجام نخواهد شد.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("✅ فعال کن", callback_data="flt_auto_enable_yes")],
                 [InlineKeyboardButton("↩️ انصراف", callback_data="hp_filtering")],
@@ -16630,14 +16699,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await asyncio.to_thread(_db_update_setting, 'phase6h_standby_readiness_state', '')
         spawn_bg_task(_standby_readiness_tick(context.application))
         await query.message.reply_text(
-            "✅ Automatic Filtering Failover فعال شد. V119-C اکنون Warm Standby readiness را هم به‌صورت پیوسته بررسی می‌کند."
+            "✅ انتقال خودکار فعال شد. وضعیت سرورهای جایگزین به‌صورت پیوسته بررسی می‌شود."
         )
         await _render_filtering_monitor_panel(query)
 
     elif d == "flt_auto_disable" and role == 'admin':
         await asyncio.to_thread(_db_update_setting, 'phase6h_auto_failover_enabled', '0')
         await asyncio.to_thread(_db_update_setting, 'phase6h_standby_readiness_state', 'DISABLED')
-        await query.message.reply_text("🛑 Automatic Filtering Failover غیرفعال شد؛ Monitoring همچنان فعال است.")
+        await query.message.reply_text("🛑 انتقال خودکار غیرفعال شد؛ پایش اختلال همچنان فعال است.")
         await _render_filtering_monitor_panel(query)
 
     elif d.startswith("flt_page_") and role == 'admin':
@@ -16658,34 +16727,34 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d.startswith("flt_check_") and role == 'admin':
         host = d[len("flt_check_"):]
         await query.edit_message_text(
-            f"⏳ در حال Regional Probe برای <code>{esc(host)}</code>...",
+            f"⏳ در حال بررسی دسترسی منطقه‌ای <code>{esc(host)}</code>...",
             parse_mode="HTML",
         )
         result = await _regional_filter_probe_one_now(context.application, host)
         if result.get("status") == PROVIDER_STATUS_LIMITED:
             mins = max(1, int(result.get("backoff_seconds", 0)) // 60)
             await query.message.reply_text(
-                f"⚠️ Check-Host در Backoff است؛ حدود {mins} دقیقه دیگر دوباره تست کنید."
+                f"⚠️ سرویس بررسی منطقه‌ای موقتاً محدود شده است؛ حدود {mins} دقیقه دیگر دوباره تست کنید."
             )
         elif result.get("status") == PROVIDER_STATUS_ERROR:
             await query.message.reply_text(
-                f"⚠️ Provider error: {result.get('error', 'unknown')}"
+                f"⚠️ خطا در سرویس بررسی منطقه‌ای: {result.get('error', 'نامشخص')}"
             )
         elif result.get("status") == "SKIPPED_CORE":
-            await query.message.reply_text("ℹ️ Core هدف Filtering Probe نیست.")
+            await query.message.reply_text("ℹ️ سرور هسته در این بررسی منطقه‌ای ارزیابی نمی‌شود.")
         await _render_filtering_edge_detail(query, host)
 
     elif d.startswith("flt_failover_confirm_") and role == 'admin':
         payload = d[len("flt_failover_confirm_"):]
         source_host, sep, target_host = payload.partition("_")
         if not sep or not source_host or not target_host:
-            await query.message.reply_text("❌ Failover callback نامعتبر است.")
+            await query.message.reply_text("❌ درخواست انتقال نامعتبر است.")
             return
         await query.edit_message_text(
-            "⏳ <b>Safe Manual Failover شروع شد.</b>\n\n"
-            f"Source: <code>{esc(source_host)}</code>\n"
-            f"Target: <code>{esc(target_host)}</code>\n\n"
-            "نتیجهٔ هر مرحله و وضعیت نهایی برای ادمین‌ها ارسال می‌شود.",
+            "⏳ <b>انتقال دستی امن شروع شد.</b>\n\n"
+            f"مبدأ: <code>{esc(source_host)}</code>\n"
+            f"مقصد: <code>{esc(target_host)}</code>\n\n"
+            "نتیجهٔ نهایی پس از انجام بررسی‌های ایمنی ارسال می‌شود.",
             parse_mode="HTML",
         )
         spawn_bg_task(
@@ -18624,7 +18693,7 @@ async def _safe_manual_failover(
 ):
     """Shared Phase 6G/6H lock-protected, scoped and rollback-aware failover engine."""
     automatic = mode == FAILOVER_MODE_AUTO
-    failover_label = "Automatic Filtering Failover" if automatic else "Safe Manual Failover"
+    failover_label = "انتقال خودکار" if automatic else "انتقال دستی امن"
     if incident_id:
         failover_label += f" [{incident_id}]"
     operation_id, busy_operation_id = await asyncio.to_thread(
@@ -18636,9 +18705,9 @@ async def _safe_manual_failover(
     if not operation_id:
         await _notify_admins(
             app,
-            f"⛔️ <b>Failover دیگری در حال اجراست.</b>\n"
-            f"Operation ID: <code>{busy_operation_id}</code>\n"
-            "تا پایان آن عملیات، Failover جدید شروع نمی‌شود."
+            "⛔️ <b>یک انتقال دیگر در حال اجراست.</b>\n"
+            f"شناسه عملیات: <code>{busy_operation_id}</code>\n"
+            "تا پایان آن عملیات، انتقال جدید شروع نمی‌شود."
         )
         return {"ok": False, "reason": "FAILOVER_BUSY", "operation_id": busy_operation_id}
 
@@ -18669,10 +18738,10 @@ async def _safe_manual_failover(
             await _notify_admins(
                 app,
                 f"⛔️ <b>{failover_label} شروع نشد.</b>\n\n"
-                f"Source: <code>{esc(source_host)}</code>\n"
-                f"Target: <code>{esc(target_host)}</code>\n"
-                f"Preflight: <code>{esc(' | '.join(errors))}</code>\n\n"
-                "هیچ DB/DNS/Account تغییری انجام نشد."
+                f"مبدأ: <code>{esc(source_host)}</code>\n"
+                f"مقصد: <code>{esc(target_host)}</code>\n"
+                f"نتیجه بررسی ایمنی: <code>{esc(' | '.join(errors))}</code>\n\n"
+                "هیچ تغییری در حساب‌ها، دیتابیس یا مسیر دامنه انجام نشد."
             )
             return {"ok": False, "reason": "PREFLIGHT_FAILED", "errors": errors, "operation_id": operation_id}
 
@@ -18838,10 +18907,10 @@ async def _safe_manual_failover(
                 )
                 await _notify_admins(
                     app,
-                    "🚨 <b>Failover نیازمند بررسی فوری است.</b>\n"
-                    "سوییچ نهایی DNS شکست خورد و بازگردانی مسیر به Core هم تأیید نشد.\n"
-                    f"Operation: <code>{operation_id}</code>\n"
-                    "برای جلوگیری از split-brain، DB/default روی Target نگه داشته شد."
+                    "🚨 <b>انتقال نیازمند بررسی فوری است.</b>\n"
+                    "تغییر نهایی مسیر دامنه ناموفق بود و بازگردانی مسیر به سرور هسته نیز تأیید نشد.\n"
+                    f"شناسه عملیات: <code>{operation_id}</code>\n"
+                    "برای جلوگیری از ناسازگاری، وضعیت داخلی روی سرور مقصد حفظ شد."
                 )
                 return {
                     "ok": False,
@@ -18874,9 +18943,9 @@ async def _safe_manual_failover(
                 )
                 await _notify_admins(
                     app,
-                    "🚨 <b>Failover نیازمند بررسی فوری است.</b>\n"
-                    "مسیر به Core برگشت، اما rollback دیتابیس کامل نشد.\n"
-                    f"Operation: <code>{operation_id}</code>"
+                    "🚨 <b>انتقال نیازمند بررسی فوری است.</b>\n"
+                    "مسیر به سرور هسته برگشت، اما بازگردانی دیتابیس کامل نشد.\n"
+                    f"شناسه عملیات: <code>{operation_id}</code>"
                 )
                 return {"ok": False, "reason": "ROLLBACK_FAILED", "operation_id": operation_id}
 
@@ -18895,12 +18964,12 @@ async def _safe_manual_failover(
             )
             await _notify_admins(
                 app,
-                "⚠️ <b>Failover نهایی نشد؛ مسیر و DB rollback شدند.</b>\n\n"
-                f"Source: <code>{esc(source_host)}</code>\n"
-                f"Target: <code>{esc(target_host)}</code>\n"
-                f"Operation: <code>{operation_id}</code>\n"
-                "دامنه روی Core fallback تأیید شد و اکانت‌ها/default به state قبل برگشتند.\n"
-                f"DNS error: <code>{esc(dns_msg)}</code>"
+                "⚠️ <b>انتقال نهایی نشد؛ وضعیت قبلی بازیابی شد.</b>\n\n"
+                f"مبدأ: <code>{esc(source_host)}</code>\n"
+                f"مقصد: <code>{esc(target_host)}</code>\n"
+                f"شناسه عملیات: <code>{operation_id}</code>\n"
+                "مسیر دامنه روی سرور هسته تأیید شد و حساب‌ها به وضعیت قبلی برگشتند.\n"
+                f"خطای تغییر مسیر: <code>{esc(dns_msg)}</code>"
             )
             return {"ok": False, "reason": "FINAL_DNS_FAILED_ROLLED_BACK", "operation_id": operation_id}
 
@@ -18925,12 +18994,12 @@ async def _safe_manual_failover(
         await _notify_admins(
             app,
             f"✅ <b>{failover_label} با موفقیت کامل شد.</b>\n\n"
-            f"Operation: <code>{operation_id}</code>\n"
-            f"Source: <code>{esc(source_host)}</code>\n"
-            f"Target: <code>{esc(target_host)}</code>\n"
-            f"Accounts moved: <b>{moved_count}</b>\n"
-            f"DNS: <code>{esc(core_public_ip)}</code> → <code>{esc(target_host)}</code>\n\n"
-            "اکانت‌های Edgeهای دیگر دست‌نخورده باقی ماندند."
+            f"شناسه عملیات: <code>{operation_id}</code>\n"
+            f"مبدأ: <code>{esc(source_host)}</code>\n"
+            f"مقصد: <code>{esc(target_host)}</code>\n"
+            f"حساب‌های منتقل‌شده: <b>{moved_count}</b>\n"
+            f"مسیر دامنه: <code>{esc(core_public_ip)}</code> → <code>{esc(target_host)}</code>\n\n"
+            "حساب‌های سایر سرورها بدون تغییر باقی ماندند."
         )
         return {
             "ok": True,
@@ -18999,29 +19068,29 @@ async def _safe_manual_failover(
         await _notify_admins(
             app,
             f"❌ <b>{failover_label} متوقف شد.</b>\n\n"
-            f"Operation: <code>{operation_id}</code>\n"
-            f"Source: <code>{esc(source_host)}</code>\n"
-            f"Target: <code>{esc(target_host)}</code>\n"
-            f"Error: <code>{esc(str(exc)[:1200])}</code>\n"
+            f"شناسه عملیات: <code>{operation_id}</code>\n"
+            f"مبدأ: <code>{esc(source_host)}</code>\n"
+            f"مقصد: <code>{esc(target_host)}</code>\n"
+            f"خطا: <code>{esc(str(exc)[:1200])}</code>\n"
             + (
-                f"🚨 DB rollback error: <code>{esc(rollback_error)}</code>\n"
+                f"🚨 خطا در بازگردانی دیتابیس: <code>{esc(rollback_error)}</code>\n"
                 if rollback_error else
                 (
-                    "⚠️ DB/default روی Target نگه داشته شد تا با مسیر نهایی ناسازگار نشود.\n"
+                    "⚠️ وضعیت داخلی روی سرور مقصد حفظ شد تا با مسیر نهایی ناسازگار نشود.\n"
                     if retained_target_state else
-                    "✅ DB در state قبلی است.\n"
+                    "✅ دیتابیس در وضعیت قبلی است.\n"
                 )
             )
             + (
-                f"🚨 Core route recovery error: <code>{esc(route_recovery_error)}</code>"
+                f"🚨 خطا در بازیابی مسیر هسته: <code>{esc(route_recovery_error)}</code>"
                 if route_recovery_error else
                 (
-                    f"✅ مسیر Target فعال باقی مانده است: <code>{esc(target_host)}</code>"
+                    f"✅ مسیر سرور مقصد فعال باقی مانده است: <code>{esc(target_host)}</code>"
                     if retained_target_state and target_route_active else
                     (
-                        f"🛟 مسیر امن فعلی: Core <code>{esc(core_public_ip)}</code>"
+                        f"🛟 مسیر امن فعلی: سرور هسته <code>{esc(core_public_ip)}</code>"
                         if core_public_ip else
-                        "⚠️ وضعیت DNS/Core باید دستی بررسی شود."
+                        "⚠️ وضعیت مسیر دامنه و سرور هسته باید دستی بررسی شود."
                     )
                 )
             )
@@ -19484,11 +19553,11 @@ async def _notify_filter_state_transition(app, host, recompute_result, regional_
         await _notify_incident_once(
             app,
             incident,
-            "🟢 <b>Incident بسته شد — دسترسی منطقه‌ای بازیابی شد</b>\n\n"
-            f"Incident: <code>{esc(incident['incident_id'])}</code>\n"
-            f"Edge: <code>{esc(host)}</code>\n"
-            f"Regional: <b>{summary.successful_nodes}/{summary.completed_nodes} reachable</b>\n"
-            "وضعیت فیلترینگ به <b>CLEAR</b> برگشت."
+            "🟢 <b>اختلال پایان یافت — دسترسی منطقه‌ای بازیابی شد</b>\n\n"
+            f"شناسه رخداد: <code>{esc(incident['incident_id'])}</code>\n"
+            f"سرور: <code>{esc(host)}</code>\n"
+            f"گره‌های در دسترس: <b>{summary.successful_nodes}/{summary.completed_nodes}</b>\n"
+            "وضعیت دسترسی منطقه‌ای دوباره سالم است."
         )
         return
 
@@ -19505,10 +19574,6 @@ async def _notify_filter_state_transition(app, host, recompute_result, regional_
     if state == FILTER_STATE_UNKNOWN and not existing:
         return
 
-    # Once failover policy/engine has taken ownership of the incident state, fresh
-    # repeated filtering evidence must not bounce it back to FILTER_CONFIRMED every
-    # minute. Preserve the operational state/reason until a real recovery, a changed
-    # failover decision, or a new failover attempt occurs.
     operational_states = {
         INCIDENT_STATE_FAILOVER_BLOCKED,
         INCIDENT_STATE_FAILOVER_STARTED,
@@ -19579,11 +19644,11 @@ async def _notify_filter_state_transition(app, host, recompute_result, regional_
         )
 
     if incident["state"] == INCIDENT_STATE_FILTER_CONFIRMED:
-        title = "🔴 <b>فیلترینگ Default Edge تأیید شد</b>"
+        title = "🔴 <b>اختلال منطقه‌ای سرور اصلی تأیید شد</b>"
     elif incident["state"] == INCIDENT_STATE_EVIDENCE_DEGRADED:
-        title = "⚪️ <b>Evidence حادثه نامطمئن شد</b>"
+        title = "⚪️ <b>اطلاعات فعلی برای تصمیم قطعی کافی نیست</b>"
     elif incident["state"] == "CONFIRMING":
-        title = "🟠 <b>فیلترینگ در حال تأیید سریع است</b>"
+        title = "🟠 <b>اختلال در حال بررسی تکمیلی است</b>"
     else:
         title = "🟡 <b>اختلال منطقه‌ای مشکوک شناسایی شد</b>"
 
@@ -19597,31 +19662,31 @@ async def _notify_filter_state_transition(app, host, recompute_result, regional_
         app,
         incident,
         f"{title}\n\n"
-        f"Incident: <code>{esc(incident['incident_id'])}</code>\n"
-        f"Edge: <code>{esc(host)}</code>\n"
-        f"Incident State: <b>{esc(incident['state'])}</b>\n"
-        f"Reason: <code>{esc(incident['last_reason'])}</code>\n"
-        f"Filtering: <b>{esc(state)} / {esc(confidence)}</b>\n"
-        f"Confirmation: <b>{failure_streak}/{EDGE_FILTER_CONFIRM_THRESHOLD}</b>\n"
-        f"Regional: <b>{summary.failed_nodes}/{summary.completed_nodes} failed</b>\n"
-        f"Failed ASN: <code>{esc(failed_asns)}</code>\n"
-        f"Failed City: <code>{esc(failed_cities)}</code>\n"
-        f"External(Core→Edge): {_probe_state_text(ph.get('external_service_ok'))}\n"
+        f"شناسه رخداد: <code>{esc(incident['incident_id'])}</code>\n"
+        f"سرور: <code>{esc(host)}</code>\n"
+        f"وضعیت: <b>{_filter_state_label_fa(state)}</b>\n"
+        f"اطمینان: <b>{_confidence_label_fa(confidence)}</b>\n"
+        f"تأییدهای متوالی: <b>{failure_streak}/{EDGE_FILTER_CONFIRM_THRESHOLD}</b>\n"
+        f"گره‌های ناموفق: <b>{summary.failed_nodes}/{summary.completed_nodes}</b>\n"
+        f"ASNهای ناموفق: <code>{esc(failed_asns)}</code>\n"
+        f"شهرهای ناموفق: <code>{esc(failed_cities)}</code>\n"
+        f"دسترسی بیرونی: {_probe_state_text(ph.get('external_service_ok'))}\n"
         f"WireGuard: {_probe_state_text(ph.get('wg_peer_ok'))}\n"
-        f"Core path: {_probe_state_text(ph.get('core_path_ok'))}\n\n"
+        f"مسیر هسته: {_probe_state_text(ph.get('core_path_ok'))}\n\n"
         + (
-            "🤖 Auto Failover روشن است؛ پس از تأیید کامل Safety Gateها فوراً ارزیابی می‌شود."
+            "🤖 انتقال خودکار روشن است؛ پس از تکمیل تأیید مقایسه‌ای و بررسی‌های ایمنی ارزیابی می‌شود."
             if auto_enabled else
-            "ℹ️ Auto Failover خاموش است؛ Incident ثبت می‌شود اما انتقال خودکار انجام نمی‌شود."
+            "ℹ️ انتقال خودکار خاموش است؛ رخداد ثبت می‌شود اما جابه‌جایی خودکار انجام نمی‌شود."
         )
     )
 
+
 def _probe_state_text(value):
     if value is True:
-        return "✅ UP"
+        return "✅ سالم"
     if value is False:
-        return "❌ DOWN"
-    return "⚪ UNKNOWN"
+        return "❌ قطع"
+    return "⚪ نامشخص"
 
 
 async def _regional_provider_enter_limited(app, host, error):
@@ -19660,10 +19725,10 @@ async def _regional_provider_enter_limited(app, host, error):
         )
         await _notify_admins(
             app,
-            "⚠️ <b>Regional Probe موقتاً محدود شد</b>\n\n"
-            "Check-Host پاسخ <code>limit_exceeded</code> داده است. "
-            f"برای جلوگیری از فشار بیشتر، probeها حدود {max(1, seconds // 60)} دقیقه متوقف می‌شوند.\n"
-            "این وضعیت <b>فیلترینگ Edge محسوب نمی‌شود</b> و state قبلی حفظ می‌شود."
+            "⚠️ <b>بررسی منطقه‌ای موقتاً محدود شد</b>\n\n"
+            "سرویس بررسی بیرونی موقتاً محدودیت درخواست اعمال کرده است. "
+            f"برای جلوگیری از فشار بیشتر، بررسی‌ها حدود {max(1, seconds // 60)} دقیقه متوقف می‌شوند.\n"
+            "این وضعیت به معنی فیلترشدن سرور نیست و آخرین نتیجهٔ معتبر حفظ می‌شود."
         )
     return seconds
 
@@ -19724,14 +19789,14 @@ async def _regional_provider_enter_error(app, host, provider_name, error):
         )
         await _notify_admins(
             app,
-            "🟠 <b>Regional Provider ناپایدار است</b>\n\n"
+            "🟠 <b>سرویس بررسی منطقه‌ای ناپایدار است</b>\n\n"
             f"{incident_line}"
-            f"Provider: <code>{esc(provider_name)}</code>\n"
+            f"سرویس: <code>{esc(provider_name)}</code>\n"
             f"Edge: <code>{esc(host)}</code>\n"
-            f"Consecutive errors: <b>{error_streak}</b>\n"
-            f"Error: <code>{esc(str(error)[:500])}</code>\n\n"
-            "این خطا <b>فیلترینگ Edge محسوب نمی‌شود</b> و آخرین Evidence معتبر حفظ شده است. "
-            "هشدار فقط پس از خطاهای متوالی و با cooldown ارسال می‌شود."
+            f"خطاهای متوالی: <b>{error_streak}</b>\n"
+            f"خطا: <code>{esc(str(error)[:500])}</code>\n\n"
+            "این خطا به معنی فیلترشدن سرور نیست و آخرین نتیجهٔ معتبر حفظ می‌شود. "
+            "هشدار فقط پس از چند خطای متوالی ارسال می‌شود."
         )
 
 
@@ -19781,10 +19846,10 @@ async def _regional_provider_mark_ok(app, regional_decision=None):
     if previous_status in {PROVIDER_STATUS_LIMITED, PROVIDER_STATUS_ERROR}:
         await _notify_admins(
             app,
-            "✅ <b>Regional Provider پایدار شد</b>\n"
-            f"Provider: <code>{esc(REGIONAL_PROBE_PROVIDER_NAME)}</code>\n"
-            f"Valid successes: <b>{success_streak}</b>\n"
-            "پایش منطقه‌ای پس از Evidence معتبر متوالی دوباره در وضعیت عادی قرار گرفت."
+            "✅ <b>سرویس بررسی منطقه‌ای دوباره پایدار شد</b>\n"
+            f"سرویس: <code>{esc(REGIONAL_PROBE_PROVIDER_NAME)}</code>\n"
+            f"بررسی‌های موفق متوالی: <b>{success_streak}</b>\n"
+            "پایش منطقه‌ای دوباره در وضعیت عادی قرار گرفت."
         )
     return True
 
@@ -20112,32 +20177,37 @@ async def _publish_standby_readiness_state(app, configured, ready, health_map):
     if state == READINESS_NO_STANDBY:
         await _notify_admins(
             app,
-            "🔴 <b>Auto Failover بدون Standby آماده است</b>\n\n"
-            "Auto Failover روشن است اما هیچ Standby تعریف نشده است.\n"
-            "در صورت تأیید فیلترینگ، سیستم Target امنی برای انتقال نخواهد داشت.\n\n"
-            "Status: <code>NO_STANDBY</code>",
+            "🔴 <b>سرور جایگزین تعریف نشده است</b>\n\n"
+            "انتقال خودکار روشن است، اما هیچ سرور جایگزینی تعریف نشده است. "
+            "در صورت تأیید اختلال، سیستم مقصد امنی برای انتقال نخواهد داشت.",
         )
     elif state == READINESS_NO_READY:
         detail_lines = []
         for host, failures in diagnostics.items():
+            readable = "، ".join(
+                standby_failure_label_fa(item) for item in failures
+            )
             detail_lines.append(
-                f"• <code>{esc(host)}</code>: <code>{esc(', '.join(failures))}</code>"
+                f"• <code>{esc(host)}</code>: {esc(readable)}"
             )
         await _notify_admins(
             app,
-            "🟠 <b>هیچ Safe Standby آماده نیست</b>\n\n"
-            f"Configured Standby: <b>{len(configured)}</b>\n"
-            "Ready Standby: <b>0</b>\n\n"
-            + ("\n".join(detail_lines[:5]) or "دلیل دقیق readiness در لاگ ثبت شد.")
-            + "\n\nتا رفع این وضعیت، Auto Failover به‌صورت fail-closed متوقف می‌شود.",
+            "🟠 <b>هیچ سرور جایگزین آماده‌ای وجود ندارد</b>\n\n"
+            f"سرورهای جایگزین تعریف‌شده: <b>{len(configured)}</b>\n"
+            "سرور آماده: <b>0</b>\n\n"
+            + ("\n".join(detail_lines[:5]) or "جزئیات بیشتر در گزارش داخلی ثبت شد.")
+            + "\n\nتا برطرف‌شدن این وضعیت، انتقال خودکار انجام نمی‌شود.",
         )
-    elif state == READINESS_READY and previous in {READINESS_NO_STANDBY, READINESS_NO_READY}:
+    elif state == READINESS_READY and previous in {
+        READINESS_NO_STANDBY,
+        READINESS_NO_READY,
+    }:
         await _notify_admins(
             app,
-            "🟢 <b>Safe Standby دوباره آماده است</b>\n\n"
-            f"Ready: <b>{len(ready)}/{len(configured)}</b>\n"
-            f"Candidate: <code>{esc(ready[0])}</code>\n"
-            "Automatic Filtering Failover دوباره Target امن در اختیار دارد.",
+            "🟢 <b>سرور جایگزین آماده است</b>\n\n"
+            f"آماده: <b>{len(ready)}/{len(configured)}</b>\n"
+            f"اولین گزینه: <code>{esc(ready[0])}</code>\n"
+            "در صورت تأیید اختلال و عبور از بررسی‌های ایمنی، انتقال خودکار امکان‌پذیر است.",
         )
     return state
 
@@ -20474,23 +20544,25 @@ async def _incident_mark_failover_blocked(
 
     rejection_lines = []
     for standby, failures in rejected.items():
+        readable = "، ".join(
+            standby_failure_label_fa(item) for item in failures
+        ) or "شرایط ایمنی کامل نیست"
         rejection_lines.append(
-            f"• <code>{esc(standby)}</code>: <code>{esc(', '.join(failures) or 'UNKNOWN')}</code>"
+            f"• <code>{esc(standby)}</code>: {esc(readable)}"
         )
     rejection_text = "\n".join(rejection_lines[:5])
     if rejection_text:
-        rejection_text = "\n\n<b>Standby rejection:</b>\n" + rejection_text
+        rejection_text = "\n\n<b>دلایل آماده نبودن سرورهای جایگزین:</b>\n" + rejection_text
 
     await _notify_incident_once(
         app,
         updated,
-        "⛔️ <b>Auto Failover انجام نشد</b>\n\n"
-        f"Incident: <code>{esc(updated['incident_id'])}</code>\n"
-        f"Source: <code>{esc(source_host or 'NOT_DEFINED')}</code>\n"
-        f"Reason: <code>{esc(reason)}</code>\n"
-        f"توضیح: {esc(reason_label_fa(reason))}\n"
-        f"Standby configured: <b>{len(standbys)}</b>\n"
-        f"Safe Standby: <b>{len(safe_candidates)}</b>"
+        "⛔️ <b>انتقال خودکار انجام نشد</b>\n\n"
+        f"شناسه رخداد: <code>{esc(updated['incident_id'])}</code>\n"
+        f"سرور مبدأ: <code>{esc(source_host or 'تعریف‌نشده')}</code>\n"
+        f"علت: {esc(reason_label_fa(reason))}\n"
+        f"سرور جایگزین تعریف‌شده: <b>{len(standbys)}</b>\n"
+        f"سرور جایگزین آماده: <b>{len(safe_candidates)}</b>"
         f"{rejection_text}"
     )
 
@@ -20538,11 +20610,11 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
                 await _notify_incident_once(
                     app,
                     updated,
-                    "⛔️ <b>Failover امکان‌پذیر نیست</b>\n\n"
-                    f"Incident: <code>{esc(updated['incident_id'])}</code>\n"
-                    "Default Edge: <b>تعریف نشده</b> ❌\n"
-                    f"Reason: <code>{reason}</code>\n"
-                    "فیلترینگ/اختلال قبلاً ثبت شده، اما بدون Default Edge منبع انتقال قابل تعیین نیست."
+                    "⛔️ <b>انتقال خودکار امکان‌پذیر نیست</b>\n\n"
+                    f"شناسه رخداد: <code>{esc(updated['incident_id'])}</code>\n"
+                    "سرور اصلی: <b>تعریف نشده</b> ❌\n"
+                    f"علت: {esc(reason_label_fa(reason))}\n"
+                    "اختلال ثبت شده است، اما بدون سرور اصلی، مبدأ انتقال قابل تعیین نیست."
                 )
         return {"eligible": False, "reason": "NO_DEFAULT_SOURCE"}
 
@@ -20579,6 +20651,32 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
             if host in active_set
         )
     provider_runtime = await asyncio.to_thread(_db_get_regional_provider_runtime)
+    differential = await asyncio.to_thread(
+        _db_get_latest_differential_confirmation,
+        source_host,
+    )
+    differential_request_id = str(
+        differential.get("source_request_id") if differential else ""
+    )
+    current_regional_request_id = str(
+        source_health.get("regional_last_request_id") or ""
+    )
+    differential_matches_current_round = bool(
+        differential_request_id
+        and current_regional_request_id
+        and differential_request_id == current_regional_request_id
+    )
+    differential_confirmed = bool(
+        differential
+        and differential.get("confirmed")
+        and differential_matches_current_round
+    )
+    differential_age = (
+        _regional_provider_timestamp_age_seconds(differential.get("checked_at"))
+        if differential else None
+    )
+    if differential_age is None:
+        differential_age = float("inf")
     switch_age = await asyncio.to_thread(_db_seconds_since_last_ip_switch)
     attempt_age = await asyncio.to_thread(_db_seconds_since_auto_failover_attempt)
 
@@ -20589,6 +20687,9 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
         filter_state=source_health.get("filter_state"),
         filter_confidence=source_health.get("filter_confidence"),
         diagnostic_reason=source_health.get("diagnostic_reason"),
+        differential_confirmed=differential_confirmed,
+        differential_age_seconds=differential_age,
+        differential_max_age_seconds=DIFFERENTIAL_CONFIRMATION_MAX_AGE_SECONDS,
         failure_streak=source_health.get("filter_consecutive_failures", 0),
         confirm_threshold=EDGE_FILTER_CONFIRM_THRESHOLD,
         provider_status=provider_runtime.get("status"),
@@ -20629,10 +20730,19 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
             configured_standbys=len(standbys),
             active_standbys=len(active_standbys),
             safe_standbys=len(safe_candidates),
+            differential_confirmed=differential_confirmed,
+            differential_age_seconds=differential_age,
+            differential_verdict=differential.get("verdict") if differential else None,
+            differential_matches_current_round=differential_matches_current_round,
         )
         if filter_confirmed and incident:
             extra = {
                 "provider_status": provider_runtime.get("status"),
+                "differential_confirmed": differential_confirmed,
+                "differential_age_seconds": differential_age,
+                "differential_verdict": differential.get("verdict") if differential else None,
+                "differential_control": differential.get("control_host") if differential else None,
+                "differential_matches_current_round": differential_matches_current_round,
                 "active_standby_count": len(active_standbys),
                 "switch_cooldown_remaining": max(
                     0,
@@ -20697,14 +20807,13 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
             await _notify_incident_once(
                 app,
                 incident,
-                "🤖 <b>Automatic Filtering Failover شروع شد</b>\n\n"
-                f"Incident: <code>{esc(incident['incident_id'])}</code>\n"
-                f"Source: <code>{esc(source_host)}</code>\n"
-                f"Target Standby: <code>{esc(target_host)}</code>\n"
-                f"Evidence: <b>{esc(source_health.get('filter_state'))} / "
-                f"{esc(source_health.get('filter_confidence'))}</b>\n"
-                f"Failure streak: <b>{source_health.get('filter_consecutive_failures', 0)}</b>\n\n"
-                "Phase 6G اکنون Preflight، rebuild، DB commit، DNS handoff و rollback را کنترل می‌کند."
+                "🤖 <b>انتقال خودکار شروع شد</b>\n\n"
+                f"شناسه رخداد: <code>{esc(incident['incident_id'])}</code>\n"
+                f"مبدأ: <code>{esc(source_host)}</code>\n"
+                f"مقصد: <code>{esc(target_host)}</code>\n"
+                f"وضعیت اختلال: <b>{_filter_state_label_fa(source_health.get('filter_state'))}</b>\n"
+                f"اطمینان: <b>{_confidence_label_fa(source_health.get('filter_confidence'))}</b>\n\n"
+                "بررسی‌های ایمنی، بازسازی حساب‌ها و تغییر مسیر به‌صورت کنترل‌شده انجام می‌شوند."
             )
 
     result = await _safe_manual_failover(

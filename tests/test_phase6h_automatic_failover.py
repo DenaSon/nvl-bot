@@ -5,6 +5,8 @@ from automatic_failover import (
     AUTO_FAILOVER_REASON_ATTEMPT_COOLDOWN,
     AUTO_FAILOVER_REASON_CONFIDENCE_NOT_HIGH,
     AUTO_FAILOVER_REASON_DISABLED,
+    AUTO_FAILOVER_REASON_DIFFERENTIAL_NOT_CONFIRMED,
+    AUTO_FAILOVER_REASON_DIFFERENTIAL_STALE,
     AUTO_FAILOVER_REASON_NO_STANDBY,
     AUTO_FAILOVER_REASON_PROVIDER_NOT_OK,
     AUTO_FAILOVER_REASON_READY,
@@ -28,6 +30,9 @@ def ready_kwargs():
         filter_state="LIKELY",
         filter_confidence="HIGH",
         diagnostic_reason="FILTER_SUSPECTED",
+        differential_confirmed=True,
+        differential_age_seconds=15,
+        differential_max_age_seconds=120,
         failure_streak=3,
         confirm_threshold=3,
         provider_status="OK",
@@ -58,6 +63,23 @@ class Phase6HPolicyTests(unittest.TestCase):
         decision = evaluate_auto_failover(**kwargs)
         self.assertFalse(decision.eligible)
         self.assertEqual(decision.reason, AUTO_FAILOVER_REASON_CONFIDENCE_NOT_HIGH)
+
+    def test_differential_confirmation_is_required(self):
+        kwargs = ready_kwargs()
+        kwargs["differential_confirmed"] = False
+        decision = evaluate_auto_failover(**kwargs)
+        self.assertFalse(decision.eligible)
+        self.assertEqual(
+            decision.reason,
+            AUTO_FAILOVER_REASON_DIFFERENTIAL_NOT_CONFIRMED,
+        )
+
+    def test_stale_differential_confirmation_cannot_trigger(self):
+        kwargs = ready_kwargs()
+        kwargs["differential_age_seconds"] = 121
+        decision = evaluate_auto_failover(**kwargs)
+        self.assertFalse(decision.eligible)
+        self.assertEqual(decision.reason, AUTO_FAILOVER_REASON_DIFFERENTIAL_STALE)
 
     def test_provider_must_be_healthy(self):
         kwargs = ready_kwargs()
@@ -167,10 +189,11 @@ class Phase6HIntegrationShapeTests(unittest.TestCase):
             "async def _render_filtering_monitor_panel",
             "async def _render_filtering_edge_detail",
         )
-        self.assertIn("Filtering Monitor — Phase 6H", region)
+        self.assertIn("پایش اختلال و فیلترینگ", region)
         self.assertIn("flt_auto_enable", region)
         self.assertIn("flt_auto_disable", region)
-        self.assertIn("LIKELY + HIGH", region)
+        self.assertIn("تأیید مقایسه‌ای تازه", region)
+        self.assertNotIn("Phase 6", region)
 
     def test_admin_confirmation_is_required_to_enable_auto(self):
         region = self._region(

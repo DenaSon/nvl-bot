@@ -201,7 +201,7 @@ class ChangeServerPhase4SafetyTests(unittest.TestCase):
             {"bundle.json": "a"},
         )
         compose_running.side_effect = [False, True]
-        exists.side_effect = [False, False]
+        exists.side_effect = [False, False, False]
 
         source_executor = RecordingExecutor(OLD_IP)
         destination_executor = RecordingExecutor(NEW_IP)
@@ -228,6 +228,91 @@ class ChangeServerPhase4SafetyTests(unittest.TestCase):
         self.assertNotIn("docker compose stop", joined)
         self.assertNotIn("docker compose up", joined)
         self.assertNotIn("update hosts", joined)
+
+    @patch("server_migration.phase4.matching_host_rows", return_value=1)
+    @patch("server_migration.phase4.database_integrity", return_value="ok")
+    @patch("server_migration.phase4._exists")
+    @patch("server_migration.phase4.compose_running")
+    @patch("server_migration.phase4.verify_incoming_bundle")
+    @patch("server_migration.phase4.inspect_server")
+    def test_retry_after_cutover_rollback_allows_new_final_sync(
+        self,
+        inspect_server,
+        verify_bundle,
+        compose_running,
+        exists,
+        _integrity,
+        _rows,
+    ):
+        src = facts("source", OLD_IP)
+        dst = facts("destination", NEW_IP)
+        inspect_server.side_effect = [src, dst]
+        verify_bundle.return_value = (
+            f"/root/nvl-migrations/{JOB_ID}/incoming",
+            metadata(),
+            {"bundle.json": "a"},
+        )
+        compose_running.side_effect = [True, False]
+        # Phase 3 complete, prior Phase 4 complete, and verified cutover rollback.
+        exists.side_effect = [True, True, True]
+
+        plan, _meta, _src, _dst = build_phase4_plan(
+            RecordingExecutor(OLD_IP),
+            RecordingExecutor(NEW_IP),
+            ServerCredentials(OLD_IP, password="a"),
+            ServerCredentials(NEW_IP, password="b"),
+            job_id=JOB_ID,
+            policy=Phase4Policy(
+                mode=PHASE4_MODE_PLAN,
+                retry_after_cutover_rollback=True,
+            ),
+        )
+
+        self.assertTrue(plan.finalization_ready)
+        self.assertEqual(plan.blockers, ())
+
+    @patch("server_migration.phase4.matching_host_rows", return_value=1)
+    @patch("server_migration.phase4.database_integrity", return_value="ok")
+    @patch("server_migration.phase4._exists")
+    @patch("server_migration.phase4.compose_running")
+    @patch("server_migration.phase4.verify_incoming_bundle")
+    @patch("server_migration.phase4.inspect_server")
+    def test_retry_after_cutover_rollback_requires_rollback_marker(
+        self,
+        inspect_server,
+        verify_bundle,
+        compose_running,
+        exists,
+        _integrity,
+        _rows,
+    ):
+        src = facts("source", OLD_IP)
+        dst = facts("destination", NEW_IP)
+        inspect_server.side_effect = [src, dst]
+        verify_bundle.return_value = (
+            f"/root/nvl-migrations/{JOB_ID}/incoming",
+            metadata(),
+            {"bundle.json": "a"},
+        )
+        compose_running.side_effect = [True, False]
+        exists.side_effect = [True, True, False]
+
+        plan, _meta, _src, _dst = build_phase4_plan(
+            RecordingExecutor(OLD_IP),
+            RecordingExecutor(NEW_IP),
+            ServerCredentials(OLD_IP, password="a"),
+            ServerCredentials(NEW_IP, password="b"),
+            job_id=JOB_ID,
+            policy=Phase4Policy(
+                mode=PHASE4_MODE_PLAN,
+                retry_after_cutover_rollback=True,
+            ),
+        )
+
+        self.assertFalse(plan.finalization_ready)
+        self.assertTrue(
+            any("CUTOVER_ROLLBACK_COMPLETE" in x for x in plan.blockers)
+        )
 
     @patch("server_migration.phase4.build_phase4_plan")
     def test_finalize_requires_exact_confirmation_before_mutation(

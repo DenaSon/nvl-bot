@@ -20882,10 +20882,13 @@ async def _regional_filter_tick(app):
             # same-node Control Edge proves those failures are target-specific.
             try:
                 source_probe, source_decision = await _regional_filter_collect_raw(
+                    app,
                     host,
                     service_port,
                     provider,
                     nodes,
+                    priority=PROBE_PRIORITY_CONFIRMATION,
+                    label=f"confirm-source:{host}",
                 )
             except RegionalProbeLimited as exc:
                 await _regional_provider_enter_limited(app, host, exc)
@@ -20953,10 +20956,13 @@ async def _regional_filter_tick(app):
                     try:
                         control_probe, control_decision = (
                             await _regional_filter_collect_raw(
+                                app,
                                 control_host,
                                 control_port,
                                 provider,
                                 nodes,
+                                priority=PROBE_PRIORITY_CONFIRMATION,
+                                label=f"confirm-control:{control_host}",
                             )
                         )
                     except RegionalProbeLimited as exc:

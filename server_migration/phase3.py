@@ -81,7 +81,7 @@ def run_phase3(
             metadata,
             manifest,
         )
-        docker_archive_valid, archive_image_ids_match = inspect_docker_image_archive(
+        docker_archive_valid, archive_image_identity_verified = inspect_docker_image_archive(
             executor,
             incoming_dir,
             metadata,
@@ -125,7 +125,7 @@ def run_phase3(
                 database_integrity=database_integrity,
                 compose_valid=compose_valid,
                 docker_archive_valid=docker_archive_valid,
-                image_ids_match=archive_image_ids_match,
+                image_identity_verified=archive_image_identity_verified,
                 runtime_restored=False,
                 docker_images_loaded=False,
                 runtime_started=False,
@@ -195,7 +195,7 @@ def run_phase3(
             database_integrity=restored_integrity,
             compose_valid=compose_valid,
             docker_archive_valid=docker_archive_valid,
-            image_ids_match=archive_image_ids_match,
+            image_identity_verified=archive_image_identity_verified,
             runtime_restored=True,
             docker_images_loaded=docker_images_loaded,
             runtime_started=runtime_started,

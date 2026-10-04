@@ -9505,7 +9505,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.delete()
                 session.stage = 'DEST_HOST'
                 await _mig_prompt_for_stage(
-                    update.effective_chat,
+                    update.message,
                     context,
                     session,
                 )
@@ -9531,7 +9531,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.delete()
                 session.stage = 'HOSTNAME'
                 await _mig_prompt_for_stage(
-                    update.effective_chat,
+                    update.message,
                     context,
                     session,
                 )

@@ -75,6 +75,14 @@ def main() -> int:
         action="store_true",
         help="leave destination stopped after final DB sync",
     )
+    parser.add_argument(
+        "--retry-after-cutover-rollback",
+        action="store_true",
+        help=(
+            "allow a new final-sync attempt only when both FINAL_SYNC_COMPLETE "
+            "and CUTOVER_ROLLBACK_COMPLETE markers exist for this job"
+        ),
+    )
     args = parser.parse_args()
 
     selected_mode = PHASE4_MODE_FINALIZE if args.finalize else PHASE4_MODE_PLAN
@@ -99,6 +107,7 @@ def main() -> int:
         fail_on_residual_old_ip=not args.allow_residual_old_ip,
         recover_source_on_failure=not args.no_source_recovery,
         start_destination=not args.no_start_destination,
+        retry_after_cutover_rollback=args.retry_after_cutover_rollback,
     )
 
     try:

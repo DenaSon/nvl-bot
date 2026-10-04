@@ -108,7 +108,13 @@ class IncomingExecutor:
     def __init__(self, *, existing=(), image_manifest=None):
         self.existing = set(existing)
         self.commands = []
-        self.image_manifest = image_manifest or {\n            IMAGE: {\n                \"config_sha256\": \"2\" * 64,\n                \"architecture\": \"amd64\",\n                \"os\": \"linux\",\n            }\n        }
+        self.image_manifest = image_manifest or {
+            IMAGE: {
+                "config_sha256": "2" * 64,
+                "architecture": "amd64",
+                "os": "linux",
+            }
+        }
 
     def run(self, command, timeout=None):
         self.commands.append(command)

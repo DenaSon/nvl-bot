@@ -332,7 +332,7 @@ from standby_readiness import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V121E-2026-10-04-failover-simulation"
+BOT_VERSION_TAG = "V121F-2026-10-04-programs-marzban-transfer-ui"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -6455,6 +6455,99 @@ async def require_login(update):
 
 PORTAL_DISPLAY_NAME = "NeVeL"  # 🔒 نام ثابت پورتال و مدیریت — با تغییر «نام برند» در تنظیمات عوض نمی‌شود
 
+def _build_admin_programs_kb():
+    """Top-level operational tools available only to NVL administrators."""
+    return [
+        [InlineKeyboardButton(
+            "🚚 انتقال سرور Marzban",
+            callback_data="apps_marzban_transfer",
+        )],
+        [InlineKeyboardButton(
+            "🏠 منوی اصلی",
+            callback_data="uact_back_to_menu",
+        )],
+    ]
+
+
+async def _show_admin_programs_hub(target, context):
+    if context.user_data.get('role') != 'admin':
+        text = "⛔️ دسترسی به برنامه‌های مدیریتی فقط برای مدیر مجاز است."
+        if hasattr(target, 'edit_message_text'):
+            await target.edit_message_text(text)
+        else:
+            await target.reply_text(text)
+        return
+
+    context.user_data.pop('state', None)
+    text = (
+        "🧩 <b>برنامه‌های مدیریتی NVL</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        "ابزارهای عملیاتی و سطح‌سیستم در این بخش قرار می‌گیرند.\n\n"
+        "🚚 <b>انتقال سرور Marzban</b>\n"
+        "مهاجرت کنترل‌شده Marzban به سرور جدید با مسیر امن "
+        "Preflight → Backup → Restore → Final Sync → Cutover."
+    )
+    markup = InlineKeyboardMarkup(_build_admin_programs_kb())
+    if hasattr(target, 'edit_message_text'):
+        await target.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
+    else:
+        await target.reply_text(text, reply_markup=markup, parse_mode="HTML")
+
+
+async def _show_marzban_transfer_entry(target, context):
+    if context.user_data.get('role') != 'admin':
+        text = "⛔️ دسترسی به انتقال سرور Marzban فقط برای مدیر مجاز است."
+        if hasattr(target, 'edit_message_text'):
+            await target.edit_message_text(text)
+        else:
+            await target.reply_text(text)
+        return
+
+    context.user_data.pop('state', None)
+    marzban_url = await asyncio.to_thread(
+        _db_get_setting,
+        'marzban_url',
+        '',
+    )
+    cf_ready = bool(CLOUDFLARE_API_TOKEN)
+
+    marzban_line = (
+        f"<code>{esc(marzban_url)}</code>"
+        if marzban_url
+        else "تنظیم نشده ⚠️"
+    )
+    cf_line = "آماده ✅" if cf_ready else "تنظیم نشده ⚠️"
+
+    text = (
+        "🚚 <b>برنامه‌ها › انتقال سرور Marzban</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        "این ابزار برای انتقال امن سرور اصلی Marzban به VPS جدید طراحی شده است.\n\n"
+        f"🌐 <b>Marzban:</b> {marzban_line}\n"
+        f"☁️ <b>Cloudflare API:</b> {cf_line}\n"
+        "🛡 <b>Rollback:</b> فعال\n\n"
+        "موتور انتقال شامل Preflight، Backup/Transfer، Restore، Final Sync، "
+        "Cloudflare Cutover و Rollback است.\n\n"
+        "در گام بعدی، ویزارد امن دریافت مشخصات سرور مقصد و اجرای مرحله‌ای "
+        "مستقیماً به همین صفحه متصل می‌شود."
+    )
+    kb = [
+        [InlineKeyboardButton("↩️ برنامه‌ها", callback_data="apps_home")],
+        [InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")],
+    ]
+    if hasattr(target, 'edit_message_text'):
+        await target.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode="HTML",
+        )
+    else:
+        await target.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode="HTML",
+        )
+
+
 async def show_main_menu(update_or_query, context):
     role = context.user_data.get('role')
 
@@ -6473,7 +6566,8 @@ async def show_main_menu(update_or_query, context):
             ['🤝 نمایندگان', '📊 گزارش‌ها'],
             ['💰 مالی و کارت‌ها', '⚙️ تنظیمات'],
             ['🛡 بررسی فیلترینگ', '🛰 بررسی مرزبان'],
-            ['🛠 V2Ray / Marzban', '📦 بکاپ'],
+            ['🛠 V2Ray / Marzban', '🧩 برنامه‌ها'],
+            ['📦 بکاپ'],
         ]
         if chat_id == SUPER_ADMIN_ID:
             kb.append(['👑 تنظیمات سوپر ادمین'])
@@ -9313,7 +9407,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '➕ فروش / ساخت اشتراک', '➕ فروش اشتراک', '👥 کاربران', '👥 کاربران من',
         '🤝 نمایندگان', '📊 گزارش‌ها', '💰 مالی و کارت‌ها', '⚙️ تنظیمات',
         '🛡 بررسی فیلترینگ', '🛰 بررسی مرزبان',
-        '🛠 V2Ray / Marzban', '📦 بکاپ', '💳 شارژ حساب', '💰 کیف پول و حساب',
+        '🛠 V2Ray / Marzban', '🧩 برنامه‌ها', '🧩 برنامه ها', '📦 بکاپ',
+        '💳 شارژ حساب', '💰 کیف پول و حساب',
         '✏️ نام برند', '💳 کارت اختصاصی',
         # Backward-compatible aliases from pre-5.6 keyboards/messages
         '🛒 خرید اشتراک', '👥 مدیریت کاربران', '💼 مدیریت نماینده‌ها', '📊 آمار و لاگ',
@@ -9399,6 +9494,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         elif text == '🛰 بررسی مرزبان' and role == 'admin':
             await _render_marzban_monitor_panel(update.message)
+            return
+        elif text in ('🧩 برنامه‌ها', '🧩 برنامه ها') and role == 'admin':
+            await _show_admin_programs_hub(update.message, context)
             return
         elif text in ('⚙️ تنظیمات', '⚙️ تنظیمات سرور') and role == 'admin':
             kb = _build_server_settings_kb()
@@ -12535,6 +12633,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("⛔️ دسترسی به مدیریت کاربران برای این نقش مجاز نیست.")
         return
 
+    # 🧩 Programs callbacks are strictly admin-only.
+    if d.startswith('apps_') and role != 'admin':
+        await query.message.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+
     # 🛠 Marzban admin callbacks are strictly admin-only.
     if d.startswith('mza_') and role != 'admin':
         await query.message.reply_text("⛔️ دسترسی غیرمجاز.")
@@ -12605,6 +12708,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not _ok_access:
             await query.message.reply_text("⛔️ شما مجاز به مشاهده/مدیریت این اکانت نیستید.")
             return
+
+    # ---------------- Programs / operational tools ----------------
+    if d == 'apps_home':
+        await _show_admin_programs_hub(query, context)
+        return
+    elif d == 'apps_marzban_transfer':
+        await _show_marzban_transfer_entry(query, context)
+        return
 
     # ---------------- Marzban Admin Dashboard ----------------
     if d == 'mza_home':

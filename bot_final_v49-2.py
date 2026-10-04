@@ -579,11 +579,16 @@ HOST_HEALTH_GRACE_PERIOD_MINUTES = 15
 
 # Phase 6C — per-Edge observability. These thresholds affect evidence/classification only;
 # they never trigger DNS switching, membership changes, promotion or customer migration.
-def _phase6c_env_int(name, default, minimum=1):
+def _phase6c_env_int(name, default, minimum=1, maximum=None):
     try:
-        return max(minimum, int(os.getenv(name, str(default))))
+        value = int(os.getenv(name, str(default)))
     except (TypeError, ValueError):
-        return int(default)
+        value = int(default)
+
+    value = max(int(minimum), value)
+    if maximum is not None:
+        value = min(max(int(minimum), int(maximum)), value)
+    return value
 
 EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS = _phase6c_env_int("NVL_OBSERVABILITY_PROBE_TIMEOUT", 3)
 WG_HANDSHAKE_MAX_AGE_SECONDS = _phase6c_env_int("NVL_WG_HANDSHAKE_MAX_AGE", 900)

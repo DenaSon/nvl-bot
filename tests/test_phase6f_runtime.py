@@ -158,7 +158,7 @@ class Phase6FBotIntegrationStaticTests(unittest.TestCase):
             region,
         )
         self.assertIn(
-            "preserve the last valid regional evidence",
+            "regional_decision.state == FILTER_STATE_UNKNOWN",
             region,
         )
         self.assertIn(
@@ -202,7 +202,7 @@ class Phase6FBotIntegrationStaticTests(unittest.TestCase):
             "async def _regional_filter_tick(app):",
             "async def _regional_filter_probe_one_now",
         )
-        self.assertIn("await _regional_provider_mark_ok(app)", tick_region)
+        self.assertIn('await _regional_provider_mark_ok(app, result.get("regional_decision"))', tick_region)
         self.assertNotIn("round_provider_ok", tick_region)
 
     def test_runtime_targets_default_and_excludes_core_before_provider_check(self):

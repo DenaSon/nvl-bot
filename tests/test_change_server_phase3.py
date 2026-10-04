@@ -108,7 +108,7 @@ class IncomingExecutor:
     def __init__(self, *, existing=(), image_manifest=None):
         self.existing = set(existing)
         self.commands = []
-        self.image_manifest = image_manifest or {IMAGE: IMAGE_ID}
+        self.image_manifest = image_manifest or {\n            IMAGE: {\n                \"config_sha256\": \"2\" * 64,\n                \"architecture\": \"amd64\",\n                \"os\": \"linux\",\n            }\n        }
 
     def run(self, command, timeout=None):
         self.commands.append(command)
@@ -202,7 +202,7 @@ class ChangeServerPhase3SafetyTests(unittest.TestCase):
         with self.assertRaises(Phase3Error):
             verify_incoming_bundle(executor, job_id=JOB_ID)
 
-    def test_docker_archive_requires_exact_image_id(self):
+    def test_docker_archive_verifies_tag_config_and_platform(self):
         executor = IncomingExecutor()
         valid, ids_match = inspect_docker_image_archive(
             executor,
@@ -210,7 +210,7 @@ class ChangeServerPhase3SafetyTests(unittest.TestCase):
             metadata(),
         )
         self.assertTrue(valid)
-        self.assertTrue(ids_match)
+        self.assertTrue(identity_verified)
 
         bad = IncomingExecutor(image_manifest={IMAGE: "0" * 64})
         with self.assertRaises(Phase3Error):

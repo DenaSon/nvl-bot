@@ -12,6 +12,7 @@ from server_migration.telegram_wizard import (
     normalize_port,
     run_backup_step,
     run_cutover_plan_step,
+    run_cutover_precheck_step,
     run_cutover_step,
     run_final_plan_step,
     run_final_sync_step,
@@ -78,6 +79,10 @@ class TelegramWizardFlowTests(unittest.TestCase):
         phase3_result = SimpleNamespace(runtime_restored=True)
         phase4_plan = SimpleNamespace(finalization_ready=True, blockers=())
         phase4_result = SimpleNamespace(api_healthy=True)
+        phase5_precheck = SimpleNamespace(
+            cutover_ready=False,
+            blockers=("Phase 4 FINAL_SYNC_COMPLETE marker is missing",),
+        )
         phase5_plan = SimpleNamespace(cutover_ready=True, blockers=())
         phase5_result = SimpleNamespace(dns_updated=True)
 
@@ -107,6 +112,9 @@ class TelegramWizardFlowTests(unittest.TestCase):
             run_final_plan_step(self.session)
             self.assertEqual(self.session.stage, "FINAL_PLAN_READY")
 
+            run_cutover_precheck_step(self.session)
+            self.assertEqual(self.session.stage, "PRE_CUTOVER_READY")
+
             run_final_sync_step(self.session)
             self.assertEqual(self.session.stage, "FINAL_SYNC_COMPLETE")
 
@@ -117,7 +125,7 @@ class TelegramWizardFlowTests(unittest.TestCase):
             self.assertEqual(self.session.stage, "CUTOVER_COMPLETE")
 
         self.assertEqual(phase4.call_count, 2)
-        self.assertEqual(phase5.call_count, 2)
+        self.assertEqual(phase5.call_count, 3)
 
     def test_stage_guards_fail_closed(self):
         self.session.stage = "SOURCE_HOST"

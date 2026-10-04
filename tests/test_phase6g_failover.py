@@ -365,7 +365,7 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
             'callback_data=f"flt_failover_{host}"',
             'd.startswith("flt_failover_pick_")',
             'd.startswith("flt_failover_confirm_")',
-            "Preflight امن",
+            "در حال بررسی ایمنی",
             "✅ تأیید و اجرا",
         ):
             self.assertIn(fragment, self.source)

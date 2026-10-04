@@ -222,18 +222,40 @@ def verify_hostname_api(
     hostname: str,
     port: int,
     timeout: float = 8.0,
-) -> bool:
+) -> tuple[bool, str]:
     url = f"https://{hostname}:{int(port)}/docs"
     request = urllib.request.Request(
         url,
-        headers={"User-Agent": "NVL-Phase5/1"},
+        headers={
+            "User-Agent": "NVL-Phase5/1",
+            "Accept": "application/json",
+        },
         method="GET",
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return 200 <= int(getattr(response, "status", 0)) < 500
-    except Exception:
-        return False
+            status = int(getattr(response, "status", 0))
+            return 200 <= status < 500, f"HTTP {status}"
+    except urllib.error.HTTPError as exc:
+        error_type = str(exc.headers.get("cf-error-type") or "").strip()
+        retry_after = str(exc.headers.get("Retry-After") or "").strip()
+        detail = f"HTTP {exc.code}"
+        if error_type:
+            detail += f" cf-error-type={error_type}"
+        if retry_after:
+            detail += f" retry-after={retry_after}"
+        try:
+            body = exc.read(1200).decode("utf-8", "replace")
+            parsed = json.loads(body)
+            if isinstance(parsed, dict):
+                name = str(parsed.get("error_name") or "").strip()
+                if name:
+                    detail += f" error_name={name}"
+        except Exception:
+            pass
+        return False, detail
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
 
 
 def verify_tcp_ports(
@@ -281,14 +303,17 @@ def wait_for_hostname_api(
     attempts: int,
     interval_seconds: float,
     timeout: float,
-) -> bool:
+) -> tuple[bool, str]:
+    last_detail = "not attempted"
     for index in range(max(1, int(attempts))):
-        if verify_hostname_api(
+        healthy, detail = verify_hostname_api(
             hostname=hostname,
             port=port,
             timeout=timeout,
-        ):
-            return True
+        )
+        last_detail = detail
+        if healthy:
+            return True, detail
         if index + 1 < max(1, int(attempts)):
             time.sleep(max(0.0, float(interval_seconds)))
-    return False
+    return False, last_detail

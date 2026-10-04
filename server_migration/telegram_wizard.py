@@ -288,8 +288,43 @@ def run_final_plan_step(session: TelegramMigrationSession):
         raise
 
 
+def run_cutover_precheck_step(session: TelegramMigrationSession):
+    """Validate Cloudflare selection before Source is stopped.
+
+    Before Phase 4 FINALIZE, Phase 5 PLAN_ONLY is expected to be blocked only
+    by the missing FINAL_SYNC_COMPLETE marker. Any other blocker must be fixed
+    before entering the downtime window.
+    """
+    _begin_step(session, {"FINAL_PLAN_READY", "PRE_CUTOVER_BLOCKED"})
+    try:
+        if not session.hostname or not session.zone_name:
+            raise TelegramWizardError("Cloudflare hostname/zone are incomplete")
+        result = run_phase5(
+            session.source_credentials(),
+            session.destination_credentials(),
+            job_id=session.job_id,
+            hostname=session.hostname,
+            zone_name=session.zone_name,
+            policy=Phase5Policy(mode=PHASE5_MODE_PLAN),
+        )
+        unexpected = tuple(
+            blocker
+            for blocker in result.blockers
+            if "FINAL_SYNC_COMPLETE" not in blocker
+        )
+        _end_step(
+            session,
+            stage="PRE_CUTOVER_READY" if not unexpected else "PRE_CUTOVER_BLOCKED",
+            result=result,
+        )
+        return result
+    except Exception as exc:
+        _end_step(session, error=exc)
+        raise
+
+
 def run_final_sync_step(session: TelegramMigrationSession):
-    _begin_step(session, {"FINAL_PLAN_READY"})
+    _begin_step(session, {"PRE_CUTOVER_READY"})
     try:
         result = run_phase4(
             session.source_credentials(),

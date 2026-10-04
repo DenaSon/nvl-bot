@@ -452,6 +452,25 @@ def activate_expired_holds(connection: sqlite3.Connection, checked_at: Optional[
 TOKEN = os.environ.get("BOT_TOKEN")
 MASTER_USER = os.environ.get("MASTER_USER")
 MASTER_PASS = os.environ.get("MASTER_PASS")
+
+# ☁️ Cloudflare API token — secret is injected by systemd EnvironmentFile.
+# Keep it server-side only: never expose it in Telegram messages, callbacks,
+# logs, subprocess arguments, or the database. Cloudflare-dependent features
+# should call require_cloudflare_api_token() at execution time and fail closed
+# if the secret is not configured.
+CLOUDFLARE_API_TOKEN_ENV = "NVL_CLOUDFLARE_API_TOKEN"
+CLOUDFLARE_API_TOKEN = (
+    os.environ.get(CLOUDFLARE_API_TOKEN_ENV) or ""
+).strip()
+
+
+def require_cloudflare_api_token():
+    token = CLOUDFLARE_API_TOKEN
+    if not token:
+        raise RuntimeError(
+            f"{CLOUDFLARE_API_TOKEN_ENV} is not configured for nvlbot.service"
+        )
+    return token
 # 🐛🔧 رفع باگِ واقعیِ «نماینده‌ها بعد از هر انتقال/ری‌استارتِ سرویس مجبور به ورود مجدد
 # می‌شدند»: مقدارهای پیش‌فرضِ زیر قبلاً مسیرِ نسبی («master_bot.db» و «bot_persistence.pickle»
 # بدونِ هیچ پوشه‌ای) بودن — یعنی محلِ واقعیِ این فایل‌ها کاملاً به WorkingDirectory سرویسِ

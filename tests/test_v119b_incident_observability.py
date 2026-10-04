@@ -122,7 +122,7 @@ class V119BIntegrationStaticTests(unittest.TestCase):
 
     def test_release_marker(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V121C-2026-10-04-differential-confirmation"',
+            'BOT_VERSION_TAG = "V121D-2026-10-04-probe-priority"',
             self.source,
         )
 

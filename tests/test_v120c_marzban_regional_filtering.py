@@ -459,7 +459,7 @@ class V120CSourceSafetyTests(unittest.TestCase):
         self.assertNotIn("62050", target_region)
         self.assertNotIn("62051", target_region)
 
-    def test_runtime_has_clean_lifecycle_and_shared_provider_lock(self):
+    def test_runtime_has_clean_lifecycle_and_low_priority_provider_coordination(self):
         init = self.bot.index("async def _post_init(app):")
         shutdown = self.bot.index("async def _post_shutdown(app):", init)
         main = self.bot.index("if __name__ == '__main__':", shutdown)
@@ -468,8 +468,10 @@ class V120CSourceSafetyTests(unittest.TestCase):
         region_start = self.bot.index("async def _marzban_regional_filter_tick")
         region_end = self.bot.index("def _db_mark_reserved_v2ray_sale", region_start)
         runtime = self.bot[region_start:region_end]
-        self.assertIn("_regional_probe_lock(app)", runtime)
-        self.assertIn('provider.discover_nodes, "ir"', runtime)
+        self.assertIn("_regional_provider_call(", runtime)
+        self.assertIn("PROBE_PRIORITY_MARZBAN", runtime)
+        self.assertIn('provider.discover_nodes,', runtime)
+        self.assertNotIn("_regional_probe_lock(app)", runtime)
 
     def test_v120c_runtime_does_not_notify_or_failover(self):
         region_start = self.bot.index("async def _marzban_regional_filter_tick")

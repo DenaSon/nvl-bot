@@ -5973,7 +5973,11 @@ async def _marzban_local_health_loop(app):
 
 
 async def _marzban_regional_filter_tick(app):
-    """V120-C regional evidence for Marzban assets; monitoring-only."""
+    """V120-C regional evidence for Marzban assets; monitoring-only.
+
+    V121-D runs each provider operation as a separate low-priority lease so Default
+    filtering work can jump ahead between Marzban targets.
+    """
     def _load():
         with db_conn() as conn:
             assets = marzban_asset_discovery.list_active_assets(conn)
@@ -5997,137 +6001,141 @@ async def _marzban_regional_filter_tick(app):
             backoff_remaining,
         )
     elif targets:
-        lock = _regional_probe_lock(app)
-        if lock.locked():
-            log.info("V120C Marzban regional probe skipped reason=PROBE_ALREADY_RUNNING")
-        else:
-            async with lock:
-                cursor = int(app.bot_data.get("marzban_regional_cursor", 0) or 0)
-                selected, next_cursor = marzban_regional.select_rotating_targets(
-                    targets,
-                    cursor,
-                    MARZBAN_REGIONAL_MAX_TARGETS_PER_CYCLE,
+        cursor = int(app.bot_data.get("marzban_regional_cursor", 0) or 0)
+        selected, next_cursor = marzban_regional.select_rotating_targets(
+            targets,
+            cursor,
+            MARZBAN_REGIONAL_MAX_TARGETS_PER_CYCLE,
+        )
+        app.bot_data["marzban_regional_cursor"] = next_cursor
+
+        try:
+            provider = _new_regional_probe_provider()
+            nodes = await _regional_provider_call(
+                app,
+                PROBE_PRIORITY_MARZBAN,
+                "marzban-node-discovery",
+                provider.discover_nodes,
+                "ir",
+            )
+            nodes = tuple(nodes[:REGIONAL_FILTER_MAX_NODES])
+            if not nodes:
+                raise RegionalProbeError("no regional nodes")
+        except RegionalProbeLimited as exc:
+            def _limited():
+                with db_conn() as conn:
+                    return marzban_regional.record_provider_limited(
+                        conn,
+                        str(exc),
+                        base_seconds=MARZBAN_REGIONAL_BACKOFF_BASE_SECONDS,
+                        max_seconds=MARZBAN_REGIONAL_BACKOFF_MAX_SECONDS,
+                    )
+            delay = await asyncio.to_thread(_limited)
+            log.warning(
+                "V120C Marzban regional provider limited backoff=%ss error=%s",
+                delay,
+                exc,
+            )
+            selected = ()
+        except (RegionalProbeError, ValueError) as exc:
+            def _provider_error():
+                with db_conn() as conn:
+                    return marzban_regional.record_provider_error(
+                        conn,
+                        str(exc),
+                        backoff_seconds=MARZBAN_REGIONAL_ERROR_BACKOFF_SECONDS,
+                    )
+            delay = await asyncio.to_thread(_provider_error)
+            log.warning(
+                "V120C Marzban regional provider error backoff=%ss error=%s",
+                delay,
+                exc,
+            )
+            selected = ()
+
+        provider_failed = False
+        for target in selected:
+            try:
+                probe = await _regional_provider_call(
+                    app,
+                    PROBE_PRIORITY_MARZBAN,
+                    f"marzban:{target.target_key}",
+                    provider.probe_tcp,
+                    target.host,
+                    target.port,
+                    nodes,
                 )
-                app.bot_data["marzban_regional_cursor"] = next_cursor
-
-                try:
-                    provider = _new_regional_probe_provider()
-                    nodes = await asyncio.to_thread(provider.discover_nodes, "ir")
-                    nodes = tuple(nodes[:REGIONAL_FILTER_MAX_NODES])
-                    if not nodes:
-                        raise RegionalProbeError("no regional nodes")
-                except RegionalProbeLimited as exc:
-                    def _limited():
-                        with db_conn() as conn:
-                            return marzban_regional.record_provider_limited(
-                                conn,
-                                str(exc),
-                                base_seconds=MARZBAN_REGIONAL_BACKOFF_BASE_SECONDS,
-                                max_seconds=MARZBAN_REGIONAL_BACKOFF_MAX_SECONDS,
-                            )
-                    delay = await asyncio.to_thread(_limited)
-                    log.warning(
-                        "V120C Marzban regional provider limited backoff=%ss error=%s",
-                        delay,
-                        exc,
-                    )
-                    selected = ()
-                except (RegionalProbeError, ValueError) as exc:
-                    def _provider_error():
-                        with db_conn() as conn:
-                            return marzban_regional.record_provider_error(
-                                conn,
-                                str(exc),
-                                backoff_seconds=MARZBAN_REGIONAL_ERROR_BACKOFF_SECONDS,
-                            )
-                    delay = await asyncio.to_thread(_provider_error)
-                    log.warning(
-                        "V120C Marzban regional provider error backoff=%ss error=%s",
-                        delay,
-                        exc,
-                    )
-                    selected = ()
-
-                provider_failed = False
-                for target in selected:
-                    try:
-                        probe = await asyncio.to_thread(
-                            provider.probe_tcp,
-                            target.host,
-                            target.port,
-                            nodes,
+            except RegionalProbeLimited as exc:
+                def _limited_target():
+                    with db_conn() as conn:
+                        marzban_regional.persist_probe_attempt_error(
+                            conn,
+                            target,
+                            PROVIDER_STATUS_LIMITED,
+                            str(exc),
                         )
-                    except RegionalProbeLimited as exc:
-                        def _limited_target():
-                            with db_conn() as conn:
-                                marzban_regional.persist_probe_attempt_error(
-                                    conn,
-                                    target,
-                                    PROVIDER_STATUS_LIMITED,
-                                    str(exc),
-                                )
-                                return marzban_regional.record_provider_limited(
-                                    conn,
-                                    str(exc),
-                                    base_seconds=MARZBAN_REGIONAL_BACKOFF_BASE_SECONDS,
-                                    max_seconds=MARZBAN_REGIONAL_BACKOFF_MAX_SECONDS,
-                                )
-                        delay = await asyncio.to_thread(_limited_target)
-                        log.warning(
-                            "V120C Marzban target limited target=%s backoff=%ss",
-                            target.target_key,
-                            delay,
+                        return marzban_regional.record_provider_limited(
+                            conn,
+                            str(exc),
+                            base_seconds=MARZBAN_REGIONAL_BACKOFF_BASE_SECONDS,
+                            max_seconds=MARZBAN_REGIONAL_BACKOFF_MAX_SECONDS,
                         )
-                        provider_failed = True
-                        break
-                    except RegionalProbeError as exc:
-                        def _error_target():
-                            with db_conn() as conn:
-                                marzban_regional.persist_probe_attempt_error(
-                                    conn,
-                                    target,
-                                    PROVIDER_STATUS_ERROR,
-                                    str(exc),
-                                )
-                                return marzban_regional.record_provider_error(
-                                    conn,
-                                    str(exc),
-                                    backoff_seconds=MARZBAN_REGIONAL_ERROR_BACKOFF_SECONDS,
-                                )
-                        delay = await asyncio.to_thread(_error_target)
-                        log.warning(
-                            "V120C Marzban target provider error target=%s backoff=%ss",
-                            target.target_key,
-                            delay,
+                delay = await asyncio.to_thread(_limited_target)
+                log.warning(
+                    "V120C Marzban target limited target=%s backoff=%ss",
+                    target.target_key,
+                    delay,
+                )
+                provider_failed = True
+                break
+            except RegionalProbeError as exc:
+                def _error_target():
+                    with db_conn() as conn:
+                        marzban_regional.persist_probe_attempt_error(
+                            conn,
+                            target,
+                            PROVIDER_STATUS_ERROR,
+                            str(exc),
                         )
-                        provider_failed = True
-                        break
+                        return marzban_regional.record_provider_error(
+                            conn,
+                            str(exc),
+                            backoff_seconds=MARZBAN_REGIONAL_ERROR_BACKOFF_SECONDS,
+                        )
+                delay = await asyncio.to_thread(_error_target)
+                log.warning(
+                    "V120C Marzban target provider error target=%s backoff=%ss",
+                    target.target_key,
+                    delay,
+                )
+                provider_failed = True
+                break
 
-                    decision = classify_regional_evidence(probe.evidence)
+            decision = classify_regional_evidence(probe.evidence)
 
-                    def _persist_success():
-                        with db_conn() as conn:
-                            marzban_regional.persist_probe_success(
-                                conn,
-                                target,
-                                probe,
-                                decision,
-                            )
-
-                    await asyncio.to_thread(_persist_success)
-                    log.info(
-                        "V120C Marzban regional result target=%s state=%s failed=%s completed=%s",
-                        target.target_key,
-                        decision.state,
-                        decision.summary.failed_nodes,
-                        decision.summary.completed_nodes,
+            def _persist_success():
+                with db_conn() as conn:
+                    marzban_regional.persist_probe_success(
+                        conn,
+                        target,
+                        probe,
+                        decision,
                     )
 
-                if selected and not provider_failed:
-                    def _provider_ok():
-                        with db_conn() as conn:
-                            marzban_regional.record_provider_ok(conn)
-                    await asyncio.to_thread(_provider_ok)
+            await asyncio.to_thread(_persist_success)
+            log.info(
+                "V120C Marzban regional result target=%s state=%s failed=%s completed=%s",
+                target.target_key,
+                decision.state,
+                decision.summary.failed_nodes,
+                decision.summary.completed_nodes,
+            )
+
+        if selected and not provider_failed:
+            def _provider_ok():
+                with db_conn() as conn:
+                    marzban_regional.record_provider_ok(conn)
+            await asyncio.to_thread(_provider_ok)
 
     def _derive_and_persist():
         with db_conn() as conn:

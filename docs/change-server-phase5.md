@@ -18,8 +18,17 @@ Required:
 - exact hostname
 - scoped Cloudflare API token
 
-The token is never accepted as a normal CLI argument. The CLI reads it from a
-hidden prompt or an explicitly named environment variable.
+The token is never accepted as a normal CLI argument. The normal path reads it
+automatically from the server environment variable:
+
+    NVL_CLOUDFLARE_API_TOKEN
+
+For the production bot, systemd injects that variable from the root-only
+EnvironmentFile. No Cloudflare token is sent through Telegram, stored in the
+bot database, printed in logs, or placed in subprocess arguments.
+
+A hidden token prompt exists only as an explicit manual/emergency fallback via
+`--prompt-cloudflare-token`.
 
 Recommended token permissions:
 
@@ -158,11 +167,28 @@ Actual cutover:
       --cutover \
       --confirm CUTOVER
 
-For unattended execution, place the token in a process environment variable and
-pass only its name:
+Normal execution requires no token flag when
+`NVL_CLOUDFLARE_API_TOKEN` is already present in the process environment:
 
-    --cloudflare-token-env NVL_CF_TOKEN
+    python3 -m server_migration.phase5_cli \
+      --source <OLD_IP> \
+      --destination <NEW_IP> \
+      --job-id <JOB_ID> \
+      --hostname gate.example.com \
+      --zone example.com \
+      --plan-only
 
+To use a differently named environment variable, override only the variable
+name:
+
+    --cloudflare-token-env MY_SCOPED_CF_TOKEN
+
+For controlled manual recovery only, an operator may explicitly request a
+hidden prompt:
+
+    --prompt-cloudflare-token
+
+The CLI never falls back to an interactive Cloudflare-token prompt implicitly.
 Do not place the token itself in shell history.
 
 ## Phase chain

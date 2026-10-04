@@ -264,6 +264,16 @@ class ChangeServerPhase2Tests(unittest.TestCase):
             )
         self.assertEqual(executor.commands, [])
 
+    def test_source_staging_disk_is_checked_before_writes(self):
+        executor = RecordingBundleExecutor()
+        with self.assertRaises(Phase2Error):
+            create_source_bundle(
+                executor,
+                source_facts(root_free_mb=100, payload_size_mb=26),
+                job_id="chg-20261004T170000Z-deadbeef",
+            )
+        self.assertEqual(executor.commands, [])
+
     def test_relay_verifies_source_local_and_destination_hashes(self):
         with tempfile.TemporaryDirectory() as temp:
             temp = pathlib.Path(temp)

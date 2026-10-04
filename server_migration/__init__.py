@@ -5,9 +5,10 @@ Phase 2 creates verified live backup bundles and relays them
 Source -> NVL control host -> Destination staging.
 Phase 3 verifies the staged bundle, builds an isolated restore preview, and can
 restore it onto a clean destination without changing DNS.
-
-Final database synchronization, IP rewrite, cutover, and rollback are later
-phases.
+Phase 4 performs the guarded final database synchronization, targeted
+hosts.address rewrite, destination start, and local health verification.
+Phase 5 performs scoped Cloudflare origin cutover, external verification, and
+immediate rollback when post-cutover verification fails.
 """
 
 from .models import (
@@ -37,6 +38,25 @@ from .phase3_models import (
     Phase3Policy,
     Phase3Result,
 )
+from .phase4 import run_phase4
+from .phase4_models import (
+    PHASE4_MODE_FINALIZE,
+    PHASE4_MODE_PLAN,
+    Phase4Error,
+    Phase4Plan,
+    Phase4Policy,
+    Phase4Result,
+)
+from .phase5 import run_phase5
+from .phase5_models import (
+    PHASE5_MODE_CUTOVER,
+    PHASE5_MODE_PLAN,
+    CloudflareRecordSnapshot,
+    Phase5Error,
+    Phase5Plan,
+    Phase5Policy,
+    Phase5Result,
+)
 from .preflight import evaluate_preflight, run_preflight
 
 __all__ = [
@@ -59,8 +79,23 @@ __all__ = [
     "Phase3Error",
     "Phase3Policy",
     "Phase3Result",
+    "PHASE4_MODE_PLAN",
+    "PHASE4_MODE_FINALIZE",
+    "Phase4Error",
+    "Phase4Plan",
+    "Phase4Policy",
+    "Phase4Result",
+    "PHASE5_MODE_PLAN",
+    "PHASE5_MODE_CUTOVER",
+    "CloudflareRecordSnapshot",
+    "Phase5Error",
+    "Phase5Plan",
+    "Phase5Policy",
+    "Phase5Result",
     "evaluate_preflight",
     "run_preflight",
     "run_phase2",
     "run_phase3",
+    "run_phase4",
+    "run_phase5",
 ]

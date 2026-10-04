@@ -114,6 +114,7 @@ import io
 import socket
 import urllib.request
 import urllib.error
+import urllib.parse
 import subprocess
 import shlex
 import sys
@@ -325,6 +326,27 @@ from standby_readiness import (
     readiness_diagnostics,
 )
 
+from server_migration.telegram_wizard import (
+    TelegramWizardBusy,
+    TelegramWizardError,
+    begin_session as _mig_begin_session,
+    cancel_session as _mig_cancel_session,
+    finish_session as _mig_finish_session,
+    get_session as _mig_get_session,
+    normalize_dns_name as _mig_normalize_dns_name,
+    normalize_host as _mig_normalize_host,
+    normalize_port as _mig_normalize_port,
+    run_backup_step as _mig_run_backup,
+    run_cutover_plan_step as _mig_run_cutover_plan,
+    run_cutover_precheck_step as _mig_run_cutover_precheck,
+    run_cutover_step as _mig_run_cutover,
+    run_final_plan_step as _mig_run_final_plan,
+    run_final_sync_step as _mig_run_final_sync,
+    run_preflight_step as _mig_run_preflight,
+    run_restore_step as _mig_run_restore,
+    suggest_zone as _mig_suggest_zone,
+)
+
 # ==========================================
 # ⚙️ پیکربندی امن (از Environment Variables)
 # ==========================================
@@ -452,6 +474,25 @@ def activate_expired_holds(connection: sqlite3.Connection, checked_at: Optional[
 TOKEN = os.environ.get("BOT_TOKEN")
 MASTER_USER = os.environ.get("MASTER_USER")
 MASTER_PASS = os.environ.get("MASTER_PASS")
+
+# ☁️ Cloudflare API token — secret is injected by systemd EnvironmentFile.
+# Keep it server-side only: never expose it in Telegram messages, callbacks,
+# logs, subprocess arguments, or the database. Cloudflare-dependent features
+# should call require_cloudflare_api_token() at execution time and fail closed
+# if the secret is not configured.
+CLOUDFLARE_API_TOKEN_ENV = "NVL_CLOUDFLARE_API_TOKEN"
+CLOUDFLARE_API_TOKEN = (
+    os.environ.get(CLOUDFLARE_API_TOKEN_ENV) or ""
+).strip()
+
+
+def require_cloudflare_api_token():
+    token = CLOUDFLARE_API_TOKEN
+    if not token:
+        raise RuntimeError(
+            f"{CLOUDFLARE_API_TOKEN_ENV} is not configured for nvlbot.service"
+        )
+    return token
 # 🐛🔧 رفع باگِ واقعیِ «نماینده‌ها بعد از هر انتقال/ری‌استارتِ سرویس مجبور به ورود مجدد
 # می‌شدند»: مقدارهای پیش‌فرضِ زیر قبلاً مسیرِ نسبی («master_bot.db» و «bot_persistence.pickle»
 # بدونِ هیچ پوشه‌ای) بودن — یعنی محلِ واقعیِ این فایل‌ها کاملاً به WorkingDirectory سرویسِ
@@ -6436,6 +6477,568 @@ async def require_login(update):
 
 PORTAL_DISPLAY_NAME = "NeVeL"  # 🔒 نام ثابت پورتال و مدیریت — با تغییر «نام برند» در تنظیمات عوض نمی‌شود
 
+def _build_admin_programs_kb():
+    """Top-level operational tools available only to NVL administrators."""
+    return [
+        [InlineKeyboardButton(
+            "🚚 انتقال سرور Marzban",
+            callback_data="apps_marzban_transfer",
+        )],
+        [InlineKeyboardButton(
+            "🏠 منوی اصلی",
+            callback_data="uact_back_to_menu",
+        )],
+    ]
+
+
+async def _show_admin_programs_hub(target, context):
+    if context.user_data.get('role') != 'admin':
+        text = "⛔️ دسترسی به برنامه‌های مدیریتی فقط برای مدیر مجاز است."
+        if hasattr(target, 'edit_message_text'):
+            await target.edit_message_text(text)
+        else:
+            await target.reply_text(text)
+        return
+
+    context.user_data.pop('state', None)
+    text = (
+        "🧩 <b>برنامه‌های مدیریتی NVL</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        "ابزارهای عملیاتی و سطح‌سیستم در این بخش قرار می‌گیرند.\n\n"
+        "🚚 <b>انتقال سرور Marzban</b>\n"
+        "مهاجرت کنترل‌شده Marzban به سرور جدید با مسیر امن "
+        "Preflight → Backup → Restore → Final Sync → Cutover."
+    )
+    markup = InlineKeyboardMarkup(_build_admin_programs_kb())
+    if hasattr(target, 'edit_message_text'):
+        await target.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
+    else:
+        await target.reply_text(text, reply_markup=markup, parse_mode="HTML")
+
+
+_MIGRATION_INPUT_STATES = {
+    'MIG_SOURCE_HOST',
+    'MIG_SOURCE_PORT',
+    'MIG_SOURCE_PASSWORD',
+    'MIG_DEST_HOST',
+    'MIG_DEST_PORT',
+    'MIG_DEST_PASSWORD',
+    'MIG_HOSTNAME',
+    'MIG_ZONE',
+}
+
+_MIGRATION_POST_FINAL_STAGES = {
+    'FINAL_SYNC_COMPLETE',
+    'CUTOVER_PLAN_READY',
+    'CUTOVER_PLAN_BLOCKED',
+    'CUTOVER_COMPLETE',
+}
+
+
+def _mig_chat_id(target):
+    message = getattr(target, 'message', None)
+    if message is not None:
+        return int(message.chat_id)
+    chat_id = getattr(target, 'chat_id', None)
+    if chat_id is not None:
+        return int(chat_id)
+    effective_chat = getattr(target, 'effective_chat', None)
+    if effective_chat is not None:
+        return int(effective_chat.id)
+    raise TelegramWizardError("cannot resolve Telegram chat id")
+
+
+async def _mig_send(target, text, *, kb=None):
+    markup = InlineKeyboardMarkup(kb) if kb else None
+    if hasattr(target, 'edit_message_text'):
+        try:
+            await target.edit_message_text(
+                text,
+                reply_markup=markup,
+                parse_mode='HTML',
+            )
+            return
+        except BadRequest:
+            message = getattr(target, 'message', None)
+            if message is not None:
+                await message.reply_text(
+                    text,
+                    reply_markup=markup,
+                    parse_mode='HTML',
+                )
+                return
+            raise
+    await target.reply_text(
+        text,
+        reply_markup=markup,
+        parse_mode='HTML',
+    )
+
+
+def _mig_stage_label(stage):
+    labels = {
+        'SOURCE_HOST': 'دریافت سرور مبدا',
+        'SOURCE_PORT': 'پورت SSH مبدا',
+        'SOURCE_PASSWORD': 'رمز SSH مبدا',
+        'DEST_HOST': 'دریافت سرور مقصد',
+        'DEST_PORT': 'پورت SSH مقصد',
+        'DEST_PASSWORD': 'رمز SSH مقصد',
+        'HOSTNAME': 'دامنه Marzban',
+        'ZONE': 'Cloudflare Zone',
+        'READY_FOR_PREFLIGHT': 'آماده Preflight',
+        'PREFLIGHT_FAILED': 'Preflight ناموفق',
+        'PREFLIGHT_READY': 'Preflight تایید شد',
+        'BACKUP_COMPLETE': 'Backup/Transfer کامل',
+        'RESTORE_COMPLETE': 'Restore کامل',
+        'FINAL_PLAN_READY': 'Final Sync آماده',
+        'FINAL_PLAN_BLOCKED': 'Final Sync مسدود',
+        'PRE_CUTOVER_READY': 'Cloudflare Precheck آماده',
+        'PRE_CUTOVER_BLOCKED': 'Cloudflare Precheck مسدود',
+        'FINAL_SYNC_COMPLETE': 'Final Sync کامل',
+        'CUTOVER_PLAN_READY': 'Cutover آماده',
+        'CUTOVER_PLAN_BLOCKED': 'Cutover مسدود',
+        'CUTOVER_COMPLETE': 'انتقال کامل',
+    }
+    return labels.get(stage, stage or 'نامشخص')
+
+
+def _mig_error_text(exc):
+    raw = f"{type(exc).__name__}: {exc}"
+    if len(raw) > 2400:
+        raw = raw[:2400] + "…"
+    return esc(raw)
+
+
+def _mig_safe_cancel_button(session):
+    if session and session.stage in _MIGRATION_POST_FINAL_STAGES:
+        return []
+    return [[InlineKeyboardButton("❌ لغو انتقال", callback_data="apps_mig_cancel")]]
+
+
+async def _show_marzban_transfer_entry(target, context):
+    if context.user_data.get('role') != 'admin':
+        await _mig_send(
+            target,
+            "⛔️ دسترسی به انتقال سرور Marzban فقط برای مدیر مجاز است.",
+        )
+        return
+
+    chat_id = _mig_chat_id(target)
+    session = _mig_get_session(chat_id)
+    marzban_url = await asyncio.to_thread(
+        _db_get_setting,
+        'marzban_url',
+        '',
+    )
+    cf_ready = bool(CLOUDFLARE_API_TOKEN)
+
+    marzban_line = (
+        f"<code>{esc(marzban_url)}</code>"
+        if marzban_url
+        else "تنظیم نشده ⚠️"
+    )
+    cf_line = "آماده ✅" if cf_ready else "تنظیم نشده ⚠️"
+
+    active = ""
+    kb = []
+    if session:
+        active = (
+            "\n\n📌 <b>انتقال فعال:</b> "
+            f"{esc(_mig_stage_label(session.stage))}"
+        )
+        if session.job_id:
+            active += f"\n🆔 <code>{esc(session.job_id)}</code>"
+        kb.append([
+            InlineKeyboardButton(
+                "▶️ ادامه انتقال",
+                callback_data="apps_mig_resume",
+            )
+        ])
+        kb.extend(_mig_safe_cancel_button(session))
+    else:
+        kb.append([
+            InlineKeyboardButton(
+                "🚀 شروع انتقال جدید",
+                callback_data="apps_mig_start",
+            )
+        ])
+
+    kb.extend([
+        [InlineKeyboardButton("↩️ برنامه‌ها", callback_data="apps_home")],
+        [InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")],
+    ])
+
+    text = (
+        "🚚 <b>برنامه‌ها › انتقال سرور Marzban</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        "انتقال کنترل‌شده سرور اصلی Marzban به VPS جدید.\n\n"
+        f"🌐 <b>Marzban:</b> {marzban_line}\n"
+        f"☁️ <b>Cloudflare API:</b> {cf_line}\n"
+        "🛡 <b>Rollback:</b> فعال\n"
+        "🔐 <b>SSH Password:</b> فقط در RAM و تا پایان Wizard\n\n"
+        "مسیر اجرا:\n"
+        "1️⃣ Preflight\n"
+        "2️⃣ Backup & Transfer\n"
+        "3️⃣ Restore\n"
+        "4️⃣ Final Sync\n"
+        "5️⃣ Cloudflare Cutover"
+        f"{active}"
+    )
+    await _mig_send(target, text, kb=kb)
+
+
+async def _mig_prompt_for_stage(target, context, session):
+    stage = session.stage
+    cancel = _mig_safe_cancel_button(session)
+
+    if stage == 'SOURCE_HOST':
+        context.user_data['state'] = 'MIG_SOURCE_HOST'
+        await _mig_send(
+            target,
+            "1️⃣ <b>سرور مبدا</b>\n\n"
+            "IP یا hostname سرور فعلی Marzban را بفرستید.\n"
+            "مثال: <code>107.189.22.229</code>",
+            kb=cancel,
+        )
+        return
+
+    if stage == 'SOURCE_PORT':
+        context.user_data['state'] = 'MIG_SOURCE_PORT'
+        await _mig_send(
+            target,
+            "🔐 <b>پورت SSH مبدا</b>\n\n"
+            "پورت SSH سرور فعلی را بفرستید.",
+            kb=[
+                [InlineKeyboardButton("✅ 22", callback_data="apps_mig_src_port22")],
+                *cancel,
+            ],
+        )
+        return
+
+    if stage == 'SOURCE_PASSWORD':
+        context.user_data['state'] = 'MIG_SOURCE_PASSWORD'
+        await _mig_send(
+            target,
+            "🔑 <b>رمز SSH مبدا</b>\n\n"
+            "رمز کاربر <code>root</code> را بفرستید.\n"
+            "پیام رمز پس از دریافت حذف می‌شود و مقدار آن در Persistence/DB ذخیره نمی‌شود.",
+            kb=cancel,
+        )
+        return
+
+    if stage == 'DEST_HOST':
+        context.user_data['state'] = 'MIG_DEST_HOST'
+        await _mig_send(
+            target,
+            "2️⃣ <b>سرور مقصد</b>\n\n"
+            "IP یا hostname VPS جدید را بفرستید.",
+            kb=cancel,
+        )
+        return
+
+    if stage == 'DEST_PORT':
+        context.user_data['state'] = 'MIG_DEST_PORT'
+        await _mig_send(
+            target,
+            "🔐 <b>پورت SSH مقصد</b>\n\n"
+            "پورت SSH سرور جدید را بفرستید.",
+            kb=[
+                [InlineKeyboardButton("✅ 22", callback_data="apps_mig_dst_port22")],
+                *cancel,
+            ],
+        )
+        return
+
+    if stage == 'DEST_PASSWORD':
+        context.user_data['state'] = 'MIG_DEST_PASSWORD'
+        await _mig_send(
+            target,
+            "🔑 <b>رمز SSH مقصد</b>\n\n"
+            "رمز کاربر <code>root</code> سرور جدید را بفرستید.\n"
+            "این پیام هم بعد از دریافت حذف می‌شود.",
+            kb=cancel,
+        )
+        return
+
+    if stage == 'HOSTNAME':
+        context.user_data['state'] = 'MIG_HOSTNAME'
+        kb = []
+        if session.suggested_hostname:
+            kb.append([
+                InlineKeyboardButton(
+                    f"✅ {session.suggested_hostname}",
+                    callback_data="apps_mig_use_hostname",
+                )
+            ])
+        kb.extend(cancel)
+        await _mig_send(
+            target,
+            "🌐 <b>Hostname عمومی Marzban</b>\n\n"
+            "رکوردی که در Cloudflare از IP قدیم به IP جدید منتقل می‌شود را وارد کنید.\n"
+            "مثال: <code>gate.nvlsup.xyz</code>",
+            kb=kb,
+        )
+        return
+
+    if stage == 'ZONE':
+        context.user_data['state'] = 'MIG_ZONE'
+        kb = []
+        if session.suggested_zone:
+            kb.append([
+                InlineKeyboardButton(
+                    f"✅ {session.suggested_zone}",
+                    callback_data="apps_mig_use_zone",
+                )
+            ])
+        kb.extend(cancel)
+        await _mig_send(
+            target,
+            "☁️ <b>Cloudflare Zone</b>\n\n"
+            "نام Zone را وارد کنید.\n"
+            "مثال: <code>nvlsup.xyz</code>",
+            kb=kb,
+        )
+        return
+
+    await _show_migration_resume(target, context, session)
+
+
+async def _show_migration_review(target, context, session):
+    context.user_data.pop('state', None)
+    text = (
+        "🧾 <b>بررسی مشخصات انتقال</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        f"مبدا: <code>{esc(session.source_host)}:{session.source_port}</code>\n"
+        f"مقصد: <code>{esc(session.destination_host)}:{session.destination_port}</code>\n"
+        f"SSH User: <code>root</code>\n"
+        f"Hostname: <code>{esc(session.hostname)}</code>\n"
+        f"Zone: <code>{esc(session.zone_name)}</code>\n\n"
+        "هیچ Passwordی در این پیام، دیتابیس یا Persistence ذخیره نشده است.\n\n"
+        "مرحله بعد کاملاً Read-only است و هیچ تغییری روی دو سرور ایجاد نمی‌کند."
+    )
+    kb = [
+        [InlineKeyboardButton("🔍 اجرای Preflight", callback_data="apps_mig_preflight")],
+        [InlineKeyboardButton("❌ لغو", callback_data="apps_mig_cancel")],
+    ]
+    await _mig_send(target, text, kb=kb)
+
+
+def _mig_preflight_text(report):
+    blockers = list(getattr(report, 'blockers', ()) or ())
+    warnings = list(getattr(report, 'warnings', ()) or ())
+    checks = list(getattr(report, 'checks', ()) or ())
+    passed = sum(1 for item in checks if getattr(item, 'status', '') == 'PASS')
+    lines = [
+        "🔍 <b>نتیجه Preflight</b>",
+        "━━━━━━━━━━━━━━",
+        f"وضعیت: {'آماده ✅' if report.ready else 'مسدود ❌'}",
+        f"Checks PASS: <b>{passed}</b>",
+        f"Warnings: <b>{len(warnings)}</b>",
+        f"Blockers: <b>{len(blockers)}</b>",
+    ]
+    if blockers:
+        lines.append("\n<b>Blockerها:</b>")
+        for item in blockers[:8]:
+            lines.append(
+                f"• <code>{esc(item.code)}</code> — {esc(item.message)}"
+            )
+    if warnings:
+        lines.append("\n<b>هشدارها:</b>")
+        for item in warnings[:5]:
+            lines.append(
+                f"• <code>{esc(item.code)}</code> — {esc(item.message)}"
+            )
+    return "\n".join(lines)
+
+
+def _mig_plan_text(title, ready, blockers):
+    lines = [
+        f"🧭 <b>{esc(title)}</b>",
+        "━━━━━━━━━━━━━━",
+        f"وضعیت: {'آماده ✅' if ready else 'مسدود ❌'}",
+    ]
+    blockers = list(blockers or ())
+    if blockers:
+        lines.append("\n<b>Blockerها:</b>")
+        for item in blockers[:8]:
+            lines.append(f"• {esc(str(item))}")
+    return "\n".join(lines)
+
+
+async def _show_migration_resume(target, context, session):
+    if session.stage in {
+        'SOURCE_HOST', 'SOURCE_PORT', 'SOURCE_PASSWORD',
+        'DEST_HOST', 'DEST_PORT', 'DEST_PASSWORD', 'HOSTNAME', 'ZONE',
+    }:
+        await _mig_prompt_for_stage(target, context, session)
+        return
+    if session.stage == 'READY_FOR_PREFLIGHT':
+        await _show_migration_review(target, context, session)
+        return
+    if session.stage in {'PREFLIGHT_READY', 'PREFLIGHT_FAILED'}:
+        report = session.last_result or session.preflight
+        if report is None:
+            session.stage = 'READY_FOR_PREFLIGHT'
+            await _show_migration_review(target, context, session)
+            return
+        kb = []
+        if report.ready:
+            kb.append([
+                InlineKeyboardButton(
+                    "📦 شروع Backup & Transfer",
+                    callback_data="apps_mig_backup",
+                )
+            ])
+        else:
+            kb.append([
+                InlineKeyboardButton(
+                    "🔄 اجرای مجدد Preflight",
+                    callback_data="apps_mig_preflight",
+                )
+            ])
+        kb.extend(_mig_safe_cancel_button(session))
+        await _mig_send(target, _mig_preflight_text(report), kb=kb)
+        return
+    if session.stage == 'BACKUP_COMPLETE':
+        await _mig_send(
+            target,
+            "📦 <b>Backup & Transfer کامل شد ✅</b>\n\n"
+            f"Job ID: <code>{esc(session.job_id)}</code>\n"
+            "Bundle روی مقصد با checksum تایید شده است.",
+            kb=[
+                [InlineKeyboardButton("♻️ Restore روی مقصد", callback_data="apps_mig_restore")],
+                *_mig_safe_cancel_button(session),
+            ],
+        )
+        return
+    if session.stage == 'RESTORE_COMPLETE':
+        await _mig_send(
+            target,
+            "♻️ <b>Restore کامل شد ✅</b>\n\n"
+            "Runtime مقصد Restore شده اما عمداً هنوز Start نشده است.\n"
+            "مرحله بعد Final Sync و Cloudflare precheck را فقط بررسی می‌کند.",
+            kb=[
+                [InlineKeyboardButton("🔎 بررسی Final Sync", callback_data="apps_mig_final_plan")],
+                *_mig_safe_cancel_button(session),
+            ],
+        )
+        return
+    if session.stage in {'FINAL_PLAN_BLOCKED', 'PRE_CUTOVER_BLOCKED'}:
+        await _mig_send(
+            target,
+            "⚠️ <b>آمادگی مرحله نهایی کامل نیست.</b>\n\n"
+            f"وضعیت: {esc(_mig_stage_label(session.stage))}\n"
+            f"<code>{esc(session.last_error or 'برای دیدن جزئیات بررسی را دوباره اجرا کنید.')}</code>",
+            kb=[
+                [InlineKeyboardButton("🔄 بررسی مجدد", callback_data="apps_mig_final_plan")],
+                *_mig_safe_cancel_button(session),
+            ],
+        )
+        return
+    if session.stage == 'PRE_CUTOVER_READY':
+        await _mig_send(
+            target,
+            "✅ <b>Final Sync و Cloudflare precheck آماده‌اند.</b>\n\n"
+            "Cloudflare Token/Zone/Record قبل از ورود به downtime بررسی شده‌اند.\n"
+            "مرحله بعد Source را متوقف و آخرین DB را روی مقصد Sync می‌کند.",
+            kb=[
+                [InlineKeyboardButton("⚠️ ادامه به Final Sync", callback_data="apps_mig_final_warn")],
+                *_mig_safe_cancel_button(session),
+            ],
+        )
+        return
+    if session.stage == 'CUTOVER_PLAN_BLOCKED':
+        await _mig_send(
+            target,
+            "🚨 <b>Source متوقف شده اما Cutover هنوز آماده نیست.</b>\n\n"
+            "لغو ساده در این نقطه مجاز نیست. ابتدا علت Blocker را برطرف و Cutover را دوباره بررسی کنید.",
+            kb=[
+                [InlineKeyboardButton("🔄 بررسی دوباره Cutover", callback_data="apps_mig_cutover_plan")],
+                [InlineKeyboardButton("↩️ صفحه انتقال", callback_data="apps_marzban_transfer")],
+            ],
+        )
+        return
+    if session.stage in {'FINAL_SYNC_COMPLETE', 'CUTOVER_PLAN_READY'}:
+        await _mig_send(
+            target,
+            "🚦 <b>Final Sync کامل شده و مقصد آماده سرویس است.</b>\n\n"
+            "اکنون فقط Cloudflare Cutover باقی مانده است.",
+            kb=[
+                [InlineKeyboardButton("🚨 ادامه به Cutover", callback_data="apps_mig_cutover_warn")],
+                [InlineKeyboardButton("↩️ صفحه انتقال", callback_data="apps_marzban_transfer")],
+            ],
+        )
+        return
+    if session.stage == 'CUTOVER_COMPLETE':
+        await _mig_send(
+            target,
+            "✅ انتقال قبلاً کامل شده است.",
+            kb=[[InlineKeyboardButton("↩️ صفحه انتقال", callback_data="apps_marzban_transfer")]],
+        )
+        return
+    await _show_marzban_transfer_entry(target, context)
+
+
+async def _mig_start_wizard(target, context):
+    if context.user_data.get('role') != 'admin':
+        await _mig_send(target, "⛔️ دسترسی غیرمجاز.")
+        return
+    chat_id = _mig_chat_id(target)
+    m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
+    candidate = str(m_url or '').strip()
+    if candidate and '://' not in candidate:
+        candidate = 'https://' + candidate
+    try:
+        suggested_hostname = (
+            urllib.parse.urlparse(candidate).hostname or ''
+            if candidate else ''
+        )
+    except Exception:
+        suggested_hostname = ''
+    suggested_zone = _mig_suggest_zone(suggested_hostname) if suggested_hostname else ''
+
+    try:
+        session = _mig_begin_session(
+            chat_id,
+            suggested_hostname=suggested_hostname,
+            suggested_zone=suggested_zone,
+        )
+    except TelegramWizardBusy as exc:
+        await _mig_send(
+            target,
+            "⛔️ <b>یک انتقال دیگر در حال آماده‌سازی است.</b>\n\n"
+            f"<code>{_mig_error_text(exc)}</code>",
+        )
+        return
+
+    session.stage = 'SOURCE_HOST'
+    await _mig_prompt_for_stage(target, context, session)
+
+
+async def _mig_run_call(target, context, session, title, fn):
+    if session.busy:
+        await _mig_send(target, "⏳ یک مرحله از انتقال هنوز در حال اجراست.")
+        return None
+    await _mig_send(
+        target,
+        f"⏳ <b>{esc(title)}</b>\n\nاین مرحله در حال اجراست…",
+    )
+    try:
+        return await asyncio.to_thread(fn, session)
+    except Exception as exc:
+        log.exception("Marzban migration wizard step failed: %s", title)
+        await _mig_send(
+            target,
+            "❌ <b>مرحله ناموفق بود.</b>\n\n"
+            f"<code>{_mig_error_text(exc)}</code>",
+            kb=[
+                [InlineKeyboardButton("▶️ ادامه / تلاش مجدد", callback_data="apps_mig_resume")],
+                *_mig_safe_cancel_button(session),
+            ],
+        )
+        return None
+
+
 async def show_main_menu(update_or_query, context):
     role = context.user_data.get('role')
 
@@ -6454,7 +7057,8 @@ async def show_main_menu(update_or_query, context):
             ['🤝 نمایندگان', '📊 گزارش‌ها'],
             ['💰 مالی و کارت‌ها', '⚙️ تنظیمات'],
             ['🛡 بررسی فیلترینگ', '🛰 بررسی مرزبان'],
-            ['🛠 V2Ray / Marzban', '📦 بکاپ'],
+            ['🛠 V2Ray / Marzban', '🧩 برنامه‌ها'],
+            ['📦 بکاپ'],
         ]
         if chat_id == SUPER_ADMIN_ID:
             kb.append(['👑 تنظیمات سوپر ادمین'])
@@ -8862,6 +9466,111 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     role = context.user_data.get('role')
     chat_id = update.effective_chat.id
 
+    # 🚚 Change Server wizard input. Secrets stay only in the module-level
+    # in-memory session store; user_data persists only the non-secret step name.
+    if state in _MIGRATION_INPUT_STATES:
+        if role != 'admin':
+            context.user_data.pop('state', None)
+            _mig_cancel_session(chat_id)
+            await update.message.reply_text("⛔️ دسترسی غیرمجاز.")
+            return
+
+        session = _mig_get_session(chat_id)
+        if session is None:
+            context.user_data.pop('state', None)
+            await update.message.reply_text(
+                "⚠️ نشست انتقال پس از restart یا timeout موجود نیست. "
+                "از «برنامه‌ها › انتقال سرور Marzban» دوباره شروع کنید."
+            )
+            return
+
+        try:
+            if state == 'MIG_SOURCE_HOST':
+                session.source_host = _mig_normalize_host(text)
+                session.stage = 'SOURCE_PORT'
+                await _mig_prompt_for_stage(update.message, context, session)
+                return
+
+            if state == 'MIG_SOURCE_PORT':
+                session.source_port = _mig_normalize_port(text)
+                session.stage = 'SOURCE_PASSWORD'
+                await _mig_prompt_for_stage(update.message, context, session)
+                return
+
+            if state == 'MIG_SOURCE_PASSWORD':
+                if not text or len(text) > 512:
+                    raise ValueError("SSH password is empty or too long")
+                session.source_password = text
+                with contextlib.suppress(Exception):
+                    await update.message.delete()
+                session.stage = 'DEST_HOST'
+                await _mig_prompt_for_stage(
+                    update.message,
+                    context,
+                    session,
+                )
+                return
+
+            if state == 'MIG_DEST_HOST':
+                session.destination_host = _mig_normalize_host(text)
+                session.stage = 'DEST_PORT'
+                await _mig_prompt_for_stage(update.message, context, session)
+                return
+
+            if state == 'MIG_DEST_PORT':
+                session.destination_port = _mig_normalize_port(text)
+                session.stage = 'DEST_PASSWORD'
+                await _mig_prompt_for_stage(update.message, context, session)
+                return
+
+            if state == 'MIG_DEST_PASSWORD':
+                if not text or len(text) > 512:
+                    raise ValueError("SSH password is empty or too long")
+                session.destination_password = text
+                with contextlib.suppress(Exception):
+                    await update.message.delete()
+                session.stage = 'HOSTNAME'
+                await _mig_prompt_for_stage(
+                    update.message,
+                    context,
+                    session,
+                )
+                return
+
+            if state == 'MIG_HOSTNAME':
+                session.hostname = _mig_normalize_dns_name(text)
+                if not session.suggested_zone:
+                    session.suggested_zone = _mig_suggest_zone(session.hostname)
+                session.stage = 'ZONE'
+                await _mig_prompt_for_stage(update.message, context, session)
+                return
+
+            if state == 'MIG_ZONE':
+                zone = _mig_normalize_dns_name(text)
+                if (
+                    session.hostname != zone
+                    and not session.hostname.endswith('.' + zone)
+                ):
+                    raise ValueError("hostname is not inside the supplied zone")
+                session.zone_name = zone
+                session.stage = 'READY_FOR_PREFLIGHT'
+                await _show_migration_review(update.message, context, session)
+                return
+
+        except ValueError as exc:
+            await update.message.reply_text(
+                f"❌ مقدار نامعتبر است: <code>{esc(str(exc))}</code>",
+                parse_mode='HTML',
+            )
+            return
+        except Exception as exc:
+            log.exception("migration wizard input failed")
+            await update.message.reply_text(
+                f"❌ خطا: <code>{_mig_error_text(exc)}</code>",
+                parse_mode='HTML',
+            )
+            return
+
     # 🔍 Phase 2 Marzban admin search — read-only and admin-only.
     if state == 'MARZBAN_ADMIN_SEARCH':
         if role != 'admin':
@@ -9294,7 +10003,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '➕ فروش / ساخت اشتراک', '➕ فروش اشتراک', '👥 کاربران', '👥 کاربران من',
         '🤝 نمایندگان', '📊 گزارش‌ها', '💰 مالی و کارت‌ها', '⚙️ تنظیمات',
         '🛡 بررسی فیلترینگ', '🛰 بررسی مرزبان',
-        '🛠 V2Ray / Marzban', '📦 بکاپ', '💳 شارژ حساب', '💰 کیف پول و حساب',
+        '🛠 V2Ray / Marzban', '🧩 برنامه‌ها', '🧩 برنامه ها', '📦 بکاپ',
+        '💳 شارژ حساب', '💰 کیف پول و حساب',
         '✏️ نام برند', '💳 کارت اختصاصی',
         # Backward-compatible aliases from pre-5.6 keyboards/messages
         '🛒 خرید اشتراک', '👥 مدیریت کاربران', '💼 مدیریت نماینده‌ها', '📊 آمار و لاگ',
@@ -9380,6 +10090,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         elif text == '🛰 بررسی مرزبان' and role == 'admin':
             await _render_marzban_monitor_panel(update.message)
+            return
+        elif text in ('🧩 برنامه‌ها', '🧩 برنامه ها') and role == 'admin':
+            await _show_admin_programs_hub(update.message, context)
             return
         elif text in ('⚙️ تنظیمات', '⚙️ تنظیمات سرور') and role == 'admin':
             kb = _build_server_settings_kb()
@@ -12516,6 +13229,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("⛔️ دسترسی به مدیریت کاربران برای این نقش مجاز نیست.")
         return
 
+    # 🧩 Programs callbacks are strictly admin-only.
+    if d.startswith('apps_') and role != 'admin':
+        await query.message.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+
     # 🛠 Marzban admin callbacks are strictly admin-only.
     if d.startswith('mza_') and role != 'admin':
         await query.message.reply_text("⛔️ دسترسی غیرمجاز.")
@@ -12586,6 +13304,239 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not _ok_access:
             await query.message.reply_text("⛔️ شما مجاز به مشاهده/مدیریت این اکانت نیستید.")
             return
+
+    # ---------------- Programs / operational tools ----------------
+    if d == 'apps_home':
+        await _show_admin_programs_hub(query, context)
+        return
+    elif d == 'apps_marzban_transfer':
+        await _show_marzban_transfer_entry(query, context)
+        return
+    elif d == 'apps_mig_start':
+        await _mig_start_wizard(query, context)
+        return
+    elif d == 'apps_mig_resume':
+        session = _mig_get_session(query.message.chat_id)
+        if session is None:
+            context.user_data.pop('state', None)
+            await _show_marzban_transfer_entry(query, context)
+        else:
+            await _show_migration_resume(query, context, session)
+        return
+    elif d == 'apps_mig_cancel':
+        session = _mig_get_session(query.message.chat_id)
+        if session and session.stage in _MIGRATION_POST_FINAL_STAGES:
+            await _mig_send(
+                query,
+                "⛔️ بعد از Final Sync لغو ساده مجاز نیست؛ Source متوقف شده است. "
+                "Cutover یا مسیر بازیابی کنترل‌شده را تکمیل کنید.",
+                kb=[[InlineKeyboardButton("▶️ ادامه", callback_data="apps_mig_resume")]],
+            )
+            return
+        _mig_cancel_session(query.message.chat_id)
+        context.user_data.pop('state', None)
+        await _show_marzban_transfer_entry(query, context)
+        return
+    elif d == 'apps_mig_src_port22':
+        session = _mig_get_session(query.message.chat_id)
+        if session is None:
+            await _show_marzban_transfer_entry(query, context)
+            return
+        session.source_port = 22
+        session.stage = 'SOURCE_PASSWORD'
+        await _mig_prompt_for_stage(query, context, session)
+        return
+    elif d == 'apps_mig_dst_port22':
+        session = _mig_get_session(query.message.chat_id)
+        if session is None:
+            await _show_marzban_transfer_entry(query, context)
+            return
+        session.destination_port = 22
+        session.stage = 'DEST_PASSWORD'
+        await _mig_prompt_for_stage(query, context, session)
+        return
+    elif d == 'apps_mig_use_hostname':
+        session = _mig_get_session(query.message.chat_id)
+        if session is None or not session.suggested_hostname:
+            await _show_marzban_transfer_entry(query, context)
+            return
+        session.hostname = _mig_normalize_dns_name(session.suggested_hostname)
+        if not session.suggested_zone:
+            session.suggested_zone = _mig_suggest_zone(session.hostname)
+        session.stage = 'ZONE'
+        await _mig_prompt_for_stage(query, context, session)
+        return
+    elif d == 'apps_mig_use_zone':
+        session = _mig_get_session(query.message.chat_id)
+        if session is None or not session.suggested_zone:
+            await _show_marzban_transfer_entry(query, context)
+            return
+        zone = _mig_normalize_dns_name(session.suggested_zone)
+        if session.hostname != zone and not session.hostname.endswith('.' + zone):
+            await _mig_send(query, "❌ Zone پیشنهادی با hostname هم‌خوانی ندارد.")
+            return
+        session.zone_name = zone
+        session.stage = 'READY_FOR_PREFLIGHT'
+        await _show_migration_review(query, context, session)
+        return
+    elif d == 'apps_mig_preflight':
+        session = _mig_get_session(query.message.chat_id)
+        if session is None:
+            await _show_marzban_transfer_entry(query, context)
+            return
+        result = await _mig_run_call(
+            query, context, session, "Preflight", _mig_run_preflight
+        )
+        if result is not None:
+            await _show_migration_resume(query, context, session)
+        return
+    elif d == 'apps_mig_backup':
+        session = _mig_get_session(query.message.chat_id)
+        if session is None:
+            await _show_marzban_transfer_entry(query, context)
+            return
+        result = await _mig_run_call(
+            query, context, session, "Backup & Transfer", _mig_run_backup
+        )
+        if result is not None:
+            await _show_migration_resume(query, context, session)
+        return
+    elif d == 'apps_mig_restore':
+        session = _mig_get_session(query.message.chat_id)
+        if session is None:
+            await _show_marzban_transfer_entry(query, context)
+            return
+        result = await _mig_run_call(
+            query, context, session, "Restore مقصد", _mig_run_restore
+        )
+        if result is not None:
+            await _show_migration_resume(query, context, session)
+        return
+    elif d == 'apps_mig_final_plan':
+        session = _mig_get_session(query.message.chat_id)
+        if session is None:
+            await _show_marzban_transfer_entry(query, context)
+            return
+        if session.stage == 'PRE_CUTOVER_BLOCKED':
+            result = await _mig_run_call(
+                query, context, session,
+                "Cloudflare precheck",
+                _mig_run_cutover_precheck,
+            )
+        else:
+            result = await _mig_run_call(
+                query, context, session,
+                "Final Sync readiness",
+                _mig_run_final_plan,
+            )
+            if result is not None and getattr(result, 'finalization_ready', False):
+                result = await _mig_run_call(
+                    query, context, session,
+                    "Cloudflare precheck قبل از downtime",
+                    _mig_run_cutover_precheck,
+                )
+        if result is not None:
+            await _show_migration_resume(query, context, session)
+        return
+    elif d == 'apps_mig_final_warn':
+        session = _mig_get_session(query.message.chat_id)
+        if session is None or session.stage != 'PRE_CUTOVER_READY':
+            await _show_migration_resume(query, context, session) if session else await _show_marzban_transfer_entry(query, context)
+            return
+        await _mig_send(
+            query,
+            "⚠️ <b>هشدار Final Sync</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            "با اجرای این مرحله:\n"
+            "• Marzban روی Source متوقف می‌شود.\n"
+            "• آخرین SQLite snapshot منتقل می‌شود.\n"
+            "• IP در hosts به مقصد rewrite می‌شود.\n"
+            "• مقصد Start و API آن verify می‌شود.\n\n"
+            "تا Cutover نهایی، یک بازه کوتاه downtime وجود دارد.",
+            kb=[
+                [InlineKeyboardButton("🛑 تایید نهایی Final Sync", callback_data="apps_mig_final_run")],
+                [InlineKeyboardButton("↩️ بازگشت", callback_data="apps_mig_resume")],
+            ],
+        )
+        return
+    elif d == 'apps_mig_final_run':
+        session = _mig_get_session(query.message.chat_id)
+        if session is None:
+            await _show_marzban_transfer_entry(query, context)
+            return
+        result = await _mig_run_call(
+            query, context, session, "Final Sync", _mig_run_final_sync
+        )
+        if result is None:
+            return
+        plan = await _mig_run_call(
+            query, context, session, "Cutover readiness", _mig_run_cutover_plan
+        )
+        if plan is not None:
+            await _show_migration_resume(query, context, session)
+        return
+    elif d == 'apps_mig_cutover_plan':
+        session = _mig_get_session(query.message.chat_id)
+        if session is None:
+            await _show_marzban_transfer_entry(query, context)
+            return
+        result = await _mig_run_call(
+            query, context, session, "Cutover readiness", _mig_run_cutover_plan
+        )
+        if result is not None:
+            await _show_migration_resume(query, context, session)
+        return
+    elif d == 'apps_mig_cutover_warn':
+        session = _mig_get_session(query.message.chat_id)
+        if session is None or session.stage != 'CUTOVER_PLAN_READY':
+            await _show_migration_resume(query, context, session) if session else await _show_marzban_transfer_entry(query, context)
+            return
+        await _mig_send(
+            query,
+            "🚨 <b>تایید نهایی Cloudflare Cutover</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"Hostname: <code>{esc(session.hostname)}</code>\n"
+            f"مبدا: <code>{esc(session.source_host)}</code>\n"
+            f"مقصد: <code>{esc(session.destination_host)}</code>\n\n"
+            "این مرحله رکورد A را به مقصد تغییر می‌دهد و بلافاصله "
+            "Cloudflare/API/Xray را verify می‌کند. در صورت failure، "
+            "Rollback خودکار اجرا می‌شود.",
+            kb=[
+                [InlineKeyboardButton("🚨 تایید و اجرای CUTOVER", callback_data="apps_mig_cutover_run")],
+                [InlineKeyboardButton("↩️ بازگشت", callback_data="apps_mig_resume")],
+            ],
+        )
+        return
+    elif d == 'apps_mig_cutover_run':
+        session = _mig_get_session(query.message.chat_id)
+        if session is None:
+            await _show_marzban_transfer_entry(query, context)
+            return
+        result = await _mig_run_call(
+            query, context, session, "Cloudflare Cutover", _mig_run_cutover
+        )
+        if result is None:
+            return
+        text = (
+            "✅ <b>انتقال Marzban با موفقیت کامل شد</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"Job: <code>{esc(session.job_id)}</code>\n"
+            f"DNS updated: {'✅' if result.dns_updated else '❌'}\n"
+            f"Cloudflare verified: {'✅' if result.cloudflare_record_verified else '❌'}\n"
+            f"Hostname API: {'✅' if result.hostname_api_healthy else '❌'}\n"
+            f"Rollback performed: {'بله' if result.rollback_performed else 'خیر'}"
+        )
+        _mig_finish_session(query.message.chat_id)
+        context.user_data.pop('state', None)
+        await _mig_send(
+            query,
+            text,
+            kb=[
+                [InlineKeyboardButton("🚚 صفحه انتقال", callback_data="apps_marzban_transfer")],
+                [InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")],
+            ],
+        )
+        return
 
     # ---------------- Marzban Admin Dashboard ----------------
     if d == 'mza_home':

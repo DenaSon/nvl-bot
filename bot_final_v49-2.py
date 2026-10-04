@@ -19791,6 +19791,17 @@ def _regional_probe_lock(app):
     return lock
 
 
+async def _regional_filter_collect_raw(host, service_port, provider, nodes):
+    """Collect and classify one regional round without mutating Edge state."""
+    probe = await asyncio.to_thread(
+        provider.probe_tcp,
+        host,
+        service_port,
+        nodes,
+    )
+    return probe, classify_regional_evidence(probe.evidence)
+
+
 async def _regional_filter_probe_edge(
     app,
     host,
@@ -19800,6 +19811,7 @@ async def _regional_filter_probe_edge(
     *,
     affect_global_provider=True,
     notify_transition=True,
+    confirmation_validated=False,
 ):
     """Probe one Edge through a provider-neutral interface; never mutates routing itself.
 
@@ -19864,6 +19876,7 @@ async def _regional_filter_probe_edge(
         host,
         probe,
         regional_decision,
+        confirmation_validated=confirmation_validated,
     )
     if recompute_result and notify_transition:
         await _notify_filter_state_transition(

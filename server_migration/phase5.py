@@ -193,6 +193,9 @@ def build_phase5_plan(
                 hostname=hostname,
                 port=api_port,
                 timeout=policy.connect_timeout_seconds,
+                use_tls=bool(
+                    destination.ssl_cert_path and destination.ssl_key_path
+                ),
             )
         verified_ports = verify_tcp_ports(
             ip=new_ip,
@@ -323,13 +326,28 @@ def run_phase5(
         source_lock = True
 
         dns_updated = False
+        dns_update_attempted = False
         rollback_performed = False
         rollback_record_verified = False
         source_restarted = False
         destination_stopped = False
 
         try:
-            before = plan.cloudflare_record
+            before = cloudflare.get_a_record(
+                zone_id=plan.cloudflare_record.zone_id,
+                hostname=plan.hostname,
+            )
+            if (
+                before.record_id != plan.cloudflare_record.record_id
+                or before.content != plan.cloudflare_record.content
+                or before.proxied != plan.cloudflare_record.proxied
+            ):
+                raise Phase5Error(
+                    "Cloudflare A record changed after planning; "
+                    "refusing to overwrite a newer DNS state"
+                )
+
+            dns_update_attempted = True
             patched = cloudflare.patch_record_content(before, plan.new_ip)
             dns_updated = True
             if patched.content != plan.new_ip:
@@ -424,65 +442,96 @@ def run_phase5(
 
         except Exception as exc:
             recovery_errors: list[str] = []
-            if dns_updated and policy.rollback_on_failure:
+            if dns_update_attempted and policy.rollback_on_failure:
                 rollback_performed = True
                 try:
-                    restored = cloudflare.patch_record_content(
-                        plan.cloudflare_record,
-                        plan.old_ip,
-                    )
-                    restored = wait_for_record_content(
-                        cloudflare,
-                        zone_id=restored.zone_id,
+                    current = cloudflare.get_a_record(
+                        zone_id=plan.cloudflare_record.zone_id,
                         hostname=plan.hostname,
-                        expected_ip=plan.old_ip,
-                        attempts=policy.verify_attempts,
-                        interval_seconds=policy.verify_interval_seconds,
                     )
-                    rollback_record_verified = restored.content == plan.old_ip
+                    if (
+                        current.record_id != plan.cloudflare_record.record_id
+                        or current.proxied != plan.cloudflare_record.proxied
+                    ):
+                        raise Phase5Error(
+                            "Cloudflare record identity/proxy state changed "
+                            "during recovery"
+                        )
+
+                    if current.content == plan.old_ip:
+                        rollback_record_verified = True
+                    elif current.content == plan.new_ip:
+                        restored = cloudflare.patch_record_content(
+                            current,
+                            plan.old_ip,
+                        )
+                        restored = wait_for_record_content(
+                            cloudflare,
+                            zone_id=restored.zone_id,
+                            hostname=plan.hostname,
+                            expected_ip=plan.old_ip,
+                            attempts=policy.verify_attempts,
+                            interval_seconds=policy.verify_interval_seconds,
+                        )
+                        rollback_record_verified = restored.content == plan.old_ip
+                    else:
+                        raise Phase5Error(
+                            "Cloudflare record has an unexpected IP during "
+                            f"recovery: {current.content}"
+                        )
                 except Exception as recovery_exc:
                     recovery_errors.append(
                         f"Cloudflare rollback failed: {recovery_exc}"
                     )
 
-                if policy.stop_destination_on_rollback:
-                    try:
-                        if compose_running(
-                            destination_executor,
-                            marzban_dir=destination.marzban_dir,
-                        ):
-                            stop_compose(
+                # Never change service ownership while DNS recovery is
+                # uncertain. If the record is not confirmed back on old_ip,
+                # keep destination serving and keep source stopped to avoid
+                # both an outage and split-brain.
+                if rollback_record_verified:
+                    if policy.stop_destination_on_rollback:
+                        try:
+                            if compose_running(
+                                destination_executor,
+                                marzban_dir=destination.marzban_dir,
+                            ):
+                                stop_compose(
+                                    destination_executor,
+                                    marzban_dir=destination.marzban_dir,
+                                )
+                            destination_stopped = not compose_running(
                                 destination_executor,
                                 marzban_dir=destination.marzban_dir,
                             )
-                        destination_stopped = not compose_running(
-                            destination_executor,
-                            marzban_dir=destination.marzban_dir,
-                        )
-                    except Exception as recovery_exc:
-                        recovery_errors.append(
-                            f"destination stop rollback failed: {recovery_exc}"
-                        )
-
-                if policy.restart_source_on_rollback:
-                    try:
-                        if not compose_running(
-                            source_executor,
-                            marzban_dir=source.marzban_dir,
-                        ):
-                            start_runtime_and_verify(
-                                source_executor,
-                                _runtime_metadata(source),
-                                source.xray_ports,
+                        except Exception as recovery_exc:
+                            recovery_errors.append(
+                                f"destination stop rollback failed: {recovery_exc}"
                             )
-                        source_restarted = compose_running(
-                            source_executor,
-                            marzban_dir=source.marzban_dir,
-                        )
-                    except Exception as recovery_exc:
-                        recovery_errors.append(
-                            f"source restart rollback failed: {recovery_exc}"
-                        )
+
+                    if policy.restart_source_on_rollback:
+                        try:
+                            if not compose_running(
+                                source_executor,
+                                marzban_dir=source.marzban_dir,
+                            ):
+                                start_runtime_and_verify(
+                                    source_executor,
+                                    _runtime_metadata(source),
+                                    source.xray_ports,
+                                )
+                            source_restarted = compose_running(
+                                source_executor,
+                                marzban_dir=source.marzban_dir,
+                            )
+                        except Exception as recovery_exc:
+                            recovery_errors.append(
+                                f"source restart rollback failed: {recovery_exc}"
+                            )
+                else:
+                    recovery_errors.append(
+                        "DNS rollback was not verified; destination was kept "
+                        "running and source was kept stopped"
+                    )
 
                 try:
                     mark_phase4_complete(

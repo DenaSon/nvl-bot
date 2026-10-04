@@ -207,7 +207,7 @@ class ChangeServerPhase5OrchestrationTests(unittest.TestCase):
         "server_migration.phase5.verify_tcp_ports",
         return_value=(80, 443, 1080, 5430, 8080, 8443),
     )
-    @patch("server_migration.phase5.wait_for_hostname_api", return_value=True)
+    @patch("server_migration.phase5.wait_for_hostname_api", return_value=(True, "HTTP 200"))
     @patch("server_migration.phase5.wait_for_record_content")
     @patch("server_migration.phase5.release_final_sync_lock")
     @patch("server_migration.phase5.acquire_final_sync_lock")
@@ -259,7 +259,7 @@ class ChangeServerPhase5OrchestrationTests(unittest.TestCase):
     @patch("server_migration.phase5.start_runtime_and_verify", return_value=(True, True, (80, 443, 2053, 8443)))
     @patch("server_migration.phase5.stop_compose")
     @patch("server_migration.phase5.compose_running")
-    @patch("server_migration.phase5.wait_for_hostname_api", return_value=False)
+    @patch("server_migration.phase5.wait_for_hostname_api", return_value=(False, "HTTP 522 cf-error-type=52x"))
     @patch("server_migration.phase5.wait_for_record_content")
     @patch("server_migration.phase5.release_final_sync_lock")
     @patch("server_migration.phase5.acquire_final_sync_lock")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 from typing import Callable
 
@@ -34,6 +35,26 @@ from .ssh import ParamikoRemoteExecutor
 
 
 ExecutorFactory = Callable[[ServerCredentials], object]
+DEFAULT_CLOUDFLARE_TOKEN_ENV = "NVL_CLOUDFLARE_API_TOKEN"
+
+
+def resolve_cloudflare_api_token(
+    api_token: str | None = None,
+    *,
+    env_name: str = DEFAULT_CLOUDFLARE_TOKEN_ENV,
+) -> str:
+    token = str(api_token or "").strip()
+    if token:
+        return token
+
+    env_name = str(env_name or "").strip()
+    token = str(os.environ.get(env_name) or "").strip() if env_name else ""
+    if not token:
+        raise Phase5Error(
+            "Cloudflare API token is not configured"
+            + (f" in environment variable {env_name!r}" if env_name else "")
+        )
+    return token
 
 
 def _run_text(executor, command: str, *, timeout: int = 30, label: str = "remote command") -> str:
@@ -236,7 +257,8 @@ def run_phase5(
     job_id: str,
     hostname: str,
     zone_name: str,
-    cloudflare_api_token: str,
+    cloudflare_api_token: str | None = None,
+    cloudflare_token_env: str = DEFAULT_CLOUDFLARE_TOKEN_ENV,
     confirmation: str = "",
     policy: Phase5Policy | None = None,
     executor_factory: ExecutorFactory = ParamikoRemoteExecutor,
@@ -250,7 +272,12 @@ def run_phase5(
     destination_executor = None
     source_lock = False
     destination_lock = False
-    cloudflare = cloudflare_factory(cloudflare_api_token)
+    cloudflare = cloudflare_factory(
+        resolve_cloudflare_api_token(
+            cloudflare_api_token,
+            env_name=cloudflare_token_env,
+        )
+    )
     paths = _paths(job_id, policy)
 
     try:

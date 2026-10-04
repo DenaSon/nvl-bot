@@ -16946,6 +16946,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if regional_age in (None, float("inf"))
             else f"{int(regional_age)} ثانیه"
         )
+        tls_lines = ""
+        if preflight.get("tls_enabled"):
+            tls_lines = (
+                f"🔒 مسیر TLS جایگزین: {_probe_state_text(preflight.get('target_tls_ok'))}\n"
+                f"🛟 TLS روی هسته: {_probe_state_text(preflight.get('core_tls_ok'))}\n"
+            )
+
         await query.edit_message_text(
             "✅ <b>سرور جایگزین برای انتقال آماده است</b>\n\n"
             f"مبدأ: <code>{esc(source_host)}</code>\n"
@@ -16957,8 +16964,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔗 WireGuard: {_probe_state_text(preflight.get('target_wg_ok'))}\n"
             f"🛣 مسیر هسته: {_probe_state_text(preflight.get('target_core_path_ok'))}\n"
             f"🛟 مسیر پشتیبان هسته: {_probe_state_text(preflight.get('core_service_ok'))}\n"
-            + (f"🔒 مسیر TLS جایگزین: {_probe_state_text(preflight.get('target_tls_ok'))}\n" if preflight.get('tls_enabled') else "")
-            + (f"🛟 TLS روی هسته: {_probe_state_text(preflight.get('core_tls_ok'))}\n" if preflight.get('tls_enabled') else "")
+            f"{tls_lines}"
             f"📡 وضعیت منطقه‌ای: <b>{_filter_state_label_fa(preflight.get('target_filter_state'))}</b>\n"
             f"⏱ تازگی بررسی منطقه‌ای: <b>{regional_age_text}</b>\n\n"
             "🧪 آزمون با موفقیت تمام شد و هیچ تغییری در DNS، حساب‌ها یا دیتابیس انجام نشد.",

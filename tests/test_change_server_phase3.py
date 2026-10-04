@@ -218,7 +218,15 @@ class ChangeServerPhase3SafetyTests(unittest.TestCase):
         self.assertTrue(valid)
         self.assertTrue(identity_verified)
 
-        bad = IncomingExecutor(image_manifest={IMAGE: "0" * 64})
+        bad = IncomingExecutor(
+            image_manifest={
+                IMAGE: {
+                    "config_sha256": "2" * 64,
+                    "architecture": "arm64",
+                    "os": "linux",
+                }
+            }
+        )
         with self.assertRaises(Phase3Error):
             inspect_docker_image_archive(bad, INCOMING, metadata())
 

@@ -19,6 +19,10 @@ restore it.
 
 ## Source staging layout
 
+Before writing anything, Phase 2 requires source staging headroom. The default
+minimum is 1024 MB, and the calculated requirement also scales with the detected
+Marzban payload size.
+
 Each run gets a unique job ID:
 
     /root/nvl-migrations/<job-id>/
@@ -110,8 +114,8 @@ Default:
 
     /var/lib/nvl/migrations/<job-id>/bundle
 
-Directories are mode 0700 and files are mode 0600 because archives can contain
-.env files and private certificates.
+Source/NVL/Destination staging directories are mode 0700 and bundle files are
+mode 0600 because archives can contain .env files and private certificates.
 
 The engine checks available local disk before downloading the bundle.
 

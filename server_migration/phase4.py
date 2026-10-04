@@ -166,6 +166,11 @@ def build_phase4_plan(
         destination_executor,
         paths["phase4_complete"],
     )
+    rollback_marker = f'{paths["job_root"]}/CUTOVER_ROLLBACK_COMPLETE'
+    rollback_complete = _exists(
+        destination_executor,
+        rollback_marker,
+    )
 
     source_integrity = database_integrity(
         source_executor,
@@ -196,7 +201,16 @@ def build_phase4_plan(
         blockers.append(
             "destination Marzban is running; final sync requires it stopped"
         )
-    if phase4_complete:
+    if policy.retry_after_cutover_rollback:
+        if not phase4_complete:
+            blockers.append(
+                "retry-after-rollback requires existing Phase 4 FINAL_SYNC_COMPLETE"
+            )
+        if not rollback_complete:
+            blockers.append(
+                "retry-after-rollback requires CUTOVER_ROLLBACK_COMPLETE marker"
+            )
+    elif phase4_complete:
         blockers.append("Phase 4 FINAL_SYNC_COMPLETE already exists")
 
     plan = Phase4Plan(

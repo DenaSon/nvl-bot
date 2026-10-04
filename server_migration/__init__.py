@@ -3,9 +3,11 @@
 Phase 1 provides read-only discovery/preflight.
 Phase 2 creates verified live backup bundles and relays them
 Source -> NVL control host -> Destination staging.
+Phase 3 verifies the staged bundle, builds an isolated restore preview, and can
+restore it onto a clean destination without changing DNS.
 
-Restore, runtime mutation, DNS cutover, and rollback are intentionally outside
-Phase 2.
+Final database synchronization, IP rewrite, cutover, and rollback are later
+phases.
 """
 
 from .models import (
@@ -27,6 +29,14 @@ from .phase2_models import (
     SourceBundle,
     TransferReport,
 )
+from .phase3 import run_phase3
+from .phase3_models import (
+    PHASE3_MODE_INSPECT,
+    PHASE3_MODE_RESTORE,
+    Phase3Error,
+    Phase3Policy,
+    Phase3Result,
+)
 from .preflight import evaluate_preflight, run_preflight
 
 __all__ = [
@@ -44,7 +54,13 @@ __all__ = [
     "Phase2Result",
     "SourceBundle",
     "TransferReport",
+    "PHASE3_MODE_INSPECT",
+    "PHASE3_MODE_RESTORE",
+    "Phase3Error",
+    "Phase3Policy",
+    "Phase3Result",
     "evaluate_preflight",
     "run_preflight",
     "run_phase2",
+    "run_phase3",
 ]

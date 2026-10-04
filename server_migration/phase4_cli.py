@@ -7,6 +7,7 @@ import sys
 
 from .models import ServerCredentials
 from .phase4 import run_phase4
+from .ssh import SSHConnectionError
 from .phase4_models import (
     PHASE4_MODE_FINALIZE,
     PHASE4_MODE_PLAN,
@@ -108,7 +109,7 @@ def main() -> int:
             confirmation=args.confirm,
             policy=policy,
         )
-    except Phase4Error as exc:
+    except (Phase4Error, SSHConnectionError) as exc:
         print(
             json.dumps(
                 {

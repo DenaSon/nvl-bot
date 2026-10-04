@@ -25,7 +25,7 @@ from .final_sync import (
     stop_compose,
 )
 from .models import ServerCredentials
-from .phase3_models import PHASE3_MODE_INSPECT, Phase3Policy
+from .phase3_models import PHASE3_MODE_INSPECT, Phase3Error, Phase3Policy
 from .phase4_models import (
     PHASE4_MODE_FINALIZE,
     PHASE4_MODE_PLAN,
@@ -128,15 +128,18 @@ def build_phase4_plan(
         role="destination",
     )
 
-    _incoming, metadata, _manifest = verify_incoming_bundle(
-        destination_executor,
-        job_id=job_id,
-        policy=Phase3Policy(
-            remote_root=policy.remote_root,
-            mode=PHASE3_MODE_INSPECT,
-            expected_bundle_schema_version=policy.expected_bundle_schema_version,
-        ),
-    )
+    try:
+        _incoming, metadata, _manifest = verify_incoming_bundle(
+            destination_executor,
+            job_id=job_id,
+            policy=Phase3Policy(
+                remote_root=policy.remote_root,
+                mode=PHASE3_MODE_INSPECT,
+                expected_bundle_schema_version=policy.expected_bundle_schema_version,
+            ),
+        )
+    except Phase3Error as exc:
+        raise Phase4Error(f"Phase 3 bundle verification failed: {exc}") from exc
 
     old_ip, new_ip = _validate_pair_identity(
         source_credentials=source_credentials,
@@ -296,6 +299,17 @@ def run_phase4(
         )
         source_lock = True
 
+        # Revalidate the destination state after both migration locks are held.
+        # The PLAN_ONLY snapshot is not authoritative once execution starts:
+        # an operator/restart policy could have started Marzban in the gap.
+        if compose_running(
+            destination_executor,
+            marzban_dir=destination.marzban_dir,
+        ):
+            raise Phase4Error(
+                "destination Marzban started after planning; refusing final DB replacement"
+            )
+
         source_was_running = plan.source_running
         source_stopped = False
         destination_backup = ""
@@ -394,6 +408,14 @@ def run_phase4(
                     metadata,
                     destination.xray_ports,
                 )
+                if not destination_started:
+                    raise Phase4Error(
+                        "destination runtime did not start successfully"
+                    )
+                if not api_healthy:
+                    raise Phase4Error(
+                        "destination API health verification did not succeed"
+                    )
 
             marker_payload = {
                 "job_id": job_id,

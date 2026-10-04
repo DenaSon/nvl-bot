@@ -112,7 +112,7 @@ class V119AFastDetectionStaticTests(unittest.TestCase):
 
     def test_release_marker(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V121B-2026-10-04-regional-only-detection"',
+            'BOT_VERSION_TAG = "V121C-2026-10-04-differential-confirmation"',
             self.source,
         )
 
@@ -146,7 +146,7 @@ class V119AFastDetectionStaticTests(unittest.TestCase):
         self.assertNotIn("CheckHostClient", runtime)
         self.assertNotIn("CheckHostError", runtime)
 
-    def test_first_likely_round_gets_fast_confirmation(self):
+    def test_first_likely_round_gets_same_node_differential_confirmation(self):
         region = self._region(
             "async def _regional_filter_tick(app):",
             "async def _regional_filter_probe_one_now",
@@ -154,7 +154,23 @@ class V119AFastDetectionStaticTests(unittest.TestCase):
         self.assertIn("REGIONAL_FAST_CONFIRM_DELAY_SECONDS", region)
         self.assertIn("decision.state == FILTER_STATE_LIKELY", region)
         self.assertIn("0 < streak < EDGE_FILTER_CONFIRM_THRESHOLD", region)
-        self.assertGreaterEqual(region.count("_regional_filter_probe_edge("), 2)
+        self.assertIn("_regional_filter_collect_raw(", region)
+        self.assertIn("_db_get_differential_control_candidate", region)
+        self.assertIn("evaluate_differential_confirmation(", region)
+        self.assertIn("confirmation_validated=confirmation_validated", region)
+        self.assertIn("same_nodes_requested", region)
+
+    def test_unvalidated_likely_round_cannot_advance_confirmation_streak(self):
+        region = self._region(
+            "def _db_record_regional_round(",
+            "def _db_record_regional_provider_status(",
+        )
+        self.assertIn("confirmation_validated=False", region)
+        self.assertIn("if confirmation_validated:", region)
+        self.assertIn(
+            "WHEN COALESCE(filter_consecutive_failures,0)=0 THEN 1",
+            region,
+        )
 
     def test_phase6h_evaluates_after_default_probe(self):
         region = self._region(

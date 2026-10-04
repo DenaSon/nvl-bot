@@ -92,7 +92,7 @@ class V120D1MonitoringUITests(unittest.TestCase):
 
     def test_release_marker(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V121B-2026-10-04-regional-only-detection"',
+            'BOT_VERSION_TAG = "V121C-2026-10-04-differential-confirmation"',
             self.source,
         )
 

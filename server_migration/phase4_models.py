@@ -18,6 +18,7 @@ class Phase4Policy:
     fail_on_residual_old_ip: bool = True
     recover_source_on_failure: bool = True
     start_destination: bool = True
+    retry_after_cutover_rollback: bool = False
     expected_bundle_schema_version: int = 1
 
 

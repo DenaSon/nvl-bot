@@ -200,13 +200,16 @@ class V119AFastDetectionStaticTests(unittest.TestCase):
         self.assertNotIn("_safe_manual_failover", region)
         self.assertNotIn("_cf_switch_public_domain", region)
 
-    def test_probe_lock_prevents_duplicate_provider_runs(self):
+    def test_probe_coordinator_prevents_duplicate_provider_runs_without_dropping_default(self):
         region = self._region(
             "async def _regional_filter_tick(app):",
             "async def _regional_filter_probe_one_now",
         )
-        self.assertIn("_regional_probe_lock(app)", region)
-        self.assertIn("PROBE_ALREADY_RUNNING", region)
+        self.assertIn("_regional_provider_call(", region)
+        self.assertIn("PROBE_PRIORITY_DEFAULT", region)
+        self.assertNotIn("_regional_probe_lock(app)", region)
+        self.assertNotIn("PROBE_ALREADY_RUNNING", region)
+        self.assertNotIn('return {"status": "BUSY"}', region)
 
     def test_fast_sentinel_task_has_clean_lifecycle(self):
         post_init = self._region(

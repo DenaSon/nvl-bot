@@ -3,7 +3,10 @@ import unittest
 from datetime import datetime
 
 from filtering_runtime import (
+    PROVIDER_STATUS_ERROR,
     PROVIDER_STATUS_LIMITED,
+    provider_error_alert_due,
+    provider_recovery_ready,
     TRANSITION_CRITICAL,
     TRANSITION_DEGRADED,
     TRANSITION_NONE,
@@ -65,6 +68,36 @@ class Phase6FRuntimePolicyTests(unittest.TestCase):
         until = provider_backoff_until(now, 2, base_seconds=300, max_seconds=3600)
         self.assertEqual((until - now).total_seconds(), 600)
 
+    def test_provider_error_alert_requires_threshold_and_repeat_window(self):
+        self.assertFalse(provider_error_alert_due(1, threshold=3))
+        self.assertFalse(provider_error_alert_due(2, threshold=3))
+        self.assertTrue(provider_error_alert_due(3, threshold=3))
+        self.assertFalse(
+            provider_error_alert_due(
+                4,
+                seconds_since_last_alert=120,
+                threshold=3,
+                repeat_seconds=1800,
+            )
+        )
+        self.assertTrue(
+            provider_error_alert_due(
+                4,
+                seconds_since_last_alert=1800,
+                threshold=3,
+                repeat_seconds=1800,
+            )
+        )
+
+    def test_provider_recovery_requires_two_valid_successes_after_error(self):
+        self.assertFalse(
+            provider_recovery_ready(PROVIDER_STATUS_ERROR, 1, threshold=2)
+        )
+        self.assertTrue(
+            provider_recovery_ready(PROVIDER_STATUS_ERROR, 2, threshold=2)
+        )
+        self.assertTrue(provider_recovery_ready("OK", 1, threshold=2))
+
 
 class Phase6FBotIntegrationStaticTests(unittest.TestCase):
     @classmethod
@@ -115,23 +148,39 @@ class Phase6FBotIntegrationStaticTests(unittest.TestCase):
         self.assertIn("'regional_node'", region)
         self.assertIn("'regional_service'", region)
 
-    def test_only_consecutive_likely_rounds_build_confirmation_streak(self):
+    def test_unknown_round_preserves_last_valid_regional_evidence_and_streak(self):
         region = self._region(
             "def _db_record_regional_round(",
             "def _db_record_regional_provider_status(",
         )
         self.assertIn(
+            "if regional_decision.state == FILTER_STATE_UNKNOWN",
+            region,
+        )
+        self.assertIn(
+            "preserve the last valid regional evidence",
+            region,
+        )
+        self.assertIn(
+            "regional_state_updated_at is intentionally untouched",
+            region,
+        )
+        self.assertIn(
             "elif regional_decision.state == FILTER_STATE_LIKELY",
             region,
         )
-        self.assertIn(
-            "POSSIBLE/UNKNOWN break a LIKELY streak",
-            region,
+
+    def test_provider_notifications_are_debounced_and_recovery_is_stable(self):
+        region = self._region(
+            "async def _regional_provider_enter_error(",
+            "def _new_regional_probe_provider",
         )
-        self.assertIn(
-            '"filter_consecutive_failures=0, "',
-            region,
-        )
+        self.assertIn("regional_provider_error_streak", region)
+        self.assertIn("REGIONAL_PROVIDER_ERROR_ALERT_THRESHOLD", region)
+        self.assertIn("provider_error_alert_due", region)
+        self.assertIn("regional_provider_success_streak", region)
+        self.assertIn("REGIONAL_PROVIDER_RECOVERY_SUCCESS_THRESHOLD", region)
+        self.assertIn("provider_recovery_ready", region)
 
     def test_provider_limit_never_becomes_edge_failure(self):
         region = self._region(

@@ -174,48 +174,53 @@ def verify_origin_api(
     hostname: str,
     port: int,
     timeout: float = 6.0,
+    use_tls: bool = True,
 ) -> bool:
-    """Probe the origin directly while preserving TLS SNI + HTTP Host.
+    """Probe the origin directly while preserving the HTTP Host header.
 
-    TLS certificate verification is intentionally disabled here because
-    Cloudflare Origin CA certificates are not generally trusted by public
-    system trust stores. The probe still uses the real hostname as SNI.
+    TLS mode preserves SNI and intentionally disables public CA verification
+    because Cloudflare Origin CA certificates are not generally trusted by
+    system trust stores. HTTP mode supports origins used behind Flexible SSL.
     """
     raw_sock = socket.create_connection((ip, int(port)), timeout=timeout)
+    transport = raw_sock
     try:
-        context = ssl._create_unverified_context()
-        tls_sock = context.wrap_socket(raw_sock, server_hostname=hostname)
+        if use_tls:
+            context = ssl._create_unverified_context()
+            transport = context.wrap_socket(raw_sock, server_hostname=hostname)
+
+        request = (
+            f"GET /docs HTTP/1.1\r\n"
+            f"Host: {hostname}:{int(port)}\r\n"
+            "User-Agent: NVL-Phase5/1\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("ascii")
+        transport.sendall(request)
+        first = b""
+        while b"\r\n" not in first and len(first) < 4096:
+            chunk = transport.recv(1024)
+            if not chunk:
+                break
+            first += chunk
+        line = first.split(b"\r\n", 1)[0].decode("ascii", "replace")
+        parts = line.split()
+        if len(parts) < 2:
+            return False
         try:
-            request = (
-                f"GET /docs HTTP/1.1\r\n"
-                f"Host: {hostname}:{int(port)}\r\n"
-                "User-Agent: NVL-Phase5/1\r\n"
-                "Connection: close\r\n\r\n"
-            ).encode("ascii")
-            tls_sock.sendall(request)
-            first = b""
-            while b"\r\n" not in first and len(first) < 4096:
-                chunk = tls_sock.recv(1024)
-                if not chunk:
-                    break
-                first += chunk
-            line = first.split(b"\r\n", 1)[0].decode("ascii", "replace")
-            parts = line.split()
-            if len(parts) < 2:
-                return False
-            try:
-                status = int(parts[1])
-            except ValueError:
-                return False
-            return 200 <= status < 500
-        finally:
-            tls_sock.close()
+            status = int(parts[1])
+        except ValueError:
+            return False
+        return 200 <= status < 500
     finally:
         try:
-            raw_sock.close()
+            transport.close()
         except Exception:
             pass
-
+        if transport is not raw_sock:
+            try:
+                raw_sock.close()
+            except Exception:
+                pass
 
 def verify_hostname_api(
     *,

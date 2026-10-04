@@ -19681,6 +19681,14 @@ async def _notify_filter_state_transition(app, host, recompute_result, regional_
     )
 
 
+def _probe_state_text(value):
+    if value is True:
+        return "✅ سالم"
+    if value is False:
+        return "❌ قطع"
+    return "⚪ نامشخص"
+
+
 async def _regional_provider_enter_limited(app, host, error):
     state = await asyncio.to_thread(_db_get_regional_provider_runtime)
     previous_status = state.get("status") or PROVIDER_STATUS_NEVER

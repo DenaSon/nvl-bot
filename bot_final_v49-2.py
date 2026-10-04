@@ -20768,375 +20768,369 @@ async def _regional_filter_tick(app):
     accelerated confirmation after REGIONAL_FAST_CONFIRM_DELAY_SECONDS instead of
     waiting for another minute-long scheduler cycle.
     """
-    lock = _regional_probe_lock(app)
-    if lock.locked():
-        log.info("V119A regional probe skipped reason=PROBE_ALREADY_RUNNING")
-        return {"status": "BUSY"}
+    remaining = await asyncio.to_thread(_db_regional_backoff_remaining_seconds)
+    if remaining > 0:
+        log.info(
+            "V119A regional monitor provider-backoff remaining=%ss; probe skipped.",
+            remaining,
+        )
+        return {
+            "status": PROVIDER_STATUS_LIMITED,
+            "backoff_seconds": remaining,
+        }
 
-    async with lock:
-        remaining = await asyncio.to_thread(_db_regional_backoff_remaining_seconds)
-        if remaining > 0:
-            log.info(
-                "V119A regional monitor provider-backoff remaining=%ss; probe skipped.",
-                remaining,
-            )
-            return {
-                "status": PROVIDER_STATUS_LIMITED,
-                "backoff_seconds": remaining,
-            }
+    targets = await asyncio.to_thread(_db_get_regional_monitor_targets)
+    if not targets:
+        log.warning("V119A regional monitor skipped reason=NO_ACTIVE_DEFAULT_EDGE")
+        return {"status": "NO_DEFAULT_EDGE"}
 
-        targets = await asyncio.to_thread(_db_get_regional_monitor_targets)
-        if not targets:
-            log.warning("V119A regional monitor skipped reason=NO_ACTIVE_DEFAULT_EDGE")
-            return {"status": "NO_DEFAULT_EDGE"}
+    host, service_port, _is_standby = targets[0]
+    if await asyncio.to_thread(_is_current_core_host, host):
+        log.info("V119A regional monitor skipped default=%s reason=DEFAULT_IS_CORE", host)
+        return {"status": "SKIPPED_CORE", "host": host}
 
-        host, service_port, _is_standby = targets[0]
-        if await asyncio.to_thread(_is_current_core_host, host):
-            log.info("V119A regional monitor skipped default=%s reason=DEFAULT_IS_CORE", host)
-            return {"status": "SKIPPED_CORE", "host": host}
-
-        try:
-            service_port = int(service_port)
-        except (TypeError, ValueError):
-            service_port = 0
-        if not 1 <= service_port <= 65535:
-            log.warning(
-                "V119A regional monitor skipped host=%s reason=INVALID_SERVICE_PORT port=%r",
-                host,
-                service_port,
-            )
-            return {"status": "INVALID_SERVICE_PORT", "host": host}
-
-        try:
-            provider = _new_regional_probe_provider()
-        except ValueError as exc:
-            log.error("V119B regional provider config invalid: %s", exc)
-            return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": str(exc)}
-
-        try:
-            nodes = await asyncio.to_thread(provider.discover_nodes, "ir")
-        except RegionalProbeLimited as exc:
-            await _regional_provider_enter_limited(app, host, exc)
-            return {"status": PROVIDER_STATUS_LIMITED, "host": host, "error": str(exc)}
-        except RegionalProbeError as exc:
-            await _regional_provider_enter_error(app, host, provider.name, exc)
-            return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": str(exc)}
-
-        nodes = tuple(nodes[:REGIONAL_FILTER_MAX_NODES])
-        if not nodes:
-            log.warning(
-                "V119B node discovery returned no Iranian nodes provider=%s",
-                provider.name,
-            )
-            return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": "no regional nodes"}
-
-        result = await _regional_filter_probe_edge(
-            app,
+    try:
+        service_port = int(service_port)
+    except (TypeError, ValueError):
+        service_port = 0
+    if not 1 <= service_port <= 65535:
+        log.warning(
+            "V119A regional monitor skipped host=%s reason=INVALID_SERVICE_PORT port=%r",
             host,
             service_port,
-            provider,
-            nodes,
         )
-        if result.get("status") != PROVIDER_STATUS_OK:
-            return result
+        return {"status": "INVALID_SERVICE_PORT", "host": host}
 
-        await _regional_provider_mark_ok(app, result.get("regional_decision"))
+    try:
+        provider = _new_regional_probe_provider()
+    except ValueError as exc:
+        log.error("V119B regional provider config invalid: %s", exc)
+        return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": str(exc)}
 
-        decision = result.get("regional_decision")
-        health = (await asyncio.to_thread(_db_get_host_port_health_map)).get(host, {})
-        streak = int(health.get("filter_consecutive_failures") or 0)
+    try:
+        nodes = await asyncio.to_thread(provider.discover_nodes, "ir")
+    except RegionalProbeLimited as exc:
+        await _regional_provider_enter_limited(app, host, exc)
+        return {"status": PROVIDER_STATUS_LIMITED, "host": host, "error": str(exc)}
+    except RegionalProbeError as exc:
+        await _regional_provider_enter_error(app, host, provider.name, exc)
+        return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": str(exc)}
 
-        if (
-            decision is not None
-            and decision.state == FILTER_STATE_LIKELY
-            and 0 < streak < EDGE_FILTER_CONFIRM_THRESHOLD
-        ):
-            log.warning(
-                "V121C differential confirmation scheduled host=%s delay=%ss streak=%s/%s",
+    nodes = tuple(nodes[:REGIONAL_FILTER_MAX_NODES])
+    if not nodes:
+        log.warning(
+            "V119B node discovery returned no Iranian nodes provider=%s",
+            provider.name,
+        )
+        return {"status": PROVIDER_STATUS_ERROR, "host": host, "error": "no regional nodes"}
+
+    result = await _regional_filter_probe_edge(
+        app,
+        host,
+        service_port,
+        provider,
+        nodes,
+    )
+    if result.get("status") != PROVIDER_STATUS_OK:
+        return result
+
+    await _regional_provider_mark_ok(app, result.get("regional_decision"))
+
+    decision = result.get("regional_decision")
+    health = (await asyncio.to_thread(_db_get_host_port_health_map)).get(host, {})
+    streak = int(health.get("filter_consecutive_failures") or 0)
+
+    if (
+        decision is not None
+        and decision.state == FILTER_STATE_LIKELY
+        and 0 < streak < EDGE_FILTER_CONFIRM_THRESHOLD
+    ):
+        log.warning(
+            "V121C differential confirmation scheduled host=%s delay=%ss streak=%s/%s",
+            host,
+            REGIONAL_FAST_CONFIRM_DELAY_SECONDS,
+            streak,
+            EDGE_FILTER_CONFIRM_THRESHOLD,
+        )
+        await asyncio.sleep(REGIONAL_FAST_CONFIRM_DELAY_SECONDS)
+
+        current_default = await asyncio.to_thread(_db_get_default_host)
+        if current_default != host:
+            log.info(
+                "V121C differential confirmation cancelled old_default=%s new_default=%s",
                 host,
-                REGIONAL_FAST_CONFIRM_DELAY_SECONDS,
-                streak,
-                EDGE_FILTER_CONFIRM_THRESHOLD,
+                current_default,
             )
-            await asyncio.sleep(REGIONAL_FAST_CONFIRM_DELAY_SECONDS)
-
-            current_default = await asyncio.to_thread(_db_get_default_host)
-            if current_default != host:
-                log.info(
-                    "V121C differential confirmation cancelled old_default=%s new_default=%s",
+        else:
+            # Collect the second Default round WITHOUT persisting it. A LIKELY
+            # round is allowed to advance the confirmation streak only after a
+            # same-node Control Edge proves those failures are target-specific.
+            try:
+                source_probe, source_decision = await _regional_filter_collect_raw(
                     host,
-                    current_default,
+                    service_port,
+                    provider,
+                    nodes,
                 )
-            else:
-                # Collect the second Default round WITHOUT persisting it. A LIKELY
-                # round is allowed to advance the confirmation streak only after a
-                # same-node Control Edge proves those failures are target-specific.
-                try:
-                    source_probe, source_decision = await _regional_filter_collect_raw(
+            except RegionalProbeLimited as exc:
+                await _regional_provider_enter_limited(app, host, exc)
+                return {
+                    "status": PROVIDER_STATUS_LIMITED,
+                    "host": host,
+                    "error": str(exc),
+                }
+            except RegionalProbeError as exc:
+                await _regional_provider_enter_error(
+                    app,
+                    host,
+                    provider.name,
+                    exc,
+                )
+                return {
+                    "status": PROVIDER_STATUS_ERROR,
+                    "host": host,
+                    "error": str(exc),
+                }
+
+            await _regional_provider_mark_ok(app, source_decision)
+
+            differential = None
+            control_probe = None
+            control_decision = None
+            control_host = None
+            control_port = None
+            confirmation_validated = False
+
+            if source_decision.state == FILTER_STATE_LIKELY:
+                control_meta = await asyncio.to_thread(
+                    _db_get_differential_control_candidate,
+                    host,
+                )
+
+                if control_meta is None:
+                    await asyncio.to_thread(
+                        _db_record_differential_check,
                         host,
-                        service_port,
-                        provider,
-                        nodes,
-                    )
-                except RegionalProbeLimited as exc:
-                    await _regional_provider_enter_limited(app, host, exc)
-                    return {
-                        "status": PROVIDER_STATUS_LIMITED,
-                        "host": host,
-                        "error": str(exc),
-                    }
-                except RegionalProbeError as exc:
-                    await _regional_provider_enter_error(
-                        app,
-                        host,
+                        None,
                         provider.name,
-                        exc,
+                        source_probe,
+                        None,
+                        source_decision,
+                        None,
+                        None,
+                        verdict_override="NO_HEALTHY_CONTROL",
+                        detail={
+                            "same_nodes": len(nodes),
+                            "confirmation_streak_preserved": streak,
+                        },
                     )
-                    return {
-                        "status": PROVIDER_STATUS_ERROR,
-                        "host": host,
-                        "error": str(exc),
-                    }
-
-                await _regional_provider_mark_ok(app, source_decision)
-
-                differential = None
-                control_probe = None
-                control_decision = None
-                control_host = None
-                control_port = None
-                confirmation_validated = False
-
-                if source_decision.state == FILTER_STATE_LIKELY:
-                    control_meta = await asyncio.to_thread(
-                        _db_get_differential_control_candidate,
-                        host,
+                    _incident_log(
+                        "regional_differential_confirmation",
+                        None,
+                        level="warning",
+                        source=host,
+                        control=None,
+                        verdict="NO_HEALTHY_CONTROL",
+                        confirmed=False,
                     )
-
-                    if control_meta is None:
-                        await asyncio.to_thread(
-                            _db_record_differential_check,
+                else:
+                    control_host, control_port = control_meta
+                    try:
+                        control_probe, control_decision = (
+                            await _regional_filter_collect_raw(
+                                control_host,
+                                control_port,
+                                provider,
+                                nodes,
+                            )
+                        )
+                    except RegionalProbeLimited as exc:
+                        # Preserve the valid source confirmation as unvalidated
+                        # evidence, but provider backoff blocks any action.
+                        recompute = await asyncio.to_thread(
+                            _db_record_regional_round,
                             host,
-                            None,
-                            provider.name,
                             source_probe,
-                            None,
                             source_decision,
-                            None,
-                            None,
-                            verdict_override="NO_HEALTHY_CONTROL",
-                            detail={
-                                "same_nodes": len(nodes),
-                                "confirmation_streak_preserved": streak,
-                            },
+                            confirmation_validated=False,
                         )
-                        _incident_log(
-                            "regional_differential_confirmation",
-                            None,
-                            level="warning",
-                            source=host,
-                            control=None,
-                            verdict="NO_HEALTHY_CONTROL",
-                            confirmed=False,
-                        )
-                    else:
-                        control_host, control_port = control_meta
-                        try:
-                            control_probe, control_decision = (
-                                await _regional_filter_collect_raw(
-                                    control_host,
-                                    control_port,
-                                    provider,
-                                    nodes,
-                                )
-                            )
-                        except RegionalProbeLimited as exc:
-                            # Preserve the valid source confirmation as unvalidated
-                            # evidence, but provider backoff blocks any action.
-                            recompute = await asyncio.to_thread(
-                                _db_record_regional_round,
-                                host,
-                                source_probe,
-                                source_decision,
-                                confirmation_validated=False,
-                            )
-                            if recompute:
-                                await _notify_filter_state_transition(
-                                    app,
-                                    host,
-                                    recompute,
-                                    source_decision,
-                                )
-                            await asyncio.to_thread(
-                                _db_record_differential_check,
-                                host,
-                                control_host,
-                                provider.name,
-                                source_probe,
-                                None,
-                                source_decision,
-                                None,
-                                None,
-                                verdict_override="CONTROL_PROVIDER_LIMITED",
-                                detail={"error": str(exc)},
-                            )
-                            await _regional_provider_enter_limited(app, host, exc)
-                            return {
-                                "status": PROVIDER_STATUS_LIMITED,
-                                "host": host,
-                                "error": str(exc),
-                            }
-                        except RegionalProbeError as exc:
-                            recompute = await asyncio.to_thread(
-                                _db_record_regional_round,
-                                host,
-                                source_probe,
-                                source_decision,
-                                confirmation_validated=False,
-                            )
-                            if recompute:
-                                await _notify_filter_state_transition(
-                                    app,
-                                    host,
-                                    recompute,
-                                    source_decision,
-                                )
-                            await asyncio.to_thread(
-                                _db_record_differential_check,
-                                host,
-                                control_host,
-                                provider.name,
-                                source_probe,
-                                None,
-                                source_decision,
-                                None,
-                                None,
-                                verdict_override="CONTROL_PROVIDER_ERROR",
-                                detail={"error": str(exc)},
-                            )
-                            await _regional_provider_enter_error(
+                        if recompute:
+                            await _notify_filter_state_transition(
                                 app,
                                 host,
-                                provider.name,
-                                exc,
+                                recompute,
+                                source_decision,
                             )
-                            return {
-                                "status": PROVIDER_STATUS_ERROR,
-                                "host": host,
-                                "error": str(exc),
-                            }
-
-                        differential = evaluate_differential_confirmation(
-                            source_decision.state,
-                            control_decision.state,
-                            source_probe.evidence,
-                            control_probe.evidence,
-                            min_target_specific_nodes=REGIONAL_DIFF_MIN_TARGET_SPECIFIC_NODES,
-                            min_target_specific_asns=REGIONAL_DIFF_MIN_TARGET_SPECIFIC_ASNS,
-                        )
-                        confirmation_validated = bool(differential.confirmed)
-
                         await asyncio.to_thread(
                             _db_record_differential_check,
                             host,
                             control_host,
                             provider.name,
                             source_probe,
-                            control_probe,
-                            source_decision,
-                            control_decision,
-                            differential,
-                            detail={
-                                "same_nodes_requested": len(nodes),
-                                "source_failed": source_decision.summary.failed_nodes,
-                                "source_completed": source_decision.summary.completed_nodes,
-                                "control_failed": control_decision.summary.failed_nodes,
-                                "control_completed": control_decision.summary.completed_nodes,
-                            },
-                        )
-                        _incident_log(
-                            "regional_differential_confirmation",
                             None,
-                            level="warning" if confirmation_validated else "info",
-                            source=host,
-                            control=control_host,
-                            verdict=differential.verdict,
-                            confirmed=confirmation_validated,
-                            target_specific_nodes=differential.target_specific_count,
-                            target_specific_asns=list(
-                                differential.target_specific_failed_asns
-                            ),
-                            shared_failed_nodes=differential.shared_failure_count,
+                            source_decision,
+                            None,
+                            None,
+                            verdict_override="CONTROL_PROVIDER_LIMITED",
+                            detail={"error": str(exc)},
                         )
+                        await _regional_provider_enter_limited(app, host, exc)
+                        return {
+                            "status": PROVIDER_STATUS_LIMITED,
+                            "host": host,
+                            "error": str(exc),
+                        }
+                    except RegionalProbeError as exc:
+                        recompute = await asyncio.to_thread(
+                            _db_record_regional_round,
+                            host,
+                            source_probe,
+                            source_decision,
+                            confirmation_validated=False,
+                        )
+                        if recompute:
+                            await _notify_filter_state_transition(
+                                app,
+                                host,
+                                recompute,
+                                source_decision,
+                            )
+                        await asyncio.to_thread(
+                            _db_record_differential_check,
+                            host,
+                            control_host,
+                            provider.name,
+                            source_probe,
+                            None,
+                            source_decision,
+                            None,
+                            None,
+                            verdict_override="CONTROL_PROVIDER_ERROR",
+                            detail={"error": str(exc)},
+                        )
+                        await _regional_provider_enter_error(
+                            app,
+                            host,
+                            provider.name,
+                            exc,
+                        )
+                        return {
+                            "status": PROVIDER_STATUS_ERROR,
+                            "host": host,
+                            "error": str(exc),
+                        }
 
-                # Persist the second source round exactly once. A strong LIKELY
-                # round only advances streak when Differential confirmed it.
-                recompute = await asyncio.to_thread(
-                    _db_record_regional_round,
-                    host,
-                    source_probe,
-                    source_decision,
-                    confirmation_validated=confirmation_validated,
-                )
-                if recompute:
-                    await _notify_filter_state_transition(
-                        app,
+                    differential = evaluate_differential_confirmation(
+                        source_decision.state,
+                        control_decision.state,
+                        source_probe.evidence,
+                        control_probe.evidence,
+                        min_target_specific_nodes=REGIONAL_DIFF_MIN_TARGET_SPECIFIC_NODES,
+                        min_target_specific_asns=REGIONAL_DIFF_MIN_TARGET_SPECIFIC_ASNS,
+                    )
+                    confirmation_validated = bool(differential.confirmed)
+
+                    await asyncio.to_thread(
+                        _db_record_differential_check,
                         host,
-                        recompute,
+                        control_host,
+                        provider.name,
+                        source_probe,
+                        control_probe,
                         source_decision,
+                        control_decision,
+                        differential,
+                        detail={
+                            "same_nodes_requested": len(nodes),
+                            "source_failed": source_decision.summary.failed_nodes,
+                            "source_completed": source_decision.summary.completed_nodes,
+                            "control_failed": control_decision.summary.failed_nodes,
+                            "control_completed": control_decision.summary.completed_nodes,
+                        },
+                    )
+                    _incident_log(
+                        "regional_differential_confirmation",
+                        None,
+                        level="warning" if confirmation_validated else "info",
+                        source=host,
+                        control=control_host,
+                        verdict=differential.verdict,
+                        confirmed=confirmation_validated,
+                        target_specific_nodes=differential.target_specific_count,
+                        target_specific_asns=list(
+                            differential.target_specific_failed_asns
+                        ),
+                        shared_failed_nodes=differential.shared_failure_count,
                     )
 
-                health_after = (
-                    await asyncio.to_thread(_db_get_host_port_health_map)
-                ).get(host, {})
-
-                log.warning(
-                    "V121C differential result source=%s control=%s source_state=%s "
-                    "control_state=%s verdict=%s confirmed=%s streak=%s/%s",
+            # Persist the second source round exactly once. A strong LIKELY
+            # round only advances streak when Differential confirmed it.
+            recompute = await asyncio.to_thread(
+                _db_record_regional_round,
+                host,
+                source_probe,
+                source_decision,
+                confirmation_validated=confirmation_validated,
+            )
+            if recompute:
+                await _notify_filter_state_transition(
+                    app,
                     host,
-                    control_host or "-",
-                    source_decision.state,
-                    control_decision.state if control_decision else "-",
-                    (
-                        differential.verdict
-                        if differential is not None
-                        else (
-                            "SOURCE_NO_LONGER_LIKELY"
-                            if source_decision.state != FILTER_STATE_LIKELY
-                            else "NO_HEALTHY_CONTROL"
-                        )
-                    ),
-                    confirmation_validated,
-                    int(health_after.get("filter_consecutive_failures") or 0),
-                    EDGE_FILTER_CONFIRM_THRESHOLD,
+                    recompute,
+                    source_decision,
                 )
 
-                result = {
-                    "status": PROVIDER_STATUS_OK,
-                    "host": host,
-                    "provider": provider.name,
-                    "probe": source_probe,
-                    "regional_decision": source_decision,
-                    "observability": recompute,
-                    "differential": differential,
-                    "control_host": control_host,
-                }
+            health_after = (
+                await asyncio.to_thread(_db_get_host_port_health_map)
+            ).get(host, {})
 
-        # V119-C: once filtering is truly confirmed, use the already-open provider
-        # context to refresh only stale/unknown locally healthy Standbys before policy.
-        ready_candidate_override = await _refresh_standbys_for_confirmed_filter(
-            app,
-            host,
-            provider,
-            nodes,
-        )
+            log.warning(
+                "V121C differential result source=%s control=%s source_state=%s "
+                "control_state=%s verdict=%s confirmed=%s streak=%s/%s",
+                host,
+                control_host or "-",
+                source_decision.state,
+                control_decision.state if control_decision else "-",
+                (
+                    differential.verdict
+                    if differential is not None
+                    else (
+                        "SOURCE_NO_LONGER_LIKELY"
+                        if source_decision.state != FILTER_STATE_LIKELY
+                        else "NO_HEALTHY_CONTROL"
+                    )
+                ),
+                confirmation_validated,
+                int(health_after.get("filter_consecutive_failures") or 0),
+                EDGE_FILTER_CONFIRM_THRESHOLD,
+            )
 
-        # Default decision remains independent from unrelated Standby provider errors.
-        await _phase6h_auto_failover_tick(
-            app,
-            ready_candidate_override=ready_candidate_override,
-        )
-        return result
+            result = {
+                "status": PROVIDER_STATUS_OK,
+                "host": host,
+                "provider": provider.name,
+                "probe": source_probe,
+                "regional_decision": source_decision,
+                "observability": recompute,
+                "differential": differential,
+                "control_host": control_host,
+            }
+
+    # V119-C: once filtering is truly confirmed, use the already-open provider
+    # context to refresh only stale/unknown locally healthy Standbys before policy.
+    ready_candidate_override = await _refresh_standbys_for_confirmed_filter(
+        app,
+        host,
+        provider,
+        nodes,
+    )
+
+    # Default decision remains independent from unrelated Standby provider errors.
+    await _phase6h_auto_failover_tick(
+        app,
+        ready_candidate_override=ready_candidate_override,
+    )
+    return result
 
 async def _regional_filter_probe_one_now(app, host):
     """Manual admin recheck through the same provider-neutral path."""

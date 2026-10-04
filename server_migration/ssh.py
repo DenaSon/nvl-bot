@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Protocol
 
 from .models import CommandResult, ServerCredentials
@@ -13,15 +14,27 @@ class RemoteExecutor(Protocol):
         ...
 
 
+class RemoteFileTransport(Protocol):
+    def download(self, remote_path: str, local_path: str) -> None:
+        ...
+
+    def upload(self, local_path: str, remote_path: str) -> None:
+        ...
+
+
 class SSHConnectionError(RuntimeError):
     pass
 
 
 class ParamikoRemoteExecutor:
-    """Small SSH wrapper used by migration discovery.
+    """SSH/SFTP wrapper shared by migration phases.
 
-    Paramiko is imported lazily so pure unit tests do not require the optional
-    runtime dependency. Passwords are never logged or included in CommandResult.
+    Paramiko is imported lazily so pure unit tests do not require the runtime
+    dependency. Passwords are never logged or included in CommandResult.
+
+    Phase 1 uses only command execution and remains read-only. Phase 2
+    additionally uses SFTP download/upload to relay staged migration artifacts
+    through the NVL control host.
     """
 
     def __init__(
@@ -35,6 +48,7 @@ class ParamikoRemoteExecutor:
         self.connect_timeout = max(1, int(connect_timeout))
         self.command_timeout = max(1, int(command_timeout))
         self._client = None
+        self._sftp = None
 
     def _ensure_client(self):
         if self._client is not None:
@@ -43,13 +57,13 @@ class ParamikoRemoteExecutor:
             import paramiko
         except ImportError as exc:
             raise SSHConnectionError(
-                "paramiko is required for live server migration preflight"
+                "paramiko is required for live server migration"
             ) from exc
 
         client = paramiko.SSHClient()
         # New destination servers usually have no local known-host entry. This
         # policy accepts the host key only in this in-memory client; we never
-        # call save_host_keys(), so Phase 1 does not mutate local known_hosts.
+        # call save_host_keys(), so migration does not mutate local known_hosts.
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
             client.connect(
@@ -73,6 +87,17 @@ class ParamikoRemoteExecutor:
         self._client = client
         return client
 
+    def _ensure_sftp(self):
+        if self._sftp is None:
+            try:
+                self._sftp = self._ensure_client().open_sftp()
+            except Exception as exc:
+                raise SSHConnectionError(
+                    f"SFTP setup failed for {self.credentials.host}:"
+                    f"{self.credentials.port}: {type(exc).__name__}: {exc}"
+                ) from exc
+        return self._sftp
+
     def run(self, command: str, timeout: int | None = None) -> CommandResult:
         client = self._ensure_client()
         try:
@@ -93,7 +118,38 @@ class ParamikoRemoteExecutor:
                 f" {type(exc).__name__}: {exc}"
             ) from exc
 
+    def download(self, remote_path: str, local_path: str) -> None:
+        """Download one staged artifact without altering the remote file."""
+        local_path = os.fspath(local_path)
+        parent = os.path.dirname(os.path.abspath(local_path))
+        if parent:
+            os.makedirs(parent, mode=0o700, exist_ok=True)
+        try:
+            self._ensure_sftp().get(str(remote_path), local_path)
+            os.chmod(local_path, 0o600)
+        except Exception as exc:
+            raise SSHConnectionError(
+                f"SFTP download failed from {self.credentials.host}:"
+                f" {type(exc).__name__}: {exc}"
+            ) from exc
+
+    def upload(self, local_path: str, remote_path: str) -> None:
+        """Upload one local staged artifact to an already-created remote path."""
+        try:
+            self._ensure_sftp().put(os.fspath(local_path), str(remote_path))
+            self._ensure_sftp().chmod(str(remote_path), 0o600)
+        except Exception as exc:
+            raise SSHConnectionError(
+                f"SFTP upload failed to {self.credentials.host}:"
+                f" {type(exc).__name__}: {exc}"
+            ) from exc
+
     def close(self) -> None:
+        if self._sftp is not None:
+            try:
+                self._sftp.close()
+            finally:
+                self._sftp = None
         if self._client is not None:
             self._client.close()
             self._client = None

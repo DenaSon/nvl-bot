@@ -397,8 +397,10 @@ def node_generated_host_payload(node: Dict[str, Any]) -> Dict[str, Any]:
         "host": None,
         "path": None,
         "security": "inbound_default",
-        "alpn": "none",
-        "fingerprint": "none",
+        # ProxyHostALPN / ProxyHostFingerprint use an empty string for
+        # their disabled value in Marzban's API model.
+        "alpn": "",
+        "fingerprint": "",
         "allowinsecure": None,
         "is_disabled": False,
         "mux_enable": False,

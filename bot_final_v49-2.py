@@ -93,6 +93,7 @@ import aiohttp
 import qrcode
 import v2ray_engine
 import marzban_admin
+import marzban_node_bootstrap
 import marzban_asset_discovery
 import marzban_local_health
 import marzban_regional_filtering as marzban_regional
@@ -7587,6 +7588,95 @@ async def _mza_render(target, text, kb):
     else:
         await target.message.reply_text(text, reply_markup=markup, parse_mode="HTML")
 
+def _mza_node_bootstrap_report_text(report):
+    status_icon = {
+        "PASS": "✅",
+        "WARN": "⚠️",
+        "FAIL": "❌",
+    }
+    lines = [
+        "🔍 <b>Node SSH Preflight</b>",
+        "━━━━━━━━━━━━━━",
+        f"Node ID  <code>{esc(report.node_id)}</code>",
+        f"Server  <code>{esc(report.host)}:{esc(report.ssh_port)}</code>",
+        f"Host Key  <code>{esc(report.host_key_algorithm)}</code>",
+        f"Fingerprint  <code>{esc(report.host_key_sha256)}</code>",
+        "",
+        "🧩 <b>Server</b>",
+        f"OS  <b>{esc(report.os_pretty_name or report.os_id or 'نامشخص')}</b>",
+        f"Architecture  <code>{esc(report.architecture or 'نامشخص')}</code>",
+        f"Docker  <b>{'✅ نصب است' if report.docker_installed else '➖ نصب نیست'}</b>",
+        f"Compose  <b>{'✅ موجود' if report.compose_available else '➖ موجود نیست'}</b>",
+        f"Marzban-node  <b>{'⚠️ آثار نصب قبلی پیدا شد' if report.marzban_node_detected else '✅ نصب قبلی پیدا نشد'}</b>",
+        "",
+        "🧪 <b>Checks</b>",
+    ]
+    for check in report.checks:
+        icon = status_icon.get(str(check.status), "•")
+        lines.append(f"{icon} {esc(check.message)}")
+    lines.extend([
+        "",
+        (
+            "✅ <b>سرور برای Phase 7 آماده است.</b>"
+            if report.ready
+            else "⛔️ <b>Preflight دارای مورد مسدودکننده است.</b>"
+        ),
+        "🔐 رمز SSH پس از پایان Preflight از حافظه NVL پاک شد.",
+    ])
+    return "\n".join(lines)
+
+
+def _mza_node_bootstrap_report_kb(context, node_id):
+    return [
+        [InlineKeyboardButton("🔄 اجرای دوباره Preflight", callback_data=f"mza_nboot_{node_id}")],
+        [InlineKeyboardButton("📜 راه‌اندازی دستی", callback_data=f"mza_nsetup_{node_id}")],
+        [InlineKeyboardButton("🖥 جزئیات Node", callback_data=f"mza_node_{node_id}")],
+        [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
+    ]
+
+
+async def _mza_probe_node_bootstrap_host_key(target, context, session):
+    try:
+        info = await asyncio.to_thread(
+            marzban_node_bootstrap.discover_host_key,
+            session,
+        )
+    except Exception as exc:
+        await _mza_render(
+            target,
+            "❌ <b>دریافت SSH Host Key ناموفق بود.</b>\n\n"
+            f"Server: <code>{esc(session.host)}:{esc(session.ssh_port)}</code>\n"
+            f"خطا: <code>{esc(type(exc).__name__)}: {esc(exc)}</code>\n\n"
+            "SSH باید از سرور NVL به این آدرس و پورت قابل دسترس باشد.",
+            [
+                [InlineKeyboardButton("🔄 تلاش مجدد", callback_data=f"mza_nboot_probe_{session.node_id}")],
+                [InlineKeyboardButton("✏️ شروع مجدد", callback_data=f"mza_nboot_{session.node_id}")],
+                [InlineKeyboardButton("↩️ Node", callback_data=f"mza_node_{session.node_id}")],
+            ],
+        )
+        return False
+
+    await _mza_render(
+        target,
+        "🔐 <b>تایید هویت SSH سرور</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        f"Server  <code>{esc(session.host)}:{esc(session.ssh_port)}</code>\n"
+        f"Key Type  <code>{esc(info.algorithm)}</code>\n"
+        f"Fingerprint  <code>{esc(info.sha256)}</code>\n\n"
+        "این fingerprint قبل از ارسال رمز دریافت شده است. در صورت امکان آن را با fingerprint کنسول/پنل ارائه‌دهنده VPS مقایسه کنید.\n"
+        "پس از تایید، اتصال SSH فقط با همین Host Key پذیرفته می‌شود.",
+        [
+            [InlineKeyboardButton(
+                "✅ Fingerprint را تایید می‌کنم",
+                callback_data=f"mza_nboot_fp_{session.node_id}_{session.host_key_nonce}",
+            )],
+            [InlineKeyboardButton("✏️ تغییر SSH Port", callback_data=f"mza_nboot_{session.node_id}")],
+            [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nboot_cancel_{session.node_id}")],
+        ],
+    )
+    return True
+
+
 async def _mza_show_renew_confirm(target, username, days):
     days = int(days)
     txt = (
@@ -8550,7 +8640,8 @@ async def _show_marzban_node_detail(target, context, node_id):
             InlineKeyboardButton("🔄 Reconnect", callback_data=f"mza_nreconnect_{node_id}"),
         ])
     kb.append([
-        InlineKeyboardButton("📜 Certificate & Setup", callback_data=f"mza_nsetup_{node_id}")
+        InlineKeyboardButton("🚀 راه‌اندازی خودکار", callback_data=f"mza_nboot_{node_id}"),
+        InlineKeyboardButton("📜 راه‌اندازی دستی", callback_data=f"mza_nsetup_{node_id}"),
     ])
     kb.extend([
         [
@@ -9677,6 +9768,110 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='HTML',
             )
             return
+
+    # 🚀 Marzban Node bootstrap Phase 6 input. Password stays only in the
+    # module-level in-memory session and is scrubbed after every preflight.
+    if state in ('MZA_NODE_BOOTSTRAP_PORT_INPUT', 'MZA_NODE_BOOTSTRAP_PASSWORD_INPUT'):
+        if role != 'admin':
+            context.user_data.pop('state', None)
+            marzban_node_bootstrap.cancel_session(chat_id)
+            await update.message.reply_text("⛔️ دسترسی غیرمجاز.")
+            return
+
+        session = marzban_node_bootstrap.get_session(chat_id)
+        if session is None:
+            context.user_data.pop('state', None)
+            await update.message.reply_text(
+                "⚠️ نشست راه‌اندازی Node پس از restart یا timeout موجود نیست. "
+                "از صفحه Node دوباره «راه‌اندازی خودکار» را بزنید."
+            )
+            return
+
+        if state == 'MZA_NODE_BOOTSTRAP_PORT_INPUT':
+            try:
+                marzban_node_bootstrap.set_ssh_port(session, text)
+            except ValueError:
+                await update.message.reply_text(
+                    "❌ پورت SSH معتبر نیست. عددی بین 1 تا 65535 بفرستید؛ مثال: <code>22</code>.",
+                    parse_mode='HTML',
+                )
+                return
+            except Exception as exc:
+                context.user_data.pop('state', None)
+                marzban_node_bootstrap.cancel_session(chat_id)
+                await update.message.reply_text(
+                    f"❌ نشست راه‌اندازی نامعتبر است: <code>{esc(exc)}</code>",
+                    parse_mode='HTML',
+                )
+                return
+            context.user_data.pop('state', None)
+            await _mza_probe_node_bootstrap_host_key(update.message, context, session)
+            return
+
+        # Password is intentionally copied only into the in-memory bootstrap
+        # session. Never put it in context.user_data, logs, DB or report objects.
+        with contextlib.suppress(Exception):
+            await update.message.delete()
+        try:
+            marzban_node_bootstrap.set_password(session, text)
+        except ValueError:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="❌ رمز SSH خالی یا بیش از حد طولانی است. دوباره ارسال کنید.",
+            )
+            return
+        except Exception as exc:
+            context.user_data.pop('state', None)
+            marzban_node_bootstrap.cancel_session(chat_id)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ نشست راه‌اندازی نامعتبر است: <code>{esc(exc)}</code>",
+                parse_mode='HTML',
+            )
+            return
+
+        context.user_data.pop('state', None)
+        status_message = await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "⏳ <b>Node SSH Preflight در حال اجراست...</b>\n"
+                f"<code>{esc(session.host)}:{esc(session.ssh_port)}</code>\n"
+                "هیچ تغییری روی سرور اعمال نمی‌شود."
+            ),
+            parse_mode='HTML',
+        )
+        try:
+            report = await asyncio.to_thread(
+                marzban_node_bootstrap.run_preflight,
+                session,
+            )
+            await status_message.edit_text(
+                _mza_node_bootstrap_report_text(report),
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(
+                    _mza_node_bootstrap_report_kb(context, session.node_id)
+                ),
+            )
+        except Exception as exc:
+            # run_preflight scrubs the password in its finally block. Keep the
+            # operator error bounded and never include the submitted secret.
+            session.scrub_secret()
+            log.warning(
+                "Marzban node SSH preflight failed node_id=%s error=%s",
+                session.node_id,
+                type(exc).__name__,
+            )
+            await status_message.edit_text(
+                "❌ <b>SSH Preflight اجرا نشد.</b>\n\n"
+                f"خطا: <code>{esc(type(exc).__name__)}</code>\n"
+                "رمز SSH از حافظه NVL پاک شد.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 شروع مجدد", callback_data=f"mza_nboot_{session.node_id}")],
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{session.node_id}")],
+                ]),
+            )
+        return
 
     # 🔍 Phase 2 Marzban admin search — read-only and admin-only.
     if state == 'MARZBAN_ADMIN_SEARCH':
@@ -13472,6 +13667,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         host_edit_starter = d.startswith('mza_hedit_')
         node_create_starter = d == 'mza_ncreate' or d.startswith('mza_ncreate_')
         node_delete_starter = d.startswith('mza_ndelete_')
+        node_bootstrap_starter = d.startswith('mza_nboot_')
         create_starter = d == 'mza_create' or d.startswith('mza_c') or d.startswith('mza_create_')
         starters = (
             d == 'mza_search'
@@ -13482,6 +13678,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             or host_edit_starter
             or node_create_starter
             or node_delete_starter
+            or node_bootstrap_starter
             or create_starter
         )
         if not starters and input_state in (
@@ -13497,6 +13694,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'MZA_NODE_CREATE_ADDRESS_INPUT',
             'MZA_NODE_CREATE_PORTS_INPUT',
             'MZA_NODE_CREATE_RATIO_INPUT',
+            'MZA_NODE_BOOTSTRAP_PORT_INPUT',
+            'MZA_NODE_BOOTSTRAP_PASSWORD_INPUT',
             'MZA_HOST_FIELD_INPUT',
             'MZA_CREATE_USERNAME_INPUT',
             'MZA_CREATE_SUBNAME_INPUT',
@@ -13523,6 +13722,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not node_delete_starter:
             context.user_data.pop("mza_node_delete_pending", None)
             context.user_data.pop("mza_node_delete_busy", None)
+        if not node_bootstrap_starter:
+            marzban_node_bootstrap.cancel_session(query.message.chat_id)
         if not create_starter and context.user_data.get("mza_create_draft") is not None:
             _mza_clear_create(context)
 
@@ -14357,7 +14558,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = []
         if node_id:
             kb.extend([
-                [InlineKeyboardButton("📜 Certificate & Setup", callback_data=f"mza_nsetup_{node_id}")],
+                [InlineKeyboardButton("🚀 راه‌اندازی خودکار", callback_data=f"mza_nboot_{node_id}")],
+                [InlineKeyboardButton("📜 راه‌اندازی دستی", callback_data=f"mza_nsetup_{node_id}")],
                 [InlineKeyboardButton("🖥 مشاهده Node", callback_data=f"mza_node_{node_id}")],
             ])
         kb.extend([
@@ -14382,7 +14584,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             success_lines.append(f"Message  <code>{esc(node_message[:500])}</code>")
         success_lines.extend([
             "",
-            "مرحله بعد: Certificate & Setup را باز کنید و Marzban-node مقصد را راه‌اندازی کنید.",
+            "مرحله بعد: «راه‌اندازی خودکار» را بزنید تا SSH و آمادگی سرور بدون هیچ تغییری بررسی شود.",
         ])
         await query.edit_message_text(
             "\n".join(success_lines),
@@ -14398,6 +14600,170 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         node_id = d[len('mza_node_'):]
         await _show_marzban_node_detail(query, context, node_id)
         return
+    elif d.startswith('mza_nboot_fp_'):
+        rest = d[len('mza_nboot_fp_'):]
+        try:
+            raw_node_id, nonce = rest.split('_', 1)
+            node_id = marzban_admin.normalize_node_id(raw_node_id)
+            session = marzban_node_bootstrap.require_session(query.message.chat_id)
+            if session.node_id != node_id:
+                raise marzban_node_bootstrap.NodeBootstrapError("Node bootstrap target changed")
+            marzban_node_bootstrap.confirm_host_key(session, nonce)
+        except Exception as exc:
+            context.user_data.pop('state', None)
+            marzban_node_bootstrap.cancel_session(query.message.chat_id)
+            retry_kb = []
+            if 'node_id' in locals():
+                retry_kb.append([
+                    InlineKeyboardButton("🚀 شروع مجدد", callback_data=f"mza_nboot_{node_id}")
+                ])
+            retry_kb.append([
+                InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))
+            ])
+            await query.edit_message_text(
+                f"❌ تایید SSH منقضی یا نامعتبر است.\n<code>{esc(type(exc).__name__)}: {esc(exc)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(retry_kb),
+            )
+            return
+
+        context.user_data['state'] = 'MZA_NODE_BOOTSTRAP_PASSWORD_INPUT'
+        await query.edit_message_text(
+            "🔑 <b>رمز SSH سرور Node</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"Server  <code>{esc(session.host)}:{esc(session.ssh_port)}</code>\n"
+            f"User  <code>root</code>\n"
+            f"Pinned Host Key  <code>{esc(session.host_key_sha256)}</code>\n\n"
+            "رمز root را در یک پیام ارسال کنید.\n"
+            "🔐 رمز در DB یا log ذخیره نمی‌شود، وارد user_data نمی‌شود و بعد از Preflight از حافظه پاک خواهد شد.\n"
+            "پیام حاوی رمز نیز بلافاصله تا حد امکان از چت حذف می‌شود.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nboot_cancel_{node_id}")]
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_nboot_port22_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nboot_port22_'):])
+        try:
+            session = marzban_node_bootstrap.require_session(query.message.chat_id)
+            if session.node_id != node_id:
+                raise marzban_node_bootstrap.NodeBootstrapError("Node bootstrap target changed")
+            marzban_node_bootstrap.set_ssh_port(session, 22)
+        except Exception as exc:
+            await query.edit_message_text(
+                f"❌ نشست راه‌اندازی معتبر نیست: <code>{esc(exc)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🚀 شروع مجدد", callback_data=f"mza_nboot_{node_id}")]
+                ]),
+            )
+            return
+        context.user_data.pop('state', None)
+        await _mza_probe_node_bootstrap_host_key(query, context, session)
+        return
+
+    elif d.startswith('mza_nboot_portcustom_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nboot_portcustom_'):])
+        try:
+            session = marzban_node_bootstrap.require_session(query.message.chat_id)
+            if session.node_id != node_id:
+                raise marzban_node_bootstrap.NodeBootstrapError("Node bootstrap target changed")
+        except Exception:
+            marzban_node_bootstrap.cancel_session(query.message.chat_id)
+            await query.edit_message_text(
+                "❌ نشست راه‌اندازی منقضی شده است.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🚀 شروع مجدد", callback_data=f"mza_nboot_{node_id}")]
+                ]),
+            )
+            return
+        context.user_data['state'] = 'MZA_NODE_BOOTSTRAP_PORT_INPUT'
+        await query.edit_message_text(
+            "🔌 <b>SSH Port</b>\n\n"
+            "پورت SSH سرور Node را بفرستید.\n"
+            "مثال: <code>22</code> یا <code>2222</code>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nboot_cancel_{node_id}")]
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_nboot_probe_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nboot_probe_'):])
+        try:
+            session = marzban_node_bootstrap.require_session(query.message.chat_id)
+            if session.node_id != node_id:
+                raise marzban_node_bootstrap.NodeBootstrapError("Node bootstrap target changed")
+        except Exception:
+            await query.edit_message_text(
+                "❌ نشست راه‌اندازی منقضی شده است.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🚀 شروع مجدد", callback_data=f"mza_nboot_{node_id}")]
+                ]),
+            )
+            return
+        await _mza_probe_node_bootstrap_host_key(query, context, session)
+        return
+
+    elif d.startswith('mza_nboot_cancel_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nboot_cancel_'):])
+        context.user_data.pop('state', None)
+        marzban_node_bootstrap.cancel_session(query.message.chat_id)
+        await _show_marzban_node_detail(query, context, node_id)
+        return
+
+    elif d.startswith('mza_nboot_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nboot_'):])
+        service = await _get_marzban_admin_service()
+        ok_node, node = await service.get_node(node_id)
+        if not ok_node or not isinstance(node, dict):
+            await query.edit_message_text(
+                "❌ دریافت Node از Marzban ناموفق بود.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))]
+                ]),
+            )
+            return
+        try:
+            session = marzban_node_bootstrap.begin_session(
+                query.message.chat_id,
+                node_id=node_id,
+                host=node.get('address'),
+                service_port=node.get('port', 62050),
+                api_port=node.get('api_port', 62051),
+            )
+        except Exception as exc:
+            await query.edit_message_text(
+                f"❌ اطلاعات Node برای SSH Preflight معتبر نیست.\n<code>{esc(exc)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ Node", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+
+        context.user_data.pop('state', None)
+        await query.edit_message_text(
+            "🚀 <b>راه‌اندازی خودکار Node · Phase 6</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"Node  <b>{esc(node.get('name') or f'Node {node_id}')}</b>\n"
+            f"Address  <code>{esc(session.host)}</code>\n"
+            f"Service Port  <code>{esc(session.service_port)}</code>\n"
+            f"Xray API Port  <code>{esc(session.api_port)}</code>\n\n"
+            "این فاز فقط SSH و آمادگی سرور را بررسی می‌کند و هیچ package، certificate یا config را تغییر نمی‌دهد.\n\n"
+            "SSH روی چه پورتی در دسترس است؟",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ پورت 22", callback_data=f"mza_nboot_port22_{node_id}")],
+                [InlineKeyboardButton("✏️ پورت دیگر", callback_data=f"mza_nboot_portcustom_{node_id}")],
+                [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nboot_cancel_{node_id}")],
+            ]),
+        )
+        return
+
     elif d.startswith('mza_nsetup_'):
         try:
             node_id = marzban_admin.normalize_node_id(d[len('mza_nsetup_'):])
@@ -14477,6 +14843,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             query,
             "\n".join(setup_lines),
             [
+                [InlineKeyboardButton("🚀 راه‌اندازی خودکار", callback_data=f"mza_nboot_{node_id}")],
                 [InlineKeyboardButton("🔄 بروزرسانی Diagnostics", callback_data=f"mza_nsetup_{node_id}")],
                 [InlineKeyboardButton("🖥 جزئیات Node", callback_data=f"mza_node_{node_id}")],
                 [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],

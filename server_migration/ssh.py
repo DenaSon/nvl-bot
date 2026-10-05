@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import os
+import socket
+from dataclasses import dataclass
 from typing import Protocol
 
 from .models import CommandResult, ServerCredentials
@@ -26,6 +30,75 @@ class SSHConnectionError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class SSHHostKeyInfo:
+    algorithm: str
+    sha256: str
+
+
+def _host_key_sha256(key) -> str:
+    digest = hashlib.sha256(key.asbytes()).digest()
+    encoded = base64.b64encode(digest).decode("ascii").rstrip("=")
+    return f"SHA256:{encoded}"
+
+
+def probe_ssh_host_key(
+    host: str,
+    port: int = 22,
+    *,
+    timeout: int = 8,
+) -> SSHHostKeyInfo:
+    """Read the server SSH host key without authenticating.
+
+    This is a read-only handshake used by operator-facing workflows before
+    collecting a password. The returned fingerprint can then be pinned during
+    the authenticated connection.
+    """
+    host = str(host or "").strip()
+    port = int(port)
+    if not host:
+        raise ValueError("host is required")
+    if not 1 <= port <= 65535:
+        raise ValueError("port must be between 1 and 65535")
+
+    try:
+        import paramiko
+    except ImportError as exc:
+        raise SSHConnectionError("paramiko is required for SSH host-key probing") from exc
+
+    sock = None
+    transport = None
+    try:
+        sock = socket.create_connection((host, port), timeout=max(1, int(timeout)))
+        transport = paramiko.Transport(sock)
+        transport.start_client(timeout=max(1, int(timeout)))
+        key = transport.get_remote_server_key()
+        if key is None:
+            raise SSHConnectionError("SSH server did not present a host key")
+        return SSHHostKeyInfo(
+            algorithm=str(key.get_name() or "unknown"),
+            sha256=_host_key_sha256(key),
+        )
+    except SSHConnectionError:
+        raise
+    except Exception as exc:
+        raise SSHConnectionError(
+            f"SSH host-key probe failed for {host}:{port}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    finally:
+        if transport is not None:
+            try:
+                transport.close()
+            except Exception:
+                pass
+        elif sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+
 class ParamikoRemoteExecutor:
     """SSH/SFTP wrapper shared by migration phases.
 
@@ -43,10 +116,14 @@ class ParamikoRemoteExecutor:
         *,
         connect_timeout: int = 8,
         command_timeout: int = 20,
+        expected_host_key_sha256: str | None = None,
     ):
         self.credentials = credentials
         self.connect_timeout = max(1, int(connect_timeout))
         self.command_timeout = max(1, int(command_timeout))
+        self.expected_host_key_sha256 = (
+            str(expected_host_key_sha256 or "").strip() or None
+        )
         self._client = None
         self._sftp = None
 
@@ -61,10 +138,25 @@ class ParamikoRemoteExecutor:
             ) from exc
 
         client = paramiko.SSHClient()
-        # New destination servers usually have no local known-host entry. This
-        # policy accepts the host key only in this in-memory client; we never
-        # call save_host_keys(), so migration does not mutate local known_hosts.
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        if self.expected_host_key_sha256:
+            expected = self.expected_host_key_sha256
+
+            class _PinnedHostKeyPolicy(paramiko.MissingHostKeyPolicy):
+                def missing_host_key(self, client, hostname, key):
+                    actual = _host_key_sha256(key)
+                    if actual != expected:
+                        raise SSHConnectionError(
+                            "SSH host-key fingerprint mismatch: "
+                            f"expected {expected}, got {actual}"
+                        )
+                    # Pin only in this in-memory client. Never persist known_hosts.
+                    client.get_host_keys().add(hostname, key.get_name(), key)
+
+            client.set_missing_host_key_policy(_PinnedHostKeyPolicy())
+        else:
+            # Existing migration workflows keep their current TOFU behavior.
+            # New node bootstrap passes an explicitly confirmed fingerprint.
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
             client.connect(
                 hostname=self.credentials.host,

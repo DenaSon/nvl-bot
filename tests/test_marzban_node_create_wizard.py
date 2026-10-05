@@ -136,7 +136,8 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
             "async def _show_marzban_node_detail",
             "_MZA_HOST_EDIT_TOKENS =",
         )
-        self.assertIn("📜 Certificate & Setup", region)
+        self.assertIn("📜 راه‌اندازی دستی", region)
+        self.assertIn("🚀 راه‌اندازی خودکار", region)
         self.assertIn('callback_data=f"mza_nsetup_{node_id}"', region)
 
     def test_setup_callback_fetches_official_node_settings(self):

@@ -1,0 +1,95 @@
+import pathlib
+import unittest
+
+
+BOT_PATH = pathlib.Path(__file__).resolve().parents[1] / "bot_final_v49-2.py"
+
+
+class MarzbanNodeBootstrapUITests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = BOT_PATH.read_text(encoding="utf-8")
+
+    def _region(self, start, end):
+        a = self.source.index(start)
+        b = self.source.index(end, a)
+        return self.source[a:b]
+
+    def test_node_detail_prefers_automatic_setup_but_keeps_manual_fallback(self):
+        region = self._region(
+            "async def _show_marzban_node_detail",
+            "_MZA_HOST_EDIT_TOKENS =",
+        )
+        self.assertIn("🚀 راه‌اندازی خودکار", region)
+        self.assertIn('callback_data=f"mza_nboot_{node_id}"', region)
+        self.assertIn("📜 راه‌اندازی دستی", region)
+        self.assertIn('callback_data=f"mza_nsetup_{node_id}"', region)
+
+    def test_post_create_success_exposes_preflight_first(self):
+        region = self._region(
+            "elif d.startswith('mza_ncreate_confirm_'):",
+            "elif d == 'mza_nodes':",
+        )
+        self.assertIn("🚀 راه‌اندازی خودکار", region)
+        self.assertIn("SSH و آمادگی سرور بدون هیچ تغییری بررسی شود", region)
+
+    def test_bootstrap_callbacks_are_behind_admin_guard(self):
+        guard = self.source.index("if d.startswith('mza_') and role != 'admin':")
+        bootstrap = self.source.index("elif d.startswith('mza_nboot_fp_'):")
+        self.assertLess(guard, bootstrap)
+
+    def test_bootstrap_offers_default_and_custom_ssh_port(self):
+        region = self._region(
+            "elif d.startswith('mza_nboot_fp_'):",
+            "elif d.startswith('mza_nsetup_'):",
+        )
+        self.assertIn("mza_nboot_port22_", region)
+        self.assertIn("mza_nboot_portcustom_", region)
+        self.assertIn("✅ پورت 22", region)
+        self.assertIn("✏️ پورت دیگر", region)
+
+    def test_fingerprint_is_confirmed_before_password_stage(self):
+        region = self._region(
+            "elif d.startswith('mza_nboot_fp_'):",
+            "elif d.startswith('mza_nsetup_'):",
+        )
+        self.assertIn("confirm_host_key(session, nonce)", region)
+        self.assertIn("Pinned Host Key", region)
+        self.assertIn("MZA_NODE_BOOTSTRAP_PASSWORD_INPUT", region)
+        self.assertIn("Fingerprint را تایید می‌کنم", self.source)
+
+    def test_password_input_never_enters_user_data_and_message_is_deleted(self):
+        region = self._region(
+            "# 🚀 Marzban Node bootstrap Phase 6 input.",
+            "# 🔍 Phase 2 Marzban admin search",
+        )
+        self.assertIn("await update.message.delete()", region)
+        self.assertIn("marzban_node_bootstrap.set_password(session, text)", region)
+        self.assertIn("marzban_node_bootstrap.run_preflight", region)
+        self.assertNotIn("user_data['password']", region)
+        self.assertNotIn('user_data["password"]', region)
+        self.assertIn("رمز SSH از حافظه NVL پاک شد", region)
+
+    def test_phase6_explicitly_states_read_only_scope(self):
+        region = self._region(
+            "elif d.startswith('mza_nboot_fp_'):",
+            "elif d.startswith('mza_nsetup_'):",
+        )
+        self.assertIn("هیچ package، certificate یا config را تغییر نمی‌دهد", region)
+
+    def test_leaving_bootstrap_flow_cancels_in_memory_session(self):
+        region = self._region(
+            "# Leaving a text-input screen through an inline button",
+            "# 🛡 Central V2Ray authorization boundary.",
+        )
+        self.assertIn("node_bootstrap_starter", region)
+        self.assertIn(
+            "marzban_node_bootstrap.cancel_session(query.message.chat_id)",
+            region,
+        )
+        self.assertIn("MZA_NODE_BOOTSTRAP_PORT_INPUT", region)
+        self.assertIn("MZA_NODE_BOOTSTRAP_PASSWORD_INPUT", region)
+
+
+if __name__ == "__main__":
+    unittest.main()

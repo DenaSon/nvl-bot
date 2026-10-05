@@ -297,6 +297,21 @@ class NodeInstallTests(unittest.TestCase):
         self.assertIn("invalid PEM", report.error)
         self.assertIsNone(session.password)
 
+    def test_run_install_precondition_race_scrubs_secret(self):
+        session = install_ready_session()
+        session.stage = "PREFLIGHT_COMPLETE"
+
+        with self.assertRaises(bootstrap.NodeBootstrapError):
+            installer.run_install(
+                session,
+                certificate=VALID_CERT,
+                executor_factory=lambda *args, **kwargs: self.fail(
+                    "executor must not start"
+                ),
+            )
+
+        self.assertIsNone(session.password)
+
     def test_prepare_install_requires_successful_phase6(self):
         session = bootstrap.NodeBootstrapSession(
             chat_id=900,

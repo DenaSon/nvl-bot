@@ -35,6 +35,13 @@ class ManagedNodePublicHostTests(unittest.IsolatedAsyncioTestCase):
             "address": "172.86.72.203",
         }
 
+    def test_generated_host_uses_marzban_disabled_enum_values(self):
+        generated = marzban_admin.node_generated_host_payload(self.node)
+
+        self.assertEqual(generated["alpn"], "")
+        self.assertEqual(generated["fingerprint"], "")
+        self.assertEqual(generated["security"], "inbound_default")
+
     async def test_reconcile_keeps_only_nvl_profile_and_preserves_manual_hosts(self):
         generated = marzban_admin.node_generated_host_payload(self.node)
         manual = dict(generated)

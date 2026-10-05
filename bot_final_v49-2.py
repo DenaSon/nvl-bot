@@ -6486,6 +6486,10 @@ def _build_admin_programs_kb():
     """Top-level operational tools available only to NVL administrators."""
     return [
         [InlineKeyboardButton(
+            "🖥 مدیریت نودهای Marzban",
+            callback_data="apps_marzban_nodes",
+        )],
+        [InlineKeyboardButton(
             "🚚 انتقال سرور Marzban",
             callback_data="apps_marzban_transfer",
         )],
@@ -6510,6 +6514,8 @@ async def _show_admin_programs_hub(target, context):
         "🧩 <b>برنامه‌های مدیریتی NVL</b>\n"
         "━━━━━━━━━━━━━━\n"
         "ابزارهای عملیاتی و سطح‌سیستم در این بخش قرار می‌گیرند.\n\n"
+        "🖥 <b>مدیریت نودهای Marzban</b>\n"
+        "مشاهده وضعیت، ویرایش تنظیمات، فعال/غیرفعال‌سازی و Reconnect نودها.\n\n"
         "🚚 <b>انتقال سرور Marzban</b>\n"
         "مهاجرت کنترل‌شده Marzban به سرور جدید با مسیر امن "
         "Preflight → Backup → Restore → Final Sync → Cutover."
@@ -8327,12 +8333,27 @@ async def _show_marzban_user_readonly(target, context, username):
     ])
     await _mza_render(target, txt, kb)
 
+def _mza_nodes_origin_is_apps(context):
+    return context.user_data.get("mza_nodes_origin") == "apps"
+
+
+def _mza_nodes_list_callback(context):
+    return "apps_marzban_nodes" if _mza_nodes_origin_is_apps(context) else "mza_nodes"
+
+
+def _mza_nodes_parent_button(context):
+    if _mza_nodes_origin_is_apps(context):
+        return InlineKeyboardButton("↩️ برنامه‌ها", callback_data="apps_home")
+    return InlineKeyboardButton("🔙 داشبورد", callback_data="mza_home")
+
+
 async def _show_marzban_nodes(target, context):
     service = await _get_marzban_admin_service()
     ok, nodes = await service.get_nodes()
+    refresh_callback = _mza_nodes_list_callback(context)
     fallback_kb = [
-        [InlineKeyboardButton("🔄 بروزرسانی", callback_data="mza_nodes")],
-        [InlineKeyboardButton("🔙 داشبورد", callback_data="mza_home")],
+        [InlineKeyboardButton("🔄 بروزرسانی", callback_data=refresh_callback)],
+        [_mza_nodes_parent_button(context)],
     ]
     if not ok or not isinstance(nodes, list):
         return await _mza_render(
@@ -8387,7 +8408,7 @@ async def _show_marzban_node_detail(target, context, node_id):
         return await _mza_render(
             target,
             "❌ شناسه نود نامعتبر است.",
-            [[InlineKeyboardButton("🔙 نودها", callback_data="mza_nodes")]],
+            [[InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))]],
         )
 
     service = await _get_marzban_admin_service()
@@ -8399,7 +8420,7 @@ async def _show_marzban_node_detail(target, context, node_id):
         return await _mza_render(
             target,
             f"❌ دریافت اطلاعات نود ناموفق بود.\n<code>{esc(node)}</code>",
-            [[InlineKeyboardButton("🔙 نودها", callback_data="mza_nodes")]],
+            [[InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))]],
         )
 
     icon, status_label, health_label = _mza_node_status_meta(node.get("status"))
@@ -8462,7 +8483,7 @@ async def _show_marzban_node_detail(target, context, node_id):
         ],
         [
             InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"mza_node_{node_id}"),
-            InlineKeyboardButton("🔙 نودها", callback_data="mza_nodes"),
+            InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context)),
         ],
     ])
     await _mza_render(target, "\n".join(lines), kb)
@@ -13312,7 +13333,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ---------------- Programs / operational tools ----------------
     if d == 'apps_home':
+        context.user_data.pop("mza_nodes_origin", None)
         await _show_admin_programs_hub(query, context)
+        return
+    elif d == 'apps_marzban_nodes':
+        context.user_data["mza_nodes_origin"] = "apps"
+        await _show_marzban_nodes(query, context)
         return
     elif d == 'apps_marzban_transfer':
         await _show_marzban_transfer_entry(query, context)
@@ -13920,6 +13946,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     elif d == 'mza_nodes':
+        context.user_data.pop("mza_nodes_origin", None)
         await _show_marzban_nodes(query, context)
         return
     elif d.startswith('mza_node_'):

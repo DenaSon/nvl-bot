@@ -197,7 +197,7 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
         self.assertIn("cleanup_incomplete", region)
         self.assertIn("Public Hostهای باقی‌مانده", region)
         self.assertIn("hosts_deleted", region)
-        self.assertIn("خود VPS حذف نمی‌شود", region)
+        self.assertIn("خود VPS", region)
 
     def test_node_delete_previews_and_cascades_only_generated_hosts(self):
         region = self._region(

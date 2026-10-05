@@ -14612,13 +14612,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as exc:
             context.user_data.pop('state', None)
             marzban_node_bootstrap.cancel_session(query.message.chat_id)
+            retry_kb = []
+            if 'node_id' in locals():
+                retry_kb.append([
+                    InlineKeyboardButton("🚀 شروع مجدد", callback_data=f"mza_nboot_{node_id}")
+                ])
+            retry_kb.append([
+                InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))
+            ])
             await query.edit_message_text(
                 f"❌ تایید SSH منقضی یا نامعتبر است.\n<code>{esc(type(exc).__name__)}: {esc(exc)}</code>",
                 parse_mode='HTML',
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🚀 شروع مجدد", callback_data=f"mza_nboot_{node_id if 'node_id' in locals() else ''}")],
-                    [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
-                ]),
+                reply_markup=InlineKeyboardMarkup(retry_kb),
             )
             return
 

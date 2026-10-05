@@ -94,6 +94,7 @@ import qrcode
 import v2ray_engine
 import marzban_admin
 import marzban_node_bootstrap
+import marzban_node_install
 import marzban_asset_discovery
 import marzban_local_health
 import marzban_regional_filtering as marzban_regional
@@ -7626,13 +7627,75 @@ def _mza_node_bootstrap_report_text(report):
     return "\n".join(lines)
 
 
-def _mza_node_bootstrap_report_kb(context, node_id):
-    return [
+def _mza_node_bootstrap_report_kb(context, node_id, *, ready=False):
+    kb = []
+    if ready:
+        kb.append([
+            InlineKeyboardButton("🚀 نصب Marzban-node · Phase 7", callback_data=f"mza_ninstall_{node_id}")
+        ])
+    kb.extend([
         [InlineKeyboardButton("🔄 اجرای دوباره Preflight", callback_data=f"mza_nboot_{node_id}")],
         [InlineKeyboardButton("📜 راه‌اندازی دستی", callback_data=f"mza_nsetup_{node_id}")],
         [InlineKeyboardButton("🖥 جزئیات Node", callback_data=f"mza_node_{node_id}")],
         [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
+    ])
+    return kb
+
+
+async def _mza_wait_node_connected(service, node_id, *, timeout=45):
+    deadline = time.monotonic() + max(1, int(timeout))
+    last_node = None
+    while time.monotonic() < deadline:
+        ok_node, node = await service.get_node(node_id)
+        if ok_node and isinstance(node, dict):
+            last_node = node
+            if str(node.get("status") or "").lower() == "connected":
+                return True, node
+        await asyncio.sleep(2)
+    return False, last_node
+
+
+def _mza_node_install_result_text(report, node=None):
+    connected = isinstance(node, dict) and str(node.get("status") or "").lower() == "connected"
+    status = str(node.get("status") or "unknown") if isinstance(node, dict) else "unknown"
+    xray = str(node.get("xray_version") or "—") if isinstance(node, dict) else "—"
+    message = str(node.get("message") or "").strip() if isinstance(node, dict) else ""
+
+    if not report.success:
+        return (
+            "❌ <b>Phase 7 کامل نشد</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"مرحله  <code>{esc(report.stage)}</code>\n"
+            f"خطا  <code>{esc(report.error)}</code>\n\n"
+            "رمز SSH از حافظه NVL پاک شد. نصب مجدد فقط روی فایل‌های NVL-managed اجازه داده می‌شود."
+        )
+
+    lines = [
+        "✅ <b>نصب Remote Marzban-node انجام شد</b>",
+        "━━━━━━━━━━━━━━",
+        f"Server  <code>{esc(report.host)}:{esc(report.ssh_port)}</code>",
+        f"Docker  <b>✅</b> <code>{esc(report.docker_version or 'installed')}</code>",
+        f"Compose  <b>✅</b> <code>{esc(report.compose_version or 'available')}</code>",
+        "Certificate  <b>✅ installed</b>",
+        "Container  <b>✅ running</b>",
+        f"Service {esc(report.service_port)}  <b>{'✅ listening' if report.service_port_listening else '⚠️ not detected'}</b>",
+        f"Xray API {esc(report.api_port)}  <b>{'✅ listening' if report.api_port_listening else '⏳ waiting for Xray'}</b>",
+        "",
+        "🩺 <b>Marzban verification</b>",
+        f"Status  <b>{'🟢 connected' if connected else esc(status)}</b>",
+        f"Xray  <code>{esc(xray)}</code>",
     ]
+    if message:
+        lines.append(f"Message  <code>{esc(message[:500])}</code>")
+    if connected:
+        lines.extend(["", "🎉 <b>Node آماده و به Marzban متصل است.</b>"])
+    else:
+        lines.extend([
+            "",
+            "⚠️ Remote install سالم است، اما Marzban هنوز connected نشده. "
+            "Firewall/Security Group یا دسترسی Main Server به Service Port را بررسی کنید.",
+        ])
+    return "\n".join(lines)
 
 
 async def _mza_probe_node_bootstrap_host_key(target, context, session):
@@ -9771,7 +9834,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 🚀 Marzban Node bootstrap Phase 6 input. Password stays only in the
     # module-level in-memory session and is scrubbed after every preflight.
-    if state in ('MZA_NODE_BOOTSTRAP_PORT_INPUT', 'MZA_NODE_BOOTSTRAP_PASSWORD_INPUT'):
+    if state in (
+        'MZA_NODE_BOOTSTRAP_PORT_INPUT',
+        'MZA_NODE_BOOTSTRAP_PASSWORD_INPUT',
+        'MZA_NODE_INSTALL_PASSWORD_INPUT',
+    ):
         if role != 'admin':
             context.user_data.pop('state', None)
             marzban_node_bootstrap.cancel_session(chat_id)
@@ -9806,6 +9873,126 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             context.user_data.pop('state', None)
             await _mza_probe_node_bootstrap_host_key(update.message, context, session)
+            return
+
+        if state == 'MZA_NODE_INSTALL_PASSWORD_INPUT':
+            with contextlib.suppress(Exception):
+                await update.message.delete()
+            try:
+                marzban_node_install.set_install_password(session, text)
+            except ValueError:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ رمز SSH خالی یا بیش از حد طولانی است. دوباره ارسال کنید.",
+                )
+                return
+            except Exception as exc:
+                context.user_data.pop('state', None)
+                session.scrub_secret()
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"❌ نشست Phase 7 نامعتبر است: <code>{esc(exc)}</code>",
+                    parse_mode='HTML',
+                )
+                return
+
+            context.user_data.pop('state', None)
+            service = await _get_marzban_admin_service()
+            (ok_node, current_node), (ok_settings, settings_payload) = await asyncio.gather(
+                service.get_node(session.node_id),
+                service.get_node_settings(),
+            )
+
+            stale = (
+                not ok_node
+                or not isinstance(current_node, dict)
+                or str(current_node.get('address') or '') != str(session.host)
+                or int(current_node.get('port') or 0) != int(session.service_port)
+                or int(current_node.get('api_port') or 0) != int(session.api_port)
+            )
+            if stale:
+                session.scrub_secret()
+                session.stage = "INSTALL_FAILED"
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "⛔️ <b>اطلاعات Node بعد از Preflight تغییر کرده یا قابل دریافت نیست.</b>\n"
+                        "برای جلوگیری از نصب روی مقصد اشتباه، Phase 7 متوقف شد. Preflight را دوباره اجرا کنید."
+                    ),
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔍 اجرای دوباره Phase 6", callback_data=f"mza_nboot_{session.node_id}")]
+                    ]),
+                )
+                return
+
+            if not ok_settings or not isinstance(settings_payload, dict):
+                session.scrub_secret()
+                session.stage = "INSTALL_FAILED"
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "❌ <b>Certificate از Marzban دریافت نشد.</b>\n"
+                        f"<code>{esc(settings_payload)}</code>\n"
+                        "هیچ نصب Remote شروع نشد."
+                    ),
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 تلاش مجدد Phase 7", callback_data=f"mza_ninstall_{session.node_id}")],
+                        [InlineKeyboardButton("📜 راه‌اندازی دستی", callback_data=f"mza_nsetup_{session.node_id}")],
+                    ]),
+                )
+                return
+
+            certificate = str(settings_payload.get("certificate") or "")
+            status_message = await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "⏳ <b>Phase 7 در حال اجراست...</b>\n"
+                    f"<code>{esc(session.host)}</code>\n\n"
+                    "Docker/Compose → Certificate → Marzban-node → Local Verify\n"
+                    "این مرحله ممکن است چند دقیقه طول بکشد."
+                ),
+                parse_mode='HTML',
+            )
+
+            report = await asyncio.to_thread(
+                marzban_node_install.run_install,
+                session,
+                certificate=certificate,
+            )
+
+            if not report.success:
+                await status_message.edit_text(
+                    _mza_node_install_result_text(report),
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 تلاش مجدد Phase 7", callback_data=f"mza_ninstall_{session.node_id}")],
+                        [InlineKeyboardButton("📜 Diagnostics دستی", callback_data=f"mza_nsetup_{session.node_id}")],
+                        [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{session.node_id}")],
+                    ]),
+                )
+                return
+
+            # The panel can remain in Error after the previous connection-refused
+            # state until it retries. Trigger one authoritative reconnect, then poll.
+            with contextlib.suppress(Exception):
+                await service.reconnect_node(session.node_id)
+
+            connected, verified_node = await _mza_wait_node_connected(
+                service,
+                session.node_id,
+                timeout=45,
+            )
+            await status_message.edit_text(
+                _mza_node_install_result_text(report, verified_node),
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Diagnostics", callback_data=f"mza_nsetup_{session.node_id}")],
+                    [InlineKeyboardButton("🖥 جزئیات Node", callback_data=f"mza_node_{session.node_id}")],
+                    [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
+                ]),
+            )
             return
 
         # Password is intentionally copied only into the in-memory bootstrap
@@ -9849,7 +10036,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 _mza_node_bootstrap_report_text(report),
                 parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup(
-                    _mza_node_bootstrap_report_kb(context, session.node_id)
+                    _mza_node_bootstrap_report_kb(
+                        context,
+                        session.node_id,
+                        ready=report.ready,
+                    )
                 ),
             )
         except Exception as exc:
@@ -13667,7 +13858,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         host_edit_starter = d.startswith('mza_hedit_')
         node_create_starter = d == 'mza_ncreate' or d.startswith('mza_ncreate_')
         node_delete_starter = d.startswith('mza_ndelete_')
-        node_bootstrap_starter = d.startswith('mza_nboot_')
+        node_bootstrap_starter = d.startswith('mza_nboot_') or d.startswith('mza_ninstall_')
         create_starter = d == 'mza_create' or d.startswith('mza_c') or d.startswith('mza_create_')
         starters = (
             d == 'mza_search'
@@ -13696,6 +13887,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'MZA_NODE_CREATE_RATIO_INPUT',
             'MZA_NODE_BOOTSTRAP_PORT_INPUT',
             'MZA_NODE_BOOTSTRAP_PASSWORD_INPUT',
+            'MZA_NODE_INSTALL_PASSWORD_INPUT',
             'MZA_HOST_FIELD_INPUT',
             'MZA_CREATE_USERNAME_INPUT',
             'MZA_CREATE_SUBNAME_INPUT',
@@ -14600,6 +14792,55 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         node_id = d[len('mza_node_'):]
         await _show_marzban_node_detail(query, context, node_id)
         return
+    elif d.startswith('mza_ninstall_cancel_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_ninstall_cancel_'):])
+        context.user_data.pop('state', None)
+        session = marzban_node_bootstrap.get_session(query.message.chat_id)
+        if session is not None:
+            session.scrub_secret()
+            if session.last_report is not None and session.last_report.ready:
+                session.stage = "PREFLIGHT_COMPLETE"
+        await _show_marzban_node_detail(query, context, node_id)
+        return
+
+    elif d.startswith('mza_ninstall_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_ninstall_'):])
+        try:
+            session = marzban_node_bootstrap.require_session(query.message.chat_id)
+            if session.node_id != node_id:
+                raise marzban_node_bootstrap.NodeBootstrapError("Node bootstrap target changed")
+            marzban_node_install.prepare_install(session)
+        except Exception as exc:
+            context.user_data.pop('state', None)
+            await query.edit_message_text(
+                "⚠️ <b>Phase 6 معتبر برای این Node پیدا نشد.</b>\n\n"
+                f"<code>{esc(type(exc).__name__)}: {esc(exc)}</code>\n\n"
+                "برای ایمنی، Preflight را دوباره اجرا کنید.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔍 اجرای Phase 6", callback_data=f"mza_nboot_{node_id}")],
+                    [InlineKeyboardButton("↩️ Node", callback_data=f"mza_node_{node_id}")],
+                ]),
+            )
+            return
+
+        context.user_data['state'] = 'MZA_NODE_INSTALL_PASSWORD_INPUT'
+        await query.edit_message_text(
+            "🚀 <b>Phase 7 · نصب خودکار Marzban-node</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"Server  <code>{esc(session.host)}:{esc(session.ssh_port)}</code>\n"
+            f"Pinned Host Key  <code>{esc(session.host_key_sha256)}</code>\n"
+            f"Service Port  <code>{esc(session.service_port)}</code>\n"
+            f"Xray API Port  <code>{esc(session.api_port)}</code>\n\n"
+            "رمز root را دوباره ارسال کنید. این رمز فقط برای همین نصب در RAM نگهداری می‌شود و پس از پایان یا خطا پاک خواهد شد.\n\n"
+            "Phase 7 ممکن است Docker/Compose را نصب کند، Certificate را منتقل کند و کانتینر Marzban-node را اجرا کند.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ لغو", callback_data=f"mza_ninstall_cancel_{node_id}")]
+            ]),
+        )
+        return
+
     elif d.startswith('mza_nboot_fp_'):
         rest = d[len('mza_nboot_fp_'):]
         try:

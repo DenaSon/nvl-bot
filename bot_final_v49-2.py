@@ -7878,7 +7878,8 @@ async def _mza_show_node_create_review(target, context):
             port=draft.get("port", 62050),
             api_port=draft.get("api_port", 62051),
             usage_coefficient=draft.get("usage_coefficient", 1.0),
-            add_as_new_host=draft.get("add_as_new_host", True),
+            # Never let Marzban's all-inbounds switch run from the NVL wizard.
+            add_as_new_host=False,
         )
     except ValueError as exc:
         return await _mza_render(
@@ -7893,7 +7894,10 @@ async def _mza_show_node_create_review(target, context):
     nonce = secrets.token_hex(8)
     draft["confirm_nonce"] = nonce
     draft.update(payload)
-    host_label = "✅ بله" if payload["add_as_new_host"] else "❌ خیر"
+    managed_hosts = "\n".join(
+        f"• <code>{esc(tag)}</code>"
+        for tag in marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS
+    )
     text = (
         "✅ <b>بررسی نهایی Node</b>\n"
         "━━━━━━━━━━━━━━\n"
@@ -7901,9 +7905,10 @@ async def _mza_show_node_create_review(target, context):
         f"آدرس سرور Node  <code>{esc(payload['address'])}</code>\n"
         f"Service Port  <code>{payload['port']}</code>\n"
         f"Xray API Port  <code>{payload['api_port']}</code>\n"
-        f"Usage Ratio  <b>{esc(payload['usage_coefficient'])}</b>\n"
-        f"ساخت Public Host  <b>{host_label}</b>\n\n"
-        "با تایید، این Node در Marzban ثبت می‌شود. پس از ساخت باید Marzban-node روی همین آدرس راه‌اندازی و متصل شود."
+        f"Usage Ratio  <b>{esc(payload['usage_coefficient'])}</b>\n\n"
+        "🌐 <b>Public Host profile · NVL</b>\n"
+        f"{managed_hosts}\n\n"
+        "Marzban ابتدا Node را بدون ساخت Host عمومی ثبت می‌کند؛ سپس NVL فقط همین Hostها را به‌صورت کنترل‌شده ایجاد و Verify می‌کند."
     )
     kb = [
         [InlineKeyboardButton("✅ ساخت نود", callback_data=f"mza_ncreate_confirm_{nonce}")],
@@ -10311,7 +10316,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 draft.update(changes)
                 context.user_data['state'] = 'MZA_NODE_CREATE_ADDRESS_INPUT'
                 await update.message.reply_text(
-                    "🌐 <b>مرحله ۲ از ۵ · آدرس نود</b>\n\n"
+                    "🌐 <b>مرحله ۲ از ۴ · آدرس نود</b>\n\n"
                     "IP یا hostname <b>خود سرور Node</b> را بفرستید؛ همان سروری که Marzban-node روی آن اجرا می‌شود.\n"
                     "دامنه یا IP پنل اصلی Marzban را وارد نکنید، مگر اینکه همان سرور Node باشد.\n\n"
                     "بدون <code>http://</code> یا <code>https://</code>\n"
@@ -10328,7 +10333,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 draft.update(changes)
                 context.user_data['state'] = 'MZA_NODE_CREATE_PORTS_INPUT'
                 await update.message.reply_text(
-                    "🔌 <b>مرحله ۳ از ۵ · پورت‌های نود</b>\n\n"
+                    "🔌 <b>مرحله ۳ از ۴ · پورت‌های نود</b>\n\n"
                     "دو پورت را به‌ترتیب در یک پیام بفرستید:\n"
                     "1) <b>Service Port</b> برای ارتباط Marzban با Node\n"
                     "2) <b>Xray API Port</b> برای API داخلی Xray\n\n"
@@ -10352,7 +10357,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 draft.update(changes)
                 context.user_data['state'] = 'MZA_NODE_CREATE_RATIO_INPUT'
                 await update.message.reply_text(
-                    "📊 <b>مرحله ۴ از ۵ · Usage Ratio</b>\n\n"
+                    "📊 <b>مرحله ۴ از ۴ · Usage Ratio</b>\n\n"
                     "ضریب محاسبه مصرف ترافیک این Node را بفرستید.\n"
                     "اگر سیاست خاصی برای وزن‌دهی ترافیک ندارید، <code>1</code> انتخاب استاندارد است.\n\n"
                     "مثال: <code>1</code> یا <code>1.5</code>",
@@ -10379,21 +10384,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        # NVL owns the Public Host policy.  The native Marzban switch would
+        # create one Host for every inbound, which pollutes subscriptions.
+        draft["add_as_new_host"] = False
         context.user_data.pop('state', None)
-        await _mza_render(
-            update.message,
-            "🌐 <b>مرحله ۵ از ۵ · Public Host</b>\n\n"
-            "آیا آدرس این Node به‌صورت خودکار به Public Hostهای Inboundها هم اضافه شود؟\n\n"
-            "✅ <b>بله:</b> Marzban برای Inboundها Host جدید با آدرس این Node می‌سازد.\n"
-            "➖ <b>خیر:</b> فقط Node ساخته می‌شود و Public Hostها تغییر نمی‌کنند.",
-            [
-                [
-                    InlineKeyboardButton("✅ بله، اضافه کن", callback_data="mza_ncreate_host_yes"),
-                    InlineKeyboardButton("➖ خیر، فقط Node", callback_data="mza_ncreate_host_no"),
-                ],
-                [InlineKeyboardButton("❌ لغو", callback_data="mza_ncreate_cancel")],
-            ],
-        )
+        await _mza_show_node_create_review(update.message, context)
         return
 
     node_input_states = {
@@ -14636,7 +14631,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "➕ <b>افزودن نود جدید Marzban</b>\n"
             "━━━━━━━━━━━━━━\n"
-            "مرحله ۱ از ۵ · <b>نام نود</b>\n\n"
+            "مرحله ۱ از ۴ · <b>نام نود</b>\n\n"
             "یک نام کوتاه و یکتا برای شناسایی این سرور در Marzban بفرستید.\n"
             "این نام فقط برچسب مدیریتی Node است.\n\n"
             "مثال: <code>USA-2</code>",
@@ -14666,7 +14661,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]),
             )
             return
-        draft["add_as_new_host"] = d == 'mza_ncreate_host_yes'
+        # Backward-compatible handling for stale inline keyboards from older
+        # bot messages: never allow the old "yes" button to create all hosts.
+        draft["add_as_new_host"] = False
         context.user_data.pop('state', None)
         await _mza_show_node_create_review(query, context)
         return
@@ -14709,7 +14706,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 port=draft.get("port", 62050),
                 api_port=draft.get("api_port", 62051),
                 usage_coefficient=draft.get("usage_coefficient", 1.0),
-                add_as_new_host=draft.get("add_as_new_host", True),
+                add_as_new_host=False,
             )
         except ValueError as exc:
             context.user_data.pop("mza_node_create_busy", None)
@@ -14729,7 +14726,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             port=payload["port"],
             api_port=payload["api_port"],
             usage_coefficient=payload["usage_coefficient"],
-            add_as_new_host=payload["add_as_new_host"],
+            # The Marzban flag is all-or-nothing; selective Hosts are reconciled below.
+            add_as_new_host=False,
         )
 
         if not ok_create:
@@ -14819,6 +14817,35 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             node_id = marzban_admin.normalize_node_id(verified.get("id"))
         except ValueError:
             node_id = None
+
+        ok_hosts, host_result = await service.reconcile_node_public_hosts(
+            verified,
+            marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+        )
+        if not ok_hosts:
+            _mza_clear_node_create(context)
+            kb = []
+            if node_id:
+                kb.append([
+                    InlineKeyboardButton(
+                        "🖥 بررسی Node",
+                        callback_data=f"mza_node_{node_id}",
+                    )
+                ])
+            kb.extend([
+                [InlineKeyboardButton("🌐 Public Hosts", callback_data="apps_marzban_hosts")],
+                [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
+            ])
+            await query.edit_message_text(
+                "⚠️ <b>Node ساخته و Verify شد، اما Public Host profile کامل نشد.</b>\n\n"
+                f"Node ID: <code>{esc(node_id if node_id is not None else 'نامشخص')}</code>\n"
+                f"خطا: <code>{esc(host_result)}</code>\n\n"
+                "Node را دوباره نسازید؛ POST موفق بوده است. فقط Hostهای مدیریت‌شده را بررسی/اصلاح کنید.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(kb),
+            )
+            return
+
         _mza_clear_node_create(context)
 
         status_key = str(verified.get("status") or "connecting").strip().lower()
@@ -14850,6 +14877,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Address  <code>{esc(verified.get('address') or payload['address'])}</code>",
             f"Port  <code>{esc(verified.get('port') or payload['port'])}</code>",
             f"API Port  <code>{esc(verified.get('api_port') or payload['api_port'])}</code>",
+            f"Public Hosts  <b>{len(marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS)} · NVL profile</b>",
             "",
             "🩺 <b>Post-create diagnostics</b>",
             f"Status  <b>{esc(status_key)}</b>",

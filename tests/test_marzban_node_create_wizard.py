@@ -38,7 +38,7 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
         self.assertIn("_mza_node_create_draft", self.source)
         self.assertIn("_mza_clear_node_create", self.source)
 
-    def test_wizard_collects_official_marzban_node_create_fields(self):
+    def test_wizard_uses_fixed_nvl_public_host_profile(self):
         region = self._region(
             "async def _mza_show_node_create_review",
             "_MZA_CREATE_TEXT_STATES =",
@@ -49,18 +49,16 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
             'draft.get("port", 62050)',
             'draft.get("api_port", 62051)',
             'draft.get("usage_coefficient", 1.0)',
-            'draft.get("add_as_new_host", True)',
-            "ساخت Public Host",
+            "add_as_new_host=False",
+            "NVL_NODE_PUBLIC_HOST_TAGS",
+            "Public Host profile · NVL",
         ):
             self.assertIn(token, region)
 
-    def test_add_as_new_host_has_explicit_yes_no_choice(self):
-        self.assertIn('callback_data="mza_ncreate_host_yes"', self.source)
-        self.assertIn('callback_data="mza_ncreate_host_no"', self.source)
-        self.assertIn(
-            "draft[\"add_as_new_host\"] = d == 'mza_ncreate_host_yes'",
-            self.source,
-        )
+    def test_old_public_host_callbacks_are_fail_safe(self):
+        self.assertIn("d in ('mza_ncreate_host_yes', 'mza_ncreate_host_no')", self.source)
+        self.assertIn('draft["add_as_new_host"] = False', self.source)
+        self.assertNotIn('InlineKeyboardButton("✅ بله، اضافه کن"', self.source)
 
     def test_confirm_uses_nonce_expiry_and_double_submit_guard(self):
         region = self._region(
@@ -79,7 +77,9 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
         )
         self.assertIn("service = await _get_marzban_admin_service()", region)
         self.assertIn("ok_create, result = await service.create_node(", region)
-        self.assertIn('add_as_new_host=payload["add_as_new_host"]', region)
+        self.assertIn("add_as_new_host=False", region)
+        self.assertIn("service.reconcile_node_public_hosts(", region)
+        self.assertIn("NVL_NODE_PUBLIC_HOST_TAGS", region)
         self.assertNotIn('api_request("POST", "/api/node"', region)
 
     def test_post_success_verify_failure_is_never_blindly_retried(self):
@@ -129,6 +129,8 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
         self.assertIn("Post-create diagnostics", region)
         self.assertIn("diagnostic_label", region)
         self.assertIn("xray_version", region)
+        self.assertIn("Public Hosts", region)
+        self.assertIn("NVL profile", region)
         self.assertIn('callback_data=f"mza_nsetup_{node_id}"', region)
 
     def test_node_detail_exposes_certificate_and_setup_entry(self):
@@ -159,23 +161,24 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
             "if state in _MZA_NODE_CREATE_TEXT_STATES:",
             "node_input_states = {",
         )
-        self.assertIn("مرحله ۲ از ۵ · آدرس نود", region)
+        self.assertIn("مرحله ۲ از ۴ · آدرس نود", region)
         self.assertIn("خود سرور Node", region)
         self.assertIn("پنل اصلی Marzban", region)
         self.assertIn("203.0.113.20", region)
 
-    def test_wizard_explains_ports_ratio_and_public_host_choices(self):
+    def test_wizard_explains_ports_ratio_and_applies_managed_host_policy(self):
         region = self._region(
             "if state in _MZA_NODE_CREATE_TEXT_STATES:",
             "node_input_states = {",
         )
-        self.assertIn("مرحله ۳ از ۵ · پورت‌های نود", region)
+        self.assertIn("مرحله ۳ از ۴ · پورت‌های نود", region)
         self.assertIn("Service Port", region)
         self.assertIn("Xray API Port", region)
-        self.assertIn("مرحله ۴ از ۵ · Usage Ratio", region)
+        self.assertIn("مرحله ۴ از ۴ · Usage Ratio", region)
         self.assertIn("اگر سیاست خاصی", region)
-        self.assertIn("مرحله ۵ از ۵ · Public Host", region)
-        self.assertIn("فقط Node ساخته می‌شود و Public Hostها تغییر نمی‌کنند", region)
+        self.assertIn('draft["add_as_new_host"] = False', region)
+        self.assertIn("_mza_show_node_create_review(update.message, context)", region)
+        self.assertNotIn("مرحله ۵ از ۵ · Public Host", region)
 
     def test_node_detail_exposes_permanent_delete_action(self):
         region = self._region(

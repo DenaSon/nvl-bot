@@ -160,6 +160,10 @@ def install_schema(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_marzban_monitor_samples_asset_time "
         "ON marzban_monitor_samples(asset_key, sampled_at DESC)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_marzban_monitor_samples_time "
+        "ON marzban_monitor_samples(sampled_at)"
+    )
 
     # Upgrade path: recover the last meaningful verdict from existing event history
     # before considering current regional rows (which may currently be UNKNOWN/stale).
@@ -338,6 +342,8 @@ def asset_metrics(
         if first_stamp is not None else 0.0
     )
     return {
+        "samples_15m": w15["samples"],
+        "samples_1h": w1["samples"],
         "samples_24h": len(rows),
         "coverage_seconds": coverage_seconds,
         "latency_15m": w15["avg_latency_ms"],
@@ -1013,6 +1019,16 @@ def _history_latency_label(metrics: Mapping[str, Any]) -> str:
     )
 
 
+def _uptime_label(metrics: Mapping[str, Any], period: str) -> str:
+    if period == "1h":
+        if int(metrics.get("samples_1h") or 0) < 3:
+            return "در حال جمع‌آوری"
+        return _pct_label(metrics.get("uptime_1h"))
+    if int(metrics.get("samples_24h") or 0) < 12 and float(metrics.get("coverage_seconds") or 0) < 3600:
+        return "در حال جمع‌آوری"
+    return _pct_label(metrics.get("uptime_24h"))
+
+
 def render_dashboard_report(conn) -> str:
     _inventory, assets, health, regional_states, provider = _monitor_snapshot(conn)
     mains = tuple(a for a in assets if a.asset_type == discovery.ASSET_MAIN)
@@ -1193,8 +1209,8 @@ def render_nodes_report(conn) -> str:
         lines.extend([
             f"Regional: {ri} <b>{html.escape(rl)}</b>",
             f"Latency avg: <code>{html.escape(_history_latency_label(metrics))}</code>",
-            f"Uptime: 1h <b>{html.escape(_pct_label(metrics.get('uptime_1h')))}</b> · "
-            f"24h <b>{html.escape(_pct_label(metrics.get('uptime_24h')))}</b>",
+            f"Uptime: 1h <b>{html.escape(_uptime_label(metrics, '1h'))}</b> · "
+            f"24h <b>{html.escape(_uptime_label(metrics, '24h'))}</b>",
             f"Failures 24h: <b>{int(metrics.get('failures_24h') or 0)}</b> · "
             f"Last failure: <b>{html.escape(_age_label(metrics.get('last_failure_at')))}</b>",
             f"Checked: <b>{html.escape(_age_label(local.get('checked_at')))}</b>",
@@ -1273,7 +1289,7 @@ def render_hosts_report(conn) -> str:
             if int(metrics.get("samples_24h") or 0) >= 2:
                 lines.append(
                     f"   Avg 1h <code>{html.escape(_latency_label(metrics.get('latency_1h')))}</code> · "
-                    f"Uptime 24h <b>{html.escape(_pct_label(metrics.get('uptime_24h')))}</b>"
+                    f"Uptime 24h <b>{html.escape(_uptime_label(metrics, '24h'))}</b>"
                 )
             else:
                 lines.append("   📈 History: در حال جمع‌آوری")

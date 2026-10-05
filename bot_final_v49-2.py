@@ -7689,6 +7689,81 @@ async def _mza_show_node_edit_confirm(target, context, node_id, changes):
 
 
 
+_MZA_NODE_CREATE_TEXT_STATES = {
+    "MZA_NODE_CREATE_NAME_INPUT",
+    "MZA_NODE_CREATE_ADDRESS_INPUT",
+    "MZA_NODE_CREATE_PORTS_INPUT",
+    "MZA_NODE_CREATE_RATIO_INPUT",
+}
+
+
+def _mza_clear_node_create(context, *, keep_draft=False):
+    if context.user_data.get("state") in _MZA_NODE_CREATE_TEXT_STATES:
+        context.user_data.pop("state", None)
+    context.user_data.pop("mza_node_create_busy", None)
+    if not keep_draft:
+        context.user_data.pop("mza_node_create_draft", None)
+
+
+def _mza_node_create_draft(context):
+    draft = context.user_data.get("mza_node_create_draft")
+    if not isinstance(draft, dict):
+        draft = {"started_at": time.time()}
+        context.user_data["mza_node_create_draft"] = draft
+    return draft
+
+
+async def _mza_show_node_create_review(target, context):
+    draft = context.user_data.get("mza_node_create_draft")
+    if not isinstance(draft, dict):
+        return await _mza_render(
+            target,
+            "❌ اطلاعات ساخت نود منقضی شده است.",
+            [[InlineKeyboardButton("➕ شروع مجدد", callback_data="mza_ncreate")]],
+        )
+
+    try:
+        payload = marzban_admin.normalize_node_create(
+            draft.get("name"),
+            draft.get("address"),
+            port=draft.get("port", 62050),
+            api_port=draft.get("api_port", 62051),
+            usage_coefficient=draft.get("usage_coefficient", 1.0),
+            add_as_new_host=draft.get("add_as_new_host", True),
+        )
+    except ValueError as exc:
+        return await _mza_render(
+            target,
+            f"❌ اطلاعات ساخت نود نامعتبر است: <code>{esc(exc)}</code>",
+            [
+                [InlineKeyboardButton("↩️ شروع مجدد", callback_data="mza_ncreate")],
+                [InlineKeyboardButton("❌ انصراف", callback_data="mza_ncreate_cancel")],
+            ],
+        )
+
+    nonce = secrets.token_hex(8)
+    draft["confirm_nonce"] = nonce
+    draft.update(payload)
+    host_label = "✅ بله" if payload["add_as_new_host"] else "❌ خیر"
+    text = (
+        "➕ <b>تایید ساخت نود Marzban</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        f"Name  <b>{esc(payload['name'])}</b>\n"
+        f"Address  <code>{esc(payload['address'])}</code>\n"
+        f"Port  <code>{payload['port']}</code>\n"
+        f"API Port  <code>{payload['api_port']}</code>\n"
+        f"Usage Ratio  <b>{esc(payload['usage_coefficient'])}</b>\n"
+        f"Add as New Host  <b>{host_label}</b>\n\n"
+        "با تایید، یک Node جدید مستقیماً در Marzban ساخته می‌شود."
+    )
+    kb = [
+        [InlineKeyboardButton("✅ ساخت نود", callback_data=f"mza_ncreate_confirm_{nonce}")],
+        [InlineKeyboardButton("✏️ شروع مجدد", callback_data="mza_ncreate")],
+        [InlineKeyboardButton("❌ انصراف", callback_data="mza_ncreate_cancel")],
+    ]
+    await _mza_render(target, text, kb)
+
+
 _MZA_CREATE_TEXT_STATES = {
     "MZA_CREATE_USERNAME_INPUT",
     "MZA_CREATE_SUBNAME_INPUT",
@@ -8371,7 +8446,7 @@ async def _show_marzban_nodes(target, context):
         f"🔴 خطا  {counts['error']}     ⚫ غیرفعال  {counts['disabled']}",
         "",
     ]
-    kb = []
+    kb = [[InlineKeyboardButton("➕ افزودن نود جدید", callback_data="mza_ncreate")]]
     for node in nodes:
         if not isinstance(node, dict):
             continue
@@ -9752,6 +9827,109 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop('mza_action_user', None)
             await _mza_show_addvol_confirm(update.message, username, amount)
             return
+
+    if state in _MZA_NODE_CREATE_TEXT_STATES:
+        if role != 'admin':
+            _mza_clear_node_create(context)
+            await update.message.reply_text("⛔️ دسترسی غیرمجاز.")
+            return
+
+        draft = context.user_data.get("mza_node_create_draft")
+        draft_age = (
+            time.time() - float(draft.get("started_at") or 0)
+            if isinstance(draft, dict)
+            else float("inf")
+        )
+        if not isinstance(draft, dict) or draft_age > 1800:
+            _mza_clear_node_create(context)
+            await update.message.reply_text(
+                "❌ فرآیند ساخت نود منقضی شده است.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ شروع مجدد", callback_data="mza_ncreate")]
+                ]),
+            )
+            return
+
+        try:
+            if state == 'MZA_NODE_CREATE_NAME_INPUT':
+                changes = marzban_admin.normalize_node_changes({"name": text})
+                draft.update(changes)
+                context.user_data['state'] = 'MZA_NODE_CREATE_ADDRESS_INPUT'
+                await update.message.reply_text(
+                    "🌐 <b>آدرس نود</b>\n\n"
+                    "IP یا hostname نود را بدون http/https بفرستید.",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("❌ لغو", callback_data="mza_ncreate_cancel")]
+                    ]),
+                )
+                return
+
+            if state == 'MZA_NODE_CREATE_ADDRESS_INPUT':
+                changes = marzban_admin.normalize_node_changes({"address": text})
+                draft.update(changes)
+                context.user_data['state'] = 'MZA_NODE_CREATE_PORTS_INPUT'
+                await update.message.reply_text(
+                    "🔌 <b>پورت‌های نود</b>\n\n"
+                    "Port و API Port را در یک پیام بفرستید.\n"
+                    "پیش‌فرض Marzban: <code>62050 62051</code>",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("❌ لغو", callback_data="mza_ncreate_cancel")]
+                    ]),
+                )
+                return
+
+            if state == 'MZA_NODE_CREATE_PORTS_INPUT':
+                parts = text.replace(",", " ").replace(":", " ").split()
+                if len(parts) != 2:
+                    raise ValueError("two ports required")
+                changes = marzban_admin.normalize_node_changes({
+                    "port": parts[0],
+                    "api_port": parts[1],
+                })
+                draft.update(changes)
+                context.user_data['state'] = 'MZA_NODE_CREATE_RATIO_INPUT'
+                await update.message.reply_text(
+                    "📊 <b>Usage Ratio</b>\n\n"
+                    "ضریب مصرف نود را بفرستید؛ مثال: <code>1</code> یا <code>1.5</code>.",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("❌ لغو", callback_data="mza_ncreate_cancel")]
+                    ]),
+                )
+                return
+
+            changes = marzban_admin.normalize_node_changes({
+                "usage_coefficient": text.strip(),
+            })
+            draft.update(changes)
+        except ValueError:
+            hints = {
+                'MZA_NODE_CREATE_NAME_INPUT': "نام باید بین ۱ تا ۸۰ کاراکتر باشد.",
+                'MZA_NODE_CREATE_ADDRESS_INPUT': "یک IP یا hostname بدون http/https و بدون فاصله وارد کنید.",
+                'MZA_NODE_CREATE_PORTS_INPUT': "دو پورت معتبر وارد کنید؛ مثال: 62050 62051",
+                'MZA_NODE_CREATE_RATIO_INPUT': "ضریب باید یک عدد مثبت باشد؛ مثال: 1 یا 1.5",
+            }
+            await update.message.reply_text(
+                f"❌ مقدار نامعتبر است.\n{hints.get(state, '')}"
+            )
+            return
+
+        context.user_data.pop('state', None)
+        await _mza_render(
+            update.message,
+            "🌐 <b>Add as New Host</b>\n\n"
+            "آیا Marzban این Node را به‌عنوان Public Host جدید هم به Inboundها اضافه کند؟",
+            [
+                [
+                    InlineKeyboardButton("✅ بله", callback_data="mza_ncreate_host_yes"),
+                    InlineKeyboardButton("❌ خیر", callback_data="mza_ncreate_host_no"),
+                ],
+                [InlineKeyboardButton("❌ لغو", callback_data="mza_ncreate_cancel")],
+            ],
+        )
+        return
 
     node_input_states = {
         'MZA_NODE_NAME_INPUT',
@@ -13276,6 +13454,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             or d.startswith('mza_nedit_ratio_')
         )
         host_edit_starter = d.startswith('mza_hedit_')
+        node_create_starter = d == 'mza_ncreate' or d.startswith('mza_ncreate_')
         create_starter = d == 'mza_create' or d.startswith('mza_c') or d.startswith('mza_create_')
         starters = (
             d == 'mza_search'
@@ -13284,6 +13463,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             or d.startswith('mza_addvol_custom_')
             or node_edit_starter
             or host_edit_starter
+            or node_create_starter
             or create_starter
         )
         if not starters and input_state in (
@@ -13295,6 +13475,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'MZA_NODE_ADDRESS_INPUT',
             'MZA_NODE_PORTS_INPUT',
             'MZA_NODE_RATIO_INPUT',
+            'MZA_NODE_CREATE_NAME_INPUT',
+            'MZA_NODE_CREATE_ADDRESS_INPUT',
+            'MZA_NODE_CREATE_PORTS_INPUT',
+            'MZA_NODE_CREATE_RATIO_INPUT',
             'MZA_HOST_FIELD_INPUT',
             'MZA_CREATE_USERNAME_INPUT',
             'MZA_CREATE_SUBNAME_INPUT',
@@ -13316,6 +13500,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop('mza_node_pending_changes', None)
         if not d.startswith('mza_hconfirm_') and not host_edit_starter:
             _mza_clear_host_pending(context)
+        if not node_create_starter and context.user_data.get("mza_node_create_draft") is not None:
+            _mza_clear_node_create(context)
         if not create_starter and context.user_data.get("mza_create_draft") is not None:
             _mza_clear_create(context)
 
@@ -13943,6 +14129,182 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("➕ ساخت کاربر دیگر", callback_data="mza_create")],
                 [InlineKeyboardButton("🔙 داشبورد", callback_data="mza_home")],
             ]),
+        )
+        return
+    elif d == 'mza_ncreate':
+        _mza_clear_node_create(context)
+        context.user_data["mza_node_create_draft"] = {"started_at": time.time()}
+        context.user_data['state'] = 'MZA_NODE_CREATE_NAME_INPUT'
+        await query.edit_message_text(
+            "➕ <b>افزودن نود جدید Marzban</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            "مرحله ۱ از ۵ · نام نود\n\n"
+            "نام نود را بفرستید؛ مثال: <code>USA-2</code>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ لغو", callback_data="mza_ncreate_cancel")]
+            ]),
+        )
+        return
+    elif d == 'mza_ncreate_cancel':
+        _mza_clear_node_create(context)
+        await _show_marzban_nodes(query, context)
+        return
+    elif d in ('mza_ncreate_host_yes', 'mza_ncreate_host_no'):
+        draft = context.user_data.get("mza_node_create_draft")
+        draft_age = (
+            time.time() - float(draft.get("started_at") or 0)
+            if isinstance(draft, dict)
+            else float("inf")
+        )
+        if not isinstance(draft, dict) or draft_age > 1800:
+            _mza_clear_node_create(context)
+            await query.edit_message_text(
+                "❌ فرآیند ساخت نود منقضی شده است.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ شروع مجدد", callback_data="mza_ncreate")]
+                ]),
+            )
+            return
+        draft["add_as_new_host"] = d == 'mza_ncreate_host_yes'
+        context.user_data.pop('state', None)
+        await _mza_show_node_create_review(query, context)
+        return
+    elif d == 'mza_ncreate_review':
+        context.user_data.pop("mza_node_create_busy", None)
+        await _mza_show_node_create_review(query, context)
+        return
+    elif d.startswith('mza_ncreate_confirm_'):
+        nonce = d[len('mza_ncreate_confirm_'):]
+        draft = context.user_data.get("mza_node_create_draft")
+        draft_age = (
+            time.time() - float(draft.get("started_at") or 0)
+            if isinstance(draft, dict)
+            else float("inf")
+        )
+        if (
+            not isinstance(draft, dict)
+            or not nonce
+            or draft.get("confirm_nonce") != nonce
+            or draft_age > 1800
+        ):
+            _mza_clear_node_create(context)
+            await query.edit_message_text(
+                "❌ این تاییدیه منقضی شده است؛ فرآیند ساخت نود را دوباره شروع کنید.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ شروع مجدد", callback_data="mza_ncreate")],
+                    [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
+                ]),
+            )
+            return
+        if context.user_data.get("mza_node_create_busy"):
+            await query.message.reply_text("⏳ درخواست ساخت قبلی هنوز در حال پردازش است.")
+            return
+
+        context.user_data["mza_node_create_busy"] = True
+        try:
+            payload = marzban_admin.normalize_node_create(
+                draft.get("name"),
+                draft.get("address"),
+                port=draft.get("port", 62050),
+                api_port=draft.get("api_port", 62051),
+                usage_coefficient=draft.get("usage_coefficient", 1.0),
+                add_as_new_host=draft.get("add_as_new_host", True),
+            )
+        except ValueError as exc:
+            context.user_data.pop("mza_node_create_busy", None)
+            await query.edit_message_text(
+                f"❌ اطلاعات ساخت نود نامعتبر است: <code>{esc(exc)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ شروع مجدد", callback_data="mza_ncreate")]
+                ]),
+            )
+            return
+
+        service = await _get_marzban_admin_service()
+        ok_create, result = await service.create_node(
+            payload["name"],
+            payload["address"],
+            port=payload["port"],
+            api_port=payload["api_port"],
+            usage_coefficient=payload["usage_coefficient"],
+            add_as_new_host=payload["add_as_new_host"],
+        )
+
+        if not ok_create:
+            created_but_unverified = isinstance(result, dict) and bool(result.get("created"))
+            if created_but_unverified:
+                node_id = result.get("node_id")
+                _mza_clear_node_create(context)
+                kb = []
+                try:
+                    verified_node_id = marzban_admin.normalize_node_id(node_id)
+                except ValueError:
+                    verified_node_id = None
+                if verified_node_id:
+                    kb.append([
+                        InlineKeyboardButton(
+                            "🖥 بررسی Node",
+                            callback_data=f"mza_node_{verified_node_id}",
+                        )
+                    ])
+                kb.append([
+                    InlineKeyboardButton(
+                        "🔙 نودها",
+                        callback_data=_mza_nodes_list_callback(context),
+                    )
+                ])
+                await query.edit_message_text(
+                    "⚠️ <b>درخواست ساخت در Marzban موفق شد، اما Verify نهایی پاسخ معتبر نداد.</b>\n\n"
+                    f"Name: <code>{esc(payload['name'])}</code>\n"
+                    f"Node ID: <code>{esc(node_id if node_id is not None else 'نامشخص')}</code>\n\n"
+                    "برای جلوگیری از ساخت تکراری، POST دوباره اجرا نمی‌شود. وضعیت Node را بررسی کنید.",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup(kb),
+                )
+                return
+
+            context.user_data.pop("mza_node_create_busy", None)
+            await query.edit_message_text(
+                "❌ <b>ساخت Node انجام نشد.</b>\n\n"
+                f"<code>{esc(result)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 بازبینی و تلاش مجدد", callback_data="mza_ncreate_review")],
+                    [InlineKeyboardButton("✏️ شروع مجدد", callback_data="mza_ncreate")],
+                    [InlineKeyboardButton("❌ انصراف", callback_data="mza_ncreate_cancel")],
+                ]),
+            )
+            return
+
+        verified = result if isinstance(result, dict) else {}
+        try:
+            node_id = marzban_admin.normalize_node_id(verified.get("id"))
+        except ValueError:
+            node_id = None
+        _mza_clear_node_create(context)
+
+        kb = []
+        if node_id:
+            kb.append([
+                InlineKeyboardButton("🖥 مشاهده Node", callback_data=f"mza_node_{node_id}")
+            ])
+        kb.extend([
+            [InlineKeyboardButton("➕ ساخت نود دیگر", callback_data="mza_ncreate")],
+            [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
+        ])
+        await query.edit_message_text(
+            "✅ <b>Node با موفقیت ساخته و Verify شد</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"Node ID  <code>{esc(node_id if node_id is not None else 'نامشخص')}</code>\n"
+            f"Name  <b>{esc(verified.get('name') or payload['name'])}</b>\n"
+            f"Address  <code>{esc(verified.get('address') or payload['address'])}</code>\n"
+            f"Port  <code>{esc(verified.get('port') or payload['port'])}</code>\n"
+            f"API Port  <code>{esc(verified.get('api_port') or payload['api_port'])}</code>\n"
+            f"Status  <b>{esc(verified.get('status') or 'connecting')}</b>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(kb),
         )
         return
     elif d == 'mza_nodes':

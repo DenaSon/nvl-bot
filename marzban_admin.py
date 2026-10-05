@@ -740,12 +740,24 @@ class MarzbanAdminService:
                 "error": verified,
             }
 
-        if int(verified.get("id") or 0) != node_id:
+        try:
+            verified_node_id = normalize_node_id(verified.get("id"))
+        except ValueError:
+            return False, {
+                "stage": "verify",
+                "created": True,
+                "node_id": node_id,
+                "error": "Marzban returned an invalid node id during verification",
+                "verified": verified,
+            }
+
+        if verified_node_id != node_id:
             return False, {
                 "stage": "verify",
                 "created": True,
                 "node_id": node_id,
                 "error": "Marzban returned a different node id during verification",
+                "verified": verified,
             }
 
         expected = {

@@ -8446,7 +8446,7 @@ async def _show_marzban_nodes(target, context):
         f"🔴 خطا  {counts['error']}     ⚫ غیرفعال  {counts['disabled']}",
         "",
     ]
-    kb = [[InlineKeyboardButton("➕ افزودن نود جدید", callback_data="mza_ncreate")]]
+    node_buttons = []
     for node in nodes:
         if not isinstance(node, dict):
             continue
@@ -8462,16 +8462,18 @@ async def _show_marzban_nodes(target, context):
             f"{icon} <b>{esc(name)}</b> — {esc(status_label)}\n"
             f"└ <code>{esc(address)}:{esc(port)}</code> · Ratio {esc(node.get('usage_coefficient', 1))}"
         )
-        kb.append([
+        node_buttons.append([
             InlineKeyboardButton(
                 f"{icon} {name}",
                 callback_data=f"mza_node_{node_id}",
             )
         ])
 
-    if not kb:
+    if not node_buttons:
         lines.append("هیچ نودی ثبت نشده است.")
 
+    kb = [[InlineKeyboardButton("➕ افزودن نود جدید", callback_data="mza_ncreate")]]
+    kb.extend(node_buttons)
     kb.extend(fallback_kb)
     await _mza_render(target, "\n".join(lines), kb)
 

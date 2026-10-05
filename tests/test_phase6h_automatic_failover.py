@@ -182,7 +182,11 @@ class Phase6HIntegrationShapeTests(unittest.TestCase):
             "async def cmd_start",
         )
         self.assertIn("🛡 بررسی فیلترینگ", home)
-        self.assertIn("🛰 بررسی مرزبان", home)
+        self.assertNotIn(
+            "['🛡 بررسی فیلترینگ', '🛰 بررسی مرزبان']",
+            home,
+        )
+        self.assertIn("🧩 برنامه‌ها", home)
 
     def test_monitor_exposes_explicit_auto_opt_in(self):
         region = self._region(

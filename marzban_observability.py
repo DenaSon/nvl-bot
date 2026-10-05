@@ -995,11 +995,33 @@ def _overall_monitor_state(
     return "🟢", "سالم"
 
 
+def _pct_label(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    return f"{number:.1f}%"
+
+
+def _history_latency_label(metrics: Mapping[str, Any]) -> str:
+    if int(metrics.get("samples_24h") or 0) < 2:
+        return "در حال جمع‌آوری"
+    return (
+        f"15m {_latency_label(metrics.get('latency_15m'))} · "
+        f"1h {_latency_label(metrics.get('latency_1h'))} · "
+        f"24h {_latency_label(metrics.get('latency_24h'))}"
+    )
+
+
 def render_dashboard_report(conn) -> str:
     _inventory, assets, health, regional_states, provider = _monitor_snapshot(conn)
     mains = tuple(a for a in assets if a.asset_type == discovery.ASSET_MAIN)
     nodes = tuple(a for a in assets if a.asset_type == discovery.ASSET_NODE)
     hosts = tuple(a for a in assets if a.asset_type == discovery.ASSET_PUBLIC_HOST)
+    metrics_by_key = {
+        item.asset_key: asset_metrics(conn, item.asset_key)
+        for item in assets
+    }
 
     overall_icon, overall_label = _overall_monitor_state(
         mains, nodes, hosts, health, regional_states, provider
@@ -1045,6 +1067,24 @@ def render_dashboard_report(conn) -> str:
         "",
     ])
 
+    if nodes:
+        lines.append("📈 <b>Node Health Score</b>")
+        for item in nodes[:4]:
+            local = health.get(item.asset_key) or {}
+            reg = regional_states.get(item.asset_key) or {}
+            score = health_score(
+                local,
+                reg,
+                metrics_by_key.get(item.asset_key) or {},
+            )
+            lines.append(
+                f"{score['icon']} {html.escape(item.name)} · "
+                f"<b>{int(score['score'])}/100</b> {html.escape(score['label'])}"
+            )
+        if len(nodes) > 4:
+            lines.append(f"… و {len(nodes) - 4} Node دیگر")
+        lines.append("")
+
     counts = {
         REGIONAL_STATE_CLEAR: 0,
         REGIONAL_STATE_POSSIBLE: 0,
@@ -1071,6 +1111,25 @@ def render_dashboard_report(conn) -> str:
         "",
     ])
 
+    incidents = current_incidents(
+        assets,
+        health,
+        regional_states,
+        provider,
+        metrics_by_key,
+        limit=4,
+    )
+    lines.append("🚨 <b>موارد نیازمند توجه</b>")
+    if not incidents:
+        lines.append("✅ مورد فعالی دیده نمی‌شود.")
+    else:
+        for incident in incidents:
+            lines.append(
+                f"{incident['icon']} <b>{html.escape(str(incident['label']))}</b> · "
+                f"{html.escape(str(incident['message']))}"
+            )
+    lines.append("")
+
     local_rows = [health.get(item.asset_key) or {} for item in assets]
     regional_rows = [
         regional_states.get(item.asset_key) or {}
@@ -1081,7 +1140,6 @@ def render_dashboard_report(conn) -> str:
         f"🕒 Regional data: <b>{html.escape(_oldest_check_label(regional_rows, 'checked_at'))}</b>",
     ])
     return "\n".join(lines)[:3900]
-
 
 def render_nodes_report(conn) -> str:
     _inventory, assets, health, regional_states, _provider = _monitor_snapshot(conn)
@@ -1095,6 +1153,8 @@ def render_nodes_report(conn) -> str:
     for item in nodes:
         local = health.get(item.asset_key) or {}
         reg = regional_states.get(item.asset_key) or {}
+        metrics = asset_metrics(conn, item.asset_key)
+        score = health_score(local, reg, metrics)
         li, ll = _local_view(local)
         ri, rl = _regional_view(reg, asset_type=item.asset_type)
         evidence = local.get("evidence") or {}
@@ -1116,7 +1176,8 @@ def render_nodes_report(conn) -> str:
         )
 
         lines.extend([
-            f"{li} <b>{html.escape(item.name)}</b>",
+            f"{li} <b>{html.escape(item.name)}</b> · "
+            f"{score['icon']} <b>{int(score['score'])}/100</b>",
             f"<code>{html.escape(_endpoint_text(item))}</code>",
             f"Marzban: <b>{html.escape(status_label)}</b> · Local: {html.escape(ll)} · "
             f"<code>{html.escape(_latency_label(local.get('latency_ms')))}</code>",
@@ -1131,12 +1192,16 @@ def render_nodes_report(conn) -> str:
             lines.append(f"Xray: <code>{html.escape(xray_version)}</code>")
         lines.extend([
             f"Regional: {ri} <b>{html.escape(rl)}</b>",
+            f"Latency avg: <code>{html.escape(_history_latency_label(metrics))}</code>",
+            f"Uptime: 1h <b>{html.escape(_pct_label(metrics.get('uptime_1h')))}</b> · "
+            f"24h <b>{html.escape(_pct_label(metrics.get('uptime_24h')))}</b>",
+            f"Failures 24h: <b>{int(metrics.get('failures_24h') or 0)}</b> · "
+            f"Last failure: <b>{html.escape(_age_label(metrics.get('last_failure_at')))}</b>",
             f"Checked: <b>{html.escape(_age_label(local.get('checked_at')))}</b>",
             "",
         ])
 
     return "\n".join(lines)[:3900]
-
 
 def _node_for_host(
     host: discovery.MarzbanAsset,
@@ -1196,6 +1261,7 @@ def render_hosts_report(conn) -> str:
         for item in group:
             local = health.get(item.asset_key) or {}
             reg = regional_states.get(item.asset_key) or {}
+            metrics = asset_metrics(conn, item.asset_key)
             li, ll = _local_view(local)
             ri, rl = _regional_view(reg, asset_type=item.asset_type)
             tag = _short_inbound_tag(item.metadata.get("inbound_tag"))
@@ -1204,6 +1270,13 @@ def render_hosts_report(conn) -> str:
                 f"{li} <b>{html.escape(tag)}</b> · <code>{html.escape(port)}</code> · "
                 f"<code>{html.escape(_latency_label(local.get('latency_ms')))}</code>"
             )
+            if int(metrics.get("samples_24h") or 0) >= 2:
+                lines.append(
+                    f"   Avg 1h <code>{html.escape(_latency_label(metrics.get('latency_1h')))}</code> · "
+                    f"Uptime 24h <b>{html.escape(_pct_label(metrics.get('uptime_24h')))}</b>"
+                )
+            else:
+                lines.append("   📈 History: در حال جمع‌آوری")
             lines.append(
                 f"   Regional: {ri} {html.escape(rl)} · "
                 f"{html.escape(_age_label(reg.get('checked_at')))}"
@@ -1211,7 +1284,6 @@ def render_hosts_report(conn) -> str:
         lines.append("")
 
     return "\n".join(lines)[:3900]
-
 
 def _regional_metrics(row: Mapping[str, Any]) -> dict[str, Any]:
     evidence = row.get("evidence") or {}

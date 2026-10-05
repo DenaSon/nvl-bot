@@ -9903,12 +9903,19 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 service.get_node_settings(),
             )
 
+            try:
+                current_port = int(current_node.get('port') or 0) if isinstance(current_node, dict) else 0
+                current_api_port = int(current_node.get('api_port') or 0) if isinstance(current_node, dict) else 0
+            except (TypeError, ValueError):
+                current_port = 0
+                current_api_port = 0
+
             stale = (
                 not ok_node
                 or not isinstance(current_node, dict)
                 or str(current_node.get('address') or '') != str(session.host)
-                or int(current_node.get('port') or 0) != int(session.service_port)
-                or int(current_node.get('api_port') or 0) != int(session.api_port)
+                or current_port != int(session.service_port)
+                or current_api_port != int(session.api_port)
             )
             if stale:
                 session.scrub_secret()

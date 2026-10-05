@@ -143,6 +143,39 @@ class NodeValidationTests(unittest.TestCase):
         self.assertIsNone(marzban_admin.find_duplicate_node(nodes, "FR Node"))
 
 
+class NodeHostLinkTests(unittest.TestCase):
+    def test_generated_host_signature_matches_official_marzban_pattern(self):
+        self.assertEqual(
+            marzban_admin.node_generated_host_remark("NeVelGate"),
+            "NeVelGate ({USERNAME}) [{PROTOCOL} - {TRANSPORT}]",
+        )
+
+    def test_find_generated_hosts_requires_exact_remark_and_address(self):
+        node = {"name": "NeVelGate", "address": "172.86.117.246"}
+        generated = {
+            "remark": "NeVelGate ({USERNAME}) [{PROTOCOL} - {TRANSPORT}]",
+            "address": "172.86.117.246",
+            "port": None,
+        }
+        payload = {
+            "VLESS": [
+                generated,
+                {"remark": "Manual", "address": "172.86.117.246", "port": 443},
+                {
+                    "remark": "NeVelGate ({USERNAME}) [{PROTOCOL} - {TRANSPORT}]",
+                    "address": "203.0.113.99",
+                },
+            ]
+        }
+
+        matches = marzban_admin.find_node_generated_hosts(payload, node)
+
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["tag"], "VLESS")
+        self.assertEqual(matches[0]["index"], 0)
+        self.assertEqual(matches[0]["host"]["remark"], generated["remark"])
+
+
 class HostValidationTests(unittest.TestCase):
     def test_inbound_tag_and_index_are_normalized(self):
         self.assertEqual(
@@ -627,6 +660,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_delete_node_uses_delete_endpoint_and_verifies_absence(self):
         current = {"id": 4, "name": "Old Node", "address": "1.2.3.4"}
         self.service.get_node = AsyncMock(return_value=(True, current))
+        self.service.get_hosts = AsyncMock(return_value=(True, {}))
         self.service.get_nodes = AsyncMock(return_value=(True, [{"id": 7, "name": "Other"}]))
         self.service.request = AsyncMock(return_value=(True, None))
 
@@ -653,6 +687,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_delete_node_verify_failure_marks_delete_as_already_sent(self):
         current = {"id": 4, "name": "Old Node", "address": "1.2.3.4"}
         self.service.get_node = AsyncMock(return_value=(True, current))
+        self.service.get_hosts = AsyncMock(return_value=(True, {}))
         self.service.request = AsyncMock(return_value=(True, None))
         self.service.get_nodes = AsyncMock(return_value=(False, "Network Error"))
 
@@ -662,6 +697,70 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["stage"], "verify")
         self.assertTrue(result["deleted"])
         self.assertEqual(result["node_id"], 4)
+        self.service.request.assert_awaited_once_with("DELETE", "/api/node/4")
+
+    async def test_delete_node_blocks_when_host_inventory_is_unavailable(self):
+        current = {"id": 4, "name": "Old Node", "address": "1.2.3.4"}
+        self.service.get_node = AsyncMock(return_value=(True, current))
+        self.service.get_hosts = AsyncMock(return_value=(False, "hosts unavailable"))
+        self.service.request = AsyncMock()
+
+        ok, result = await self.service.delete_node(4)
+
+        self.assertFalse(ok)
+        self.assertEqual(result["stage"], "host_precheck")
+        self.assertFalse(result["deleted"])
+        self.service.request.assert_not_awaited()
+
+    async def test_delete_node_cleans_only_exact_auto_generated_hosts(self):
+        current = {"id": 4, "name": "Old Node", "address": "1.2.3.4"}
+        auto = {
+            "remark": "Old Node ({USERNAME}) [{PROTOCOL} - {TRANSPORT}]",
+            "address": "1.2.3.4",
+        }
+        manual_same_address = {
+            "remark": "Manual CDN",
+            "address": "1.2.3.4",
+        }
+        hosts = {"VLESS": [auto, manual_same_address]}
+        self.service.get_node = AsyncMock(return_value=(True, current))
+        self.service.get_hosts = AsyncMock(return_value=(True, hosts))
+        self.service.get_nodes = AsyncMock(return_value=(True, []))
+        self.service.request = AsyncMock(return_value=(True, None))
+        self.service.delete_node_generated_hosts = AsyncMock(
+            return_value=(True, {"deleted_count": 1})
+        )
+
+        ok, result = await self.service.delete_node(4)
+
+        self.assertTrue(ok)
+        self.assertEqual(result["hosts_deleted"], 1)
+        candidates = self.service.delete_node_generated_hosts.await_args.args[0]
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["host"]["remark"], auto["remark"])
+
+    async def test_delete_node_reports_partial_cleanup_without_retrying_node_delete(self):
+        current = {"id": 4, "name": "Old Node", "address": "1.2.3.4"}
+        auto = {
+            "remark": "Old Node ({USERNAME}) [{PROTOCOL} - {TRANSPORT}]",
+            "address": "1.2.3.4",
+        }
+        self.service.get_node = AsyncMock(return_value=(True, current))
+        self.service.get_hosts = AsyncMock(return_value=(True, {"VLESS": [auto]}))
+        self.service.get_nodes = AsyncMock(return_value=(True, []))
+        self.service.request = AsyncMock(return_value=(True, None))
+        self.service.delete_node_generated_hosts = AsyncMock(return_value=(
+            False,
+            {"stage": "host_cleanup", "deleted_count": 0, "error": "verify failed"},
+        ))
+
+        ok, result = await self.service.delete_node(4)
+
+        self.assertFalse(ok)
+        self.assertTrue(result["deleted"])
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["stage"], "host_cleanup")
+        self.assertEqual(result["hosts_deleted"], 0)
         self.service.request.assert_awaited_once_with("DELETE", "/api/node/4")
 
     async def test_reconnect_node_uses_reconnect_endpoint(self):
@@ -881,6 +980,62 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ok)
         self.assertIn("changed since confirmation", error)
         request.assert_not_awaited()
+
+    async def test_delete_host_removes_only_target_and_verifies(self):
+        target = {"remark": "Old", "address": "old.example.com", "port": 443}
+        keep = {"remark": "Keep", "address": "keep.example.com", "port": 443}
+        before = {"VLESS": [target, keep]}
+        after = {"VLESS": [keep]}
+        self.service.get_hosts = AsyncMock(side_effect=[(True, before), (True, after)])
+        self.service.request = AsyncMock(return_value=(True, {}))
+
+        ok, result = await self.service.delete_host(
+            "VLESS",
+            0,
+            expected_host=target,
+        )
+
+        self.assertTrue(ok)
+        self.assertTrue(result["verified"])
+        sent = self.service.request.await_args.kwargs["json_data"]
+        self.assertEqual(len(sent["VLESS"]), 1)
+        self.assertEqual(sent["VLESS"][0]["remark"], "Keep")
+
+    async def test_delete_host_rejects_stale_snapshot_without_put(self):
+        expected = {"remark": "Old", "address": "old.example.com", "port": 443}
+        changed = {"remark": "Changed", "address": "old.example.com", "port": 443}
+        self.service.get_hosts = AsyncMock(return_value=(True, {"VLESS": [changed]}))
+        self.service.request = AsyncMock()
+
+        ok, result = await self.service.delete_host(
+            "VLESS",
+            0,
+            expected_host=expected,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(result["stage"], "precheck")
+        self.assertIn("changed since confirmation", result["error"])
+        self.service.request.assert_not_awaited()
+
+    async def test_delete_host_verify_failure_marks_delete_as_sent(self):
+        target = {"remark": "Old", "address": "old.example.com", "port": 443}
+        self.service.get_hosts = AsyncMock(side_effect=[
+            (True, {"VLESS": [target]}),
+            (False, "Network Error"),
+        ])
+        self.service.request = AsyncMock(return_value=(True, {}))
+
+        ok, result = await self.service.delete_host(
+            "VLESS",
+            0,
+            expected_host=target,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(result["stage"], "verify")
+        self.assertTrue(result["deleted"])
+        self.service.request.assert_awaited_once()
 
     async def test_disable_host_routes_through_safe_host_update(self):
         host = {"remark": "DE", "address": "de.example.com", "port": 443}

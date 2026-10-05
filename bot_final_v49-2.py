@@ -8848,6 +8848,8 @@ def _mza_clear_host_pending(context):
         "mza_host_edit_token",
         "mza_host_edit_field",
         "mza_host_pending",
+        "mza_host_delete_pending",
+        "mza_host_delete_busy",
     ):
         context.user_data.pop(key, None)
 
@@ -9084,6 +9086,7 @@ async def _show_marzban_host_detail(target, context, host_token):
             InlineKeyboardButton("🔊 Noise", callback_data=f"mza_hedit_noise_{host_token}"),
         ],
         [InlineKeyboardButton(disabled_label, callback_data=f"mza_htoggle_disabled_{host_token}")],
+        [InlineKeyboardButton("🗑 حذف دائمی Host", callback_data=f"mza_hdelete_{host_token}")],
         [
             InlineKeyboardButton("🔓 Allow Insecure", callback_data=f"mza_htoggle_insecure_{host_token}"),
             InlineKeyboardButton("🔀 Mux", callback_data=f"mza_htoggle_mux_{host_token}"),
@@ -13886,6 +13889,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             or d.startswith('mza_nedit_ratio_')
         )
         host_edit_starter = d.startswith('mza_hedit_')
+        host_delete_starter = d.startswith('mza_hdelete_')
         node_create_starter = d == 'mza_ncreate' or d.startswith('mza_ncreate_')
         node_delete_starter = d.startswith('mza_ndelete_')
         node_bootstrap_starter = d.startswith('mza_nboot_') or d.startswith('mza_ninstall_')
@@ -13897,6 +13901,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             or d.startswith('mza_addvol_custom_')
             or node_edit_starter
             or host_edit_starter
+            or host_delete_starter
             or node_create_starter
             or node_delete_starter
             or node_bootstrap_starter
@@ -13937,7 +13942,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not d.startswith('mza_nedit_confirm_') and not node_edit_starter:
             context.user_data.pop('mza_action_node', None)
             context.user_data.pop('mza_node_pending_changes', None)
-        if not d.startswith('mza_hconfirm_') and not host_edit_starter:
+        if (
+            not d.startswith('mza_hconfirm_')
+            and not host_edit_starter
+            and not host_delete_starter
+        ):
             _mza_clear_host_pending(context)
         if not node_create_starter and context.user_data.get("mza_node_create_draft") is not None:
             _mza_clear_node_create(context)
@@ -15228,6 +15237,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("mza_node_delete_pending", None)
 
         if not ok_delete:
+            cleanup_incomplete = (
+                isinstance(result, dict)
+                and result.get("stage") == "host_cleanup"
+                and bool(result.get("deleted"))
+            )
+            if cleanup_incomplete:
+                await query.edit_message_text(
+                    "⚠️ <b>Node حذف شد، اما cleanup همه Hostها کامل نشد.</b>\n\n"
+                    f"Node ID: <code>{node_id}</code>\n"
+                    f"Hostهای حذف‌شده: <b>{esc(result.get('hosts_deleted', 0))}</b>\n"
+                    f"جزئیات: <code>{esc(result.get('error'))}</code>\n\n"
+                    "Node دوباره DELETE نمی‌شود. Public Hostهای باقی‌مانده را از بخش Inbounds & Public Hosts بررسی کنید.",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🌐 بررسی Hostها", callback_data="mza_inbounds")],
+                        [InlineKeyboardButton("🔙 لیست نودها", callback_data=_mza_nodes_list_callback(context))],
+                    ]),
+                )
+                return
+
             deleted_but_unverified = isinstance(result, dict) and bool(result.get("deleted"))
             if deleted_but_unverified:
                 await query.edit_message_text(
@@ -15263,8 +15292,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ <b>Node با موفقیت حذف شد</b>\n"
             "━━━━━━━━━━━━━━\n"
             f"نام  <b>{esc(deleted_name)}</b>\n"
-            f"Node ID  <code>{node_id}</code>\n\n"
-            "حذف در Marzban انجام و با لیست نودها Verify شد. خود VPS یا سرور فیزیکی حذف نشده است.",
+            f"Node ID  <code>{node_id}</code>\n"
+            f"Public Host حذف‌شده  <b>{esc(result.get('hosts_deleted', 0) if isinstance(result, dict) else 0)}</b>\n\n"
+            "Node و Public Hostهای auto-generated مرتبط حذف و Verify شدند. خود VPS یا سرور فیزیکی حذف نشده است.",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 لیست نودها", callback_data=_mza_nodes_list_callback(context))]
@@ -15275,7 +15305,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d.startswith('mza_ndelete_'):
         node_id = marzban_admin.normalize_node_id(d[len('mza_ndelete_'):])
         service = await _get_marzban_admin_service()
-        ok_node, node = await service.get_node(node_id)
+        (ok_node, node), (ok_hosts, hosts_payload) = await asyncio.gather(
+            service.get_node(node_id),
+            service.get_hosts(),
+        )
         if not ok_node or not isinstance(node, dict):
             await query.edit_message_text(
                 "❌ دریافت Node از Marzban ناموفق بود.",
@@ -15284,7 +15317,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]),
             )
             return
+        if not ok_hosts or not isinstance(hosts_payload, dict):
+            await query.edit_message_text(
+                "❌ لیست Public Hostها قابل دریافت نیست؛ برای جلوگیری از باقی‌ماندن Host یتیم، حذف Node متوقف شد.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 تلاش مجدد", callback_data=f"mza_ndelete_{node_id}")],
+                    [InlineKeyboardButton("↩️ Node", callback_data=f"mza_node_{node_id}")],
+                ]),
+            )
+            return
 
+        linked_hosts = marzban_admin.find_node_generated_hosts(hosts_payload, node)
         nonce = secrets.token_hex(8)
         context.user_data["mza_node_delete_pending"] = {
             "node_id": node_id,
@@ -15292,6 +15335,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "started_at": time.time(),
             "name": str(node.get("name") or f"Node {node_id}"),
             "address": str(node.get("address") or "نامشخص"),
+            "linked_hosts": len(linked_hosts),
         }
         context.user_data.pop("mza_node_delete_busy", None)
         await query.edit_message_text(
@@ -15300,13 +15344,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"نام  <b>{esc(node.get('name') or f'Node {node_id}')}</b>\n"
             f"Node ID  <code>{node_id}</code>\n"
             f"Address  <code>{esc(node.get('address') or 'نامشخص')}</code>\n"
-            f"Status  <code>{esc(node.get('status') or 'unknown')}</code>\n\n"
-            "این عملیات رکورد Node را از Marzban حذف می‌کند و با غیرفعال‌سازی متفاوت است.\n"
-            "خود VPS حذف نمی‌شود، اما برای برگرداندن Node باید دوباره آن را در Marzban ثبت کنید.",
+            f"Status  <code>{esc(node.get('status') or 'unknown')}</code>\n"
+            f"Public Host مرتبط  <b>{len(linked_hosts)}</b>\n\n"
+            "با تایید، Node حذف می‌شود و فقط Public Hostهایی که دقیقاً با الگوی رسمی auto-generated همین Node تطبیق دارند نیز پاک می‌شوند.\n"
+            "Hostهای دستی یا صرفاً هم‌آدرس حذف نخواهند شد. خود VPS هم حذف نمی‌شود.",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(
-                    "⚠️ بله، Node را حذف کن",
+                    f"⚠️ حذف Node + {len(linked_hosts)} Host مرتبط",
                     callback_data=f"mza_ndelete_confirm_{node_id}_{nonce}",
                 )],
                 [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_node_{node_id}")],
@@ -15504,6 +15549,137 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_host_{host_token}")]
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_hdelete_confirm_'):
+        rest = d[len('mza_hdelete_confirm_'):]
+        try:
+            host_token, nonce = rest.split('_', 1)
+        except ValueError:
+            await query.edit_message_text("❌ درخواست حذف Host نامعتبر است.")
+            return
+
+        pending = context.user_data.get("mza_host_delete_pending")
+        age = (
+            time.time() - float(pending.get("started_at") or 0)
+            if isinstance(pending, dict)
+            else float("inf")
+        )
+        if (
+            not isinstance(pending, dict)
+            or pending.get("token") != host_token
+            or pending.get("nonce") != nonce
+            or not isinstance(pending.get("expected_host"), dict)
+            or age > 600
+        ):
+            _mza_clear_host_pending(context)
+            await query.edit_message_text(
+                "❌ تایید حذف Host منقضی شده است؛ لیست Hostها را دوباره باز کنید.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Inbounds", callback_data="mza_inbounds")]
+                ]),
+            )
+            return
+
+        if context.user_data.get("mza_host_delete_busy"):
+            await query.message.reply_text("⏳ درخواست حذف Host قبلی هنوز در حال پردازش است.")
+            return
+
+        context.user_data["mza_host_delete_busy"] = True
+        service = await _get_marzban_admin_service()
+        ok_delete, result = await service.delete_host(
+            pending.get("tag"),
+            pending.get("index"),
+            expected_host=pending.get("expected_host"),
+        )
+        inbound_token = pending.get("inbound_token")
+        context.user_data.pop("mza_host_delete_busy", None)
+        context.user_data.pop("mza_host_delete_pending", None)
+
+        if not ok_delete:
+            applied_but_unverified = (
+                isinstance(result, dict)
+                and bool(result.get("deleted"))
+            )
+            if applied_but_unverified:
+                await query.edit_message_text(
+                    "⚠️ <b>حذف Host ارسال شد، اما Verify نهایی کامل نشد.</b>\n\n"
+                    f"<code>{esc(result.get('error'))}</code>\n\n"
+                    "درخواست حذف دوباره اجرا نمی‌شود؛ ابتدا لیست Hostها را Refresh کنید.",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 بررسی Inbound", callback_data=f"mza_inb_{inbound_token}")],
+                        [InlineKeyboardButton("🔙 Inbounds", callback_data="mza_inbounds")],
+                    ]),
+                )
+                return
+
+            await query.edit_message_text(
+                "❌ <b>Public Host حذف نشد.</b>\n\n"
+                f"<code>{esc(result)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 بررسی Inbound", callback_data=f"mza_inb_{inbound_token}")],
+                    [InlineKeyboardButton("🔙 Inbounds", callback_data="mza_inbounds")],
+                ]),
+            )
+            return
+
+        deleted_host = result.get("host") if isinstance(result, dict) else {}
+        await query.edit_message_text(
+            "✅ <b>Public Host حذف شد</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"Inbound  <code>{esc(pending.get('tag'))}</code>\n"
+            f"Host  <b>{esc((deleted_host or {}).get('remark') or '—')}</b>\n"
+            f"Address  <code>{esc((deleted_host or {}).get('address') or '—')}</code>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("↩️ بازگشت به Inbound", callback_data=f"mza_inb_{inbound_token}")],
+                [InlineKeyboardButton("🔙 Inbounds", callback_data="mza_inbounds")],
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_hdelete_'):
+        host_token = d[len('mza_hdelete_'):]
+        ok_host, resolved, error = await _mza_load_host_target(context, host_token)
+        if not ok_host:
+            await query.edit_message_text(
+                f"❌ {esc(error)}",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Inbounds", callback_data="mza_inbounds")]
+                ]),
+            )
+            return
+
+        nonce = secrets.token_hex(8)
+        context.user_data["mza_host_delete_pending"] = {
+            "token": host_token,
+            "nonce": nonce,
+            "started_at": time.time(),
+            "tag": resolved["tag"],
+            "index": resolved["index"],
+            "expected_host": marzban_admin.host_snapshot(resolved["host"]),
+            "inbound_token": resolved["inbound_token"],
+        }
+        context.user_data.pop("mza_host_delete_busy", None)
+        await query.edit_message_text(
+            "🗑 <b>حذف دائمی Public Host</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"Inbound  <code>{esc(resolved['tag'])}</code>\n"
+            f"Host  <b>{esc(resolved['host'].get('remark') or resolved['index'] + 1)}</b>\n"
+            f"Address  <code>{esc(_mza_host_display(resolved['host'].get('address')))}</code>\n\n"
+            "این Host از تنظیمات Marzban حذف می‌شود؛ غیرفعال‌سازی نیست.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "⚠️ بله، Host را حذف کن",
+                    callback_data=f"mza_hdelete_confirm_{host_token}_{nonce}",
+                )],
+                [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_host_{host_token}")],
             ]),
         )
         return

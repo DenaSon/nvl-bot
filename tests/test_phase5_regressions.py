@@ -49,10 +49,9 @@ class Phase5InboundHostRegressionTests(unittest.TestCase):
             "if not d.startswith('mza_nedit_confirm_') and not node_edit_starter:",
             self.source,
         )
-        self.assertIn(
-            "if not d.startswith('mza_hconfirm_') and not host_edit_starter:",
-            self.source,
-        )
+        self.assertIn("host_delete_starter = d.startswith('mza_hdelete_')", self.source)
+        self.assertIn("and not host_edit_starter", self.source)
+        self.assertIn("and not host_delete_starter", self.source)
         self.assertIn("context.user_data.pop('mza_node_pending_changes', None)", self.source)
 
     def test_host_mutations_use_service_layer_and_stale_snapshot(self):

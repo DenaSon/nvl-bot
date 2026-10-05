@@ -352,6 +352,64 @@ def _host_payload(host: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+def node_generated_host_remark(node_name: Any) -> str:
+    """Return the exact remark Marzban uses for add_as_new_host Node hosts."""
+    name = normalize_node_changes(
+        {"name": node_name},
+        allow_status=False,
+    )["name"]
+    return f"{name} ({{USERNAME}}) [{{PROTOCOL}} - {{TRANSPORT}}]"
+
+
+def find_node_generated_hosts(
+    hosts_payload: Any,
+    node: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Find only Public Hosts that match Marzban's automatic Node-host signature.
+
+    Matching both the exact generated remark and the Node address avoids
+    deleting manually-created hosts that merely share an IP/hostname.
+    """
+    if not isinstance(hosts_payload, dict) or not isinstance(node, dict):
+        return []
+
+    try:
+        expected_remark = node_generated_host_remark(node.get("name"))
+    except ValueError:
+        return []
+
+    expected_address = str(node.get("address") or "").strip().casefold()
+    if not expected_address:
+        return []
+
+    matches: List[Dict[str, Any]] = []
+    for raw_tag, hosts in hosts_payload.items():
+        if not isinstance(hosts, list):
+            continue
+        try:
+            tag = normalize_inbound_tag(raw_tag)
+        except ValueError:
+            continue
+        for index, host in enumerate(hosts):
+            if not isinstance(host, dict):
+                continue
+            if (
+                str(host.get("address") or "").strip().casefold() != expected_address
+                or str(host.get("remark") or "") != expected_remark
+            ):
+                continue
+            try:
+                snapshot = host_snapshot(host)
+            except ValueError:
+                continue
+            matches.append({
+                "tag": tag,
+                "index": index,
+                "host": snapshot,
+            })
+    return matches
+
+
 def can_manage_v2ray_account(role: Optional[str], actor_agent_id: int, owner_agent_id: int) -> bool:
     """Return whether the current actor may read or mutate a V2Ray account.
 
@@ -894,13 +952,7 @@ class MarzbanAdminService:
         )
 
     async def delete_node(self, node_id: int) -> ApiResult:
-        """Permanently delete a Marzban node and verify it disappeared.
-
-        A successful DELETE is never retried here. If the authoritative
-        post-delete node list cannot be fetched, the structured failure keeps
-        deleted=True so callers can reconcile safely instead of blindly
-        repeating a destructive request.
-        """
+        """Delete a Node, then remove only its exact auto-generated Public Hosts."""
         node_id = normalize_node_id(node_id)
 
         ok_current, current = await self.get_node(node_id)
@@ -912,6 +964,23 @@ class MarzbanAdminService:
                 "error": current,
             }
 
+        # Fail closed before deleting the Node if host inventory cannot be read:
+        # the operator asked for Node deletion to include generated-host cleanup.
+        ok_hosts, hosts_payload = await self.get_hosts()
+        if not ok_hosts or not isinstance(hosts_payload, dict):
+            return False, {
+                "stage": "host_precheck",
+                "deleted": False,
+                "node_id": node_id,
+                "node": current,
+                "error": (
+                    hosts_payload
+                    if not ok_hosts
+                    else "Invalid Marzban hosts response"
+                ),
+            }
+        host_candidates = find_node_generated_hosts(hosts_payload, current)
+
         ok_delete, response = await self.request("DELETE", f"/api/node/{node_id}")
         if not ok_delete:
             return False, {
@@ -919,6 +988,7 @@ class MarzbanAdminService:
                 "deleted": False,
                 "node_id": node_id,
                 "node": current,
+                "host_candidates": host_candidates,
                 "error": response,
             }
 
@@ -929,6 +999,7 @@ class MarzbanAdminService:
                 "deleted": True,
                 "node_id": node_id,
                 "node": current,
+                "host_candidates": host_candidates,
                 "error": (
                     nodes
                     if not ok_nodes
@@ -949,7 +1020,29 @@ class MarzbanAdminService:
                     "deleted": True,
                     "node_id": node_id,
                     "node": current,
+                    "host_candidates": host_candidates,
                     "error": "Node is still present after DELETE",
+                }
+
+        cleanup_result = {
+            "stage": "host_cleanup",
+            "deleted_count": 0,
+            "deleted_hosts": [],
+        }
+        if host_candidates:
+            ok_cleanup, cleanup_result = await self.delete_node_generated_hosts(
+                host_candidates
+            )
+            if not ok_cleanup:
+                return False, {
+                    "stage": "host_cleanup",
+                    "deleted": True,
+                    "verified": True,
+                    "node_id": node_id,
+                    "node": current,
+                    "host_candidates": host_candidates,
+                    "hosts_deleted": int(cleanup_result.get("deleted_count") or 0),
+                    "error": cleanup_result,
                 }
 
         return True, {
@@ -959,6 +1052,8 @@ class MarzbanAdminService:
             "node_id": node_id,
             "node": current,
             "response": response,
+            "host_candidates": host_candidates,
+            "hosts_deleted": int(cleanup_result.get("deleted_count") or 0),
         }
 
     async def reconnect_node(self, node_id: int) -> ApiResult:
@@ -1047,6 +1142,213 @@ class MarzbanAdminService:
             expected_host=expected_host,
             is_disabled=bool(disabled),
         )
+
+    async def delete_host(
+        self,
+        inbound_tag: str,
+        host_index: int,
+        *,
+        expected_host: Optional[Dict[str, Any]] = None,
+    ) -> ApiResult:
+        """Delete one Public Host with stale-snapshot and post-write verification."""
+        tag = normalize_inbound_tag(inbound_tag)
+        index = normalize_host_index(host_index)
+
+        ok, payload = await self.get_hosts()
+        if not ok:
+            return False, {
+                "stage": "precheck",
+                "deleted": False,
+                "tag": tag,
+                "index": index,
+                "error": payload,
+            }
+        if not isinstance(payload, dict):
+            return False, {
+                "stage": "precheck",
+                "deleted": False,
+                "tag": tag,
+                "index": index,
+                "error": "Invalid Marzban hosts response",
+            }
+
+        current_hosts = payload.get(tag)
+        if not isinstance(current_hosts, list) or index >= len(current_hosts):
+            return False, {
+                "stage": "precheck",
+                "deleted": False,
+                "tag": tag,
+                "index": index,
+                "error": "Public Host no longer exists",
+            }
+
+        current = current_hosts[index]
+        if not isinstance(current, dict):
+            return False, {
+                "stage": "precheck",
+                "deleted": False,
+                "tag": tag,
+                "index": index,
+                "error": "Invalid Marzban host response",
+            }
+
+        if expected_host is not None:
+            try:
+                if host_snapshot(current) != host_snapshot(expected_host):
+                    return False, {
+                        "stage": "precheck",
+                        "deleted": False,
+                        "tag": tag,
+                        "index": index,
+                        "error": "Public Host changed since confirmation; reload and try again",
+                    }
+            except ValueError as exc:
+                return False, {
+                    "stage": "precheck",
+                    "deleted": False,
+                    "tag": tag,
+                    "index": index,
+                    "error": str(exc),
+                }
+
+        try:
+            before = [_host_payload(item) for item in current_hosts]
+        except ValueError as exc:
+            return False, {
+                "stage": "precheck",
+                "deleted": False,
+                "tag": tag,
+                "index": index,
+                "error": str(exc),
+            }
+        after = before[:index] + before[index + 1:]
+
+        ok_put, response = await self.request(
+            "PUT",
+            "/api/hosts",
+            json_data={tag: after},
+        )
+        if not ok_put:
+            return False, {
+                "stage": "delete",
+                "deleted": False,
+                "tag": tag,
+                "index": index,
+                "host": host_snapshot(current),
+                "error": response,
+            }
+
+        ok_verify, verify_payload = await self.get_hosts()
+        if not ok_verify or not isinstance(verify_payload, dict):
+            return False, {
+                "stage": "verify",
+                "deleted": True,
+                "tag": tag,
+                "index": index,
+                "host": host_snapshot(current),
+                "error": (
+                    verify_payload
+                    if not ok_verify
+                    else "Invalid Marzban hosts response after delete"
+                ),
+            }
+
+        verify_hosts = verify_payload.get(tag)
+        if not isinstance(verify_hosts, list):
+            return False, {
+                "stage": "verify",
+                "deleted": True,
+                "tag": tag,
+                "index": index,
+                "host": host_snapshot(current),
+                "error": "Inbound host list missing after delete",
+            }
+        try:
+            verified = [_host_payload(item) for item in verify_hosts]
+        except ValueError as exc:
+            return False, {
+                "stage": "verify",
+                "deleted": True,
+                "tag": tag,
+                "index": index,
+                "host": host_snapshot(current),
+                "error": str(exc),
+            }
+
+        if verified != after:
+            return False, {
+                "stage": "verify",
+                "deleted": True,
+                "tag": tag,
+                "index": index,
+                "host": host_snapshot(current),
+                "error": "Public Host list does not match expected state after delete",
+            }
+
+        return True, {
+            "stage": "verify",
+            "deleted": True,
+            "verified": True,
+            "tag": tag,
+            "index": index,
+            "host": host_snapshot(current),
+            "response": response,
+        }
+
+    async def delete_node_generated_hosts(
+        self,
+        candidates: Any,
+    ) -> ApiResult:
+        """Delete pre-confirmed auto-generated Node hosts, safely per inbound."""
+        if not isinstance(candidates, list):
+            return False, {
+                "stage": "host_cleanup",
+                "deleted_count": 0,
+                "error": "Invalid Node host cleanup candidates",
+            }
+
+        normalized: List[Dict[str, Any]] = []
+        try:
+            for item in candidates:
+                if not isinstance(item, dict):
+                    raise ValueError("invalid host cleanup candidate")
+                normalized.append({
+                    "tag": normalize_inbound_tag(item.get("tag")),
+                    "index": normalize_host_index(item.get("index")),
+                    "host": host_snapshot(item.get("host")),
+                })
+        except ValueError as exc:
+            return False, {
+                "stage": "host_cleanup",
+                "deleted_count": 0,
+                "error": str(exc),
+            }
+
+        # Descending index keeps remaining indices stable even in the unlikely
+        # case multiple matching hosts exist under the same inbound.
+        normalized.sort(key=lambda item: (item["tag"], -item["index"]))
+        deleted: List[Dict[str, Any]] = []
+        for item in normalized:
+            ok_delete, result = await self.delete_host(
+                item["tag"],
+                item["index"],
+                expected_host=item["host"],
+            )
+            if not ok_delete:
+                return False, {
+                    "stage": "host_cleanup",
+                    "deleted_count": len(deleted),
+                    "deleted_hosts": deleted,
+                    "failed_host": item,
+                    "error": result,
+                }
+            deleted.append(item)
+
+        return True, {
+            "stage": "host_cleanup",
+            "deleted_count": len(deleted),
+            "deleted_hosts": deleted,
+        }
 
     async def modify_user(self, username: str, **changes: Any) -> ApiResult:
         if not changes:

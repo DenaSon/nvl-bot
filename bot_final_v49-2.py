@@ -528,13 +528,18 @@ if not MASTER_USER or not MASTER_PASS:
 
 # سیستم ثبت لاگ پیشرفته در فایل
 logging.basicConfig(
-    level=logging.INFO, 
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler("bot_operations.log", encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
+# python-telegram-bot uses httpx internally. INFO request logs include the full
+# Telegram Bot API URL, which embeds BOT_TOKEN in the path. Keep application
+# logs at INFO while preventing credentials from being written to journal/files.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("NeVeL_Enterprise")
 
 SUBPROCESS_TIMEOUT = 12.0      # تایم‌اوت دستورات حساس (useradd/chpasswd/usermod) — از ۶ به ۱۲ ثانیه افزایش یافت

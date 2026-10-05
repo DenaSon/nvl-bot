@@ -3,16 +3,17 @@ from __future__ import annotations
 import ipaddress
 import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .models import ServerCredentials
+from .cloudflare_cutover import CloudflareClient
+from .models import CHECK_FAIL, CHECK_PASS, PreflightCheck, ServerCredentials
 from .phase2 import run_phase2
 from .phase3 import run_phase3
 from .phase3_models import PHASE3_MODE_RESTORE, Phase3Policy
 from .phase4 import run_phase4
 from .phase4_models import PHASE4_MODE_FINALIZE, PHASE4_MODE_PLAN, Phase4Policy
-from .phase5 import run_phase5
+from .phase5 import resolve_cloudflare_api_token, run_phase5
 from .phase5_models import PHASE5_MODE_CUTOVER, PHASE5_MODE_PLAN, Phase5Policy
 from .preflight import run_preflight
 
@@ -211,13 +212,93 @@ def _end_step(
         session.stage = stage
 
 
-def run_preflight_step(session: TelegramMigrationSession):
+def _cloudflare_preflight_check(
+    session: TelegramMigrationSession,
+    report,
+    *,
+    cloudflare_factory=CloudflareClient,
+    cloudflare_token_resolver=resolve_cloudflare_api_token,
+) -> PreflightCheck:
+    """Validate Cloudflare read access and the selected A record before backup.
+
+    This is intentionally read-only. The later Phase 5 pre-cutover check remains
+    authoritative, but catching a bad/placeholder token here avoids transferring
+    and restoring a server only to discover the Cloudflare problem afterwards.
+    """
+    try:
+        if not session.hostname or not session.zone_name:
+            raise TelegramWizardError("Cloudflare hostname/zone are incomplete")
+        if report.source is None:
+            raise TelegramWizardError("source facts are unavailable")
+
+        token = str(cloudflare_token_resolver() or "").strip()
+        if (
+            len(token) < 20
+            or token.lower().startswith("bearer ")
+            or any(ch.isspace() for ch in token)
+        ):
+            raise TelegramWizardError(
+                "NVL_CLOUDFLARE_API_TOKEN has an invalid format"
+            )
+
+        cloudflare = cloudflare_factory(token)
+        zone_id = cloudflare.resolve_zone_id(session.zone_name)
+        record = cloudflare.get_a_record(
+            zone_id=zone_id,
+            hostname=session.hostname,
+        )
+        expected_ip = str(
+            report.source.primary_ipv4 or session.source_host
+        ).strip()
+        if record.content != expected_ip:
+            raise TelegramWizardError(
+                f"Cloudflare A record points to {record.content}, "
+                f"expected source {expected_ip}"
+            )
+        if record.proxied is not True:
+            raise TelegramWizardError("Cloudflare A record is not proxied")
+    except Exception as exc:
+        return PreflightCheck(
+            code="CLOUDFLARE_PRECHECK",
+            status=CHECK_FAIL,
+            role="control-plane",
+            message=f"{type(exc).__name__}: {exc}",
+            blocking=True,
+        )
+
+    return PreflightCheck(
+        code="CLOUDFLARE_PRECHECK",
+        status=CHECK_PASS,
+        role="control-plane",
+        message="Cloudflare token, zone and A record validated before backup",
+        blocking=False,
+    )
+
+
+def run_preflight_step(
+    session: TelegramMigrationSession,
+    *,
+    cloudflare_factory=CloudflareClient,
+    cloudflare_token_resolver=resolve_cloudflare_api_token,
+):
     _begin_step(session, {"READY_FOR_PREFLIGHT", "PREFLIGHT_FAILED"})
     try:
         report = run_preflight(
             session.source_credentials(),
             session.destination_credentials(),
         )
+        if report.ready:
+            cf_check = _cloudflare_preflight_check(
+                session,
+                report,
+                cloudflare_factory=cloudflare_factory,
+                cloudflare_token_resolver=cloudflare_token_resolver,
+            )
+            report = replace(
+                report,
+                checks=tuple(report.checks) + (cf_check,),
+                ready=cf_check.status != CHECK_FAIL,
+            )
         session.preflight = report
         _end_step(
             session,

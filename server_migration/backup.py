@@ -409,15 +409,43 @@ def create_source_bundle(
     )
 
     # Copy all non-database runtime files into the isolated snapshot tree.
+    #
+    # SQLite commonly runs in DELETE journal mode on Marzban. In that mode
+    # db.sqlite3-journal is created and removed around transactions, which
+    # changes the parent directory mtime while tar is walking ".". GNU tar can
+    # then return exit code 1 with exactly:
+    #
+    #   tar: .: file changed as we read it
+    #
+    # The contents are still complete; only the root directory metadata moved.
+    # Exclude every SQLite sidecar and tolerate only that exact, single
+    # root-directory warning. Any other tar warning/error remains fatal.
     exclude_db = f"./{database_name}"
+    tar_stderr = f"{remote_bundle_dir}/marzban-data-copy.stderr"
+    q_tar_stderr = shlex.quote(tar_stderr)
     copy_pipeline = (
         "set -o pipefail; "
-        f"tar -C {shlex.quote(data_dir)} "
+        f"rm -f {q_tar_stderr}; "
+        f"LC_ALL=C tar -C {shlex.quote(data_dir)} "
         f"--exclude={shlex.quote(exclude_db)} "
         f"--exclude={shlex.quote(exclude_db + '-wal')} "
         f"--exclude={shlex.quote(exclude_db + '-shm')} "
-        "-cf - . | "
-        f"tar -C {shlex.quote(snapshot_data_dir)} -xf -"
+        f"--exclude={shlex.quote(exclude_db + '-journal')} "
+        f"-cf - . 2>{q_tar_stderr} | "
+        f"tar -C {shlex.quote(snapshot_data_dir)} -xf -; "
+        'pipe_status=("${PIPESTATUS[@]}"); '
+        'src_status="${pipe_status[0]:-1}"; '
+        'dst_status="${pipe_status[1]:-1}"; '
+        f'if [ "$dst_status" -ne 0 ]; then cat {q_tar_stderr} >&2; '
+        'exit "$dst_status"; fi; '
+        'if [ "$src_status" -ne 0 ]; then '
+        'if [ "$src_status" -eq 1 ] '
+        f'&& [ "$(wc -l < {q_tar_stderr})" -eq 1 ] '
+        f'&& grep -Fxq "tar: .: file changed as we read it" {q_tar_stderr}; '
+        'then :; '
+        f'else cat {q_tar_stderr} >&2; exit "$src_status"; fi; '
+        'fi; '
+        f"rm -f {q_tar_stderr}"
     )
     _run_checked(
         executor,

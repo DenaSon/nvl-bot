@@ -162,10 +162,9 @@ def run_install(
     if not session.host_key_sha256:
         raise NodeBootstrapError("confirmed SSH host-key fingerprint is missing")
 
-    cert = _validate_certificate(certificate)
     session.busy = True
     executor = None
-    stage = "connect"
+    stage = "certificate"
     docker_installed_now = False
     docker_version = ""
     compose_version = ""
@@ -173,6 +172,7 @@ def run_install(
     managed_retry = False
 
     try:
+        cert = _validate_certificate(certificate)
         credentials = session.credentials()
         executor = executor_factory(
             credentials,

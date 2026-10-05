@@ -194,8 +194,21 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
         self.assertIn("age > 600", region)
         self.assertIn("mza_node_delete_busy", region)
         self.assertIn("ok_delete, result = await service.delete_node(node_id)", region)
-        self.assertIn("⚠️ بله، Node را حذف کن", region)
+        self.assertIn("cleanup_incomplete", region)
+        self.assertIn("Public Hostهای باقی‌مانده", region)
+        self.assertIn("hosts_deleted", region)
         self.assertIn("خود VPS حذف نمی‌شود", region)
+
+    def test_node_delete_previews_and_cascades_only_generated_hosts(self):
+        region = self._region(
+            "elif d.startswith('mza_ndelete_confirm_'):",
+            "elif d.startswith('mza_nreconnect_'):",
+        )
+        self.assertIn("service.get_hosts()", region)
+        self.assertIn("find_node_generated_hosts", region)
+        self.assertIn("Public Host مرتبط", region)
+        self.assertIn("auto-generated", region)
+        self.assertIn("Hostهای دستی یا صرفاً هم‌آدرس حذف نخواهند شد", region)
 
     def test_delete_verify_uncertainty_never_blindly_retries(self):
         region = self._region(

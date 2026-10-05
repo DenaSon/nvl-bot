@@ -560,6 +560,10 @@ def run_preflight(
         )
         session.last_report = report
         session.stage = "PREFLIGHT_COMPLETE" if ready else "PREFLIGHT_BLOCKED"
+        # Give the operator a fresh window to continue into Phase 7 after a
+        # successful preflight without extending the lifetime of SSH secrets.
+        if ready:
+            session.started_at = time.time()
         return report
     finally:
         session.scrub_secret()

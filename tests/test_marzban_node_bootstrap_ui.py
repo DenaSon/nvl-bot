@@ -120,6 +120,16 @@ class MarzbanNodeBootstrapUITests(unittest.TestCase):
         self.assertIn("هیچ نصب Remote شروع نشد", region)
         self.assertIn("marzban_node_install.run_install", region)
 
+    def test_phase7_api_prefetch_failure_scrubs_secret_before_remote_install(self):
+        region = self._region(
+            "if state == 'MZA_NODE_INSTALL_PASSWORD_INPUT':",
+            "# Password is intentionally copied only into the in-memory bootstrap",
+        )
+        self.assertIn("except Exception as exc:", region)
+        self.assertIn("ارتباط با Marzban قبل از نصب ناموفق بود", region)
+        self.assertIn("session.scrub_secret()", region)
+        self.assertIn("هیچ نصب Remote شروع نشد", region)
+
     def test_phase7_reconnects_and_polls_authoritative_marzban_status(self):
         region = self._region(
             "if state == 'MZA_NODE_INSTALL_PASSWORD_INPUT':",

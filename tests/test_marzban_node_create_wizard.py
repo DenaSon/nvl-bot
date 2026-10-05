@@ -153,6 +153,60 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
         self.assertIn("SERVICE_PROTOCOL=rest", region)
         self.assertIn("بروزرسانی Diagnostics", region)
 
+    def test_wizard_explains_node_address_without_overloading_screen(self):
+        region = self._region(
+            "if state in _MZA_NODE_CREATE_TEXT_STATES:",
+            "node_input_states = {",
+        )
+        self.assertIn("مرحله ۲ از ۵ · آدرس نود", region)
+        self.assertIn("خود سرور Node", region)
+        self.assertIn("پنل اصلی Marzban", region)
+        self.assertIn("203.0.113.20", region)
+
+    def test_wizard_explains_ports_ratio_and_public_host_choices(self):
+        region = self._region(
+            "if state in _MZA_NODE_CREATE_TEXT_STATES:",
+            "node_input_states = {",
+        )
+        self.assertIn("مرحله ۳ از ۵ · پورت‌های نود", region)
+        self.assertIn("Service Port", region)
+        self.assertIn("Xray API Port", region)
+        self.assertIn("مرحله ۴ از ۵ · Usage Ratio", region)
+        self.assertIn("اگر سیاست خاصی", region)
+        self.assertIn("مرحله ۵ از ۵ · Public Host", region)
+        self.assertIn("فقط Node ساخته می‌شود و Public Hostها تغییر نمی‌کنند", region)
+
+    def test_node_detail_exposes_permanent_delete_action(self):
+        region = self._region(
+            "async def _show_marzban_node_detail",
+            "_MZA_HOST_EDIT_TOKENS =",
+        )
+        self.assertIn("🗑 حذف دائمی نود", region)
+        self.assertIn('callback_data=f"mza_ndelete_{node_id}"', region)
+
+    def test_node_delete_has_explicit_confirmation_and_verified_service_call(self):
+        region = self._region(
+            "elif d.startswith('mza_ndelete_confirm_'):",
+            "elif d.startswith('mza_nreconnect_'):",
+        )
+        self.assertIn("mza_node_delete_pending", region)
+        self.assertIn("age > 600", region)
+        self.assertIn("mza_node_delete_busy", region)
+        self.assertIn("ok_delete, result = await service.delete_node(node_id)", region)
+        self.assertIn("⚠️ بله، Node را حذف کن", region)
+        self.assertIn("خود VPS حذف نمی‌شود", region)
+
+    def test_delete_verify_uncertainty_never_blindly_retries(self):
+        region = self._region(
+            "elif d.startswith('mza_ndelete_confirm_'):",
+            "elif d.startswith('mza_nreconnect_'):",
+        )
+        self.assertIn("deleted_but_unverified", region)
+        self.assertIn("درخواست DELETE دوباره اجرا نمی‌شود", region)
+        uncertain_start = region.index("if deleted_but_unverified:")
+        uncertain_end = region.index("await query.edit_message_text(", uncertain_start + 50)
+        self.assertNotIn("service.delete_node(", region[uncertain_start:uncertain_end])
+
     def test_origin_aware_navigation_is_preserved(self):
         region = self._region(
             "elif d.startswith('mza_ncreate_confirm_'):",

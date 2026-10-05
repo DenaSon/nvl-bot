@@ -6485,20 +6485,17 @@ async def require_login(update):
 PORTAL_DISPLAY_NAME = "NeVeL"  # 🔒 نام ثابت پورتال و مدیریت — با تغییر «نام برند» در تنظیمات عوض نمی‌شود
 
 def _build_admin_programs_kb():
-    """Top-level operational tools available only to NVL administrators."""
+    """Infrastructure and operational tools available only to NVL administrators."""
     return [
-        [InlineKeyboardButton(
-            "🖥 مدیریت نودهای Marzban",
-            callback_data="apps_marzban_nodes",
-        )],
-        [InlineKeyboardButton(
-            "🚚 انتقال سرور Marzban",
-            callback_data="apps_marzban_transfer",
-        )],
-        [InlineKeyboardButton(
-            "🏠 منوی اصلی",
-            callback_data="uact_back_to_menu",
-        )],
+        [
+            InlineKeyboardButton("🖥 نودها", callback_data="apps_marzban_nodes"),
+            InlineKeyboardButton("🌐 هاست‌ها", callback_data="apps_marzban_hosts"),
+        ],
+        [
+            InlineKeyboardButton("🚚 انتقال Marzban", callback_data="apps_marzban_transfer"),
+            InlineKeyboardButton("🛰 مانیتورینگ", callback_data="apps_marzban_monitor"),
+        ],
+        [InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")],
     ]
 
 
@@ -6513,14 +6510,13 @@ async def _show_admin_programs_hub(target, context):
 
     context.user_data.pop('state', None)
     text = (
-        "🧩 <b>برنامه‌های مدیریتی NVL</b>\n"
+        "🧩 <b>برنامه‌ها › زیرساخت Marzban</b>\n"
         "━━━━━━━━━━━━━━\n"
-        "ابزارهای عملیاتی و سطح‌سیستم در این بخش قرار می‌گیرند.\n\n"
-        "🖥 <b>مدیریت نودهای Marzban</b>\n"
-        "مشاهده وضعیت، ویرایش تنظیمات، فعال/غیرفعال‌سازی و Reconnect نودها.\n\n"
-        "🚚 <b>انتقال سرور Marzban</b>\n"
-        "مهاجرت کنترل‌شده Marzban به سرور جدید با مسیر امن "
-        "Preflight → Backup → Restore → Final Sync → Cutover."
+        "ابزارهای زیرساختی Marzban از مدیریت کاربران جدا شده‌اند.\n\n"
+        "🖥 <b>نودها</b> — وضعیت، تنظیمات، راه‌اندازی و اتصال Node\n"
+        "🌐 <b>هاست‌ها</b> — Inboundها و Public Hostها\n"
+        "🚚 <b>انتقال</b> — مهاجرت کنترل‌شده سرور اصلی Marzban\n"
+        "🛰 <b>مانیتورینگ</b> — سلامت و وضعیت دارایی‌های Marzban"
     )
     markup = InlineKeyboardMarkup(_build_admin_programs_kb())
     if hasattr(target, 'edit_message_text'):
@@ -8332,8 +8328,7 @@ async def _show_marzban_admin_dashboard(target, context):
         [InlineKeyboardButton("👥 کاربران", callback_data="mza_users_0"),
          InlineKeyboardButton("🟢 آنلاین", callback_data="mza_online_0")],
         [InlineKeyboardButton("🔍 جستجوی کاربر", callback_data="mza_search")],
-        [InlineKeyboardButton("🖥 نودها", callback_data="mza_nodes"),
-         InlineKeyboardButton("🌐 Inbounds & Hosts", callback_data="mza_inbounds")],
+        [InlineKeyboardButton("🧩 زیرساخت Marzban", callback_data="apps_home")],
         [InlineKeyboardButton("🔄 بروزرسانی", callback_data="mza_home")],
         [InlineKeyboardButton("🔙 منوی اصلی", callback_data="uact_back_to_menu")],
     ]
@@ -8366,7 +8361,7 @@ async def _show_marzban_admin_dashboard(target, context):
             node_line += f" · {node_counts['disabled']} غیرفعال"
 
     txt = (
-        "🛠 <b>V2Ray / Marzban</b>\n"
+        "🛠 <b>V2Ray / Marzban › کاربران</b>\n"
         "━━━━━━━━━━━━━━\n"
         "🖥 <b>وضعیت سیستم</b>\n"
         f"CPU  <b>{cpu:.1f}%</b>\n"
@@ -8561,6 +8556,32 @@ async def _show_marzban_user_readonly(target, context, username):
     ])
     await _mza_render(target, txt, kb)
 
+def _mza_target_chat_id(target):
+    message = getattr(target, "message", None)
+    if message is not None and getattr(message, "chat_id", None) is not None:
+        return int(message.chat_id)
+    if getattr(target, "chat_id", None) is not None:
+        return int(target.chat_id)
+    effective_chat = getattr(target, "effective_chat", None)
+    if effective_chat is not None and getattr(effective_chat, "id", None) is not None:
+        return int(effective_chat.id)
+    return None
+
+
+def _mza_phase7_ready_session(target, node_id):
+    chat_id = _mza_target_chat_id(target)
+    if chat_id is None:
+        return None
+    session = marzban_node_bootstrap.get_session(chat_id)
+    if session is None or session.node_id != int(node_id):
+        return None
+    if session.last_report is None or not session.last_report.ready:
+        return None
+    if session.stage not in {"PREFLIGHT_COMPLETE", "INSTALL_FAILED"}:
+        return None
+    return session
+
+
 def _mza_nodes_origin_is_apps(context):
     return context.user_data.get("mza_nodes_origin") == "apps"
 
@@ -8694,7 +8715,15 @@ async def _show_marzban_node_detail(target, context, node_id):
         lines.extend(["", f"⚠️ پیام Marzban: <code>{esc(message[:500])}</code>"])
 
     status_key = str(node.get("status") or "").lower()
+    phase7_ready = _mza_phase7_ready_session(target, node_id) is not None
     kb = []
+    if phase7_ready:
+        kb.append([
+            InlineKeyboardButton(
+                "🚀 نصب Marzban-node · Phase 7",
+                callback_data=f"mza_ninstall_{node_id}",
+            )
+        ])
     if status_key == "disabled":
         kb.append([InlineKeyboardButton("🟢 فعال‌سازی نود", callback_data=f"mza_ntoggle_{node_id}")])
     else:
@@ -8702,8 +8731,9 @@ async def _show_marzban_node_detail(target, context, node_id):
             InlineKeyboardButton("🔴 غیرفعال‌سازی", callback_data=f"mza_ntoggle_{node_id}"),
             InlineKeyboardButton("🔄 Reconnect", callback_data=f"mza_nreconnect_{node_id}"),
         ])
+    bootstrap_label = "🔄 اجرای دوباره Preflight" if phase7_ready else "🚀 راه‌اندازی خودکار"
     kb.append([
-        InlineKeyboardButton("🚀 راه‌اندازی خودکار", callback_data=f"mza_nboot_{node_id}"),
+        InlineKeyboardButton(bootstrap_label, callback_data=f"mza_nboot_{node_id}"),
         InlineKeyboardButton("📜 راه‌اندازی دستی", callback_data=f"mza_nsetup_{node_id}"),
     ])
     kb.extend([
@@ -8897,7 +8927,7 @@ async def _show_marzban_inbounds(target, context):
     )
     fallback = [
         [InlineKeyboardButton("🔄 بروزرسانی", callback_data="mza_inbounds")],
-        [InlineKeyboardButton("🔙 داشبورد", callback_data="mza_home")],
+        [InlineKeyboardButton("↩️ برنامه‌ها", callback_data="apps_home")],
     ]
     if not ok_inbounds or not isinstance(inbounds_payload, dict):
         return await _mza_render(
@@ -8914,7 +8944,7 @@ async def _show_marzban_inbounds(target, context):
 
     total_hosts = sum(len(v) for v in hosts_map.values() if isinstance(v, list))
     lines = [
-        "🌐 <b>Inbounds & Public Hosts</b>",
+        "🌐 <b>برنامه‌ها › Marzban Hosts</b>",
         "━━━━━━━━━━━━━━",
         f"Inbounds  <b>{len(inbounds)}</b>",
         f"Public Hosts  <b>{total_hosts}</b>",
@@ -8955,7 +8985,7 @@ async def _show_marzban_inbound_detail(target, context, inbound_token):
         return await _mza_render(
             target,
             "❌ این صفحه منقضی شده است؛ لیست Inboundها را دوباره باز کنید.",
-            [[InlineKeyboardButton("🔙 Inbounds", callback_data="mza_inbounds")]],
+            [[InlineKeyboardButton("↩️ Hostها", callback_data="apps_marzban_hosts")]],
         )
 
     service = await _get_marzban_admin_service()
@@ -13892,7 +13922,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         host_delete_starter = d.startswith('mza_hdelete_')
         node_create_starter = d == 'mza_ncreate' or d.startswith('mza_ncreate_')
         node_delete_starter = d.startswith('mza_ndelete_')
-        node_bootstrap_starter = d.startswith('mza_nboot_') or d.startswith('mza_ninstall_')
+        node_bootstrap_starter = (
+            d.startswith('mza_nboot_')
+            or d.startswith('mza_ninstall_')
+            or d.startswith('mza_node_')
+        )
         create_starter = d == 'mza_create' or d.startswith('mza_c') or d.startswith('mza_create_')
         starters = (
             d == 'mza_search'
@@ -13978,6 +14012,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d == 'apps_marzban_nodes':
         context.user_data["mza_nodes_origin"] = "apps"
         await _show_marzban_nodes(query, context)
+        return
+    elif d == 'apps_marzban_hosts':
+        await _show_marzban_inbounds(query, context)
+        return
+    elif d == 'apps_marzban_monitor':
+        await _render_marzban_monitor_panel(
+            query,
+            back_callback="apps_home",
+            back_label="↩️ برنامه‌ها",
+            refresh_callback="apps_marzban_monitor",
+        )
         return
     elif d == 'apps_marzban_transfer':
         await _show_marzban_transfer_entry(query, context)
@@ -24345,16 +24390,22 @@ async def _filter_detect_loop(app):
             log.exception("Traffic Anomaly monitor failed; next round will continue.")
         await asyncio.sleep(FILTER_DETECT_CHECK_INTERVAL_SECONDS)
 
-async def _render_marzban_monitor_panel(target):
-    """Unified Marzban monitor UI for menu, callbacks and /marzban_monitor."""
+async def _render_marzban_monitor_panel(
+    target,
+    *,
+    back_callback="uact_back_to_menu",
+    back_label="🏠 منوی اصلی",
+    refresh_callback="mzm_refresh",
+):
+    """Unified Marzban monitor UI with caller-aware refresh/back navigation."""
     def _report():
         with db_conn() as conn:
             return marzban_observability.render_status_report(conn)
 
     report = await asyncio.to_thread(_report)
     markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 بروزرسانی نمایش", callback_data="mzm_refresh")],
-        [InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")],
+        [InlineKeyboardButton("🔄 بروزرسانی نمایش", callback_data=refresh_callback)],
+        [InlineKeyboardButton(back_label, callback_data=back_callback)],
     ])
     if hasattr(target, "edit_message_text"):
         await target.edit_message_text(

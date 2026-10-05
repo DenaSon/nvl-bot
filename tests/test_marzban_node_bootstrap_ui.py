@@ -86,6 +86,24 @@ class MarzbanNodeBootstrapUITests(unittest.TestCase):
         self.assertIn('callback_data=f"mza_ninstall_{node_id}"', region)
         self.assertIn("if ready:", region)
 
+    def test_node_detail_recovers_phase7_cta_from_ready_session(self):
+        helper = self._region(
+            "def _mza_phase7_ready_session",
+            "def _mza_nodes_origin_is_apps",
+        )
+        self.assertIn("marzban_node_bootstrap.get_session", helper)
+        self.assertIn('"PREFLIGHT_COMPLETE"', helper)
+        self.assertIn('"INSTALL_FAILED"', helper)
+
+        detail = self._region(
+            "async def _show_marzban_node_detail",
+            "_MZA_HOST_EDIT_TOKENS =",
+        )
+        self.assertIn("phase7_ready = _mza_phase7_ready_session", detail)
+        self.assertIn("🚀 نصب Marzban-node · Phase 7", detail)
+        self.assertIn('callback_data=f"mza_ninstall_{node_id}"', detail)
+        self.assertIn("🔄 اجرای دوباره Preflight", detail)
+
     def test_phase7_callback_requires_phase6_session_and_reprompts_password(self):
         region = self._region(
             "elif d.startswith('mza_ninstall_cancel_'):",
@@ -150,10 +168,9 @@ class MarzbanNodeBootstrapUITests(unittest.TestCase):
             "# Leaving a text-input screen through an inline button",
             "# 🛡 Central V2Ray authorization boundary.",
         )
-        self.assertIn(
-            "d.startswith('mza_nboot_') or d.startswith('mza_ninstall_')",
-            region,
-        )
+        self.assertIn("d.startswith('mza_nboot_')", region)
+        self.assertIn("d.startswith('mza_ninstall_')", region)
+        self.assertIn("d.startswith('mza_node_')", region)
         self.assertIn("MZA_NODE_INSTALL_PASSWORD_INPUT", region)
 
     def test_leaving_bootstrap_flow_cancels_in_memory_session(self):

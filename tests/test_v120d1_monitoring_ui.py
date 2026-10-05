@@ -69,7 +69,8 @@ class V120D1MonitoringUITests(unittest.TestCase):
             "async def cmd_marzban_monitor",
         )
         self.assertIn("🔄 بروزرسانی نمایش", region)
-        self.assertIn('callback_data="mzm_refresh"', region)
+        self.assertIn('refresh_callback="mzm_refresh"', region)
+        self.assertIn("callback_data=refresh_callback", region)
         self.assertIn("🏠 منوی اصلی", region)
 
     def test_marzban_command_reuses_same_ui(self):

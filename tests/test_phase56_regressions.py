@@ -93,7 +93,7 @@ class Phase56NavigationRegressionTests(unittest.TestCase):
             "ساخت مستقیم User در این بخش، فروش یا فاکتور ثبت نمی‌کند.",
             self.source,
         )
-        self.assertIn("🛠 <b>V2Ray / Marzban</b>", self.source)
+        self.assertIn("🛠 <b>V2Ray / Marzban › کاربران</b>", self.source)
 
     def test_user_lists_have_breadcrumb_style_titles(self):
         self.assertIn('panel_title = f"👥 کاربران من › {srv_name}"', self.source)

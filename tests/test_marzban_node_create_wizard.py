@@ -110,6 +110,49 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
         self.assertIn("node_create_starter", region)
         self.assertIn("_mza_clear_node_create(context)", region)
 
+    def test_duplicate_precheck_has_dedicated_no_post_result(self):
+        region = self._region(
+            "elif d.startswith('mza_ncreate_confirm_'):",
+            "elif d == 'mza_nodes':",
+        )
+        self.assertIn("duplicate_precheck", region)
+        self.assertIn('result.get("stage") == "precheck"', region)
+        self.assertIn('result.get("duplicate")', region)
+        self.assertIn("Duplicate precheck قبل از POST", region)
+        self.assertIn("مشاهده Node موجود", region)
+
+    def test_success_exposes_post_create_diagnostics_and_setup(self):
+        region = self._region(
+            "elif d.startswith('mza_ncreate_confirm_'):",
+            "elif d == 'mza_nodes':",
+        )
+        self.assertIn("Post-create diagnostics", region)
+        self.assertIn("diagnostic_label", region)
+        self.assertIn("xray_version", region)
+        self.assertIn('callback_data=f"mza_nsetup_{node_id}"', region)
+
+    def test_node_detail_exposes_certificate_and_setup_entry(self):
+        region = self._region(
+            "async def _show_marzban_node_detail",
+            "_MZA_HOST_EDIT_TOKENS =",
+        )
+        self.assertIn("📜 Certificate & Setup", region)
+        self.assertIn('callback_data=f"mza_nsetup_{node_id}"', region)
+
+    def test_setup_callback_fetches_official_node_settings(self):
+        region = self._region(
+            "elif d.startswith('mza_nsetup_'):",
+            "elif d == 'mza_inbounds':",
+        )
+        self.assertIn("service.get_node(node_id)", region)
+        self.assertIn("service.get_node_settings()", region)
+        self.assertIn("Client Certificate", region)
+        self.assertIn("/var/lib/marzban-node/cert.pem", region)
+        self.assertIn("SERVICE_PORT=", region)
+        self.assertIn("XRAY_API_PORT=", region)
+        self.assertIn("SERVICE_PROTOCOL=rest", region)
+        self.assertIn("بروزرسانی Diagnostics", region)
+
     def test_origin_aware_navigation_is_preserved(self):
         region = self._region(
             "elif d.startswith('mza_ncreate_confirm_'):",

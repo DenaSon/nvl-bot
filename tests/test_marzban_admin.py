@@ -132,6 +132,17 @@ class NodeValidationTests(unittest.TestCase):
             )
 
 
+    def test_duplicate_node_lookup_is_case_insensitive(self):
+        nodes = [
+            {"id": 4, "name": "  USA   Node  ", "address": "1.2.3.4"},
+            {"id": 5, "name": "DE Node", "address": "5.6.7.8"},
+        ]
+        duplicate = marzban_admin.find_duplicate_node(nodes, "usa node")
+        self.assertIsNotNone(duplicate)
+        self.assertEqual(duplicate["id"], 4)
+        self.assertIsNone(marzban_admin.find_duplicate_node(nodes, "FR Node"))
+
+
 class HostValidationTests(unittest.TestCase):
     def test_inbound_tag_and_index_are_normalized(self):
         self.assertEqual(
@@ -313,7 +324,38 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             params=None,
         )
 
+    async def test_get_node_settings_fetches_certificate_endpoint(self):
+        with patch("v2ray_engine.api_request", new_callable=AsyncMock) as request:
+            request.return_value = (
+                True,
+                {
+                    "min_node_version": "v0.4.4",
+                    "certificate": "-----BEGIN CERTIFICATE-----\nABC\n-----END CERTIFICATE-----",
+                },
+            )
+            ok, payload = await self.service.get_node_settings()
+
+        self.assertTrue(ok)
+        self.assertEqual(payload["min_node_version"], "v0.4.4")
+        self.assertIn("BEGIN CERTIFICATE", payload["certificate"])
+        request.assert_awaited_once_with(
+            "GET",
+            "/api/node/settings",
+            "https://marzban.example",
+            "admin",
+            "secret",
+            json_data=None,
+            params=None,
+        )
+
+    async def test_get_node_settings_rejects_missing_certificate(self):
+        self.service.request = AsyncMock(return_value=(True, {"min_node_version": "v0.4.4"}))
+        ok, error = await self.service.get_node_settings()
+        self.assertFalse(ok)
+        self.assertIn("certificate", error)
+
     async def test_create_node_posts_node_create_contract_and_verifies(self):
+        self.service.get_nodes = AsyncMock(return_value=(True, []))
         created = {
             "id": 9,
             "name": "USA-2",
@@ -364,7 +406,45 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("URL scheme", error)
         self.service.request.assert_not_awaited()
 
+    async def test_create_node_duplicate_precheck_blocks_post(self):
+        self.service.get_nodes = AsyncMock(return_value=(
+            True,
+            [{"id": 7, "name": "usa-2", "address": "old.example.com"}],
+        ))
+        self.service.request = AsyncMock()
+        self.service.get_node = AsyncMock()
+
+        ok, result = await self.service.create_node(
+            "USA-2",
+            "node.example.com",
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(result["stage"], "precheck")
+        self.assertFalse(result["created"])
+        self.assertTrue(result["duplicate"])
+        self.assertEqual(result["node_id"], 7)
+        self.service.request.assert_not_awaited()
+        self.service.get_node.assert_not_awaited()
+
+    async def test_create_node_precheck_failure_blocks_post(self):
+        self.service.get_nodes = AsyncMock(return_value=(False, "Network Error"))
+        self.service.request = AsyncMock()
+
+        ok, result = await self.service.create_node(
+            "USA-2",
+            "node.example.com",
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(result["stage"], "precheck")
+        self.assertFalse(result["created"])
+        self.assertFalse(result["duplicate"])
+        self.assertEqual(result["error"], "Network Error")
+        self.service.request.assert_not_awaited()
+
     async def test_create_node_post_failure_is_returned_without_verify(self):
+        self.service.get_nodes = AsyncMock(return_value=(True, []))
         self.service.request = AsyncMock(
             return_value=(False, {"status": 409, "detail": 'Node "USA-2" already exists'})
         )
@@ -380,6 +460,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.service.get_node.assert_not_awaited()
 
     async def test_create_node_reports_post_success_verify_failure_without_retry(self):
+        self.service.get_nodes = AsyncMock(return_value=(True, []))
         self.service.request = AsyncMock(return_value=(
             True,
             {
@@ -408,6 +489,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.service.get_node.assert_awaited_once_with(9)
 
     async def test_create_node_rejects_invalid_verified_node_id(self):
+        self.service.get_nodes = AsyncMock(return_value=(True, []))
         self.service.request = AsyncMock(return_value=(
             True,
             {
@@ -445,6 +527,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
 
     async def test_create_node_rejects_mismatched_verified_identity(self):
+        self.service.get_nodes = AsyncMock(return_value=(True, []))
         self.service.request = AsyncMock(return_value=(
             True,
             {

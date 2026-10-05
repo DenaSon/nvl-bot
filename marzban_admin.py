@@ -178,6 +178,22 @@ def normalize_node_create(
     return payload
 
 
+def find_duplicate_node(nodes: Any, name: Any) -> Optional[Dict[str, Any]]:
+    """Return an existing Marzban node whose name matches case-insensitively."""
+    expected = normalize_node_changes({"name": name}, allow_status=False)["name"].casefold()
+    if not isinstance(nodes, list):
+        return None
+
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        current = _CONTROL_CHARS_RE.sub("", str(node.get("name") or "")).strip()
+        current = " ".join(current.split()).casefold()
+        if current and current == expected:
+            return node
+    return None
+
+
 def normalize_inbound_tag(value: Any) -> str:
     """Normalize an exact Marzban inbound tag without changing internal spaces."""
     raw = _CONTROL_CHARS_RE.sub("", str(value or "")).strip()
@@ -676,6 +692,22 @@ class MarzbanAdminService:
     async def get_nodes(self) -> ApiResult:
         return await self.request("GET", "/api/nodes")
 
+    async def get_node_settings(self) -> ApiResult:
+        """Fetch Marzban Node settings and validate the client certificate payload."""
+        ok, payload = await self.request("GET", "/api/node/settings")
+        if not ok:
+            return False, payload
+        if not isinstance(payload, dict):
+            return False, "Invalid Marzban node settings response"
+
+        certificate = str(payload.get("certificate") or "").strip()
+        if not certificate:
+            return False, "Marzban node settings did not include a certificate"
+
+        normalized = dict(payload)
+        normalized["certificate"] = certificate
+        return True, normalized
+
     async def create_node(
         self,
         name: Any,
@@ -703,6 +735,34 @@ class MarzbanAdminService:
             )
         except ValueError as exc:
             return False, str(exc)
+
+        ok_nodes, nodes = await self.get_nodes()
+        if not ok_nodes or not isinstance(nodes, list):
+            return False, {
+                "stage": "precheck",
+                "created": False,
+                "duplicate": False,
+                "error": (
+                    nodes
+                    if not ok_nodes
+                    else "Marzban returned an invalid node list during duplicate precheck"
+                ),
+            }
+
+        duplicate = find_duplicate_node(nodes, payload["name"])
+        if duplicate is not None:
+            try:
+                duplicate_id = normalize_node_id(duplicate.get("id"))
+            except ValueError:
+                duplicate_id = None
+            return False, {
+                "stage": "precheck",
+                "created": False,
+                "duplicate": True,
+                "node_id": duplicate_id,
+                "existing": duplicate,
+                "error": f'Node "{payload["name"]}" already exists',
+            }
 
         ok_create, created = await self.request(
             "POST",

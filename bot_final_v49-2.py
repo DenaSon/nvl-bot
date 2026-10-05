@@ -8549,6 +8549,9 @@ async def _show_marzban_node_detail(target, context, node_id):
             InlineKeyboardButton("🔴 غیرفعال‌سازی", callback_data=f"mza_ntoggle_{node_id}"),
             InlineKeyboardButton("🔄 Reconnect", callback_data=f"mza_nreconnect_{node_id}"),
         ])
+    kb.append([
+        InlineKeyboardButton("📜 Certificate & Setup", callback_data=f"mza_nsetup_{node_id}")
+    ])
     kb.extend([
         [
             InlineKeyboardButton("✏️ نام", callback_data=f"mza_nedit_name_{node_id}"),
@@ -14051,6 +14054,42 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         if not ok_create:
+            duplicate_precheck = (
+                isinstance(result, dict)
+                and result.get("stage") == "precheck"
+                and bool(result.get("duplicate"))
+            )
+            if duplicate_precheck:
+                existing = result.get("existing") if isinstance(result.get("existing"), dict) else {}
+                existing_id = result.get("node_id")
+                try:
+                    existing_id = marzban_admin.normalize_node_id(existing_id)
+                except ValueError:
+                    existing_id = None
+                _mza_clear_node_create(context)
+                kb = []
+                if existing_id:
+                    kb.append([
+                        InlineKeyboardButton(
+                            "🖥 مشاهده Node موجود",
+                            callback_data=f"mza_node_{existing_id}",
+                        )
+                    ])
+                kb.extend([
+                    [InlineKeyboardButton("✏️ ساخت با نام دیگر", callback_data="mza_ncreate")],
+                    [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
+                ])
+                await query.edit_message_text(
+                    "⛔️ <b>Node با این نام از قبل در Marzban وجود دارد.</b>\n\n"
+                    f"Name: <code>{esc(payload['name'])}</code>\n"
+                    f"Existing Node ID: <code>{esc(existing_id if existing_id is not None else 'نامشخص')}</code>\n"
+                    f"Address: <code>{esc(existing.get('address') or 'نامشخص')}</code>\n\n"
+                    "Duplicate precheck قبل از POST متوقف شد؛ Node جدیدی ساخته نشد.",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup(kb),
+                )
+                return
+
             created_but_unverified = isinstance(result, dict) and bool(result.get("created"))
             if created_but_unverified:
                 unverified_subname = draft.get("subscription_name")
@@ -14287,24 +14326,48 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             node_id = None
         _mza_clear_node_create(context)
 
+        status_key = str(verified.get("status") or "connecting").strip().lower()
+        diagnostic_label = {
+            "connected": "✅ آماده و متصل",
+            "connecting": "🟡 ساخته شده؛ در انتظار اتصال Node",
+            "error": "🔴 ساخته شده؛ خطای اتصال",
+            "disabled": "⚫ ساخته شده؛ غیرفعال",
+        }.get(status_key, "⚪ وضعیت نامشخص")
+        xray_version = str(verified.get("xray_version") or "—")
+        node_message = str(verified.get("message") or "").strip()
+
         kb = []
         if node_id:
-            kb.append([
-                InlineKeyboardButton("🖥 مشاهده Node", callback_data=f"mza_node_{node_id}")
+            kb.extend([
+                [InlineKeyboardButton("📜 Certificate & Setup", callback_data=f"mza_nsetup_{node_id}")],
+                [InlineKeyboardButton("🖥 مشاهده Node", callback_data=f"mza_node_{node_id}")],
             ])
         kb.extend([
             [InlineKeyboardButton("➕ ساخت نود دیگر", callback_data="mza_ncreate")],
             [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
         ])
+        success_lines = [
+            "✅ <b>Node با موفقیت ساخته و Verify شد</b>",
+            "━━━━━━━━━━━━━━",
+            f"Node ID  <code>{esc(node_id if node_id is not None else 'نامشخص')}</code>",
+            f"Name  <b>{esc(verified.get('name') or payload['name'])}</b>",
+            f"Address  <code>{esc(verified.get('address') or payload['address'])}</code>",
+            f"Port  <code>{esc(verified.get('port') or payload['port'])}</code>",
+            f"API Port  <code>{esc(verified.get('api_port') or payload['api_port'])}</code>",
+            "",
+            "🩺 <b>Post-create diagnostics</b>",
+            f"Status  <b>{esc(status_key)}</b>",
+            f"Readiness  <b>{esc(diagnostic_label)}</b>",
+            f"Xray  <code>{esc(xray_version)}</code>",
+        ]
+        if node_message:
+            success_lines.append(f"Message  <code>{esc(node_message[:500])}</code>")
+        success_lines.extend([
+            "",
+            "مرحله بعد: Certificate & Setup را باز کنید و Marzban-node مقصد را راه‌اندازی کنید.",
+        ])
         await query.edit_message_text(
-            "✅ <b>Node با موفقیت ساخته و Verify شد</b>\n"
-            "━━━━━━━━━━━━━━\n"
-            f"Node ID  <code>{esc(node_id if node_id is not None else 'نامشخص')}</code>\n"
-            f"Name  <b>{esc(verified.get('name') or payload['name'])}</b>\n"
-            f"Address  <code>{esc(verified.get('address') or payload['address'])}</code>\n"
-            f"Port  <code>{esc(verified.get('port') or payload['port'])}</code>\n"
-            f"API Port  <code>{esc(verified.get('api_port') or payload['api_port'])}</code>\n"
-            f"Status  <b>{esc(verified.get('status') or 'connecting')}</b>",
+            "\n".join(success_lines),
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup(kb),
         )
@@ -14316,6 +14379,91 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d.startswith('mza_node_'):
         node_id = d[len('mza_node_'):]
         await _show_marzban_node_detail(query, context, node_id)
+        return
+    elif d.startswith('mza_nsetup_'):
+        try:
+            node_id = marzban_admin.normalize_node_id(d[len('mza_nsetup_'):])
+        except ValueError:
+            await query.edit_message_text(
+                "❌ شناسه Node نامعتبر است.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))]
+                ]),
+            )
+            return
+
+        service = await _get_marzban_admin_service()
+        (ok_node, node), (ok_settings, settings_payload) = await asyncio.gather(
+            service.get_node(node_id),
+            service.get_node_settings(),
+        )
+        if not ok_node or not isinstance(node, dict):
+            await query.edit_message_text(
+                f"❌ دریافت اطلاعات Node ناموفق بود.\n<code>{esc(node)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))]
+                ]),
+            )
+            return
+
+        icon, status_label, health_label = _mza_node_status_meta(node.get("status"))
+        name = str(node.get("name") or f"Node {node_id}")
+        address = str(node.get("address") or "?")
+        port = node.get("port", 62050)
+        api_port = node.get("api_port", 62051)
+        xray_version = str(node.get("xray_version") or "—")
+        node_message = str(node.get("message") or "").strip()
+        setup_lines = [
+            f"{icon} <b>Marzban-node Setup · {esc(name)}</b>",
+            "━━━━━━━━━━━━━━",
+            f"Node ID  <code>{node_id}</code>",
+            f"Address  <code>{esc(address)}</code>",
+            f"Port  <code>{esc(port)}</code>",
+            f"API Port  <code>{esc(api_port)}</code>",
+            "",
+            "🩺 <b>Diagnostics</b>",
+            f"Status  <b>{esc(status_label)}</b>",
+            f"Health  <b>{esc(health_label)}</b>",
+            f"Xray  <code>{esc(xray_version)}</code>",
+        ]
+        if node_message:
+            setup_lines.append(f"Message  <code>{esc(node_message[:500])}</code>")
+
+        if ok_settings and isinstance(settings_payload, dict):
+            certificate = str(settings_payload.get("certificate") or "").strip()
+            min_node_version = str(settings_payload.get("min_node_version") or "—")
+            setup_lines.extend([
+                "",
+                "🔐 <b>Client Certificate</b>",
+                f"Minimum Node Version  <code>{esc(min_node_version)}</code>",
+                f"<pre>{esc(certificate)}</pre>",
+                "",
+                "🛠 <b>تنظیم Marzban-node مقصد</b>",
+                "1) Certificate بالا را دقیقاً در <code>/var/lib/marzban-node/cert.pem</code> ذخیره کنید.",
+                "2) <code>SSL_CLIENT_CERT_FILE=/var/lib/marzban-node/cert.pem</code>",
+                f"3) <code>SERVICE_PORT={esc(port)}</code>",
+                f"4) <code>XRAY_API_PORT={esc(api_port)}</code>",
+                "5) برای نسخه‌های جدید Marzban-node، <code>SERVICE_PROTOCOL=rest</code> پیشنهاد می‌شود.",
+                "6) دسترسی پورت‌های Node را در فایروال فقط به مبدأهای لازم محدود کنید و سپس سرویس Node را restart کنید.",
+            ])
+        else:
+            setup_lines.extend([
+                "",
+                "⚠️ <b>Certificate دریافت نشد.</b>",
+                f"<code>{esc(settings_payload)}</code>",
+                "Node ساخته شده است؛ بدون Certificate دوباره POST ساخت Node اجرا نکنید.",
+            ])
+
+        await _mza_render(
+            query,
+            "\n".join(setup_lines),
+            [
+                [InlineKeyboardButton("🔄 بروزرسانی Diagnostics", callback_data=f"mza_nsetup_{node_id}")],
+                [InlineKeyboardButton("🖥 جزئیات Node", callback_data=f"mza_node_{node_id}")],
+                [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
+            ],
+        )
         return
     elif d == 'mza_inbounds':
         await _show_marzban_inbounds(query, context)

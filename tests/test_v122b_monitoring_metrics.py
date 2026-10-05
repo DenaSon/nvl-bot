@@ -123,8 +123,8 @@ class V122BScoreAndIncidentTests(unittest.TestCase):
             {"healthy": True, "latency_ms": 45.0},
             {"filter_state": REGIONAL_STATE_CLEAR},
             {
-                "samples_24h": 30,
-                "coverage_seconds": 7200,
+                "samples_24h": 1440,
+                "coverage_seconds": 24 * 3600,
                 "uptime_24h": 100.0,
                 "latency_1h": 50.0,
             },
@@ -207,7 +207,7 @@ class V122BIntegrationShapeTests(unittest.TestCase):
     def test_operator_ui_exposes_score_uptime_latency_and_incidents(self):
         self.assertIn("Node Health Score", self.module)
         self.assertIn("Latency avg", self.module)
-        self.assertIn("Uptime:", self.module)
+        self.assertIn("Observed uptime:", self.module)
         self.assertIn("Failures 24h", self.module)
         self.assertIn("موارد نیازمند توجه", self.module)
 

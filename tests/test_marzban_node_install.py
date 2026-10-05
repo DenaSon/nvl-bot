@@ -1,3 +1,4 @@
+import pathlib
 import unittest
 
 import marzban_node_bootstrap as bootstrap
@@ -156,6 +157,22 @@ def install_ready_session(chat_id=500):
     installer.prepare_install(session)
     installer.set_install_password(session, "temporary-secret")
     return session
+
+
+class NodeInstallSourceSafetyTests(unittest.TestCase):
+    def test_phase7_never_recreates_marzban_node_or_mutates_firewall(self):
+        source = pathlib.Path(installer.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("create_node(", source)
+        self.assertNotIn("ufw ", source)
+        self.assertNotIn("iptables", source)
+        self.assertNotIn("nft ", source)
+
+    def test_phase7_uses_current_official_container_contract(self):
+        source = pathlib.Path(installer.__file__).read_text(encoding="utf-8")
+        self.assertIn("gozargah/marzban-node:latest", source)
+        self.assertIn("/var/lib/marzban-node/cert.pem", source)
+        self.assertIn('SERVICE_PROTOCOL: "rest"', source)
+        self.assertIn("https://get.docker.com", source)
 
 
 class NodeInstallTests(unittest.TestCase):

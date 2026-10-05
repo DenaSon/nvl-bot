@@ -203,7 +203,7 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
 
     def test_release_marker_includes_phase6h_on_top_of_phase6g_engine(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V121E-2026-10-04-failover-simulation"',
+            'BOT_VERSION_TAG = "V122B-2026-10-06-monitoring-metrics"',
             self.source,
         )
 

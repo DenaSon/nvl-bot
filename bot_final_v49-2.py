@@ -14054,42 +14054,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         if not ok_create:
-            duplicate_precheck = (
-                isinstance(result, dict)
-                and result.get("stage") == "precheck"
-                and bool(result.get("duplicate"))
-            )
-            if duplicate_precheck:
-                existing = result.get("existing") if isinstance(result.get("existing"), dict) else {}
-                existing_id = result.get("node_id")
-                try:
-                    existing_id = marzban_admin.normalize_node_id(existing_id)
-                except ValueError:
-                    existing_id = None
-                _mza_clear_node_create(context)
-                kb = []
-                if existing_id:
-                    kb.append([
-                        InlineKeyboardButton(
-                            "🖥 مشاهده Node موجود",
-                            callback_data=f"mza_node_{existing_id}",
-                        )
-                    ])
-                kb.extend([
-                    [InlineKeyboardButton("✏️ ساخت با نام دیگر", callback_data="mza_ncreate")],
-                    [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
-                ])
-                await query.edit_message_text(
-                    "⛔️ <b>Node با این نام از قبل در Marzban وجود دارد.</b>\n\n"
-                    f"Name: <code>{esc(payload['name'])}</code>\n"
-                    f"Existing Node ID: <code>{esc(existing_id if existing_id is not None else 'نامشخص')}</code>\n"
-                    f"Address: <code>{esc(existing.get('address') or 'نامشخص')}</code>\n\n"
-                    "Duplicate precheck قبل از POST متوقف شد؛ Node جدیدی ساخته نشد.",
-                    parse_mode='HTML',
-                    reply_markup=InlineKeyboardMarkup(kb),
-                )
-                return
-
             created_but_unverified = isinstance(result, dict) and bool(result.get("created"))
             if created_but_unverified:
                 unverified_subname = draft.get("subscription_name")
@@ -14274,6 +14238,42 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         if not ok_create:
+            duplicate_precheck = (
+                isinstance(result, dict)
+                and result.get("stage") == "precheck"
+                and bool(result.get("duplicate"))
+            )
+            if duplicate_precheck:
+                existing = result.get("existing") if isinstance(result.get("existing"), dict) else {}
+                existing_id = result.get("node_id")
+                try:
+                    existing_id = marzban_admin.normalize_node_id(existing_id)
+                except ValueError:
+                    existing_id = None
+                _mza_clear_node_create(context)
+                kb = []
+                if existing_id:
+                    kb.append([
+                        InlineKeyboardButton(
+                            "🖥 مشاهده Node موجود",
+                            callback_data=f"mza_node_{existing_id}",
+                        )
+                    ])
+                kb.extend([
+                    [InlineKeyboardButton("✏️ ساخت با نام دیگر", callback_data="mza_ncreate")],
+                    [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
+                ])
+                await query.edit_message_text(
+                    "⛔️ <b>Node با این نام از قبل در Marzban وجود دارد.</b>\n\n"
+                    f"Name: <code>{esc(payload['name'])}</code>\n"
+                    f"Existing Node ID: <code>{esc(existing_id if existing_id is not None else 'نامشخص')}</code>\n"
+                    f"Address: <code>{esc(existing.get('address') or 'نامشخص')}</code>\n\n"
+                    "Duplicate precheck قبل از POST متوقف شد؛ Node جدیدی ساخته نشد.",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup(kb),
+                )
+                return
+
             created_but_unverified = isinstance(result, dict) and bool(result.get("created"))
             if created_but_unverified:
                 node_id = result.get("node_id")

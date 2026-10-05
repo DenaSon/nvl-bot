@@ -105,7 +105,7 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
     def test_leaving_node_create_flow_clears_pending_draft(self):
         region = self._region(
             "# Leaving a text-input screen through an inline button",
-            "# Confirmation messages can outlive the screen",
+            "# 🛡 Central V2Ray authorization boundary.",
         )
         self.assertIn("node_create_starter", region)
         self.assertIn("_mza_clear_node_create(context)", region)

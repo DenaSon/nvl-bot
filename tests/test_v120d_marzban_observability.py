@@ -206,11 +206,11 @@ class V120DStatusReportTests(unittest.TestCase):
             self.conn,
             [state(REGIONAL_STATE_CLEAR, stamp="2026-10-03T21:59:00Z")],
         )
-        report = obs.render_status_report(self.conn)
-        self.assertIn("Marzban Infrastructure Monitor", report)
-        self.assertIn("LOCAL_HEALTHY", report)
-        self.assertIn("CLEAR", report)
+        report = obs.render_dashboard_report(self.conn)
+        self.assertIn("Marzban Monitor", report)
+        self.assertIn("سالم", report)
         self.assertIn("198.51.100.1:2053", report)
+        self.assertNotIn("LOCAL_HEALTHY", report)
 
     def test_disabled_public_hosts_are_kept_in_inventory_but_hidden_from_monitor(self):
         enabled = asset(
@@ -258,9 +258,7 @@ class V120DStatusReportTests(unittest.TestCase):
                 ),
             ],
         )
-        report = obs.render_status_report(self.conn)
-        self.assertIn("Monitored: <b>1</b> · Inventory: <b>2</b>", report)
-        self.assertIn("Ignored disabled: <b>1</b>", report)
+        report = obs.render_hosts_report(self.conn)
         self.assertIn("Live Host", report)
         self.assertNotIn("Old disabled host", report)
 
@@ -308,14 +306,21 @@ class V120DStatusReportTests(unittest.TestCase):
                 )
             ],
         )
-        report = obs.render_status_report(self.conn)
+        report = obs.render_nodes_report(self.conn)
         self.assertIn("USA-1", report)
-        self.assertIn("Regional: <b>N/A</b>", report)
-        self.assertNotIn("Regional: <b>UNKNOWN</b>", report)
+        self.assertIn("Regional: ➖ <b>N/A</b>", report)
+        self.assertNotIn("UNKNOWN", report)
 
     def test_report_is_bounded_for_telegram(self):
-        report = obs.render_status_report(self.conn)
-        self.assertLessEqual(len(report), 3900)
+        for renderer in (
+            obs.render_dashboard_report,
+            obs.render_nodes_report,
+            obs.render_hosts_report,
+            obs.render_regional_report,
+            obs.render_events_report,
+        ):
+            report = renderer(self.conn)
+            self.assertLessEqual(len(report), 3900)
 
 
 class V120DSourceSafetyTests(unittest.TestCase):

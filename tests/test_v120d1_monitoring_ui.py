@@ -16,14 +16,14 @@ class V120D1MonitoringUITests(unittest.TestCase):
         b = self.source.index(end, a)
         return self.source[a:b]
 
-    def test_admin_home_has_two_monitoring_entries(self):
+    def test_admin_home_keeps_filtering_but_moves_marzban_monitor_to_programs(self):
         region = self._region(
             "async def show_main_menu",
             "async def cmd_start",
         )
         self.assertIn("🛡 بررسی فیلترینگ", region)
-        self.assertIn("🛰 بررسی مرزبان", region)
-        self.assertIn(
+        self.assertIn("🧩 برنامه‌ها", region)
+        self.assertNotIn(
             "['🛡 بررسی فیلترینگ', '🛰 بررسی مرزبان']",
             region,
         )
@@ -63,15 +63,18 @@ class V120D1MonitoringUITests(unittest.TestCase):
         self.assertIn("🏠 منوی اصلی", region)
         self.assertNotIn("بازگشت به تنظیمات", region)
 
-    def test_marzban_panel_has_refresh_and_home_actions(self):
+    def test_marzban_panel_is_programs_dashboard_with_drilldowns(self):
         region = self._region(
             "async def _render_marzban_monitor_panel",
             "async def cmd_marzban_monitor",
         )
-        self.assertIn("🔄 بروزرسانی نمایش", region)
-        self.assertIn('refresh_callback="mzm_refresh"', region)
-        self.assertIn("callback_data=refresh_callback", region)
-        self.assertIn("🏠 منوی اصلی", region)
+        self.assertIn('back_callback="apps_home"', region)
+        self.assertIn("↩️ برنامه‌ها", region)
+        self.assertIn("🖥 نودها", region)
+        self.assertIn("🌐 هاست‌ها", region)
+        self.assertIn("🌍 وضعیت منطقه‌ای", region)
+        self.assertIn("🕘 رخدادها", region)
+        self.assertIn('callback_data="apps_marzban_monitor"', region)
 
     def test_marzban_command_reuses_same_ui(self):
         region = self._region(

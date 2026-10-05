@@ -10,6 +10,7 @@ from __future__ import annotations
 import html
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Mapping, Optional, Sequence
 
 import marzban_asset_discovery as discovery
@@ -23,7 +24,7 @@ from regional_filtering import (
 )
 
 
-V120D_VERSION = "V120D.2-2026-10-04-clean-monitoring-data"
+V120D_VERSION = "V122A.0-2026-10-06-monitoring-ui"
 
 TRANSITION_NONE = "NONE"
 TRANSITION_WARNING = "WARNING"
@@ -250,7 +251,10 @@ def record_state_transitions(
         if not transition.notify:
             continue
 
-        name = asset.name if asset else state.asset_key
+        if asset and asset.asset_type == discovery.ASSET_PUBLIC_HOST:
+            name = _short_inbound_tag(asset.metadata.get("inbound_tag"))
+        else:
+            name = asset.name if asset else state.asset_key
         address = asset.address if asset else ""
         evidence = {
             "regional": dict(state.evidence),
@@ -405,11 +409,14 @@ def render_alert_digest(events: Sequence[MonitorEvent]) -> str:
     lines = [title, ""]
     for event in events[:12]:
         previous = event.previous_state or "—"
+        display_name = event.asset_name
+        if event.asset_type == discovery.ASSET_PUBLIC_HOST:
+            display_name = _clean_host_remark(display_name) or event.address or "Public Host"
         lines.extend(
             [
                 f"{_transition_icon(event.transition_kind)} "
                 f"<b>{html.escape(_type_label(event.asset_type))}</b> — "
-                f"{html.escape(event.asset_name)}",
+                f"{html.escape(display_name)}",
                 f"<code>{html.escape(event.address or '-')}</code>",
                 f"{html.escape(previous)} → <b>{html.escape(event.current_state)}</b>",
                 f"Reason: <code>{html.escape(event.filter_reason)}</code>",
@@ -422,87 +429,576 @@ def render_alert_digest(events: Sequence[MonitorEvent]) -> str:
     return "\n".join(lines)[:3900]
 
 
-def render_status_report(conn, *, max_assets: int = 30, event_limit: int = 8) -> str:
+def _parse_stamp(value: Any) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            return datetime.fromisoformat(raw[:-1] + "+00:00")
+        parsed = datetime.fromisoformat(raw)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _age_label(value: Any, *, now: Optional[datetime] = None) -> str:
+    stamp = _parse_stamp(value)
+    if stamp is None:
+        return "ثبت نشده"
+    now = now or datetime.now(timezone.utc)
+    age = max(0, int((now - stamp.astimezone(timezone.utc)).total_seconds()))
+    if age < 60:
+        return "کمتر از ۱ دقیقه پیش"
+    minutes = age // 60
+    if minutes < 60:
+        return f"{minutes} دقیقه پیش"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} ساعت پیش"
+    return f"{hours // 24} روز پیش"
+
+
+def _latency_label(value: Any) -> str:
+    try:
+        latency = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if latency < 0:
+        return "—"
+    return f"{latency:.0f} ms"
+
+
+def _local_view(row: Mapping[str, Any]) -> tuple[str, str]:
+    state = str(row.get("health_state") or local_health.STATE_UNKNOWN).upper()
+    labels = {
+        local_health.STATE_LOCAL_HEALTHY: ("🟢", "سالم"),
+        local_health.STATE_DNS_ERROR: ("🔴", "خطای DNS"),
+        local_health.STATE_SERVICE_DOWN: ("🔴", "سرویس در دسترس نیست"),
+        local_health.STATE_API_DOWN: ("🔴", "API در دسترس نیست"),
+        local_health.STATE_NODE_DISCONNECTED: ("🔴", "Node قطع است"),
+        local_health.STATE_CONTROL_DOWN: ("🔴", "کنترل Node در دسترس نیست"),
+        local_health.STATE_DISABLED: ("⚫️", "غیرفعال"),
+        local_health.STATE_UNKNOWN: ("⚪️", "در انتظار داده"),
+    }
+    return labels.get(state, ("⚪️", state.replace("_", " ").title()))
+
+
+def _regional_view(
+    row: Mapping[str, Any],
+    *,
+    asset_type: Optional[str] = None,
+) -> tuple[str, str]:
+    state = str(row.get("filter_state") or REGIONAL_STATE_UNKNOWN).upper()
+    reason = str(row.get("filter_reason") or "").upper()
+
+    if asset_type == discovery.ASSET_NODE and reason == regional.REASON_NO_PUBLIC_HOST_MAPPING:
+        return "➖", "N/A"
+
+    if state == REGIONAL_STATE_CLEAR:
+        return "🟢", "سالم"
+    if state == REGIONAL_STATE_POSSIBLE:
+        return "🟡", "مشکوک"
+    if state == REGIONAL_STATE_LIKELY:
+        return "🔴", "اختلال محتمل"
+
+    reason_labels = {
+        regional.REASON_ENDPOINT_EVIDENCE_STALE: ("⚪️", "داده قدیمی"),
+        regional.REASON_PROVIDER_UNAVAILABLE: ("⚠️", "Probe در دسترس نیست"),
+        regional.REASON_LOCAL_EVIDENCE_MISSING: ("⏳", "در انتظار Local Check"),
+        regional.REASON_LOCAL_NOT_HEALTHY: ("⚠️", "Local مشکل دارد"),
+        regional.REASON_NO_REGIONAL_TARGET: ("⏳", "در انتظار تست منطقه‌ای"),
+        regional.REASON_NO_PUBLIC_HOST_MAPPING: ("➖", "N/A"),
+        regional.REASON_DISABLED: ("⚫️", "غیرفعال"),
+    }
+    return reason_labels.get(reason, ("⚪️", "در انتظار داده"))
+
+
+def _short_inbound_tag(value: Any) -> str:
+    tag = str(value or "").strip()
+    aliases = {
+        "VLESS TCP REALITY": "VLESS Reality",
+        "VLESS TCP REALITY DIRECT": "VLESS Reality Direct",
+        "VLESS TCP HTTP": "VLESS TCP",
+        "SS2022-TUNNEL": "SS2022 Tunnel",
+    }
+    return aliases.get(tag, tag or "Public Host")
+
+
+def _clean_host_remark(value: Any) -> Optional[str]:
+    remark = str(value or "").strip()
+    if not remark:
+        return None
+    if any(token in remark for token in ("{USERNAME}", "{PROTOCOL}", "{TRANSPORT}")):
+        return None
+    return remark
+
+
+def _endpoint_text(asset: discovery.MarzbanAsset) -> str:
+    endpoint = asset.address
+    if asset.port:
+        endpoint += f":{asset.port}"
+    return endpoint
+
+
+def _monitor_snapshot(conn):
     inventory = discovery.list_active_assets(conn)
     health = local_health.list_health(conn)
     regional_states = regional.list_asset_states(conn)
     provider = regional.get_runtime(conn)
-
     assets = tuple(
         item for item in inventory if _is_monitorable_asset(item, health)
     )
-    ignored_count = len(inventory) - len(assets)
-    visible_keys = {item.asset_key for item in assets}
-    history = tuple(
-        event
-        for event in recent_events(conn, max(event_limit * 4, event_limit))
-        if event.asset_key in visible_keys
-    )[:event_limit]
+    return inventory, assets, health, regional_states, provider
+
+
+def _oldest_check_label(
+    rows: Sequence[Mapping[str, Any]],
+    field: str,
+) -> str:
+    stamps = []
+    for row in rows:
+        stamp = _parse_stamp(row.get(field))
+        if stamp is not None:
+            stamps.append(stamp)
+    if not stamps:
+        return "ثبت نشده"
+    return _age_label(min(stamps))
+
+
+def _node_connected(
+    node: discovery.MarzbanAsset,
+    local: Mapping[str, Any],
+) -> bool:
+    evidence = local.get("evidence") or {}
+    status = str(
+        evidence.get("node_status")
+        or node.metadata.get("status")
+        or ""
+    ).strip().lower()
+    return status == "connected" and local.get("healthy") is True
+
+
+def _overall_monitor_state(
+    mains: Sequence[discovery.MarzbanAsset],
+    nodes: Sequence[discovery.MarzbanAsset],
+    hosts: Sequence[discovery.MarzbanAsset],
+    health: Mapping[str, Mapping[str, Any]],
+    regional_states: Mapping[str, Mapping[str, Any]],
+    provider: Mapping[str, Any],
+) -> tuple[str, str]:
+    monitored = tuple(mains) + tuple(nodes) + tuple(hosts)
+    local_rows = [health.get(item.asset_key) or {} for item in monitored]
+    if any(row.get("healthy") is False for row in local_rows):
+        return "🔴", "نیازمند بررسی"
+
+    regional_rows = [
+        regional_states.get(item.asset_key) or {}
+        for item in tuple(mains) + tuple(hosts)
+    ]
+    states = {
+        str(row.get("filter_state") or REGIONAL_STATE_UNKNOWN).upper()
+        for row in regional_rows
+    }
+    if REGIONAL_STATE_LIKELY in states:
+        return "🔴", "اختلال منطقه‌ای محتمل"
+    if REGIONAL_STATE_POSSIBLE in states:
+        return "🟡", "نیازمند بررسی"
+
+    provider_status = str(provider.get("provider_status") or "NEVER").upper()
+    if provider_status in {"ERROR", "LIMITED"}:
+        return "🟡", "پایش منطقه‌ای محدود"
+
+    if (
+        any(not row for row in local_rows)
+        or any(
+            str(row.get("filter_state") or REGIONAL_STATE_UNKNOWN).upper()
+            == REGIONAL_STATE_UNKNOWN
+            for row in regional_rows
+        )
+    ):
+        return "🟡", "پایش ناقص"
+
+    return "🟢", "سالم"
+
+
+def render_dashboard_report(conn) -> str:
+    _inventory, assets, health, regional_states, provider = _monitor_snapshot(conn)
+    mains = tuple(a for a in assets if a.asset_type == discovery.ASSET_MAIN)
+    nodes = tuple(a for a in assets if a.asset_type == discovery.ASSET_NODE)
+    hosts = tuple(a for a in assets if a.asset_type == discovery.ASSET_PUBLIC_HOST)
+
+    overall_icon, overall_label = _overall_monitor_state(
+        mains, nodes, hosts, health, regional_states, provider
+    )
 
     lines = [
-        "🛰️ <b>Marzban Infrastructure Monitor</b>",
+        "🛰️ <b>Marzban Monitor</b>",
+        "━━━━━━━━━━━━━━",
+        f"{overall_icon} وضعیت کلی: <b>{html.escape(overall_label)}</b>",
         "",
-        f"Provider: <code>{html.escape(str(provider.get('provider_status') or 'NEVER'))}</code>",
-        f"Monitored: <b>{len(assets)}</b> · Inventory: <b>{len(inventory)}</b>",
     ]
-    if ignored_count:
-        lines.append(f"Ignored disabled: <b>{ignored_count}</b>")
-    lines.append("")
 
-    if not assets:
-        lines.append("هیچ Asset قابل مانیتوری فعالی وجود ندارد.")
+    if mains:
+        main = mains[0]
+        local = health.get(main.asset_key) or {}
+        reg = regional_states.get(main.asset_key) or {}
+        li, ll = _local_view(local)
+        ri, rl = _regional_view(reg, asset_type=main.asset_type)
+        lines.extend([
+            "🌐 <b>Main</b>",
+            f"{li} {html.escape(ll)} · <code>{html.escape(_latency_label(local.get('latency_ms')))}</code>",
+            f"<code>{html.escape(_endpoint_text(main))}</code>",
+            f"Regional: {ri} <b>{html.escape(rl)}</b>",
+            "",
+        ])
     else:
-        for item in assets[:max_assets]:
-            local = health.get(item.asset_key) or {}
-            reg = regional_states.get(item.asset_key) or {}
-            reg_state = str(reg.get("filter_state") or REGIONAL_STATE_UNKNOWN)
-            reg_reason = str(reg.get("filter_reason") or "")
-            local_state = str(local.get("health_state") or "NO_DATA")
+        lines.extend(["🌐 <b>Main</b>", "⚪️ هنوز در Inventory ثبت نشده است.", ""])
 
-            regional_na = (
-                item.asset_type == discovery.ASSET_NODE
-                and reg_reason == regional.REASON_NO_PUBLIC_HOST_MAPPING
-            )
-            icon = (
-                "🟢"
-                if regional_na and local_state == local_health.STATE_LOCAL_HEALTHY
-                else _state_icon(reg_state)
-            )
+    connected_nodes = sum(
+        1 for item in nodes if _node_connected(item, health.get(item.asset_key) or {})
+    )
+    healthy_hosts = sum(
+        1 for item in hosts if (health.get(item.asset_key) or {}).get("healthy") is True
+    )
+    lines.extend([
+        "🖥 <b>Nodes</b>",
+        f"{'🟢' if nodes and connected_nodes == len(nodes) else '🟡' if nodes else '⚪️'} "
+        f"<b>{connected_nodes}/{len(nodes)}</b> متصل و سالم",
+        "",
+        "🔗 <b>Public Hosts</b>",
+        f"{'🟢' if hosts and healthy_hosts == len(hosts) else '🟡' if hosts else '⚪️'} "
+        f"<b>{healthy_hosts}/{len(hosts)}</b> سالم",
+        "",
+    ])
 
+    counts = {
+        REGIONAL_STATE_CLEAR: 0,
+        REGIONAL_STATE_POSSIBLE: 0,
+        REGIONAL_STATE_LIKELY: 0,
+        REGIONAL_STATE_UNKNOWN: 0,
+    }
+    for item in hosts:
+        row = regional_states.get(item.asset_key) or {}
+        state = str(row.get("filter_state") or REGIONAL_STATE_UNKNOWN).upper()
+        counts[state if state in counts else REGIONAL_STATE_UNKNOWN] += 1
+
+    lines.extend([
+        "🌍 <b>Regional · Public Hosts</b>",
+        f"🟢 {counts[REGIONAL_STATE_CLEAR]} سالم · "
+        f"🟡 {counts[REGIONAL_STATE_POSSIBLE]} مشکوک · "
+        f"🔴 {counts[REGIONAL_STATE_LIKELY]} محتمل · "
+        f"⚪️ {counts[REGIONAL_STATE_UNKNOWN]} بدون نتیجه",
+    ])
+
+    provider_status = str(provider.get("provider_status") or "NEVER").upper()
+    provider_icon = "🟢" if provider_status == "OK" else "🟡" if provider_status in {"LIMITED", "ERROR"} else "⚪️"
+    lines.extend([
+        f"{provider_icon} Probe provider: <code>{html.escape(provider_status)}</code>",
+        "",
+    ])
+
+    local_rows = [health.get(item.asset_key) or {} for item in assets]
+    regional_rows = [
+        regional_states.get(item.asset_key) or {}
+        for item in tuple(mains) + tuple(hosts)
+    ]
+    lines.extend([
+        f"🕒 Local data: <b>{html.escape(_oldest_check_label(local_rows, 'checked_at'))}</b>",
+        f"🕒 Regional data: <b>{html.escape(_oldest_check_label(regional_rows, 'checked_at'))}</b>",
+    ])
+    return "\n".join(lines)[:3900]
+
+
+def render_nodes_report(conn) -> str:
+    _inventory, assets, health, regional_states, _provider = _monitor_snapshot(conn)
+    nodes = tuple(a for a in assets if a.asset_type == discovery.ASSET_NODE)
+    lines = ["🖥 <b>Marzban Nodes</b>", "━━━━━━━━━━━━━━", ""]
+
+    if not nodes:
+        lines.append("هیچ Node فعالی ثبت نشده است.")
+        return "\n".join(lines)
+
+    for item in nodes:
+        local = health.get(item.asset_key) or {}
+        reg = regional_states.get(item.asset_key) or {}
+        li, ll = _local_view(local)
+        ri, rl = _regional_view(reg, asset_type=item.asset_type)
+        evidence = local.get("evidence") or {}
+        node_status = str(
+            evidence.get("node_status") or item.metadata.get("status") or "unknown"
+        ).strip().lower()
+        status_label = {
+            "connected": "Connected",
+            "connecting": "Connecting",
+            "disabled": "Disabled",
+            "error": "Error",
+        }.get(node_status, node_status or "Unknown")
+        api_port = item.metadata.get("api_port")
+        node_api = evidence.get("node_api") or {}
+        api_icon = (
+            "🟢" if node_api.get("ok") is True
+            else "🔴" if node_api.get("ok") is False
+            else "⚪️"
+        )
+
+        lines.extend([
+            f"{li} <b>{html.escape(item.name)}</b>",
+            f"<code>{html.escape(_endpoint_text(item))}</code>",
+            f"Marzban: <b>{html.escape(status_label)}</b> · Local: {html.escape(ll)} · "
+            f"<code>{html.escape(_latency_label(local.get('latency_ms')))}</code>",
+        ])
+        if api_port:
             lines.append(
-                f"{icon} <b>{html.escape(_type_label(item.asset_type))}</b> "
-                f"{html.escape(item.name)}"
+                f"Xray API <code>:{int(api_port)}</code> {api_icon} "
+                f"<code>{html.escape(_latency_label(node_api.get('latency_ms')))}</code>"
             )
-            endpoint = item.address
-            if item.port:
-                endpoint += f":{item.port}"
-            lines.append(f"   <code>{html.escape(endpoint)}</code>")
-
-            if regional_na:
-                lines.append(
-                    f"   Local: <code>{html.escape(local_state)}</code> | "
-                    "Regional: <b>N/A</b> <i>(no active Public Host)</i>"
-                )
-            else:
-                lines.append(
-                    f"   Local: <code>{html.escape(local_state)}</code> | "
-                    f"Regional: <b>{html.escape(reg_state)}</b>"
-                )
-
-        if len(assets) > max_assets:
-            lines.append(f"… {len(assets) - max_assets} Asset دیگر")
-
-    lines.extend(["", "🕘 <b>Recent transitions</b>"])
-    if not history:
-        lines.append("هنوز Transition معناداری ثبت نشده است.")
-    else:
-        for event in history:
-            previous = event.previous_state or "—"
-            lines.append(
-                f"{_transition_icon(event.transition_kind)} "
-                f"{html.escape(event.asset_name)}: "
-                f"{html.escape(previous)} → <b>{html.escape(event.current_state)}</b>"
-            )
-            lines.append(f"   <code>{html.escape(event.created_at)}</code>")
+        xray_version = str(item.metadata.get("xray_version") or "").strip()
+        if xray_version:
+            lines.append(f"Xray: <code>{html.escape(xray_version)}</code>")
+        lines.extend([
+            f"Regional: {ri} <b>{html.escape(rl)}</b>",
+            f"Checked: <b>{html.escape(_age_label(local.get('checked_at')))}</b>",
+            "",
+        ])
 
     return "\n".join(lines)[:3900]
+
+
+def _node_for_host(
+    host: discovery.MarzbanAsset,
+    nodes: Sequence[discovery.MarzbanAsset],
+) -> Optional[discovery.MarzbanAsset]:
+    host_ips = set(host.resolved_ips)
+    for node in nodes:
+        if host.address == node.address:
+            return node
+        if host_ips and host_ips.intersection(node.resolved_ips):
+            return node
+    return None
+
+
+def render_hosts_report(conn) -> str:
+    _inventory, assets, health, regional_states, _provider = _monitor_snapshot(conn)
+    nodes = tuple(a for a in assets if a.asset_type == discovery.ASSET_NODE)
+    hosts = tuple(a for a in assets if a.asset_type == discovery.ASSET_PUBLIC_HOST)
+    lines = ["🌐 <b>Public Hosts</b>", "━━━━━━━━━━━━━━", ""]
+
+    if not hosts:
+        lines.append("هیچ Public Host فعالی ثبت نشده است.")
+        return "\n".join(lines)
+
+    groups: dict[str, list[discovery.MarzbanAsset]] = {}
+    for item in hosts:
+        groups.setdefault(item.address, []).append(item)
+
+    for address in sorted(groups):
+        group = sorted(
+            groups[address],
+            key=lambda item: (
+                str(item.metadata.get("inbound_tag") or ""),
+                int(item.port or 0),
+            ),
+        )
+        node = _node_for_host(group[0], nodes)
+        if node is not None:
+            title = node.name
+            prefix = "🖥"
+        else:
+            title = next(
+                (
+                    remark
+                    for remark in (_clean_host_remark(item.name) for item in group)
+                    if remark
+                ),
+                "Standalone",
+            )
+            prefix = "🌐"
+
+        lines.extend([
+            f"{prefix} <b>{html.escape(title)}</b>",
+            f"<code>{html.escape(address)}</code>",
+        ])
+
+        for item in group:
+            local = health.get(item.asset_key) or {}
+            reg = regional_states.get(item.asset_key) or {}
+            li, ll = _local_view(local)
+            ri, rl = _regional_view(reg, asset_type=item.asset_type)
+            tag = _short_inbound_tag(item.metadata.get("inbound_tag"))
+            port = f":{item.port}" if item.port else ":?"
+            lines.append(
+                f"{li} <b>{html.escape(tag)}</b> · <code>{html.escape(port)}</code> · "
+                f"<code>{html.escape(_latency_label(local.get('latency_ms')))}</code>"
+            )
+            lines.append(
+                f"   Regional: {ri} {html.escape(rl)} · "
+                f"{html.escape(_age_label(reg.get('checked_at')))}"
+            )
+        lines.append("")
+
+    return "\n".join(lines)[:3900]
+
+
+def _regional_metrics(row: Mapping[str, Any]) -> dict[str, Any]:
+    evidence = row.get("evidence") or {}
+    endpoints = evidence.get("endpoints") or {}
+    if not isinstance(endpoints, dict):
+        return {}
+
+    endpoint_rows = [value for value in endpoints.values() if isinstance(value, dict)]
+    if not endpoint_rows:
+        return {}
+
+    completed = sum(int(value.get("completed_nodes") or 0) for value in endpoint_rows)
+    successful = sum(int(value.get("successful_nodes") or 0) for value in endpoint_rows)
+    failed = sum(int(value.get("failed_nodes") or 0) for value in endpoint_rows)
+    pending = sum(int(value.get("pending_nodes") or 0) for value in endpoint_rows)
+    ratio = (successful / completed) if completed > 0 else None
+    failed_asns = sorted({
+        str(item)
+        for value in endpoint_rows
+        for item in (value.get("failed_asns") or [])
+        if str(item).strip()
+    })
+    failed_cities = sorted({
+        str(item)
+        for value in endpoint_rows
+        for item in (value.get("failed_cities") or [])
+        if str(item).strip()
+    })
+    checked = [
+        value.get("evidence_checked_at")
+        for value in endpoint_rows
+        if value.get("evidence_checked_at")
+    ]
+    providers = sorted({
+        str(value.get("provider") or "").strip()
+        for value in endpoint_rows
+        if str(value.get("provider") or "").strip()
+    })
+    return {
+        "completed": completed,
+        "successful": successful,
+        "failed": failed,
+        "pending": pending,
+        "ratio": ratio,
+        "failed_asns": failed_asns,
+        "failed_cities": failed_cities,
+        "checked_at": min(checked) if checked else row.get("checked_at"),
+        "providers": providers,
+    }
+
+
+def render_regional_report(conn) -> str:
+    _inventory, assets, _health, regional_states, provider = _monitor_snapshot(conn)
+    targets = tuple(
+        item for item in assets
+        if item.asset_type in {discovery.ASSET_MAIN, discovery.ASSET_PUBLIC_HOST}
+    )
+    provider_status = str(provider.get("provider_status") or "NEVER").upper()
+    lines = [
+        "🌍 <b>Regional Monitoring</b>",
+        "━━━━━━━━━━━━━━",
+        f"Provider: <code>{html.escape(provider_status)}</code> · "
+        f"{html.escape(_age_label(provider.get('updated_at')))}",
+    ]
+    if provider.get("provider_error"):
+        lines.append(f"⚠️ <code>{html.escape(str(provider.get('provider_error'))[:180])}</code>")
+    if provider.get("backoff_until"):
+        lines.append(f"Backoff until: <code>{html.escape(str(provider.get('backoff_until')))}</code>")
+    lines.append("")
+
+    if not targets:
+        lines.append("هیچ Endpoint منطقه‌ای فعالی وجود ندارد.")
+        return "\n".join(lines)
+
+    for item in targets:
+        row = regional_states.get(item.asset_key) or {}
+        ri, rl = _regional_view(row, asset_type=item.asset_type)
+        if item.asset_type == discovery.ASSET_MAIN:
+            label = "Main"
+        else:
+            label = _short_inbound_tag(item.metadata.get("inbound_tag"))
+
+        lines.extend([
+            f"{ri} <b>{html.escape(label)}</b>",
+            f"<code>{html.escape(_endpoint_text(item))}</code>",
+            f"Status: <b>{html.escape(rl)}</b> · "
+            f"Checked: {html.escape(_age_label(row.get('checked_at')))}",
+        ])
+
+        metrics = _regional_metrics(row)
+        if metrics:
+            ratio = metrics.get("ratio")
+            ratio_text = f"{ratio * 100:.0f}%" if ratio is not None else "—"
+            lines.append(
+                f"Reachability: <b>{html.escape(ratio_text)}</b> · "
+                f"OK {metrics['successful']} · Fail {metrics['failed']} · Pending {metrics['pending']}"
+            )
+            if metrics["providers"]:
+                lines.append(
+                    "Probe: <code>"
+                    + html.escape(", ".join(metrics["providers"]))
+                    + "</code>"
+                )
+            if metrics["failed_asns"]:
+                lines.append(
+                    "Failed ASN: <code>"
+                    + html.escape(", ".join(metrics["failed_asns"][:6]))
+                    + "</code>"
+                )
+            if metrics["failed_cities"]:
+                lines.append(
+                    "Failed cities: <code>"
+                    + html.escape(", ".join(metrics["failed_cities"][:6]))
+                    + "</code>"
+                )
+        lines.append("")
+
+    return "\n".join(lines)[:3900]
+
+
+def render_events_report(conn, *, event_limit: int = 12) -> str:
+    _inventory, assets, _health, _regional_states, _provider = _monitor_snapshot(conn)
+    asset_map = {item.asset_key: item for item in assets}
+    events = recent_events(conn, event_limit)
+    lines = ["🕘 <b>Marzban Events</b>", "━━━━━━━━━━━━━━", ""]
+
+    if not events:
+        lines.append("هنوز Transition معناداری ثبت نشده است.")
+        return "\n".join(lines)
+
+    for event in events:
+        asset = asset_map.get(event.asset_key)
+        if asset is not None:
+            if asset.asset_type == discovery.ASSET_PUBLIC_HOST:
+                label = _short_inbound_tag(asset.metadata.get("inbound_tag"))
+            elif asset.asset_type == discovery.ASSET_MAIN:
+                label = "Main"
+            else:
+                label = asset.name
+        else:
+            label = _clean_host_remark(event.asset_name) or event.address or _type_label(event.asset_type)
+
+        previous_icon, previous_label = _regional_view(
+            {"filter_state": event.previous_state or REGIONAL_STATE_UNKNOWN}
+        )
+        current_icon, current_label = _regional_view(
+            {"filter_state": event.current_state}
+        )
+        lines.extend([
+            f"{_transition_icon(event.transition_kind)} <b>{html.escape(label)}</b>",
+            f"{previous_icon} {html.escape(previous_label)} → "
+            f"{current_icon} <b>{html.escape(current_label)}</b>",
+            f"<code>{html.escape(event.address or '-')}</code> · "
+            f"{html.escape(_age_label(event.created_at))}",
+            "",
+        ])
+
+    return "\n".join(lines)[:3900]
+
+
+def render_status_report(conn, *, max_assets: int = 30, event_limit: int = 8) -> str:
+    """Backward-compatible entry point; V122A uses the compact dashboard."""
+    return render_dashboard_report(conn)

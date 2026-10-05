@@ -378,8 +378,8 @@ def health_score(
 
     uptime = metrics.get("uptime_24h")
     history_ready = (
-        int(metrics.get("samples_24h") or 0) >= 12
-        or float(metrics.get("coverage_seconds") or 0) >= 3600
+        float(metrics.get("coverage_seconds") or 0) >= 24 * 3600
+        and int(metrics.get("samples_24h") or 0) >= 60
     )
     if uptime is None or not history_ready:
         uptime_points = 10
@@ -518,14 +518,17 @@ def current_incidents(
                     "message": "داده Regional قدیمی است",
                 })
 
-        if int(metrics.get("samples_24h") or 0) >= 12:
+        if (
+            float(metrics.get("coverage_seconds") or 0) >= 24 * 3600
+            and int(metrics.get("samples_24h") or 0) >= 60
+        ):
             uptime = metrics.get("uptime_24h")
             if uptime is not None and float(uptime) < 98.0:
                 incidents.append({
                     "severity": 2,
                     "icon": "🟡",
                     "label": label,
-                    "message": f"پایداری 24h پایین ({float(uptime):.1f}%)",
+                    "message": f"پایداری مشاهده‌شده 24h پایین ({float(uptime):.1f}%)",
                 })
             latency = metrics.get("latency_1h")
             if latency is not None and float(latency) > 800:
@@ -776,6 +779,21 @@ def _type_label(asset_type: str) -> str:
     }.get(asset_type, asset_type)
 
 
+def _bounded_report(lines: Sequence[str], limit: int = 3900) -> str:
+    """Bound Telegram HTML without cutting through an HTML tag."""
+    output: list[str] = []
+    used = 0
+    for line in lines:
+        extra = len(line) + (1 if output else 0)
+        if used + extra > limit:
+            if used + len("\n…") <= limit:
+                output.append("…")
+            break
+        output.append(line)
+        used += extra
+    return "\n".join(output)
+
+
 def render_alert_digest(events: Sequence[MonitorEvent]) -> str:
     events = tuple(events)
     if not events:
@@ -805,7 +823,7 @@ def render_alert_digest(events: Sequence[MonitorEvent]) -> str:
     if len(events) > 12:
         lines.append(f"… و {len(events) - 12} تغییر دیگر")
     lines.append("ℹ️ فقط هشدار/مانیتور؛ هیچ اقدام خودکاری انجام نشده است.")
-    return "\n".join(lines)[:3900]
+    return _bounded_report(lines)
 
 
 def _parse_stamp(value: Any) -> Optional[datetime]:
@@ -1010,23 +1028,44 @@ def _pct_label(value: Any) -> str:
 
 
 def _history_latency_label(metrics: Mapping[str, Any]) -> str:
-    if int(metrics.get("samples_24h") or 0) < 2:
-        return "در حال جمع‌آوری"
-    return (
-        f"15m {_latency_label(metrics.get('latency_15m'))} · "
-        f"1h {_latency_label(metrics.get('latency_1h'))} · "
-        f"24h {_latency_label(metrics.get('latency_24h'))}"
+    coverage = float(metrics.get("coverage_seconds") or 0)
+    parts = []
+    parts.append(
+        f"15m {_latency_label(metrics.get('latency_15m'))}"
+        if coverage >= 15 * 60 and int(metrics.get("samples_15m") or 0) >= 3
+        else "15m collecting"
     )
+    parts.append(
+        f"1h {_latency_label(metrics.get('latency_1h'))}"
+        if coverage >= 60 * 60 and int(metrics.get("samples_1h") or 0) >= 6
+        else "1h collecting"
+    )
+    parts.append(
+        f"24h {_latency_label(metrics.get('latency_24h'))}"
+        if coverage >= 24 * 3600 and int(metrics.get("samples_24h") or 0) >= 60
+        else "24h collecting"
+    )
+    return " · ".join(parts)
 
 
 def _uptime_label(metrics: Mapping[str, Any], period: str) -> str:
+    coverage = float(metrics.get("coverage_seconds") or 0)
     if period == "1h":
-        if int(metrics.get("samples_1h") or 0) < 3:
+        if coverage < 3600 or int(metrics.get("samples_1h") or 0) < 6:
             return "در حال جمع‌آوری"
         return _pct_label(metrics.get("uptime_1h"))
-    if int(metrics.get("samples_24h") or 0) < 12 and float(metrics.get("coverage_seconds") or 0) < 3600:
+    if coverage < 24 * 3600 or int(metrics.get("samples_24h") or 0) < 60:
         return "در حال جمع‌آوری"
     return _pct_label(metrics.get("uptime_24h"))
+
+
+def _failure_24h_label(metrics: Mapping[str, Any]) -> str:
+    if (
+        float(metrics.get("coverage_seconds") or 0) < 24 * 3600
+        or int(metrics.get("samples_24h") or 0) < 60
+    ):
+        return "در حال جمع‌آوری"
+    return str(int(metrics.get("failures_24h") or 0))
 
 
 def render_dashboard_report(conn) -> str:
@@ -1155,7 +1194,7 @@ def render_dashboard_report(conn) -> str:
         f"🕒 Local data: <b>{html.escape(_oldest_check_label(local_rows, 'checked_at'))}</b>",
         f"🕒 Regional data: <b>{html.escape(_oldest_check_label(regional_rows, 'checked_at'))}</b>",
     ])
-    return "\n".join(lines)[:3900]
+    return _bounded_report(lines)
 
 def render_nodes_report(conn) -> str:
     _inventory, assets, health, regional_states, _provider = _monitor_snapshot(conn)
@@ -1164,7 +1203,7 @@ def render_nodes_report(conn) -> str:
 
     if not nodes:
         lines.append("هیچ Node فعالی ثبت نشده است.")
-        return "\n".join(lines)
+        return _bounded_report(lines)
 
     for item in nodes:
         local = health.get(item.asset_key) or {}
@@ -1209,15 +1248,15 @@ def render_nodes_report(conn) -> str:
         lines.extend([
             f"Regional: {ri} <b>{html.escape(rl)}</b>",
             f"Latency avg: <code>{html.escape(_history_latency_label(metrics))}</code>",
-            f"Uptime: 1h <b>{html.escape(_uptime_label(metrics, '1h'))}</b> · "
+            f"Observed uptime: 1h <b>{html.escape(_uptime_label(metrics, '1h'))}</b> · "
             f"24h <b>{html.escape(_uptime_label(metrics, '24h'))}</b>",
-            f"Failures 24h: <b>{int(metrics.get('failures_24h') or 0)}</b> · "
+            f"Failures 24h: <b>{html.escape(_failure_24h_label(metrics))}</b> · "
             f"Last failure: <b>{html.escape(_age_label(metrics.get('last_failure_at')))}</b>",
             f"Checked: <b>{html.escape(_age_label(local.get('checked_at')))}</b>",
             "",
         ])
 
-    return "\n".join(lines)[:3900]
+    return _bounded_report(lines)
 
 def _node_for_host(
     host: discovery.MarzbanAsset,
@@ -1240,7 +1279,7 @@ def render_hosts_report(conn) -> str:
 
     if not hosts:
         lines.append("هیچ Public Host فعالی ثبت نشده است.")
-        return "\n".join(lines)
+        return _bounded_report(lines)
 
     groups: dict[str, list[discovery.MarzbanAsset]] = {}
     for item in hosts:
@@ -1289,7 +1328,7 @@ def render_hosts_report(conn) -> str:
             if int(metrics.get("samples_24h") or 0) >= 2:
                 lines.append(
                     f"   Avg 1h <code>{html.escape(_latency_label(metrics.get('latency_1h')))}</code> · "
-                    f"Uptime 24h <b>{html.escape(_uptime_label(metrics, '24h'))}</b>"
+                    f"Observed uptime 24h <b>{html.escape(_uptime_label(metrics, '24h'))}</b>"
                 )
             else:
                 lines.append("   📈 History: در حال جمع‌آوری")
@@ -1299,7 +1338,7 @@ def render_hosts_report(conn) -> str:
             )
         lines.append("")
 
-    return "\n".join(lines)[:3900]
+    return _bounded_report(lines)
 
 def _regional_metrics(row: Mapping[str, Any]) -> dict[str, Any]:
     evidence = row.get("evidence") or {}
@@ -1372,7 +1411,7 @@ def render_regional_report(conn) -> str:
 
     if not targets:
         lines.append("هیچ Endpoint منطقه‌ای فعالی وجود ندارد.")
-        return "\n".join(lines)
+        return _bounded_report(lines)
 
     for item in targets:
         row = regional_states.get(item.asset_key) or {}
@@ -1417,7 +1456,7 @@ def render_regional_report(conn) -> str:
                 )
         lines.append("")
 
-    return "\n".join(lines)[:3900]
+    return _bounded_report(lines)
 
 
 def render_events_report(conn, *, event_limit: int = 12) -> str:
@@ -1428,7 +1467,7 @@ def render_events_report(conn, *, event_limit: int = 12) -> str:
 
     if not events:
         lines.append("هنوز Transition معناداری ثبت نشده است.")
-        return "\n".join(lines)
+        return _bounded_report(lines)
 
     for event in events:
         asset = asset_map.get(event.asset_key)
@@ -1457,7 +1496,7 @@ def render_events_report(conn, *, event_limit: int = 12) -> str:
             "",
         ])
 
-    return "\n".join(lines)[:3900]
+    return _bounded_report(lines)
 
 
 def render_status_report(conn, *, max_assets: int = 30, event_limit: int = 8) -> str:

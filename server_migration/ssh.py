@@ -14,6 +14,27 @@ class RemoteExecutor(Protocol):
     def run(self, command: str, timeout: int | None = None) -> CommandResult:
         ...
 
+    def write_text(
+        self,
+        remote_path: str,
+        content: str,
+        *,
+        mode: int = 0o600,
+    ) -> None:
+        """Write UTF-8 text directly over SFTP without a local temp file."""
+        remote_path = str(remote_path)
+        try:
+            sftp = self._ensure_sftp()
+            with sftp.file(remote_path, "w") as remote_file:
+                remote_file.write(str(content))
+                remote_file.flush()
+            sftp.chmod(remote_path, int(mode))
+        except Exception as exc:
+            raise SSHConnectionError(
+                f"SFTP write failed on {self.credentials.host}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+
     def close(self) -> None:
         ...
 
@@ -23,6 +44,15 @@ class RemoteFileTransport(Protocol):
         ...
 
     def upload(self, local_path: str, remote_path: str) -> None:
+        ...
+
+    def write_text(
+        self,
+        remote_path: str,
+        content: str,
+        *,
+        mode: int = 0o600,
+    ) -> None:
         ...
 
 

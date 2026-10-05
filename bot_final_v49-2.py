@@ -9898,10 +9898,28 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             context.user_data.pop('state', None)
             service = await _get_marzban_admin_service()
-            (ok_node, current_node), (ok_settings, settings_payload) = await asyncio.gather(
-                service.get_node(session.node_id),
-                service.get_node_settings(),
-            )
+            try:
+                (ok_node, current_node), (ok_settings, settings_payload) = await asyncio.gather(
+                    service.get_node(session.node_id),
+                    service.get_node_settings(),
+                )
+            except Exception as exc:
+                session.scrub_secret()
+                session.stage = "INSTALL_FAILED"
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "❌ <b>ارتباط با Marzban قبل از نصب ناموفق بود.</b>\n"
+                        f"<code>{esc(type(exc).__name__)}</code>\n"
+                        "هیچ نصب Remote شروع نشد و رمز SSH از حافظه پاک شد."
+                    ),
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 تلاش مجدد Phase 7", callback_data=f"mza_ninstall_{session.node_id}")],
+                        [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{session.node_id}")],
+                    ]),
+                )
+                return
 
             try:
                 current_port = int(current_node.get('port') or 0) if isinstance(current_node, dict) else 0
@@ -9952,16 +9970,21 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             certificate = str(settings_payload.get("certificate") or "")
-            status_message = await context.bot.send_message(
-                chat_id=chat_id,
-                text=(
-                    "⏳ <b>Phase 7 در حال اجراست...</b>\n"
-                    f"<code>{esc(session.host)}</code>\n\n"
-                    "Docker/Compose → Certificate → Marzban-node → Local Verify\n"
-                    "این مرحله ممکن است چند دقیقه طول بکشد."
-                ),
-                parse_mode='HTML',
-            )
+            try:
+                status_message = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "⏳ <b>Phase 7 در حال اجراست...</b>\n"
+                        f"<code>{esc(session.host)}</code>\n\n"
+                        "Docker/Compose → Certificate → Marzban-node → Local Verify\n"
+                        "این مرحله ممکن است چند دقیقه طول بکشد."
+                    ),
+                    parse_mode='HTML',
+                )
+            except Exception:
+                session.scrub_secret()
+                session.stage = "INSTALL_FAILED"
+                raise
 
             report = await asyncio.to_thread(
                 marzban_node_install.run_install,

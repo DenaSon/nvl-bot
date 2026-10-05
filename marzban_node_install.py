@@ -218,9 +218,13 @@ def run_install(
                     + ", ".join(str(port) for port in conflicts),
                 )
 
-        stage = "curl"
-        curl_probe = executor.run("command -v curl", timeout=20)
-        if curl_probe.exit_code != 0:
+        stage = "prerequisites"
+        prereq_probe = executor.run(
+            "command -v curl >/dev/null && "
+            "dpkg -s ca-certificates >/dev/null 2>&1",
+            timeout=20,
+        )
+        if prereq_probe.exit_code != 0:
             _run(
                 executor,
                 (
@@ -300,6 +304,15 @@ def run_install(
             timeout=30,
         )
 
+        # Claim only the fresh directories that passed the unmanaged-install
+        # guard above. Writing this marker first makes interrupted installs
+        # safely retryable without ever adopting third-party files.
+        executor.write_text(
+            MANAGED_MARKER,
+            "managed-by=NVL\ncomponent=marzban-node\n",
+            mode=0o600,
+        )
+
         stage = "write-config"
         executor.write_text(
             CERT_PATH,
@@ -309,11 +322,6 @@ def run_install(
         executor.write_text(
             COMPOSE_PATH,
             _compose_text(session.service_port, session.api_port),
-            mode=0o600,
-        )
-        executor.write_text(
-            MANAGED_MARKER,
-            "managed-by=NVL\ncomponent=marzban-node\n",
             mode=0o600,
         )
 

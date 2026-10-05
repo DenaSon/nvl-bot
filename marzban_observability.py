@@ -251,7 +251,10 @@ def record_state_transitions(
         if not transition.notify:
             continue
 
-        name = asset.name if asset else state.asset_key
+        if asset and asset.asset_type == discovery.ASSET_PUBLIC_HOST:
+            name = _short_inbound_tag(asset.metadata.get("inbound_tag"))
+        else:
+            name = asset.name if asset else state.asset_key
         address = asset.address if asset else ""
         evidence = {
             "regional": dict(state.evidence),
@@ -406,11 +409,14 @@ def render_alert_digest(events: Sequence[MonitorEvent]) -> str:
     lines = [title, ""]
     for event in events[:12]:
         previous = event.previous_state or "—"
+        display_name = event.asset_name
+        if event.asset_type == discovery.ASSET_PUBLIC_HOST:
+            display_name = _clean_host_remark(display_name) or event.address or "Public Host"
         lines.extend(
             [
                 f"{_transition_icon(event.transition_kind)} "
                 f"<b>{html.escape(_type_label(event.asset_type))}</b> — "
-                f"{html.escape(event.asset_name)}",
+                f"{html.escape(display_name)}",
                 f"<code>{html.escape(event.address or '-')}</code>",
                 f"{html.escape(previous)} → <b>{html.escape(event.current_state)}</b>",
                 f"Reason: <code>{html.escape(event.filter_reason)}</code>",

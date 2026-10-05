@@ -356,7 +356,7 @@ from server_migration.telegram_wizard import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V121E-2026-10-04-failover-simulation"
+BOT_VERSION_TAG = "V122B-2026-10-06-monitoring-metrics"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -6035,6 +6035,12 @@ async def _marzban_local_health_tick():
     def _persist():
         with db_conn() as conn:
             marzban_local_health.persist_health_snapshot(conn, results)
+            regional_states = marzban_regional.list_asset_states(conn)
+            marzban_observability.record_health_samples(
+                conn,
+                results,
+                regional_states,
+            )
 
     await asyncio.to_thread(_persist)
     states = {}
@@ -24597,5 +24603,5 @@ if __name__ == '__main__':
     print(f"🧭 V120A Marzban Asset Discovery فعال است (هر {MARZBAN_ASSET_DISCOVERY_INTERVAL_SECONDS}s؛ فقط Inventory و بدون Probe/Alert/Mutation).")
     print(f"🩺 V120B Marzban Local Health فعال است (هر {MARZBAN_LOCAL_HEALTH_INTERVAL_SECONDS}s؛ Main/Node/Public Host؛ بدون Regional/Alert/Mutation).")
     print(f"🌍 V120C Marzban Regional Filtering فعال است (هر {MARZBAN_REGIONAL_INTERVAL_SECONDS}s؛ حداکثر {MARZBAN_REGIONAL_MAX_TARGETS_PER_CYCLE} target در هر دور؛ بدون Action).")
-    print("🔔 V120D Marzban Alerts & Observability فعال است (Transition-only alerts + /marzban_monitor؛ بدون Auto-action).")
+    print("📈 V122B Marzban Observability فعال است (History/Uptime/Health Score؛ بدون Auto-action).")
     app.run_polling()

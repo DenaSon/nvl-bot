@@ -10,7 +10,7 @@ from __future__ import annotations
 import html
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Optional, Sequence
 
 import marzban_asset_discovery as discovery
@@ -24,7 +24,7 @@ from regional_filtering import (
 )
 
 
-V120D_VERSION = "V122A.0-2026-10-06-monitoring-ui"
+V120D_VERSION = "V122B.0-2026-10-06-monitoring-metrics"
 
 TRANSITION_NONE = "NONE"
 TRANSITION_WARNING = "WARNING"
@@ -143,6 +143,27 @@ def install_schema(conn) -> None:
             updated_at TEXT NOT NULL
         )"""
     )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS marzban_monitor_samples (
+            sample_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            asset_key TEXT NOT NULL,
+            asset_type TEXT NOT NULL,
+            sampled_at TEXT NOT NULL,
+            healthy INTEGER DEFAULT NULL,
+            latency_ms REAL DEFAULT NULL,
+            regional_state TEXT DEFAULT NULL,
+            regional_reason TEXT DEFAULT NULL,
+            UNIQUE(asset_key, sampled_at)
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_marzban_monitor_samples_asset_time "
+        "ON marzban_monitor_samples(asset_key, sampled_at DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_marzban_monitor_samples_time "
+        "ON marzban_monitor_samples(sampled_at)"
+    )
 
     # Upgrade path: recover the last meaningful verdict from existing event history
     # before considering current regional rows (which may currently be UNKNOWN/stale).
@@ -169,6 +190,367 @@ def install_schema(conn) -> None:
            FROM marzban_asset_regional
            WHERE filter_state IN ('CLEAR','POSSIBLE','LIKELY')"""
     )
+
+
+MONITOR_HISTORY_RETENTION_HOURS = 24 * 14
+MONITOR_LOCAL_STALE_SECONDS = 180
+MONITOR_REGIONAL_STALE_SECONDS = 15 * 60
+
+
+def _utc_text(value: Optional[datetime] = None) -> str:
+    value = value or datetime.now(timezone.utc)
+    value = value.astimezone(timezone.utc).replace(microsecond=0)
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def record_health_samples(
+    conn,
+    results: Sequence[local_health.AssetHealth],
+    regional_states: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    *,
+    retention_hours: int = MONITOR_HISTORY_RETENTION_HOURS,
+) -> int:
+    """Persist a lightweight time-series sample for latency/uptime trends.
+
+    Sampling piggybacks on the existing local-health cycle; it adds no network
+    probes and never mutates Marzban/Xray. Regional state is the latest already
+    persisted verdict available at sample time.
+    """
+    install_schema(conn)
+    regional_states = regional_states or {}
+    inserted = 0
+    newest: Optional[datetime] = None
+
+    for result in results:
+        reg = regional_states.get(result.asset_key) or {}
+        stamp = _parse_stamp(result.checked_at)
+        if stamp is not None and (newest is None or stamp > newest):
+            newest = stamp
+        cursor = conn.execute(
+            """INSERT OR IGNORE INTO marzban_monitor_samples (
+                   asset_key, asset_type, sampled_at, healthy, latency_ms,
+                   regional_state, regional_reason
+               ) VALUES (?,?,?,?,?,?,?)""",
+            (
+                result.asset_key,
+                result.asset_type,
+                result.checked_at,
+                None if result.healthy is None else int(result.healthy),
+                result.latency_ms,
+                str(reg.get("filter_state") or REGIONAL_STATE_UNKNOWN).upper(),
+                str(reg.get("filter_reason") or ""),
+            ),
+        )
+        inserted += max(0, int(cursor.rowcount or 0))
+
+    base = newest or datetime.now(timezone.utc)
+    cutoff = _utc_text(base - timedelta(hours=max(24, int(retention_hours))))
+    conn.execute(
+        "DELETE FROM marzban_monitor_samples WHERE sampled_at < ?",
+        (cutoff,),
+    )
+    return inserted
+
+
+def _history_rows(
+    conn,
+    asset_key: str,
+    *,
+    since: datetime,
+) -> list[dict[str, Any]]:
+    install_schema(conn)
+    rows = conn.execute(
+        """SELECT sampled_at, healthy, latency_ms, regional_state, regional_reason
+           FROM marzban_monitor_samples
+           WHERE asset_key=? AND sampled_at>=?
+           ORDER BY sampled_at""",
+        (asset_key, _utc_text(since)),
+    ).fetchall()
+    return [
+        {
+            "sampled_at": row[0],
+            "healthy": None if row[1] is None else bool(row[1]),
+            "latency_ms": row[2],
+            "regional_state": row[3],
+            "regional_reason": row[4],
+        }
+        for row in rows
+    ]
+
+
+def _window_metrics(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    since: datetime,
+) -> dict[str, Any]:
+    selected = []
+    for row in rows:
+        stamp = _parse_stamp(row.get("sampled_at"))
+        if stamp is not None and stamp >= since:
+            selected.append(row)
+
+    known = [row for row in selected if row.get("healthy") is not None]
+    healthy_count = sum(1 for row in known if row.get("healthy") is True)
+    uptime = (healthy_count / len(known) * 100.0) if known else None
+
+    latencies = []
+    for row in selected:
+        try:
+            value = float(row.get("latency_ms"))
+        except (TypeError, ValueError):
+            continue
+        if value >= 0:
+            latencies.append(value)
+    avg_latency = (sum(latencies) / len(latencies)) if latencies else None
+
+    failures = 0
+    previous: Optional[bool] = None
+    last_failure_at = None
+    for row in known:
+        current = bool(row.get("healthy"))
+        if current is False and previous is not False:
+            failures += 1
+        if current is False:
+            last_failure_at = row.get("sampled_at")
+        previous = current
+
+    return {
+        "samples": len(selected),
+        "known_samples": len(known),
+        "uptime_pct": uptime,
+        "avg_latency_ms": avg_latency,
+        "failure_count": failures,
+        "last_failure_at": last_failure_at,
+    }
+
+
+def asset_metrics(
+    conn,
+    asset_key: str,
+    *,
+    now: Optional[datetime] = None,
+) -> dict[str, Any]:
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    rows = _history_rows(conn, asset_key, since=now - timedelta(hours=24))
+    w15 = _window_metrics(rows, since=now - timedelta(minutes=15))
+    w1 = _window_metrics(rows, since=now - timedelta(hours=1))
+    w24 = _window_metrics(rows, since=now - timedelta(hours=24))
+
+    first_stamp = _parse_stamp(rows[0].get("sampled_at")) if rows else None
+    coverage_seconds = (
+        max(0.0, (now - first_stamp).total_seconds())
+        if first_stamp is not None else 0.0
+    )
+    return {
+        "samples_15m": w15["samples"],
+        "samples_1h": w1["samples"],
+        "samples_24h": len(rows),
+        "coverage_seconds": coverage_seconds,
+        "latency_15m": w15["avg_latency_ms"],
+        "latency_1h": w1["avg_latency_ms"],
+        "latency_24h": w24["avg_latency_ms"],
+        "uptime_1h": w1["uptime_pct"],
+        "uptime_24h": w24["uptime_pct"],
+        "failures_1h": w1["failure_count"],
+        "failures_24h": w24["failure_count"],
+        "last_failure_at": w24["last_failure_at"],
+    }
+
+
+def health_score(
+    local: Mapping[str, Any],
+    regional_row: Mapping[str, Any],
+    metrics: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return a transparent 0-100 operator score, never used for automation."""
+    healthy = local.get("healthy")
+    local_points = 45 if healthy is True else 20 if healthy is None else 0
+
+    regional_state = str(
+        regional_row.get("filter_state") or REGIONAL_STATE_UNKNOWN
+    ).upper()
+    regional_points = {
+        REGIONAL_STATE_CLEAR: 25,
+        REGIONAL_STATE_POSSIBLE: 12,
+        REGIONAL_STATE_LIKELY: 0,
+        REGIONAL_STATE_UNKNOWN: 15,
+    }.get(regional_state, 15)
+
+    uptime = metrics.get("uptime_24h")
+    history_ready = (
+        float(metrics.get("coverage_seconds") or 0) >= 24 * 3600
+        and int(metrics.get("samples_24h") or 0) >= 60
+    )
+    if uptime is None or not history_ready:
+        uptime_points = 10
+    else:
+        uptime_points = int(round(20 * max(0.0, min(100.0, float(uptime))) / 100.0))
+
+    latency = metrics.get("latency_1h")
+    if latency is None:
+        latency = local.get("latency_ms")
+    try:
+        latency_value = float(latency)
+    except (TypeError, ValueError):
+        latency_value = None
+    if latency_value is None:
+        latency_points = 5
+    elif latency_value <= 100:
+        latency_points = 10
+    elif latency_value <= 250:
+        latency_points = 8
+    elif latency_value <= 500:
+        latency_points = 5
+    elif latency_value <= 1000:
+        latency_points = 2
+    else:
+        latency_points = 0
+
+    score = max(0, min(100, local_points + regional_points + uptime_points + latency_points))
+    if score >= 90:
+        icon, label = "🟢", "عالی"
+    elif score >= 75:
+        icon, label = "🟢", "خوب"
+    elif score >= 60:
+        icon, label = "🟡", "متوسط"
+    else:
+        icon, label = "🔴", "ضعیف"
+    return {
+        "score": score,
+        "icon": icon,
+        "label": label,
+        "history_ready": history_ready,
+        "components": {
+            "local": local_points,
+            "regional": regional_points,
+            "uptime": uptime_points,
+            "latency": latency_points,
+        },
+    }
+
+
+def _age_seconds(value: Any, *, now: Optional[datetime] = None) -> Optional[float]:
+    stamp = _parse_stamp(value)
+    if stamp is None:
+        return None
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    return max(0.0, (now - stamp.astimezone(timezone.utc)).total_seconds())
+
+
+def _incident_asset_label(asset: discovery.MarzbanAsset) -> str:
+    if asset.asset_type == discovery.ASSET_MAIN:
+        return "Main"
+    if asset.asset_type == discovery.ASSET_PUBLIC_HOST:
+        return _short_inbound_tag(asset.metadata.get("inbound_tag"))
+    return asset.name
+
+
+def current_incidents(
+    assets: Sequence[discovery.MarzbanAsset],
+    health: Mapping[str, Mapping[str, Any]],
+    regional_states: Mapping[str, Mapping[str, Any]],
+    provider: Mapping[str, Any],
+    metrics_by_key: Mapping[str, Mapping[str, Any]],
+    *,
+    now: Optional[datetime] = None,
+    limit: int = 5,
+) -> tuple[dict[str, Any], ...]:
+    """Build a read-only, deduplicated incident summary for operators."""
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    incidents: list[dict[str, Any]] = []
+
+    provider_status = str(provider.get("provider_status") or "NEVER").upper()
+    if provider_status in {"ERROR", "LIMITED"}:
+        incidents.append({
+            "severity": 2,
+            "icon": "🟡",
+            "label": "Regional Probe",
+            "message": "Provider محدود/در دسترس نیست",
+        })
+
+    for asset in assets:
+        local = health.get(asset.asset_key) or {}
+        reg = regional_states.get(asset.asset_key) or {}
+        metrics = metrics_by_key.get(asset.asset_key) or {}
+        label = _incident_asset_label(asset)
+
+        if local.get("healthy") is False:
+            _icon, local_label = _local_view(local)
+            incidents.append({
+                "severity": 3,
+                "icon": "🔴",
+                "label": label,
+                "message": local_label,
+            })
+            continue
+
+        local_age = _age_seconds(local.get("checked_at"), now=now)
+        if local_age is not None and local_age > MONITOR_LOCAL_STALE_SECONDS:
+            incidents.append({
+                "severity": 2,
+                "icon": "🟡",
+                "label": label,
+                "message": "داده Local قدیمی است",
+            })
+
+        reg_state = str(reg.get("filter_state") or REGIONAL_STATE_UNKNOWN).upper()
+        if reg_state == REGIONAL_STATE_LIKELY:
+            incidents.append({
+                "severity": 3,
+                "icon": "🔴",
+                "label": label,
+                "message": "اختلال منطقه‌ای محتمل",
+            })
+        elif reg_state == REGIONAL_STATE_POSSIBLE:
+            incidents.append({
+                "severity": 2,
+                "icon": "🟡",
+                "label": label,
+                "message": "اختلال منطقه‌ای مشکوک",
+            })
+        elif asset.asset_type != discovery.ASSET_NODE:
+            reg_age = _age_seconds(reg.get("checked_at"), now=now)
+            if reg_age is not None and reg_age > MONITOR_REGIONAL_STALE_SECONDS:
+                incidents.append({
+                    "severity": 1,
+                    "icon": "⚪️",
+                    "label": label,
+                    "message": "داده Regional قدیمی است",
+                })
+
+        if (
+            float(metrics.get("coverage_seconds") or 0) >= 24 * 3600
+            and int(metrics.get("samples_24h") or 0) >= 60
+        ):
+            uptime = metrics.get("uptime_24h")
+            if uptime is not None and float(uptime) < 98.0:
+                incidents.append({
+                    "severity": 2,
+                    "icon": "🟡",
+                    "label": label,
+                    "message": f"پایداری مشاهده‌شده 24h پایین ({float(uptime):.1f}%)",
+                })
+            latency = metrics.get("latency_1h")
+            if latency is not None and float(latency) > 800:
+                incidents.append({
+                    "severity": 2,
+                    "icon": "🟡",
+                    "label": label,
+                    "message": f"Latency بالا ({float(latency):.0f} ms)",
+                })
+
+    unique: dict[tuple[str, str], dict[str, Any]] = {}
+    for incident in incidents:
+        key = (str(incident["label"]), str(incident["message"]))
+        existing = unique.get(key)
+        if existing is None or int(incident["severity"]) > int(existing["severity"]):
+            unique[key] = incident
+
+    ordered = sorted(
+        unique.values(),
+        key=lambda item: (-int(item["severity"]), str(item["label"]), str(item["message"])),
+    )
+    return tuple(ordered[:max(1, int(limit))])
 
 
 def _existing_states(conn) -> dict[str, str]:
@@ -397,6 +779,21 @@ def _type_label(asset_type: str) -> str:
     }.get(asset_type, asset_type)
 
 
+def _bounded_report(lines: Sequence[str], limit: int = 3900) -> str:
+    """Bound Telegram HTML without cutting through an HTML tag."""
+    output: list[str] = []
+    used = 0
+    for line in lines:
+        extra = len(line) + (1 if output else 0)
+        if used + extra > limit:
+            if used + len("\n…") <= limit:
+                output.append("…")
+            break
+        output.append(line)
+        used += extra
+    return "\n".join(output)
+
+
 def render_alert_digest(events: Sequence[MonitorEvent]) -> str:
     events = tuple(events)
     if not events:
@@ -426,7 +823,7 @@ def render_alert_digest(events: Sequence[MonitorEvent]) -> str:
     if len(events) > 12:
         lines.append(f"… و {len(events) - 12} تغییر دیگر")
     lines.append("ℹ️ فقط هشدار/مانیتور؛ هیچ اقدام خودکاری انجام نشده است.")
-    return "\n".join(lines)[:3900]
+    return _bounded_report(lines)
 
 
 def _parse_stamp(value: Any) -> Optional[datetime]:
@@ -622,11 +1019,64 @@ def _overall_monitor_state(
     return "🟢", "سالم"
 
 
+def _pct_label(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    return f"{number:.1f}%"
+
+
+def _history_latency_label(metrics: Mapping[str, Any]) -> str:
+    coverage = float(metrics.get("coverage_seconds") or 0)
+    parts = []
+    parts.append(
+        f"15m {_latency_label(metrics.get('latency_15m'))}"
+        if coverage >= 15 * 60 and int(metrics.get("samples_15m") or 0) >= 3
+        else "15m collecting"
+    )
+    parts.append(
+        f"1h {_latency_label(metrics.get('latency_1h'))}"
+        if coverage >= 60 * 60 and int(metrics.get("samples_1h") or 0) >= 6
+        else "1h collecting"
+    )
+    parts.append(
+        f"24h {_latency_label(metrics.get('latency_24h'))}"
+        if coverage >= 24 * 3600 and int(metrics.get("samples_24h") or 0) >= 60
+        else "24h collecting"
+    )
+    return " · ".join(parts)
+
+
+def _uptime_label(metrics: Mapping[str, Any], period: str) -> str:
+    coverage = float(metrics.get("coverage_seconds") or 0)
+    if period == "1h":
+        if coverage < 3600 or int(metrics.get("samples_1h") or 0) < 6:
+            return "در حال جمع‌آوری"
+        return _pct_label(metrics.get("uptime_1h"))
+    if coverage < 24 * 3600 or int(metrics.get("samples_24h") or 0) < 60:
+        return "در حال جمع‌آوری"
+    return _pct_label(metrics.get("uptime_24h"))
+
+
+def _failure_24h_label(metrics: Mapping[str, Any]) -> str:
+    if (
+        float(metrics.get("coverage_seconds") or 0) < 24 * 3600
+        or int(metrics.get("samples_24h") or 0) < 60
+    ):
+        return "در حال جمع‌آوری"
+    return str(int(metrics.get("failures_24h") or 0))
+
+
 def render_dashboard_report(conn) -> str:
     _inventory, assets, health, regional_states, provider = _monitor_snapshot(conn)
     mains = tuple(a for a in assets if a.asset_type == discovery.ASSET_MAIN)
     nodes = tuple(a for a in assets if a.asset_type == discovery.ASSET_NODE)
     hosts = tuple(a for a in assets if a.asset_type == discovery.ASSET_PUBLIC_HOST)
+    metrics_by_key = {
+        item.asset_key: asset_metrics(conn, item.asset_key)
+        for item in assets
+    }
 
     overall_icon, overall_label = _overall_monitor_state(
         mains, nodes, hosts, health, regional_states, provider
@@ -672,6 +1122,24 @@ def render_dashboard_report(conn) -> str:
         "",
     ])
 
+    if nodes:
+        lines.append("📈 <b>Node Health Score</b>")
+        for item in nodes[:4]:
+            local = health.get(item.asset_key) or {}
+            reg = regional_states.get(item.asset_key) or {}
+            score = health_score(
+                local,
+                reg,
+                metrics_by_key.get(item.asset_key) or {},
+            )
+            lines.append(
+                f"{score['icon']} {html.escape(item.name)} · "
+                f"<b>{int(score['score'])}/100</b> {html.escape(score['label'])}"
+            )
+        if len(nodes) > 4:
+            lines.append(f"… و {len(nodes) - 4} Node دیگر")
+        lines.append("")
+
     counts = {
         REGIONAL_STATE_CLEAR: 0,
         REGIONAL_STATE_POSSIBLE: 0,
@@ -698,6 +1166,25 @@ def render_dashboard_report(conn) -> str:
         "",
     ])
 
+    incidents = current_incidents(
+        assets,
+        health,
+        regional_states,
+        provider,
+        metrics_by_key,
+        limit=4,
+    )
+    lines.append("🚨 <b>موارد نیازمند توجه</b>")
+    if not incidents:
+        lines.append("✅ مورد فعالی دیده نمی‌شود.")
+    else:
+        for incident in incidents:
+            lines.append(
+                f"{incident['icon']} <b>{html.escape(str(incident['label']))}</b> · "
+                f"{html.escape(str(incident['message']))}"
+            )
+    lines.append("")
+
     local_rows = [health.get(item.asset_key) or {} for item in assets]
     regional_rows = [
         regional_states.get(item.asset_key) or {}
@@ -707,8 +1194,7 @@ def render_dashboard_report(conn) -> str:
         f"🕒 Local data: <b>{html.escape(_oldest_check_label(local_rows, 'checked_at'))}</b>",
         f"🕒 Regional data: <b>{html.escape(_oldest_check_label(regional_rows, 'checked_at'))}</b>",
     ])
-    return "\n".join(lines)[:3900]
-
+    return _bounded_report(lines)
 
 def render_nodes_report(conn) -> str:
     _inventory, assets, health, regional_states, _provider = _monitor_snapshot(conn)
@@ -717,11 +1203,13 @@ def render_nodes_report(conn) -> str:
 
     if not nodes:
         lines.append("هیچ Node فعالی ثبت نشده است.")
-        return "\n".join(lines)
+        return _bounded_report(lines)
 
     for item in nodes:
         local = health.get(item.asset_key) or {}
         reg = regional_states.get(item.asset_key) or {}
+        metrics = asset_metrics(conn, item.asset_key)
+        score = health_score(local, reg, metrics)
         li, ll = _local_view(local)
         ri, rl = _regional_view(reg, asset_type=item.asset_type)
         evidence = local.get("evidence") or {}
@@ -743,7 +1231,8 @@ def render_nodes_report(conn) -> str:
         )
 
         lines.extend([
-            f"{li} <b>{html.escape(item.name)}</b>",
+            f"{li} <b>{html.escape(item.name)}</b> · "
+            f"{score['icon']} <b>{int(score['score'])}/100</b>",
             f"<code>{html.escape(_endpoint_text(item))}</code>",
             f"Marzban: <b>{html.escape(status_label)}</b> · Local: {html.escape(ll)} · "
             f"<code>{html.escape(_latency_label(local.get('latency_ms')))}</code>",
@@ -758,12 +1247,16 @@ def render_nodes_report(conn) -> str:
             lines.append(f"Xray: <code>{html.escape(xray_version)}</code>")
         lines.extend([
             f"Regional: {ri} <b>{html.escape(rl)}</b>",
+            f"Latency avg: <code>{html.escape(_history_latency_label(metrics))}</code>",
+            f"Observed uptime: 1h <b>{html.escape(_uptime_label(metrics, '1h'))}</b> · "
+            f"24h <b>{html.escape(_uptime_label(metrics, '24h'))}</b>",
+            f"Failures 24h: <b>{html.escape(_failure_24h_label(metrics))}</b> · "
+            f"Last failure: <b>{html.escape(_age_label(metrics.get('last_failure_at')))}</b>",
             f"Checked: <b>{html.escape(_age_label(local.get('checked_at')))}</b>",
             "",
         ])
 
-    return "\n".join(lines)[:3900]
-
+    return _bounded_report(lines)
 
 def _node_for_host(
     host: discovery.MarzbanAsset,
@@ -786,7 +1279,7 @@ def render_hosts_report(conn) -> str:
 
     if not hosts:
         lines.append("هیچ Public Host فعالی ثبت نشده است.")
-        return "\n".join(lines)
+        return _bounded_report(lines)
 
     groups: dict[str, list[discovery.MarzbanAsset]] = {}
     for item in hosts:
@@ -823,6 +1316,7 @@ def render_hosts_report(conn) -> str:
         for item in group:
             local = health.get(item.asset_key) or {}
             reg = regional_states.get(item.asset_key) or {}
+            metrics = asset_metrics(conn, item.asset_key)
             li, ll = _local_view(local)
             ri, rl = _regional_view(reg, asset_type=item.asset_type)
             tag = _short_inbound_tag(item.metadata.get("inbound_tag"))
@@ -831,14 +1325,20 @@ def render_hosts_report(conn) -> str:
                 f"{li} <b>{html.escape(tag)}</b> · <code>{html.escape(port)}</code> · "
                 f"<code>{html.escape(_latency_label(local.get('latency_ms')))}</code>"
             )
+            if int(metrics.get("samples_24h") or 0) >= 2:
+                lines.append(
+                    f"   Avg 1h <code>{html.escape(_latency_label(metrics.get('latency_1h')))}</code> · "
+                    f"Observed uptime 24h <b>{html.escape(_uptime_label(metrics, '24h'))}</b>"
+                )
+            else:
+                lines.append("   📈 History: در حال جمع‌آوری")
             lines.append(
                 f"   Regional: {ri} {html.escape(rl)} · "
                 f"{html.escape(_age_label(reg.get('checked_at')))}"
             )
         lines.append("")
 
-    return "\n".join(lines)[:3900]
-
+    return _bounded_report(lines)
 
 def _regional_metrics(row: Mapping[str, Any]) -> dict[str, Any]:
     evidence = row.get("evidence") or {}
@@ -911,7 +1411,7 @@ def render_regional_report(conn) -> str:
 
     if not targets:
         lines.append("هیچ Endpoint منطقه‌ای فعالی وجود ندارد.")
-        return "\n".join(lines)
+        return _bounded_report(lines)
 
     for item in targets:
         row = regional_states.get(item.asset_key) or {}
@@ -956,7 +1456,7 @@ def render_regional_report(conn) -> str:
                 )
         lines.append("")
 
-    return "\n".join(lines)[:3900]
+    return _bounded_report(lines)
 
 
 def render_events_report(conn, *, event_limit: int = 12) -> str:
@@ -967,7 +1467,7 @@ def render_events_report(conn, *, event_limit: int = 12) -> str:
 
     if not events:
         lines.append("هنوز Transition معناداری ثبت نشده است.")
-        return "\n".join(lines)
+        return _bounded_report(lines)
 
     for event in events:
         asset = asset_map.get(event.asset_key)
@@ -996,7 +1496,7 @@ def render_events_report(conn, *, event_limit: int = 12) -> str:
             "",
         ])
 
-    return "\n".join(lines)[:3900]
+    return _bounded_report(lines)
 
 
 def render_status_report(conn, *, max_assets: int = 30, event_limit: int = 8) -> str:

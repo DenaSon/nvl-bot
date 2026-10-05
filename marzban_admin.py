@@ -33,6 +33,16 @@ _USER_CREATE_USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
 NODE_MUTABLE_FIELDS = {"name", "address", "port", "api_port", "status", "usage_coefficient"}
 NODE_MUTABLE_STATUSES = {"disabled", "connecting"}
 
+# NVL intentionally exposes only the small, proven subset of Marzban
+# inbounds on newly-added Nodes.  Marzban's native add_as_new_host switch is
+# all-or-nothing, so the bot creates the Node with it disabled and reconciles
+# this profile explicitly afterwards.
+NVL_NODE_PUBLIC_HOST_TAGS = (
+    "Shadowsocks TCP",
+    "VLESS TCP REALITY",
+    "Trojan WS",
+)
+
 HOST_FIELDS = (
     "remark",
     "address",
@@ -359,6 +369,44 @@ def node_generated_host_remark(node_name: Any) -> str:
         allow_status=False,
     )["name"]
     return f"{name} ({{USERNAME}}) [{{PROTOCOL}} - {{TRANSPORT}}]"
+
+
+def node_generated_host_payload(node: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the canonical Public Host payload for one Marzban Node.
+
+    The values intentionally mirror Marzban's own add_as_new_host output while
+    leaving the effective service port to the referenced inbound.
+    """
+    if not isinstance(node, dict):
+        raise ValueError("invalid Marzban node")
+
+    name = normalize_node_changes(
+        {"name": node.get("name")},
+        allow_status=False,
+    )["name"]
+    address = normalize_node_changes(
+        {"address": node.get("address")},
+        allow_status=False,
+    )["address"]
+
+    return _host_payload({
+        "remark": node_generated_host_remark(name),
+        "address": address,
+        "port": None,
+        "sni": None,
+        "host": None,
+        "path": None,
+        "security": "inbound_default",
+        "alpn": "none",
+        "fingerprint": "none",
+        "allowinsecure": None,
+        "is_disabled": False,
+        "mux_enable": False,
+        "fragment_setting": None,
+        "noise_setting": None,
+        "random_user_agent": False,
+        "use_sni_as_host": False,
+    })
 
 
 def find_node_generated_hosts(
@@ -1072,6 +1120,197 @@ class MarzbanAdminService:
 
     async def get_hosts(self) -> ApiResult:
         return await self.request("GET", "/api/hosts")
+
+    async def reconcile_node_public_hosts(
+        self,
+        node: Dict[str, Any],
+        tags: Any = NVL_NODE_PUBLIC_HOST_TAGS,
+    ) -> ApiResult:
+        """Reconcile one Node to an explicit Public Host allow-list.
+
+        Marzban's NodeCreate.add_as_new_host flag creates a Host for every
+        inbound. NVL instead creates Nodes with that flag disabled, then calls
+        this idempotent reconciler. It adds the exact generated Host to wanted
+        tags, removes only exact auto-generated matches from unwanted tags, and
+        preserves all manual Hosts.
+        """
+        if not isinstance(node, dict):
+            return False, {
+                "stage": "host_profile_precheck",
+                "error": "Invalid Marzban node",
+            }
+
+        try:
+            generated = node_generated_host_payload(node)
+            wanted: List[str] = []
+            seen = set()
+            for raw_tag in tags or ():
+                tag = normalize_inbound_tag(raw_tag)
+                if tag not in seen:
+                    wanted.append(tag)
+                    seen.add(tag)
+            if not wanted:
+                raise ValueError("at least one managed Public Host tag is required")
+        except ValueError as exc:
+            return False, {
+                "stage": "host_profile_precheck",
+                "error": str(exc),
+            }
+
+        ok_inbounds, inbounds_payload = await self.get_inbounds()
+        if not ok_inbounds or not isinstance(inbounds_payload, dict):
+            return False, {
+                "stage": "host_profile_precheck",
+                "error": (
+                    inbounds_payload
+                    if not ok_inbounds
+                    else "Invalid Marzban inbounds response"
+                ),
+            }
+
+        available = {row["tag"] for row in flatten_marzban_inbounds(inbounds_payload)}
+        missing = [tag for tag in wanted if tag not in available]
+        if missing:
+            return False, {
+                "stage": "host_profile_precheck",
+                "error": "Required inbound(s) missing: " + ", ".join(missing),
+                "managed_tags": wanted,
+            }
+
+        ok_hosts, hosts_payload = await self.get_hosts()
+        if not ok_hosts or not isinstance(hosts_payload, dict):
+            return False, {
+                "stage": "host_profile_precheck",
+                "error": (
+                    hosts_payload
+                    if not ok_hosts
+                    else "Invalid Marzban hosts response"
+                ),
+                "managed_tags": wanted,
+            }
+
+        expected_remark = generated["remark"]
+        expected_address = str(generated["address"]).strip().casefold()
+
+        def is_generated(item: Any) -> bool:
+            return (
+                isinstance(item, dict)
+                and str(item.get("remark") or "") == expected_remark
+                and str(item.get("address") or "").strip().casefold() == expected_address
+            )
+
+        desired_by_tag: Dict[str, List[Dict[str, Any]]] = {}
+        added: List[str] = []
+        removed: List[str] = []
+
+        all_tags = set(hosts_payload) | set(wanted)
+        for raw_tag in all_tags:
+            try:
+                tag = normalize_inbound_tag(raw_tag)
+            except ValueError:
+                continue
+
+            raw_hosts = hosts_payload.get(raw_tag, [])
+            if not isinstance(raw_hosts, list):
+                if tag in wanted:
+                    return False, {
+                        "stage": "host_profile_precheck",
+                        "error": f"Invalid Public Host list for inbound: {tag}",
+                        "managed_tags": wanted,
+                    }
+                continue
+
+            try:
+                current = [_host_payload(item) for item in raw_hosts]
+            except ValueError as exc:
+                return False, {
+                    "stage": "host_profile_precheck",
+                    "error": f"{tag}: {exc}",
+                    "managed_tags": wanted,
+                }
+
+            matches = [item for item in current if is_generated(item)]
+            others = [item for item in current if not is_generated(item)]
+
+            if tag in wanted:
+                if matches:
+                    desired = others + [matches[0]]
+                    if len(matches) > 1:
+                        removed.extend([tag] * (len(matches) - 1))
+                else:
+                    desired = others + [dict(generated)]
+                    added.append(tag)
+            else:
+                desired = others
+                if matches:
+                    removed.extend([tag] * len(matches))
+
+            if desired != current:
+                desired_by_tag[tag] = desired
+
+        changed: List[str] = []
+        for tag in sorted(desired_by_tag):
+            ok_put, response = await self.request(
+                "PUT",
+                "/api/hosts",
+                json_data={tag: desired_by_tag[tag]},
+            )
+            if not ok_put:
+                return False, {
+                    "stage": "host_profile_write",
+                    "managed_tags": wanted,
+                    "changed_tags": changed,
+                    "added_tags": added,
+                    "removed_tags": removed,
+                    "failed_tag": tag,
+                    "error": response,
+                }
+            changed.append(tag)
+
+        ok_verify, verify_payload = await self.get_hosts()
+        if not ok_verify or not isinstance(verify_payload, dict):
+            return False, {
+                "stage": "host_profile_verify",
+                "managed_tags": wanted,
+                "changed_tags": changed,
+                "error": (
+                    verify_payload
+                    if not ok_verify
+                    else "Invalid Marzban hosts response after reconciliation"
+                ),
+            }
+
+        matches = find_node_generated_hosts(verify_payload, node)
+        counts: Dict[str, int] = {}
+        for item in matches:
+            tag = item["tag"]
+            counts[tag] = counts.get(tag, 0) + 1
+
+        bad_counts = {
+            tag: count
+            for tag, count in counts.items()
+            if tag not in wanted or count != 1
+        }
+        missing_after = [tag for tag in wanted if counts.get(tag) != 1]
+        if bad_counts or missing_after:
+            return False, {
+                "stage": "host_profile_verify",
+                "managed_tags": wanted,
+                "changed_tags": changed,
+                "counts": counts,
+                "missing_tags": missing_after,
+                "unexpected_tags": bad_counts,
+                "error": "Managed Public Host profile did not verify",
+            }
+
+        return True, {
+            "stage": "host_profile_verify",
+            "verified": True,
+            "managed_tags": wanted,
+            "changed_tags": changed,
+            "added_tags": added,
+            "removed_tags": removed,
+        }
 
     async def update_host(
         self,

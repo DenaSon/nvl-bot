@@ -156,10 +156,13 @@ def run_install(
     if session.busy:
         raise NodeBootstrapBusy("Node bootstrap is busy")
     if session.stage != "INSTALL_READY":
+        session.scrub_secret()
         raise NodeBootstrapError("Phase 7 install is not ready")
     if session.last_report is None or not session.last_report.ready:
+        session.scrub_secret()
         raise NodeBootstrapError("successful Phase 6 preflight is required")
     if not session.host_key_sha256:
+        session.scrub_secret()
         raise NodeBootstrapError("confirmed SSH host-key fingerprint is missing")
 
     session.busy = True

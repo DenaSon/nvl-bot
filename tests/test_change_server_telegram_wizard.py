@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from server_migration.models import MigrationPreflightReport
 from server_migration.telegram_wizard import (
     TelegramWizardBusy,
     TelegramWizardError,
@@ -72,8 +73,28 @@ class TelegramWizardFlowTests(unittest.TestCase):
 
     @patch("server_migration.telegram_wizard.run_preflight")
     def test_happy_path_advances_through_all_five_phases(self, preflight):
-        report = SimpleNamespace(ready=True)
+        report = MigrationPreflightReport(
+            source=SimpleNamespace(primary_ipv4="192.0.2.10"),
+            destination=SimpleNamespace(primary_ipv4="192.0.2.20"),
+            checks=(),
+            ready=True,
+            observed_at="2026-10-05T00:00:00Z",
+        )
         preflight.return_value = report
+
+        class FakeCloudflare:
+            def __init__(self, token):
+                self.token = token
+
+            def resolve_zone_id(self, zone_name):
+                self.zone_name = zone_name
+                return "zone-1"
+
+            def get_a_record(self, *, zone_id, hostname):
+                return SimpleNamespace(
+                    content="192.0.2.10",
+                    proxied=True,
+                )
 
         phase2_result = SimpleNamespace(job_id="chg-test-job")
         phase3_result = SimpleNamespace(runtime_restored=True)
@@ -99,7 +120,13 @@ class TelegramWizardFlowTests(unittest.TestCase):
             "server_migration.telegram_wizard.run_phase5",
             side_effect=[phase5_precheck, phase5_plan, phase5_result],
         ) as phase5:
-            self.assertTrue(run_preflight_step(self.session).ready)
+            self.assertTrue(
+                run_preflight_step(
+                    self.session,
+                    cloudflare_factory=FakeCloudflare,
+                    cloudflare_token_resolver=lambda: "cfat_" + ("x" * 48),
+                ).ready
+            )
             self.assertEqual(self.session.stage, "PREFLIGHT_READY")
 
             run_backup_step(self.session)
@@ -126,6 +153,68 @@ class TelegramWizardFlowTests(unittest.TestCase):
 
         self.assertEqual(phase4.call_count, 2)
         self.assertEqual(phase5.call_count, 3)
+
+    @patch("server_migration.telegram_wizard.run_preflight")
+    def test_preflight_rejects_placeholder_cloudflare_token_before_backup(
+        self,
+        preflight,
+    ):
+        preflight.return_value = MigrationPreflightReport(
+            source=SimpleNamespace(primary_ipv4="192.0.2.10"),
+            destination=SimpleNamespace(primary_ipv4="192.0.2.20"),
+            checks=(),
+            ready=True,
+            observed_at="2026-10-05T00:00:00Z",
+        )
+
+        report = run_preflight_step(
+            self.session,
+            cloudflare_token_resolver=lambda: "echo",
+        )
+
+        self.assertFalse(report.ready)
+        self.assertEqual(self.session.stage, "PREFLIGHT_FAILED")
+        blockers = [item for item in report.checks if item.blocking]
+        self.assertEqual(len(blockers), 1)
+        self.assertEqual(blockers[0].code, "CLOUDFLARE_PRECHECK")
+        self.assertIn("invalid format", blockers[0].message)
+
+    @patch("server_migration.telegram_wizard.run_preflight")
+    def test_preflight_blocks_cloudflare_record_not_pointing_to_source(
+        self,
+        preflight,
+    ):
+        preflight.return_value = MigrationPreflightReport(
+            source=SimpleNamespace(primary_ipv4="192.0.2.10"),
+            destination=SimpleNamespace(primary_ipv4="192.0.2.20"),
+            checks=(),
+            ready=True,
+            observed_at="2026-10-05T00:00:00Z",
+        )
+
+        class WrongRecordCloudflare:
+            def __init__(self, _token):
+                pass
+
+            def resolve_zone_id(self, _zone_name):
+                return "zone-1"
+
+            def get_a_record(self, *, zone_id, hostname):
+                return SimpleNamespace(
+                    content="192.0.2.99",
+                    proxied=True,
+                )
+
+        report = run_preflight_step(
+            self.session,
+            cloudflare_factory=WrongRecordCloudflare,
+            cloudflare_token_resolver=lambda: "cfat_" + ("x" * 48),
+        )
+
+        self.assertFalse(report.ready)
+        self.assertEqual(self.session.stage, "PREFLIGHT_FAILED")
+        blocker = next(item for item in report.checks if item.blocking)
+        self.assertIn("expected source 192.0.2.10", blocker.message)
 
     def test_stage_guards_fail_closed(self):
         self.session.stage = "SOURCE_HOST"

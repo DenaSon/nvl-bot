@@ -137,6 +137,47 @@ def normalize_node_changes(changes: Dict[str, Any], *, allow_status: bool = True
     return normalized
 
 
+def _normalize_node_bool(value: Any, field: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+
+    raw = str(value or "").strip().lower()
+    if raw in {"1", "true", "yes", "on", "enable", "enabled"}:
+        return True
+    if raw in {"0", "false", "no", "off", "disable", "disabled"}:
+        return False
+    raise ValueError(f"{field} must be a boolean")
+
+
+def normalize_node_create(
+    name: Any,
+    address: Any,
+    *,
+    port: Any = 62050,
+    api_port: Any = 62051,
+    usage_coefficient: Any = 1.0,
+    add_as_new_host: Any = True,
+) -> Dict[str, Any]:
+    """Validate and normalize Marzban's NodeCreate contract."""
+    payload = normalize_node_changes(
+        {
+            "name": name,
+            "address": address,
+            "port": port,
+            "api_port": api_port,
+            "usage_coefficient": usage_coefficient,
+        },
+        allow_status=False,
+    )
+    payload["add_as_new_host"] = _normalize_node_bool(
+        add_as_new_host,
+        "add_as_new_host",
+    )
+    return payload
+
+
 def normalize_inbound_tag(value: Any) -> str:
     """Normalize an exact Marzban inbound tag without changing internal spaces."""
     raw = _CONTROL_CHARS_RE.sub("", str(value or "")).strip()
@@ -634,6 +675,133 @@ class MarzbanAdminService:
 
     async def get_nodes(self) -> ApiResult:
         return await self.request("GET", "/api/nodes")
+
+    async def create_node(
+        self,
+        name: Any,
+        address: Any,
+        *,
+        port: Any = 62050,
+        api_port: Any = 62051,
+        usage_coefficient: Any = 1.0,
+        add_as_new_host: Any = True,
+    ) -> ApiResult:
+        """Create a Marzban node and verify it with an authoritative GET.
+
+        A successful POST is never retried here. If verification fails, the
+        structured failure includes created=True and the returned node id when
+        available so callers can reconcile safely instead of duplicating it.
+        """
+        try:
+            payload = normalize_node_create(
+                name,
+                address,
+                port=port,
+                api_port=api_port,
+                usage_coefficient=usage_coefficient,
+                add_as_new_host=add_as_new_host,
+            )
+        except ValueError as exc:
+            return False, str(exc)
+
+        ok_create, created = await self.request(
+            "POST",
+            "/api/node",
+            json_data=payload,
+        )
+        if not ok_create:
+            return False, created
+
+        if not isinstance(created, dict):
+            return False, {
+                "stage": "verify",
+                "created": True,
+                "node_id": None,
+                "error": "Marzban returned an invalid create-node response",
+            }
+
+        try:
+            node_id = normalize_node_id(created.get("id"))
+        except ValueError:
+            return False, {
+                "stage": "verify",
+                "created": True,
+                "node_id": None,
+                "error": "Marzban create-node response did not include a valid node id",
+                "response": created,
+            }
+
+        ok_verify, verified = await self.get_node(node_id)
+        if not ok_verify or not isinstance(verified, dict):
+            return False, {
+                "stage": "verify",
+                "created": True,
+                "node_id": node_id,
+                "error": verified,
+            }
+
+        try:
+            verified_node_id = normalize_node_id(verified.get("id"))
+        except ValueError:
+            return False, {
+                "stage": "verify",
+                "created": True,
+                "node_id": node_id,
+                "error": "Marzban returned an invalid node id during verification",
+                "verified": verified,
+            }
+
+        if verified_node_id != node_id:
+            return False, {
+                "stage": "verify",
+                "created": True,
+                "node_id": node_id,
+                "error": "Marzban returned a different node id during verification",
+                "verified": verified,
+            }
+
+        expected = {
+            "name": payload["name"],
+            "address": payload["address"],
+            "port": payload["port"],
+            "api_port": payload["api_port"],
+        }
+        for field, expected_value in expected.items():
+            if verified.get(field) != expected_value:
+                return False, {
+                    "stage": "verify",
+                    "created": True,
+                    "node_id": node_id,
+                    "error": f"Marzban returned a different {field} during verification",
+                    "verified": verified,
+                }
+
+        try:
+            verified_ratio = float(verified.get("usage_coefficient"))
+        except (TypeError, ValueError):
+            return False, {
+                "stage": "verify",
+                "created": True,
+                "node_id": node_id,
+                "error": "Marzban returned an invalid usage_coefficient during verification",
+                "verified": verified,
+            }
+
+        if not math.isclose(
+            verified_ratio,
+            float(payload["usage_coefficient"]),
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        ):
+            return False, {
+                "stage": "verify",
+                "created": True,
+                "node_id": node_id,
+                "error": "Marzban returned a different usage_coefficient during verification",
+                "verified": verified,
+            }
+
+        return True, verified
 
     async def get_node(self, node_id: int) -> ApiResult:
         node_id = normalize_node_id(node_id)

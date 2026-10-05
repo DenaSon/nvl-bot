@@ -80,6 +80,58 @@ class NodeValidationTests(unittest.TestCase):
             )
 
 
+    def test_node_create_uses_marzban_defaults_and_normalizes(self):
+        self.assertEqual(
+            marzban_admin.normalize_node_create(
+                "  USA   Node ",
+                "node.example.com",
+            ),
+            {
+                "name": "USA Node",
+                "address": "node.example.com",
+                "port": 62050,
+                "api_port": 62051,
+                "usage_coefficient": 1.0,
+                "add_as_new_host": True,
+            },
+        )
+
+    def test_node_create_normalizes_custom_values(self):
+        self.assertEqual(
+            marzban_admin.normalize_node_create(
+                "USA-2",
+                "144.172.105.187",
+                port="62060",
+                api_port=62061,
+                usage_coefficient="1.5",
+                add_as_new_host="false",
+            ),
+            {
+                "name": "USA-2",
+                "address": "144.172.105.187",
+                "port": 62060,
+                "api_port": 62061,
+                "usage_coefficient": 1.5,
+                "add_as_new_host": False,
+            },
+        )
+
+    def test_node_create_rejects_invalid_boolean_and_fields(self):
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_node_create(
+                "USA-2",
+                "node.example.com",
+                add_as_new_host="maybe",
+            )
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_node_create("", "node.example.com")
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_node_create(
+                "USA-2",
+                "https://node.example.com",
+            )
+
+
 class HostValidationTests(unittest.TestCase):
     def test_inbound_tag_and_index_are_normalized(self):
         self.assertEqual(
@@ -260,6 +312,174 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             json_data=None,
             params=None,
         )
+
+    async def test_create_node_posts_node_create_contract_and_verifies(self):
+        created = {
+            "id": 9,
+            "name": "USA-2",
+            "address": "144.172.105.187",
+            "port": 62060,
+            "api_port": 62061,
+            "usage_coefficient": 1.5,
+            "status": "connecting",
+        }
+        verified = dict(created, status="connected")
+        self.service.request = AsyncMock(return_value=(True, created))
+        self.service.get_node = AsyncMock(return_value=(True, verified))
+
+        ok, payload = await self.service.create_node(
+            " USA-2 ",
+            "144.172.105.187",
+            port="62060",
+            api_port=62061,
+            usage_coefficient="1.5",
+            add_as_new_host=False,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(payload, verified)
+        self.service.request.assert_awaited_once_with(
+            "POST",
+            "/api/node",
+            json_data={
+                "name": "USA-2",
+                "address": "144.172.105.187",
+                "port": 62060,
+                "api_port": 62061,
+                "usage_coefficient": 1.5,
+                "add_as_new_host": False,
+            },
+        )
+        self.service.get_node.assert_awaited_once_with(9)
+
+    async def test_create_node_validation_failure_never_posts(self):
+        self.service.request = AsyncMock()
+
+        ok, error = await self.service.create_node(
+            "USA-2",
+            "https://node.example.com",
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("URL scheme", error)
+        self.service.request.assert_not_awaited()
+
+    async def test_create_node_post_failure_is_returned_without_verify(self):
+        self.service.request = AsyncMock(
+            return_value=(False, {"status": 409, "detail": 'Node "USA-2" already exists'})
+        )
+        self.service.get_node = AsyncMock()
+
+        ok, error = await self.service.create_node(
+            "USA-2",
+            "node.example.com",
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(error["status"], 409)
+        self.service.get_node.assert_not_awaited()
+
+    async def test_create_node_reports_post_success_verify_failure_without_retry(self):
+        self.service.request = AsyncMock(return_value=(
+            True,
+            {
+                "id": 9,
+                "name": "USA-2",
+                "address": "node.example.com",
+                "port": 62050,
+                "api_port": 62051,
+                "usage_coefficient": 1.0,
+                "status": "connecting",
+            },
+        ))
+        self.service.get_node = AsyncMock(return_value=(False, "Network Error"))
+
+        ok, result = await self.service.create_node(
+            "USA-2",
+            "node.example.com",
+        )
+
+        self.assertFalse(ok)
+        self.assertTrue(result["created"])
+        self.assertEqual(result["stage"], "verify")
+        self.assertEqual(result["node_id"], 9)
+        self.assertEqual(result["error"], "Network Error")
+        self.service.request.assert_awaited_once()
+        self.service.get_node.assert_awaited_once_with(9)
+
+    async def test_create_node_rejects_invalid_verified_node_id(self):
+        self.service.request = AsyncMock(return_value=(
+            True,
+            {
+                "id": 9,
+                "name": "USA-2",
+                "address": "node.example.com",
+                "port": 62050,
+                "api_port": 62051,
+                "usage_coefficient": 1.0,
+                "status": "connecting",
+            },
+        ))
+        self.service.get_node = AsyncMock(return_value=(
+            True,
+            {
+                "id": "not-an-id",
+                "name": "USA-2",
+                "address": "node.example.com",
+                "port": 62050,
+                "api_port": 62051,
+                "usage_coefficient": 1.0,
+                "status": "connected",
+            },
+        ))
+
+        ok, result = await self.service.create_node(
+            "USA-2",
+            "node.example.com",
+        )
+
+        self.assertFalse(ok)
+        self.assertTrue(result["created"])
+        self.assertEqual(result["node_id"], 9)
+        self.assertIn("invalid node id", result["error"])
+
+
+    async def test_create_node_rejects_mismatched_verified_identity(self):
+        self.service.request = AsyncMock(return_value=(
+            True,
+            {
+                "id": 9,
+                "name": "USA-2",
+                "address": "node.example.com",
+                "port": 62050,
+                "api_port": 62051,
+                "usage_coefficient": 1.0,
+                "status": "connecting",
+            },
+        ))
+        self.service.get_node = AsyncMock(return_value=(
+            True,
+            {
+                "id": 9,
+                "name": "Different Node",
+                "address": "node.example.com",
+                "port": 62050,
+                "api_port": 62051,
+                "usage_coefficient": 1.0,
+                "status": "connected",
+            },
+        ))
+
+        ok, result = await self.service.create_node(
+            "USA-2",
+            "node.example.com",
+        )
+
+        self.assertFalse(ok)
+        self.assertTrue(result["created"])
+        self.assertEqual(result["node_id"], 9)
+        self.assertIn("different name", result["error"])
+
 
     async def test_disable_node_uses_node_modify_endpoint(self):
         with patch("v2ray_engine.api_request", new_callable=AsyncMock) as request:

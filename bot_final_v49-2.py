@@ -10316,7 +10316,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 draft.update(changes)
                 context.user_data['state'] = 'MZA_NODE_CREATE_ADDRESS_INPUT'
                 await update.message.reply_text(
-                    "🌐 <b>مرحله ۲ از ۵ · آدرس نود</b>\n\n"
+                    "🌐 <b>مرحله ۲ از ۴ · آدرس نود</b>\n\n"
                     "IP یا hostname <b>خود سرور Node</b> را بفرستید؛ همان سروری که Marzban-node روی آن اجرا می‌شود.\n"
                     "دامنه یا IP پنل اصلی Marzban را وارد نکنید، مگر اینکه همان سرور Node باشد.\n\n"
                     "بدون <code>http://</code> یا <code>https://</code>\n"
@@ -10333,7 +10333,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 draft.update(changes)
                 context.user_data['state'] = 'MZA_NODE_CREATE_PORTS_INPUT'
                 await update.message.reply_text(
-                    "🔌 <b>مرحله ۳ از ۵ · پورت‌های نود</b>\n\n"
+                    "🔌 <b>مرحله ۳ از ۴ · پورت‌های نود</b>\n\n"
                     "دو پورت را به‌ترتیب در یک پیام بفرستید:\n"
                     "1) <b>Service Port</b> برای ارتباط Marzban با Node\n"
                     "2) <b>Xray API Port</b> برای API داخلی Xray\n\n"

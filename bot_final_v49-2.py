@@ -7065,7 +7065,7 @@ async def show_main_menu(update_or_query, context):
             ['➕ فروش / ساخت اشتراک', '👥 کاربران'],
             ['🤝 نمایندگان', '📊 گزارش‌ها'],
             ['💰 مالی و کارت‌ها', '⚙️ تنظیمات'],
-            ['🛡 بررسی فیلترینگ', '🛰 بررسی مرزبان'],
+            ['🛡 بررسی فیلترینگ'],
             ['🛠 V2Ray / Marzban', '🧩 برنامه‌ها'],
             ['📦 بکاپ'],
         ]
@@ -10753,6 +10753,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _render_filtering_monitor_panel(update.message)
             return
         elif text == '🛰 بررسی مرزبان' and role == 'admin':
+            # Compatibility for old Telegram reply keyboards. The canonical
+            # navigation now lives under Programs -> Monitoring.
             await _render_marzban_monitor_panel(update.message)
             return
         elif text in ('🧩 برنامه‌ها', '🧩 برنامه ها') and role == 'admin':
@@ -14012,12 +14014,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _show_marzban_inbounds(query, context)
         return
     elif d == 'apps_marzban_monitor':
-        await _render_marzban_monitor_panel(
-            query,
-            back_callback="apps_home",
-            back_label="↩️ برنامه‌ها",
-            refresh_callback="apps_marzban_monitor",
-        )
+        await _render_marzban_monitor_panel(query, page="summary")
+        return
+    elif d == 'apps_mzm_nodes':
+        await _render_marzban_monitor_panel(query, page="nodes")
+        return
+    elif d == 'apps_mzm_hosts':
+        await _render_marzban_monitor_panel(query, page="hosts")
+        return
+    elif d == 'apps_mzm_regional':
+        await _render_marzban_monitor_panel(query, page="regional")
+        return
+    elif d == 'apps_mzm_events':
+        await _render_marzban_monitor_panel(query, page="events")
         return
     elif d == 'apps_marzban_transfer':
         await _show_marzban_transfer_entry(query, context)
@@ -19276,7 +19285,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d == "mzm_refresh" and role == 'admin':
         await query.answer("🔄 نمایش با آخرین داده‌های ذخیره‌شده بروزرسانی شد.", show_alert=False)
-        await _render_marzban_monitor_panel(query)
+        await _render_marzban_monitor_panel(query, page="summary")
 
     elif d == "flt_auto_enable" and role == 'admin':
         await query.edit_message_text(
@@ -24421,20 +24430,56 @@ async def _filter_detect_loop(app):
 async def _render_marzban_monitor_panel(
     target,
     *,
-    back_callback="uact_back_to_menu",
-    back_label="🏠 منوی اصلی",
-    refresh_callback="mzm_refresh",
+    page="summary",
+    back_callback="apps_home",
+    back_label="↩️ برنامه‌ها",
 ):
-    """Unified Marzban monitor UI with caller-aware refresh/back navigation."""
+    """V122A Marzban monitoring UI.
+
+    The summary is intentionally compact; detailed Nodes, Public Hosts,
+    Regional evidence and transition history live on separate pages.
+    """
+    renderers = {
+        "summary": marzban_observability.render_dashboard_report,
+        "nodes": marzban_observability.render_nodes_report,
+        "hosts": marzban_observability.render_hosts_report,
+        "regional": marzban_observability.render_regional_report,
+        "events": marzban_observability.render_events_report,
+    }
+    renderer = renderers.get(page, renderers["summary"])
+
     def _report():
         with db_conn() as conn:
-            return marzban_observability.render_status_report(conn)
+            return renderer(conn)
 
     report = await asyncio.to_thread(_report)
-    markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 بروزرسانی نمایش", callback_data=refresh_callback)],
-        [InlineKeyboardButton(back_label, callback_data=back_callback)],
-    ])
+
+    if page == "summary":
+        markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🖥 نودها", callback_data="apps_mzm_nodes"),
+                InlineKeyboardButton("🌐 هاست‌ها", callback_data="apps_mzm_hosts"),
+            ],
+            [
+                InlineKeyboardButton("🌍 وضعیت منطقه‌ای", callback_data="apps_mzm_regional"),
+                InlineKeyboardButton("🕘 رخدادها", callback_data="apps_mzm_events"),
+            ],
+            [InlineKeyboardButton("🔄 بروزرسانی", callback_data="apps_marzban_monitor")],
+            [InlineKeyboardButton(back_label, callback_data=back_callback)],
+        ])
+    else:
+        refresh_callback = {
+            "nodes": "apps_mzm_nodes",
+            "hosts": "apps_mzm_hosts",
+            "regional": "apps_mzm_regional",
+            "events": "apps_mzm_events",
+        }.get(page, "apps_marzban_monitor")
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 بروزرسانی", callback_data=refresh_callback)],
+            [InlineKeyboardButton("↩️ نمای کلی", callback_data="apps_marzban_monitor")],
+            [InlineKeyboardButton("↩️ برنامه‌ها", callback_data="apps_home")],
+        ])
+
     if hasattr(target, "edit_message_text"):
         await target.edit_message_text(
             report,

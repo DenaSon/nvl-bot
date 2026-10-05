@@ -58,18 +58,25 @@ class MarzbanProgramsUITests(unittest.TestCase):
         self.assertIn("elif d == 'apps_marzban_hosts':", region)
         self.assertIn("await _show_marzban_inbounds(query, context)", region)
         self.assertIn("elif d == 'apps_marzban_monitor':", region)
-        self.assertIn('back_callback="apps_home"', region)
-        self.assertIn('refresh_callback="apps_marzban_monitor"', region)
+        self.assertIn('page="summary"', region)
+        self.assertIn("elif d == 'apps_mzm_nodes':", region)
+        self.assertIn("elif d == 'apps_mzm_hosts':", region)
+        self.assertIn("elif d == 'apps_mzm_regional':", region)
+        self.assertIn("elif d == 'apps_mzm_events':", region)
 
-    def test_monitor_renderer_supports_contextual_navigation(self):
+    def test_monitor_renderer_is_page_aware_and_returns_to_programs(self):
         region = self._region(
             "async def _render_marzban_monitor_panel",
             "async def cmd_marzban_monitor",
         )
-        self.assertIn('back_callback="uact_back_to_menu"', region)
-        self.assertIn('back_label="🏠 منوی اصلی"', region)
-        self.assertIn('refresh_callback="mzm_refresh"', region)
-        self.assertIn("callback_data=refresh_callback", region)
+        self.assertIn('page="summary"', region)
+        self.assertIn('back_callback="apps_home"', region)
+        self.assertIn('back_label="↩️ برنامه‌ها"', region)
+        self.assertIn('"summary": marzban_observability.render_dashboard_report', region)
+        self.assertIn('"nodes": marzban_observability.render_nodes_report', region)
+        self.assertIn('"hosts": marzban_observability.render_hosts_report', region)
+        self.assertIn('"regional": marzban_observability.render_regional_report', region)
+        self.assertIn('"events": marzban_observability.render_events_report', region)
         self.assertIn("callback_data=back_callback", region)
 
 

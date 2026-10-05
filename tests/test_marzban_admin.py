@@ -407,6 +407,43 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.service.request.assert_awaited_once()
         self.service.get_node.assert_awaited_once_with(9)
 
+    async def test_create_node_rejects_invalid_verified_node_id(self):
+        self.service.request = AsyncMock(return_value=(
+            True,
+            {
+                "id": 9,
+                "name": "USA-2",
+                "address": "node.example.com",
+                "port": 62050,
+                "api_port": 62051,
+                "usage_coefficient": 1.0,
+                "status": "connecting",
+            },
+        ))
+        self.service.get_node = AsyncMock(return_value=(
+            True,
+            {
+                "id": "not-an-id",
+                "name": "USA-2",
+                "address": "node.example.com",
+                "port": 62050,
+                "api_port": 62051,
+                "usage_coefficient": 1.0,
+                "status": "connected",
+            },
+        ))
+
+        ok, result = await self.service.create_node(
+            "USA-2",
+            "node.example.com",
+        )
+
+        self.assertFalse(ok)
+        self.assertTrue(result["created"])
+        self.assertEqual(result["node_id"], 9)
+        self.assertIn("invalid node id", result["error"])
+
+
     async def test_create_node_rejects_mismatched_verified_identity(self):
         self.service.request = AsyncMock(return_value=(
             True,

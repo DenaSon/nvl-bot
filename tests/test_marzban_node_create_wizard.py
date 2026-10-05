@@ -50,7 +50,7 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
             'draft.get("api_port", 62051)',
             'draft.get("usage_coefficient", 1.0)',
             'draft.get("add_as_new_host", True)',
-            "Add as New Host",
+            "ساخت Public Host",
         ):
             self.assertIn(token, region)
 

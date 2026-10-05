@@ -6,7 +6,7 @@ import marzban_asset_discovery as discovery
 import marzban_local_health as local_health
 import marzban_observability as obs
 import marzban_regional_filtering as regional
-from regional_filtering import REGIONAL_STATE_CLEAR
+from regional_filtering import REGIONAL_STATE_CLEAR, REGIONAL_STATE_LIKELY
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -156,6 +156,36 @@ class V122AMonitoringPresentationTests(unittest.TestCase):
         self.assertIn("AS123", report)
         self.assertIn("Tehran", report)
         self.assertNotIn("{USERNAME}", report)
+
+    def test_public_host_alerts_never_render_marzban_templates(self):
+        host = self.hosts[1]
+        created = obs.record_state_transitions(
+            self.conn,
+            [host],
+            [
+                regional.AssetRegionalState(
+                    host.asset_key,
+                    host.asset_type,
+                    REGIONAL_STATE_LIKELY,
+                    regional.REASON_DIRECT_ENDPOINTS,
+                    "2026-10-06T00:03:00Z",
+                    {},
+                )
+            ],
+            {
+                host.asset_key: {
+                    "healthy": True,
+                    "health_state": local_health.STATE_LOCAL_HEALTHY,
+                }
+            },
+        )
+        self.assertEqual(len(created), 1)
+        digest = obs.render_alert_digest(created)
+
+        self.assertIn("VLESS Reality", digest)
+        self.assertNotIn("{USERNAME}", digest)
+        self.assertNotIn("{PROTOCOL}", digest)
+        self.assertNotIn("{TRANSPORT}", digest)
 
 
 class V122ANavigationTests(unittest.TestCase):

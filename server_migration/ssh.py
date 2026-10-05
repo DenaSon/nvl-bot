@@ -150,7 +150,7 @@ class ParamikoRemoteExecutor:
                             f"expected {expected}, got {actual}"
                         )
                     # Pin only in this in-memory client. Never persist known_hosts.
-                    client._host_keys.add(hostname, key.get_name(), key)
+                    client.get_host_keys().add(hostname, key.get_name(), key)
 
             client.set_missing_host_key_policy(_PinnedHostKeyPolicy())
         else:

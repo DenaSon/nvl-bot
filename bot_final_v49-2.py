@@ -7746,15 +7746,15 @@ async def _mza_show_node_create_review(target, context):
     draft.update(payload)
     host_label = "✅ بله" if payload["add_as_new_host"] else "❌ خیر"
     text = (
-        "➕ <b>تایید ساخت نود Marzban</b>\n"
+        "✅ <b>بررسی نهایی Node</b>\n"
         "━━━━━━━━━━━━━━\n"
-        f"Name  <b>{esc(payload['name'])}</b>\n"
-        f"Address  <code>{esc(payload['address'])}</code>\n"
-        f"Port  <code>{payload['port']}</code>\n"
-        f"API Port  <code>{payload['api_port']}</code>\n"
+        f"نام  <b>{esc(payload['name'])}</b>\n"
+        f"آدرس سرور Node  <code>{esc(payload['address'])}</code>\n"
+        f"Service Port  <code>{payload['port']}</code>\n"
+        f"Xray API Port  <code>{payload['api_port']}</code>\n"
         f"Usage Ratio  <b>{esc(payload['usage_coefficient'])}</b>\n"
-        f"Add as New Host  <b>{host_label}</b>\n\n"
-        "با تایید، یک Node جدید مستقیماً در Marzban ساخته می‌شود."
+        f"ساخت Public Host  <b>{host_label}</b>\n\n"
+        "با تایید، این Node در Marzban ثبت می‌شود. پس از ساخت باید Marzban-node روی همین آدرس راه‌اندازی و متصل شود."
     )
     kb = [
         [InlineKeyboardButton("✅ ساخت نود", callback_data=f"mza_ncreate_confirm_{nonce}")],
@@ -8561,6 +8561,7 @@ async def _show_marzban_node_detail(target, context, node_id):
             InlineKeyboardButton("🔌 پورت‌ها", callback_data=f"mza_nedit_ports_{node_id}"),
             InlineKeyboardButton("📊 Usage Ratio", callback_data=f"mza_nedit_ratio_{node_id}"),
         ],
+        [InlineKeyboardButton("🗑 حذف دائمی نود", callback_data=f"mza_ndelete_{node_id}")],
         [
             InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"mza_node_{node_id}"),
             InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context)),
@@ -9861,8 +9862,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 draft.update(changes)
                 context.user_data['state'] = 'MZA_NODE_CREATE_ADDRESS_INPUT'
                 await update.message.reply_text(
-                    "🌐 <b>آدرس نود</b>\n\n"
-                    "IP یا hostname نود را بدون http/https بفرستید.",
+                    "🌐 <b>مرحله ۲ از ۵ · آدرس نود</b>\n\n"
+                    "IP یا hostname <b>خود سرور Node</b> را بفرستید؛ همان سروری که Marzban-node روی آن اجرا می‌شود.\n"
+                    "دامنه یا IP پنل اصلی Marzban را وارد نکنید، مگر اینکه همان سرور Node باشد.\n\n"
+                    "بدون <code>http://</code> یا <code>https://</code>\n"
+                    "مثال: <code>203.0.113.20</code>",
                     parse_mode='HTML',
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("❌ لغو", callback_data="mza_ncreate_cancel")]
@@ -9875,9 +9879,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 draft.update(changes)
                 context.user_data['state'] = 'MZA_NODE_CREATE_PORTS_INPUT'
                 await update.message.reply_text(
-                    "🔌 <b>پورت‌های نود</b>\n\n"
-                    "Port و API Port را در یک پیام بفرستید.\n"
-                    "پیش‌فرض Marzban: <code>62050 62051</code>",
+                    "🔌 <b>مرحله ۳ از ۵ · پورت‌های نود</b>\n\n"
+                    "دو پورت را به‌ترتیب در یک پیام بفرستید:\n"
+                    "1) <b>Service Port</b> برای ارتباط Marzban با Node\n"
+                    "2) <b>Xray API Port</b> برای API داخلی Xray\n\n"
+                    "اگر تنظیم خاصی ندارید، پیش‌فرض را بفرستید:\n"
+                    "<code>62050 62051</code>",
                     parse_mode='HTML',
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("❌ لغو", callback_data="mza_ncreate_cancel")]
@@ -9896,8 +9903,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 draft.update(changes)
                 context.user_data['state'] = 'MZA_NODE_CREATE_RATIO_INPUT'
                 await update.message.reply_text(
-                    "📊 <b>Usage Ratio</b>\n\n"
-                    "ضریب مصرف نود را بفرستید؛ مثال: <code>1</code> یا <code>1.5</code>.",
+                    "📊 <b>مرحله ۴ از ۵ · Usage Ratio</b>\n\n"
+                    "ضریب محاسبه مصرف ترافیک این Node را بفرستید.\n"
+                    "اگر سیاست خاصی برای وزن‌دهی ترافیک ندارید، <code>1</code> انتخاب استاندارد است.\n\n"
+                    "مثال: <code>1</code> یا <code>1.5</code>",
                     parse_mode='HTML',
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("❌ لغو", callback_data="mza_ncreate_cancel")]
@@ -9912,9 +9921,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             hints = {
                 'MZA_NODE_CREATE_NAME_INPUT': "نام باید بین ۱ تا ۸۰ کاراکتر باشد.",
-                'MZA_NODE_CREATE_ADDRESS_INPUT': "یک IP یا hostname بدون http/https و بدون فاصله وارد کنید.",
-                'MZA_NODE_CREATE_PORTS_INPUT': "دو پورت معتبر وارد کنید؛ مثال: 62050 62051",
-                'MZA_NODE_CREATE_RATIO_INPUT': "ضریب باید یک عدد مثبت باشد؛ مثال: 1 یا 1.5",
+                'MZA_NODE_CREATE_ADDRESS_INPUT': "IP یا hostname خود سرور Node را بدون http/https و بدون فاصله وارد کنید.",
+                'MZA_NODE_CREATE_PORTS_INPUT': "Service Port و Xray API Port را به‌ترتیب وارد کنید؛ مثال: 62050 62051",
+                'MZA_NODE_CREATE_RATIO_INPUT': "ضریب باید عدد مثبت باشد؛ اگر مطمئن نیستید 1 وارد کنید.",
             }
             await update.message.reply_text(
                 f"❌ مقدار نامعتبر است.\n{hints.get(state, '')}"
@@ -9924,12 +9933,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('state', None)
         await _mza_render(
             update.message,
-            "🌐 <b>Add as New Host</b>\n\n"
-            "آیا Marzban این Node را به‌عنوان Public Host جدید هم به Inboundها اضافه کند؟",
+            "🌐 <b>مرحله ۵ از ۵ · Public Host</b>\n\n"
+            "آیا آدرس این Node به‌صورت خودکار به Public Hostهای Inboundها هم اضافه شود؟\n\n"
+            "✅ <b>بله:</b> Marzban برای Inboundها Host جدید با آدرس این Node می‌سازد.\n"
+            "➖ <b>خیر:</b> فقط Node ساخته می‌شود و Public Hostها تغییر نمی‌کنند.",
             [
                 [
-                    InlineKeyboardButton("✅ بله", callback_data="mza_ncreate_host_yes"),
-                    InlineKeyboardButton("❌ خیر", callback_data="mza_ncreate_host_no"),
+                    InlineKeyboardButton("✅ بله، اضافه کن", callback_data="mza_ncreate_host_yes"),
+                    InlineKeyboardButton("➖ خیر، فقط Node", callback_data="mza_ncreate_host_no"),
                 ],
                 [InlineKeyboardButton("❌ لغو", callback_data="mza_ncreate_cancel")],
             ],
@@ -13460,6 +13471,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         host_edit_starter = d.startswith('mza_hedit_')
         node_create_starter = d == 'mza_ncreate' or d.startswith('mza_ncreate_')
+        node_delete_starter = d.startswith('mza_ndelete_')
         create_starter = d == 'mza_create' or d.startswith('mza_c') or d.startswith('mza_create_')
         starters = (
             d == 'mza_search'
@@ -13469,6 +13481,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             or node_edit_starter
             or host_edit_starter
             or node_create_starter
+            or node_delete_starter
             or create_starter
         )
         if not starters and input_state in (
@@ -13507,6 +13520,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _mza_clear_host_pending(context)
         if not node_create_starter and context.user_data.get("mza_node_create_draft") is not None:
             _mza_clear_node_create(context)
+        if not node_delete_starter:
+            context.user_data.pop("mza_node_delete_pending", None)
+            context.user_data.pop("mza_node_delete_busy", None)
         if not create_starter and context.user_data.get("mza_create_draft") is not None:
             _mza_clear_create(context)
 
@@ -14143,8 +14159,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "➕ <b>افزودن نود جدید Marzban</b>\n"
             "━━━━━━━━━━━━━━\n"
-            "مرحله ۱ از ۵ · نام نود\n\n"
-            "نام نود را بفرستید؛ مثال: <code>USA-2</code>",
+            "مرحله ۱ از ۵ · <b>نام نود</b>\n\n"
+            "یک نام کوتاه و یکتا برای شناسایی این سرور در Marzban بفرستید.\n"
+            "این نام فقط برچسب مدیریتی Node است.\n\n"
+            "مثال: <code>USA-2</code>",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("❌ لغو", callback_data="mza_ncreate_cancel")]
@@ -14527,6 +14545,135 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         await _show_marzban_node_detail(query, context, node_id)
+        return
+
+    elif d.startswith('mza_ndelete_confirm_'):
+        rest = d[len('mza_ndelete_confirm_'):]
+        try:
+            raw_node_id, nonce = rest.split('_', 1)
+            node_id = marzban_admin.normalize_node_id(raw_node_id)
+        except (ValueError, TypeError):
+            await query.edit_message_text("❌ درخواست حذف Node نامعتبر است.")
+            return
+
+        pending = context.user_data.get("mza_node_delete_pending")
+        age = (
+            time.time() - float(pending.get("started_at") or 0)
+            if isinstance(pending, dict)
+            else float("inf")
+        )
+        if (
+            not isinstance(pending, dict)
+            or pending.get("node_id") != node_id
+            or pending.get("nonce") != nonce
+            or age > 600
+        ):
+            context.user_data.pop("mza_node_delete_pending", None)
+            context.user_data.pop("mza_node_delete_busy", None)
+            await query.edit_message_text(
+                "❌ تایید حذف منقضی شده است؛ دوباره از صفحه Node شروع کنید.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ بازگشت به Node", callback_data=f"mza_node_{node_id}")],
+                    [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
+                ]),
+            )
+            return
+
+        if context.user_data.get("mza_node_delete_busy"):
+            await query.message.reply_text("⏳ درخواست حذف قبلی هنوز در حال پردازش است.")
+            return
+
+        context.user_data["mza_node_delete_busy"] = True
+        service = await _get_marzban_admin_service()
+        ok_delete, result = await service.delete_node(node_id)
+        context.user_data.pop("mza_node_delete_busy", None)
+        context.user_data.pop("mza_node_delete_pending", None)
+
+        if not ok_delete:
+            deleted_but_unverified = isinstance(result, dict) and bool(result.get("deleted"))
+            if deleted_but_unverified:
+                await query.edit_message_text(
+                    "⚠️ <b>DELETE اجرا شد، اما Verify نهایی کامل نشد.</b>\n\n"
+                    f"Node ID: <code>{node_id}</code>\n"
+                    f"جزئیات: <code>{esc(result.get('error'))}</code>\n\n"
+                    "درخواست DELETE دوباره اجرا نمی‌شود. ابتدا لیست Nodeها را Refresh و وضعیت را بررسی کنید.",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 بررسی لیست نودها", callback_data=_mza_nodes_list_callback(context))],
+                    ]),
+                )
+                return
+
+            await query.edit_message_text(
+                "❌ <b>حذف Node انجام نشد.</b>\n\n"
+                f"<code>{esc(result)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ بازگشت به Node", callback_data=f"mza_node_{node_id}")],
+                    [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
+                ]),
+            )
+            return
+
+        deleted_node = result.get("node") if isinstance(result, dict) else {}
+        deleted_name = (
+            deleted_node.get("name")
+            if isinstance(deleted_node, dict)
+            else pending.get("name")
+        ) or f"Node {node_id}"
+        await query.edit_message_text(
+            "✅ <b>Node با موفقیت حذف شد</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"نام  <b>{esc(deleted_name)}</b>\n"
+            f"Node ID  <code>{node_id}</code>\n\n"
+            "حذف در Marzban انجام و با لیست نودها Verify شد. خود VPS یا سرور فیزیکی حذف نشده است.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 لیست نودها", callback_data=_mza_nodes_list_callback(context))]
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_ndelete_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_ndelete_'):])
+        service = await _get_marzban_admin_service()
+        ok_node, node = await service.get_node(node_id)
+        if not ok_node or not isinstance(node, dict):
+            await query.edit_message_text(
+                "❌ دریافت Node از Marzban ناموفق بود.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))]
+                ]),
+            )
+            return
+
+        nonce = secrets.token_hex(8)
+        context.user_data["mza_node_delete_pending"] = {
+            "node_id": node_id,
+            "nonce": nonce,
+            "started_at": time.time(),
+            "name": str(node.get("name") or f"Node {node_id}"),
+            "address": str(node.get("address") or "نامشخص"),
+        }
+        context.user_data.pop("mza_node_delete_busy", None)
+        await query.edit_message_text(
+            "🗑 <b>حذف دائمی Node</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"نام  <b>{esc(node.get('name') or f'Node {node_id}')}</b>\n"
+            f"Node ID  <code>{node_id}</code>\n"
+            f"Address  <code>{esc(node.get('address') or 'نامشخص')}</code>\n"
+            f"Status  <code>{esc(node.get('status') or 'unknown')}</code>\n\n"
+            "این عملیات رکورد Node را از Marzban حذف می‌کند و با غیرفعال‌سازی متفاوت است.\n"
+            "خود VPS حذف نمی‌شود، اما برای برگرداندن Node باید دوباره آن را در Marzban ثبت کنید.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "⚠️ بله، Node را حذف کن",
+                    callback_data=f"mza_ndelete_confirm_{node_id}_{nonce}",
+                )],
+                [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_node_{node_id}")],
+            ]),
+        )
         return
 
     elif d.startswith('mza_nreconnect_'):

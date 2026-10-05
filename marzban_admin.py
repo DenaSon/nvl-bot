@@ -893,6 +893,74 @@ class MarzbanAdminService:
             status="connecting" if enabled else "disabled",
         )
 
+    async def delete_node(self, node_id: int) -> ApiResult:
+        """Permanently delete a Marzban node and verify it disappeared.
+
+        A successful DELETE is never retried here. If the authoritative
+        post-delete node list cannot be fetched, the structured failure keeps
+        deleted=True so callers can reconcile safely instead of blindly
+        repeating a destructive request.
+        """
+        node_id = normalize_node_id(node_id)
+
+        ok_current, current = await self.get_node(node_id)
+        if not ok_current or not isinstance(current, dict):
+            return False, {
+                "stage": "precheck",
+                "deleted": False,
+                "node_id": node_id,
+                "error": current,
+            }
+
+        ok_delete, response = await self.request("DELETE", f"/api/node/{node_id}")
+        if not ok_delete:
+            return False, {
+                "stage": "delete",
+                "deleted": False,
+                "node_id": node_id,
+                "node": current,
+                "error": response,
+            }
+
+        ok_nodes, nodes = await self.get_nodes()
+        if not ok_nodes or not isinstance(nodes, list):
+            return False, {
+                "stage": "verify",
+                "deleted": True,
+                "node_id": node_id,
+                "node": current,
+                "error": (
+                    nodes
+                    if not ok_nodes
+                    else "Marzban returned an invalid node list after DELETE"
+                ),
+            }
+
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            try:
+                remaining_id = normalize_node_id(node.get("id"))
+            except ValueError:
+                continue
+            if remaining_id == node_id:
+                return False, {
+                    "stage": "verify",
+                    "deleted": True,
+                    "node_id": node_id,
+                    "node": current,
+                    "error": "Node is still present after DELETE",
+                }
+
+        return True, {
+            "stage": "verify",
+            "deleted": True,
+            "verified": True,
+            "node_id": node_id,
+            "node": current,
+            "response": response,
+        }
+
     async def reconnect_node(self, node_id: int) -> ApiResult:
         node_id = normalize_node_id(node_id)
         return await self.request("POST", f"/api/node/{node_id}/reconnect")

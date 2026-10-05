@@ -624,6 +624,46 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             params=None,
         )
 
+    async def test_delete_node_uses_delete_endpoint_and_verifies_absence(self):
+        current = {"id": 4, "name": "Old Node", "address": "1.2.3.4"}
+        self.service.get_node = AsyncMock(return_value=(True, current))
+        self.service.get_nodes = AsyncMock(return_value=(True, [{"id": 7, "name": "Other"}]))
+        self.service.request = AsyncMock(return_value=(True, None))
+
+        ok, result = await self.service.delete_node(4)
+
+        self.assertTrue(ok)
+        self.assertTrue(result["deleted"])
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["node_id"], 4)
+        self.service.request.assert_awaited_once_with("DELETE", "/api/node/4")
+        self.service.get_nodes.assert_awaited_once_with()
+
+    async def test_delete_node_precheck_failure_never_deletes(self):
+        self.service.get_node = AsyncMock(return_value=(False, "not found"))
+        self.service.request = AsyncMock()
+
+        ok, result = await self.service.delete_node(4)
+
+        self.assertFalse(ok)
+        self.assertEqual(result["stage"], "precheck")
+        self.assertFalse(result["deleted"])
+        self.service.request.assert_not_awaited()
+
+    async def test_delete_node_verify_failure_marks_delete_as_already_sent(self):
+        current = {"id": 4, "name": "Old Node", "address": "1.2.3.4"}
+        self.service.get_node = AsyncMock(return_value=(True, current))
+        self.service.request = AsyncMock(return_value=(True, None))
+        self.service.get_nodes = AsyncMock(return_value=(False, "Network Error"))
+
+        ok, result = await self.service.delete_node(4)
+
+        self.assertFalse(ok)
+        self.assertEqual(result["stage"], "verify")
+        self.assertTrue(result["deleted"])
+        self.assertEqual(result["node_id"], 4)
+        self.service.request.assert_awaited_once_with("DELETE", "/api/node/4")
+
     async def test_reconnect_node_uses_reconnect_endpoint(self):
         with patch("v2ray_engine.api_request", new_callable=AsyncMock) as request:
             request.return_value = (True, {"detail": "Reconnection task scheduled"})

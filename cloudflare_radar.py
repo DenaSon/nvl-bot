@@ -113,6 +113,7 @@ class RadarOutage:
     locations: Tuple[str, ...]
     asns: Tuple[str, ...]
     tags: Tuple[str, ...]
+    is_instantaneous: bool = False
 
 
 Transport = Callable[
@@ -803,6 +804,7 @@ class CloudflareRadarClient:
                     ),
                     asns=_tuple_text(row.get("asns")),
                     tags=_tuple_text(row.get("tags")),
+                    is_instantaneous=bool(row.get("isInstantaneous")),
                 )
             )
         return tuple(normalized)

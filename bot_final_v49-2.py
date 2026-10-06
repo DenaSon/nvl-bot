@@ -94,6 +94,7 @@ import qrcode
 import v2ray_engine
 import marzban_admin
 import cloudflare_dns
+import radar_runtime
 import marzban_node_bootstrap
 import marzban_node_install
 import marzban_asset_discovery
@@ -28283,6 +28284,10 @@ async def _post_init(app):
     app.bot_data['ip_pressure_monitor_task'] = asyncio.create_task(_ip_pressure_monitor_loop(app))
     app.bot_data['host_health_task'] = asyncio.create_task(_host_health_loop(app))
     app.bot_data['regional_filter_task'] = asyncio.create_task(_regional_filter_loop(app))
+    radar_monitor = radar_runtime.RadarMonitor(DB_PATH)
+    await asyncio.to_thread(radar_monitor.ensure_schema)
+    app.bot_data['radar_monitor'] = radar_monitor
+    app.bot_data['radar_monitor_task'] = asyncio.create_task(radar_monitor.loop(app))
     app.bot_data['fast_default_sentinel_task'] = asyncio.create_task(_fast_default_sentinel_loop(app))
     app.bot_data['standby_readiness_task'] = asyncio.create_task(_standby_readiness_loop(app))
     app.bot_data['marzban_asset_discovery_task'] = asyncio.create_task(_marzban_asset_discovery_loop(app))
@@ -28304,7 +28309,7 @@ async def _post_shutdown(app):
     # قلم افتاده بود — پس هیچ‌وقت cancel نمی‌شد و روی asyncio.sleep(...) منتظر می‌ماند، پروسه
     # واقعاً خارج نمی‌شد تا systemd صبرش تمام شود و به‌زور بکشدش (که همان قطعیِ طولانی و نیازِ
     # نماینده‌ها به ورودِ مجدد را رقم می‌زد).
-    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 V119A Regional Filter Monitor'), ('fast_default_sentinel_task', '⚡ V119A Fast Default Sentinel'), ('standby_readiness_task', '🛟 V119C Warm Standby Watchdog'), ('marzban_asset_discovery_task', '🧭 V120A Marzban Asset Discovery'), ('marzban_local_health_task', '🩺 V120B Marzban Local Health'), ('marzban_regional_task', '🌍 V120C Marzban Regional Filtering'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار')):
+    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 V119A Regional Filter Monitor'), ('radar_monitor_task', '🌐 Cloudflare Radar Network Context'), ('fast_default_sentinel_task', '⚡ V119A Fast Default Sentinel'), ('standby_readiness_task', '🛟 V119C Warm Standby Watchdog'), ('marzban_asset_discovery_task', '🧭 V120A Marzban Asset Discovery'), ('marzban_local_health_task', '🩺 V120B Marzban Local Health'), ('marzban_regional_task', '🌍 V120C Marzban Regional Filtering'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار')):
         task = app.bot_data.get(key)
         if task and not task.done():
             task.cancel()

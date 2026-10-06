@@ -148,17 +148,27 @@ for each round.
 
 ## Transition notifications
 
-Notifications are state-transition driven, not emitted for every probe.
+Regional state transitions are always persisted for incident history and remain
+visible in the monitoring UI, but Telegram admin notifications are intentionally
+**critical-only**.
 
-Examples:
+Telegram alerts are emitted only when entering one of these incident states:
 
-- CLEAR -> POSSIBLE: warning
-- POSSIBLE -> LIKELY: critical
-- LIKELY/POSSIBLE -> CLEAR: recovered
-- unhealthy state -> UNKNOWN: degraded evidence
+- `FILTER_CONFIRMED`: high-confidence regional filtering is confirmed;
+- `FAILOVER_BLOCKED`: confirmed filtering exists but automatic recovery cannot proceed safely;
+- `FAILOVER_FAILED`: an automatic failover attempt failed.
 
-Initial healthy state population is quiet to avoid a notification burst after
-deploy.
+These states remain silent in Telegram while still being recorded:
+
+- `SUSPECTED`;
+- `CONFIRMING`;
+- `EVIDENCE_DEGRADED`;
+- `RECOVERED`;
+- `FAILOVER_STARTED`;
+- `FAILOVER_SUCCEEDED`.
+
+A reason-only change while already inside the same critical state does not emit
+another alert. Initial healthy state population is also quiet.
 
 ## Management UI
 

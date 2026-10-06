@@ -44,6 +44,15 @@ REASON_DIFFERENTIAL_NOT_CONFIRMED = "DIFFERENTIAL_NOT_CONFIRMED"
 REASON_DIFFERENTIAL_STALE = "DIFFERENTIAL_STALE"
 REASON_WIDESPREAD_NETWORK_OUTAGE = "WIDESPREAD_NETWORK_OUTAGE"
 
+# Telegram admin alerts are intentionally restricted to states that require
+# immediate operator attention. Lower-severity states are still persisted in
+# the incident timeline and remain visible in monitoring UI.
+CRITICAL_NOTIFICATION_STATES = frozenset({
+    INCIDENT_STATE_FILTER_CONFIRMED,
+    INCIDENT_STATE_FAILOVER_BLOCKED,
+    INCIDENT_STATE_FAILOVER_FAILED,
+})
+
 _AUTO_REASON_MAP = {
     "AUTO_DISABLED": REASON_AUTO_DISABLED,
     "PROVIDER_NOT_OK": REASON_PROVIDER_ERROR,
@@ -138,11 +147,20 @@ def should_notify_incident(
     new_state: str,
     new_reason: str,
 ) -> bool:
-    """Notify only for a meaningful incident state/reason transition."""
-    return (
-        str(previous_state or "") != str(new_state or "")
-        or str(previous_reason or "") != str(new_reason or "")
-    )
+    """Notify admins only when entering a critical incident state.
+
+    SUSPECTED, CONFIRMING, EVIDENCE_DEGRADED, RECOVERED, FAILOVER_STARTED and
+    FAILOVER_SUCCEEDED remain persisted/observable but are intentionally quiet.
+    A reason-only change inside the same critical state is also quiet to avoid
+    notification churn.
+    """
+    current = str(new_state or "").upper()
+    previous = str(previous_state or "").upper()
+
+    if current not in CRITICAL_NOTIFICATION_STATES:
+        return False
+
+    return previous != current
 
 
 def reason_label_fa(reason: str) -> str:

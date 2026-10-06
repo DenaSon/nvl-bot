@@ -42,6 +42,42 @@ class ManagedNodePublicHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(generated["fingerprint"], "")
         self.assertEqual(generated["security"], "inbound_default")
 
+    def test_generated_host_can_use_stable_public_hostname_without_changing_node(self):
+        generated = marzban_admin.node_generated_host_payload(
+            self.node,
+            public_address="Argus.NVLSup.XYZ.",
+        )
+
+        self.assertEqual(self.node["address"], "172.86.72.203")
+        self.assertEqual(generated["address"], "argus.nvlsup.xyz")
+        self.assertNotEqual(generated["address"], self.node["address"])
+
+    def test_public_hostname_rejects_ip_and_preflight_requires_dns_match(self):
+        with self.assertRaises(ValueError):
+            marzban_admin.normalize_public_hostname("172.86.72.203")
+
+        mapping = {
+            "argus.nvlsup.xyz": ["172.86.72.203"],
+            "wrong.nvlsup.xyz": ["203.0.113.99"],
+        }
+        resolver = lambda host: mapping.get(host, [])
+
+        ok = marzban_admin.preflight_public_endpoint(
+            "172.86.72.203",
+            "argus.nvlsup.xyz",
+            resolver=resolver,
+        )
+        bad = marzban_admin.preflight_public_endpoint(
+            "172.86.72.203",
+            "wrong.nvlsup.xyz",
+            resolver=resolver,
+        )
+
+        self.assertTrue(ok["ok"])
+        self.assertEqual(ok["matched_ips"], ("172.86.72.203",))
+        self.assertFalse(bad["ok"])
+        self.assertEqual(bad["matched_ips"], ())
+
     async def test_reconcile_keeps_only_nvl_profile_and_preserves_manual_hosts(self):
         generated = marzban_admin.node_generated_host_payload(self.node)
         manual = dict(generated)
@@ -129,6 +165,44 @@ class ManagedNodePublicHostTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(ok)
         self.assertEqual(result["changed_tags"], [])
+        self.service.request.assert_not_awaited()
+
+    async def test_reconcile_with_public_hostname_is_idempotent_and_verified(self):
+        public_address = "argus.nvlsup.xyz"
+        generated = marzban_admin.node_generated_host_payload(
+            self.node,
+            public_address=public_address,
+        )
+        state = {
+            tag: [copy.deepcopy(generated)]
+            for tag in marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS
+        }
+
+        self.service.get_inbounds = AsyncMock(return_value=(
+            True,
+            _inbounds(*marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS),
+        ))
+
+        async def get_hosts():
+            return True, copy.deepcopy(state)
+
+        self.service.get_hosts = AsyncMock(side_effect=get_hosts)
+        self.service.request = AsyncMock()
+
+        ok, result = await self.service.reconcile_node_public_hosts(
+            self.node,
+            public_address=public_address,
+        )
+
+        self.assertTrue(ok)
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["changed_tags"], [])
+        matches = marzban_admin.find_node_generated_hosts(
+            state,
+            self.node,
+            public_address=public_address,
+        )
+        self.assertEqual(len(matches), len(marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS))
         self.service.request.assert_not_awaited()
 
     async def test_missing_required_inbound_fails_closed_before_writes(self):

@@ -107,6 +107,7 @@ import marzban_observability
 import market_commerce
 import market_customer
 import market_wallet
+import market_orders
 import secrets
 
 import base64
@@ -4287,11 +4288,16 @@ def _db_cancel_reservation(un: str):
     with db_conn() as conn:
         conn.execute("DELETE FROM ssh_accounts WHERE username=? AND status='⏳ درحال ساخت'", (un,))
 
-def _db_finalize_reserved_user(un, pw, exp, cr, lim, cnt, br, agid=0, conn_mode='direct', hold_deadline=None, hold_duration_days=None, host=None):
+def _db_finalize_reserved_user(
+    un, pw, exp, cr, lim, cnt, br, agid=0, conn_mode='direct',
+    hold_deadline=None, hold_duration_days=None, host=None,
+    customer_id=None, market_order_id=None,
+):
     """Finalize one reserved SSH account atomically with its owning Edge.
 
-    Phase 6G forbids this transition while a manual failover is RUNNING so an
-    account cannot become active between the rebuild snapshot and final handoff.
+    Legacy Agent/Admin callers leave customer_id/market_order_id as NULL.
+    Direct Market passes both values so ownership and billing order are bound
+    before wallet capture.
     """
     if not host:
         raise RuntimeError("SSH_ACCOUNT_HOST_REQUIRED")
@@ -4300,12 +4306,13 @@ def _db_finalize_reserved_user(un, pw, exp, cr, lim, cnt, br, agid=0, conn_mode=
         _db_assert_account_write_allowed(conn)
         cur = conn.execute(
             "UPDATE ssh_accounts SET password=?, expire_date=?, creation_date=?, users_limit=?, status='🟢 فعال', "
-            "agent_id=?, conn_mode=?, hold_active=?, hold_deadline=?, hold_duration_days=?, host=? "
+            "agent_id=?, conn_mode=?, hold_active=?, hold_deadline=?, hold_duration_days=?, host=?, "
+            "service_type='ssh', customer_id=?, market_order_id=? "
             "WHERE username=? AND status='⏳ درحال ساخت'",
             (
                 pw, exp, cr, lim, agid, conn_mode,
                 1 if hold_deadline else 0, hold_deadline, hold_duration_days,
-                host, un,
+                host, customer_id, market_order_id, un,
             ),
         )
         if cur.rowcount != 1:
@@ -6627,6 +6634,580 @@ def _db_reject_market_topup(receipt_id, reviewer_chat_id):
             conn,
             receipt_id=receipt_id,
             reviewer_chat_id=reviewer_chat_id,
+        )
+
+
+def _db_market_list_ssh_plans():
+    with db_conn() as conn:
+        return market_orders.list_active_ssh_plans(conn)
+
+
+def _db_market_get_ssh_plan(plan_id):
+    with db_conn() as conn:
+        return market_orders.get_ssh_plan(conn, plan_id, require_active=True)
+
+
+def _db_market_create_ssh_order(customer_id, plan_id, idempotency_key):
+    with db_conn() as conn:
+        return market_orders.create_ssh_order_and_reserve(
+            conn,
+            customer_id=customer_id,
+            plan_id=plan_id,
+            idempotency_key=idempotency_key,
+        )
+
+
+def _db_market_claim_ssh_order(order_id, customer_id):
+    with db_conn() as conn:
+        return market_orders.claim_order_for_provisioning(
+            conn,
+            order_id=order_id,
+            customer_id=customer_id,
+        )
+
+
+def _db_market_set_provisioning_target(order_id, customer_id, username, host):
+    with db_conn() as conn:
+        return market_orders.set_provisioning_target(
+            conn,
+            order_id=order_id,
+            customer_id=customer_id,
+            service_username=username,
+            service_host=host,
+        )
+
+
+def _db_market_complete_ssh_order(order_id, customer_id):
+    with db_conn() as conn:
+        return market_orders.complete_ssh_order(
+            conn,
+            order_id=order_id,
+            customer_id=customer_id,
+        )
+
+
+def _db_market_fail_ssh_order(order_id, customer_id, reason):
+    with db_conn() as conn:
+        return market_orders.fail_ssh_order_and_release(
+            conn,
+            order_id=order_id,
+            customer_id=customer_id,
+            failure_reason=reason,
+        )
+
+
+def _db_market_mark_order_recovery(order_id, customer_id, reason):
+    with db_conn() as conn:
+        return market_orders.mark_order_recovery_required(
+            conn,
+            order_id=order_id,
+            customer_id=customer_id,
+            reason=reason,
+        )
+
+
+def _db_delete_market_ssh_artifact(username, customer_id, order_id):
+    """Delete only a reservation/service provably owned by this market attempt."""
+    with db_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT status, agent_id, customer_id, market_order_id
+            FROM ssh_accounts WHERE username=?
+            """,
+            (username,),
+        ).fetchone()
+        if not row:
+            return True
+        status, agent_id, row_customer_id, row_order_id = row
+        finalized_owned = (
+            int(agent_id or 0) == 0
+            and row_customer_id == int(customer_id)
+            and row_order_id == int(order_id)
+        )
+        reserved_owned = (
+            status == '⏳ درحال ساخت'
+            and int(agent_id or 0) == 0
+            and row_customer_id is None
+            and row_order_id is None
+        )
+        if not (finalized_owned or reserved_owned):
+            raise RuntimeError("MARKET_SSH_CLEANUP_OWNERSHIP_MISMATCH")
+        cur = conn.execute(
+            "DELETE FROM ssh_accounts WHERE username=?",
+            (username,),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError("MARKET_SSH_CLEANUP_DELETE_MISMATCH")
+        return True
+
+
+async def _show_market_ssh_plans(target, context):
+    customer_id = context.user_data.get('customer_id')
+    if not customer_id:
+        await target.reply_text("❌ هویت مشتری نامعتبر است؛ /start را دوباره ارسال کنید.")
+        return
+    plans, wallet = await asyncio.gather(
+        asyncio.to_thread(_db_market_list_ssh_plans),
+        asyncio.to_thread(_db_get_market_wallet, customer_id),
+    )
+    if not plans:
+        await target.reply_text(
+            "🛒 در حال حاضر پلن SSH فعالی برای فروش مستقیم تنظیم نشده است."
+        )
+        return
+    lines = [
+        "🛒 <b>خرید اشتراک SSH</b>",
+        "━━━━━━━━━━━━━━",
+        f"موجودی قابل استفاده: <b>{wallet['available_toman']:,} تومان</b>",
+        "",
+        "یک پلن را انتخاب کنید:",
+    ]
+    kb = []
+    for plan in plans:
+        lines.append(
+            f"• <b>{esc(plan['title'])}</b> — {plan['duration_days']} روز، "
+            f"{plan['users_limit']} کاربر، {plan['price_toman']:,} تومان"
+        )
+        kb.append([
+            InlineKeyboardButton(
+                f"{plan['title']} — {plan['price_toman']:,} تومان",
+                callback_data=f"mkt_ssh_plan_{plan['id']}",
+            )
+        ])
+    kb.append([InlineKeyboardButton("💰 کیف پول", callback_data="mkt_wallet_home")])
+    await target.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="HTML",
+    )
+
+
+async def _show_market_ssh_plan_confirm(query, context, plan_id):
+    customer_id = context.user_data.get('customer_id')
+    plan, wallet = await asyncio.gather(
+        asyncio.to_thread(_db_market_get_ssh_plan, plan_id),
+        asyncio.to_thread(_db_get_market_wallet, customer_id),
+    )
+    if not plan:
+        await query.edit_message_text("❌ این پلن دیگر برای فروش فعال نیست.")
+        return
+    enough = wallet['available_toman'] >= plan['price_toman']
+    nonce = secrets.token_hex(6)
+    lines = [
+        "🧾 <b>تایید خرید SSH</b>",
+        "━━━━━━━━━━━━━━",
+        f"پلن: <b>{esc(plan['title'])}</b>",
+        f"مدت: {plan['duration_days']} روز",
+        f"تعداد کاربر: {plan['users_limit']}",
+        f"مبلغ: <b>{plan['price_toman']:,} تومان</b>",
+        f"موجودی قابل استفاده: {wallet['available_toman']:,} تومان",
+    ]
+    if not enough:
+        lines.append("\n❌ موجودی کیف پول برای این خرید کافی نیست.")
+        kb = [
+            [InlineKeyboardButton("➕ افزایش موجودی", callback_data="mkt_wallet_topup")],
+            [InlineKeyboardButton("↩️ پلن‌ها", callback_data="mkt_ssh_plans")],
+        ]
+    else:
+        lines.append(
+            "\nپس از تایید، مبلغ ابتدا رزرو می‌شود و فقط بعد از ساخت موفق سرویس کسر خواهد شد."
+        )
+        kb = [
+            [InlineKeyboardButton(
+                "✅ تایید و خرید",
+                callback_data=f"mkt_ssh_buy_{plan['id']}_{nonce}",
+            )],
+            [InlineKeyboardButton("↩️ پلن‌ها", callback_data="mkt_ssh_plans")],
+        ]
+    await query.edit_message_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="HTML",
+    )
+
+
+async def _cleanup_market_ssh_provisioning(username, customer_id, order_id):
+    """Best-effort compensation; returns (safe_to_release_funds, detail)."""
+    details = []
+    try:
+        exists = await _os_user_exists(username)
+    except Exception as exc:
+        return False, f"OS existence check failed: {exc}"
+
+    if exists:
+        ok_del, err_del, _kind = await run_cmd("sudo", "userdel", "-f", username)
+        if not ok_del:
+            try:
+                still_exists = await _os_user_exists(username)
+            except Exception as exc:
+                return False, f"userdel failed and recheck failed: {err_del}; {exc}"
+            if still_exists:
+                return False, f"userdel failed and Linux user still exists: {err_del}"
+        details.append("linux-user-removed")
+
+    with contextlib.suppress(Exception):
+        await _remove_user_limit_file(username)
+
+    try:
+        await asyncio.to_thread(
+            _db_delete_market_ssh_artifact,
+            username,
+            customer_id,
+            order_id,
+        )
+        details.append("db-artifact-removed")
+    except Exception as exc:
+        return False, f"DB cleanup failed: {exc}"
+
+    return True, ", ".join(details) or "nothing-to-clean"
+
+
+async def _provision_market_ssh_order(order):
+    """Provision one SSH account without touching Agent finance."""
+    order_id = order['id']
+    customer_id = order['customer_id']
+    duration_days = int(order['duration_days'])
+    users_limit = int(order['users_limit'])
+    conn_mode = order.get('connection_mode') or 'direct'
+
+    br = (await asyncio.to_thread(_db_get_setting, 'brand', 'NeVeL')).lower().strip()
+    br = re.sub(r'[^a-z0-9]', '', br) or "nevel"
+    c_start = await asyncio.to_thread(_db_get_prefix_start_counter, br)
+    username = None
+    target_host = await asyncio.to_thread(_pick_target_host_for_new_account)
+    target_port = await asyncio.to_thread(_db_get_host_service_port, target_host, 22)
+    max_retries = 500
+
+    try:
+        username, counter = await asyncio.to_thread(_db_reserve_username, br, c_start)
+        if username is None:
+            return {"ok": False, "safe_to_release": True, "error": "USERNAME_RESERVATION_EXHAUSTED"}
+
+        # Linux users live on Core in the active Relay topology. Check Core first,
+        # then still retain the useradd duplicate retry below for race safety.
+        retries = 0
+        while await _os_user_exists(username) and retries < max_retries:
+            await asyncio.to_thread(_db_cancel_reservation, username)
+            username, counter = await asyncio.to_thread(
+                _db_reserve_username, br, counter + 1
+            )
+            if username is None:
+                return {"ok": False, "safe_to_release": True, "error": "USERNAME_RESERVATION_EXHAUSTED"}
+            retries += 1
+
+        await asyncio.to_thread(
+            _db_market_set_provisioning_target,
+            order_id,
+            customer_id,
+            username,
+            target_host,
+        )
+
+        password = "".join(random.choices(string.digits, k=5))
+        now = datetime.now()
+        hold_sched = await asyncio.to_thread(
+            _prepare_hidden_hold_for_new_account,
+            username,
+            duration_days,
+        )
+        os_exp_db = hold_sched.linux_expire_date
+        exp_db = hold_sched.visible_expire_date
+        created_db = now.strftime("%Y-%m-%d")
+
+        useradd_retries = 0
+        while True:
+            ok_add, err_add, kind_add = await run_cmd(
+                "sudo", "useradd", "-s", "/bin/false", "-e", os_exp_db, username
+            )
+            if ok_add:
+                break
+            if "already exists" in (err_add or "").lower() and useradd_retries < max_retries:
+                await asyncio.to_thread(_db_cancel_reservation, username)
+                username, counter = await asyncio.to_thread(
+                    _db_reserve_username, br, counter + 1
+                )
+                if username is None:
+                    return {"ok": False, "safe_to_release": True, "error": "USERNAME_RESERVATION_EXHAUSTED"}
+                await asyncio.to_thread(
+                    _db_market_set_provisioning_target,
+                    order_id,
+                    customer_id,
+                    username,
+                    target_host,
+                )
+                useradd_retries += 1
+                continue
+            await asyncio.to_thread(_db_cancel_reservation, username)
+            return {
+                "ok": False,
+                "safe_to_release": True,
+                "error": f"USERADD_FAILED:{kind_add}:{err_add}",
+            }
+
+        ok_pw, err_pw, kind_pw = await run_cmd(
+            "sudo", "chpasswd", input_data=f"{username}:{password}\n".encode()
+        )
+        if not ok_pw:
+            safe, detail = await _cleanup_market_ssh_provisioning(
+                username, customer_id, order_id
+            )
+            return {
+                "ok": False,
+                "safe_to_release": safe,
+                "error": f"CHPASSWD_FAILED:{kind_pw}:{err_pw}; cleanup={detail}",
+            }
+
+        try:
+            await asyncio.to_thread(
+                _db_finalize_reserved_user,
+                username,
+                password,
+                exp_db,
+                created_db,
+                users_limit,
+                str(counter + 1).zfill(4),
+                br,
+                0,
+                conn_mode,
+                hold_sched.hold_deadline,
+                duration_days,
+                target_host,
+                customer_id,
+                order_id,
+            )
+        except Exception as exc:
+            safe, detail = await _cleanup_market_ssh_provisioning(
+                username, customer_id, order_id
+            )
+            return {
+                "ok": False,
+                "safe_to_release": safe,
+                "error": f"DB_FINALIZE_FAILED:{exc}; cleanup={detail}",
+            }
+
+        # Same as the legacy flow: PAM limit sync is best-effort and is not the
+        # accounting commit point.
+        await _sync_user_limit_file(username, users_limit)
+
+        return {
+            "ok": True,
+            "username": username,
+            "password": password,
+            "host": target_host,
+            "port": target_port,
+        }
+    except Exception as exc:
+        if username:
+            safe, detail = await _cleanup_market_ssh_provisioning(
+                username, customer_id, order_id
+            )
+        else:
+            safe, detail = True, "no-service-created"
+        return {
+            "ok": False,
+            "safe_to_release": safe,
+            "error": f"UNEXPECTED_PROVISIONING_ERROR:{exc}; cleanup={detail}",
+        }
+
+
+async def _notify_market_order_recovery(context, order, reason):
+    with contextlib.suppress(Exception):
+        await _notify_admins(
+            context.application,
+            (
+                "🚨 <b>Direct Market — سفارش نیازمند بررسی</b>\n\n"
+                f"Order: <code>{esc(order['order_no'])}</code>\n"
+                f"Customer ID: <code>{order['customer_id']}</code>\n"
+                f"مبلغ رزرو‌شده: <b>{order['price_toman']:,} تومان</b>\n"
+                f"Service: <code>{esc(order.get('service_username') or '—')}</code>\n"
+                f"علت: <code>{esc(str(reason)[:500])}</code>\n\n"
+                "⚠️ مبلغ آزاد نشده است تا سرویس و تسویه دستی بررسی شوند."
+            ),
+        )
+
+
+async def _execute_market_ssh_purchase(query, context, plan_id, nonce):
+    customer_id = context.user_data.get('customer_id')
+    idempotency_key = f"market-ssh:{customer_id}:{nonce}"
+
+    try:
+        created = await asyncio.to_thread(
+            _db_market_create_ssh_order,
+            customer_id,
+            plan_id,
+            idempotency_key,
+        )
+    except market_orders.InsufficientFundsError as exc:
+        await query.edit_message_text(
+            f"❌ موجودی کافی نیست.\n\n"
+            f"مبلغ لازم: {exc.required_toman:,} تومان\n"
+            f"موجودی قابل استفاده: {exc.available_toman:,} تومان",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ افزایش موجودی", callback_data="mkt_wallet_topup")],
+                [InlineKeyboardButton("↩️ پلن‌ها", callback_data="mkt_ssh_plans")],
+            ]),
+        )
+        return
+    except market_orders.PlanUnavailableError:
+        await query.edit_message_text("❌ این پلن دیگر برای فروش فعال نیست.")
+        return
+    except Exception:
+        log.exception("Direct Market order creation failed customer=%s plan=%s", customer_id, plan_id)
+        await query.edit_message_text("❌ ایجاد سفارش ناموفق بود؛ هیچ مبلغی کسر نشد.")
+        return
+
+    order = created['order']
+    if order['status'] == market_orders.ORDER_COMPLETED:
+        invoice = await _build_invoice_text(order['service_username'])
+        await query.edit_message_text(
+            f"✅ این سفارش قبلاً تکمیل شده است.\n\n{invoice or ''}",
+            parse_mode="HTML",
+        )
+        return
+    if order['status'] == market_orders.ORDER_FAILED:
+        await query.edit_message_text(
+            f"❌ این تلاش خرید قبلاً ناموفق شده است.\nOrder: <code>{esc(order['order_no'])}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        claim = await asyncio.to_thread(
+            _db_market_claim_ssh_order,
+            order['id'],
+            customer_id,
+        )
+    except Exception:
+        log.exception("Direct Market order claim failed order=%s", order['id'])
+        await query.edit_message_text(
+            "⚠️ سفارش ثبت شده اما شروع Provisioning ممکن نشد. مبلغ فقط رزرو شده و کسر نشده است."
+        )
+        return
+
+    if claim['outcome'] == 'in_progress':
+        await query.edit_message_text(
+            f"⏳ سفارش <code>{esc(order['order_no'])}</code> در حال پردازش است؛ "
+            "درخواست تکراری سرویس جدیدی ایجاد نکرد.",
+            parse_mode="HTML",
+        )
+        return
+    if claim['outcome'] == 'completed':
+        invoice = await _build_invoice_text(claim['order']['service_username'])
+        await query.edit_message_text(
+            f"✅ سفارش قبلاً تکمیل شده است.\n\n{invoice or ''}",
+            parse_mode="HTML",
+        )
+        return
+    if claim['outcome'] == 'failed':
+        await query.edit_message_text("❌ این سفارش قبلاً ناموفق شده است.")
+        return
+
+    order = claim['order']
+    await query.edit_message_text(
+        f"⏳ سفارش <code>{esc(order['order_no'])}</code> ثبت شد.\n"
+        f"مبلغ {order['price_toman']:,} تومان رزرو شده و ساخت SSH در حال انجام است...",
+        parse_mode="HTML",
+    )
+
+    provision = await _provision_market_ssh_order(order)
+    if not provision.get('ok'):
+        reason = provision.get('error') or "provisioning failed"
+        if provision.get('safe_to_release'):
+            try:
+                failed = await asyncio.to_thread(
+                    _db_market_fail_ssh_order,
+                    order['id'],
+                    customer_id,
+                    reason,
+                )
+                await query.edit_message_text(
+                    "❌ ساخت سرویس ناموفق بود.\n"
+                    f"Order: <code>{esc(order['order_no'])}</code>\n\n"
+                    "✅ رزرو کیف پول آزاد شد و هیچ مبلغی کسر نشد.",
+                    parse_mode="HTML",
+                )
+                return
+            except Exception:
+                log.exception("Direct Market safe release failed order=%s", order['id'])
+
+        recovery = await asyncio.to_thread(
+            _db_market_mark_order_recovery,
+            order['id'],
+            customer_id,
+            reason,
+        )
+        await _notify_market_order_recovery(context, recovery, reason)
+        await query.edit_message_text(
+            "⚠️ ساخت سرویس با وضعیت نامطمئن متوقف شد.\n\n"
+            "مبلغ <b>کسر نشده</b> اما برای جلوگیری از سرویس رایگان، همچنان رزرو است. "
+            "مدیریت به‌صورت خودکار مطلع شد.",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        completed = await asyncio.to_thread(
+            _db_market_complete_ssh_order,
+            order['id'],
+            customer_id,
+        )
+    except Exception as exc:
+        log.exception("Direct Market wallet capture failed order=%s", order['id'])
+        safe, cleanup_detail = await _cleanup_market_ssh_provisioning(
+            provision['username'],
+            customer_id,
+            order['id'],
+        )
+        reason = f"CAPTURE_FAILED:{exc}; cleanup={cleanup_detail}"
+        if safe:
+            try:
+                await asyncio.to_thread(
+                    _db_market_fail_ssh_order,
+                    order['id'],
+                    customer_id,
+                    reason,
+                )
+                await query.edit_message_text(
+                    "❌ تسویه سفارش انجام نشد؛ سرویس ساخته‌شده Rollback شد و رزرو کیف پول آزاد شد. "
+                    "هیچ مبلغی کسر نشده است."
+                )
+                return
+            except Exception:
+                log.exception("Direct Market post-capture release failed order=%s", order['id'])
+
+        recovery = await asyncio.to_thread(
+            _db_market_mark_order_recovery,
+            order['id'],
+            customer_id,
+            reason,
+        )
+        await _notify_market_order_recovery(context, recovery, reason)
+        await query.edit_message_text(
+            "🚨 تسویه سفارش با وضعیت نامطمئن مواجه شد. مبلغ آزاد نشده و مدیریت مطلع شده است."
+        )
+        return
+
+    invoice = await _build_invoice_text(provision['username'])
+    wallet = completed['wallet']
+    text = (
+        "✅ <b>خرید با موفقیت انجام شد</b>\n"
+        f"Order: <code>{esc(completed['order']['order_no'])}</code>\n"
+        f"مبلغ کسرشده: <b>{completed['order']['price_toman']:,} تومان</b>\n"
+        f"مانده کیف پول: {wallet['balance_toman']:,} تومان\n\n"
+        f"{invoice or ('username: <code>' + esc(provision['username']) + '</code>')}"
+    )
+    await query.edit_message_text(text, parse_mode="HTML")
+    with contextlib.suppress(Exception):
+        await _notify_admins(
+            context.application,
+            (
+                "🛒 <b>فروش مستقیم SSH تکمیل شد</b>\n"
+                f"Order: <code>{esc(completed['order']['order_no'])}</code>\n"
+                f"Customer ID: <code>{customer_id}</code>\n"
+                f"Service: <code>{esc(provision['username'])}</code>\n"
+                f"مبلغ: {completed['order']['price_toman']:,} تومان"
+            ),
         )
 
 
@@ -12170,10 +12751,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Direct Market customer is a separate actor. Never let customer text
         # fall through into legacy Agent/Admin menu actions.
         if role == market_customer.ROLE_CUSTOMER:
+            if not await asyncio.to_thread(_db_direct_market_enabled):
+                context.user_data.clear()
+                await update.message.reply_text(
+                    "⛔️ فروش مستقیم در حال حاضر غیرفعال است. برای ورود مجدد /start را ارسال کنید.",
+                    reply_markup=ReplyKeyboardMarkup([['/start']], resize_keyboard=True),
+                )
+                return
             if text == market_customer.BUTTON_AGENT_LOGIN:
                 context.user_data.clear()
                 context.user_data['state'] = 'LOGIN_USER'
                 await require_portal_login(update)
+                return
+            if text == market_customer.BUTTON_BUY:
+                await _show_market_ssh_plans(update.message, context)
                 return
             if text == market_customer.BUTTON_WALLET:
                 await _show_market_wallet(update.message, context)
@@ -12372,6 +12963,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Customer sessions never enter legacy Agent/Admin state machines.
     if role == market_customer.ROLE_CUSTOMER:
+        if not await asyncio.to_thread(_db_direct_market_enabled):
+            context.user_data.clear()
+            await update.message.reply_text(
+                "⛔️ فروش مستقیم در حال حاضر غیرفعال است. برای ادامه /start را ارسال کنید.",
+                reply_markup=ReplyKeyboardMarkup([['/start']], resize_keyboard=True),
+            )
+            return
         if state == 'MARKET_TOPUP_AMOUNT':
             raw_amount = fa_to_en_digits(text).replace(',', '').replace('٬', '').strip()
             try:
@@ -13416,6 +14014,10 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     role = context.user_data.get('role')
 
     if state == 'MARKET_TOPUP_PHOTO' and role == market_customer.ROLE_CUSTOMER:
+        if not await asyncio.to_thread(_db_direct_market_enabled):
+            context.user_data.clear()
+            await update.message.reply_text("⛔️ فروش مستقیم در حال حاضر غیرفعال است؛ رسید ثبت نشد.")
+            return
         customer_id = context.user_data.get('customer_id')
         amount = context.user_data.get('market_topup_amount')
         if not customer_id or not amount:
@@ -15631,6 +16233,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Direct Market customer callbacks are explicit allowlist entries. All
     # legacy Admin/Agent callbacks remain fail-closed for this role.
     if role == market_customer.ROLE_CUSTOMER:
+        if not await asyncio.to_thread(_db_direct_market_enabled):
+            context.user_data.clear()
+            await query.message.reply_text("⛔️ فروش مستقیم در حال حاضر غیرفعال است. /start")
+            return
         if d == 'mkt_wallet_home':
             safe_clear_context(context)
             await _show_market_wallet(query, context, edit=True)
@@ -15642,6 +16248,34 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "مبلغ موردنظر را به تومان و فقط به‌صورت عدد ارسال کنید.",
                 parse_mode="HTML",
             )
+            return
+        if d == 'mkt_ssh_plans':
+            safe_clear_context(context)
+            await _show_market_ssh_plans(query.message, context)
+            return
+        if d.startswith('mkt_ssh_plan_'):
+            try:
+                plan_id = int(d.rsplit('_', 1)[1])
+            except (TypeError, ValueError):
+                await query.message.reply_text("❌ شناسه پلن نامعتبر است.")
+                return
+            await _show_market_ssh_plan_confirm(query, context, plan_id)
+            return
+        if d.startswith('mkt_ssh_buy_'):
+            parts = d.split('_')
+            if len(parts) != 5:
+                await query.message.reply_text("❌ درخواست خرید نامعتبر است.")
+                return
+            try:
+                plan_id = int(parts[3])
+            except (TypeError, ValueError):
+                await query.message.reply_text("❌ شناسه پلن نامعتبر است.")
+                return
+            nonce = parts[4]
+            if not re.fullmatch(r'[0-9a-f]{12}', nonce):
+                await query.message.reply_text("❌ شناسه خرید نامعتبر است.")
+                return
+            await _execute_market_ssh_purchase(query, context, plan_id, nonce)
             return
         await query.message.reply_text("⛔️ این عملیات برای حساب مشتری در دسترس نیست.")
         return

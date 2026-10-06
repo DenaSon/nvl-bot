@@ -161,7 +161,7 @@ class DirectMarketRoutingTests(unittest.TestCase):
         )
         self.assertEqual(
             set(market_customer.CUSTOMER_PLACEHOLDER_LABELS),
-            {"🛒 خرید اشتراک", "📦 سرویس‌های من"},
+            {"📦 سرویس‌های من"},
         )
         for label in market_customer.CUSTOMER_PLACEHOLDER_LABELS:
             self.assertTrue(market_customer.phase2_placeholder_text(label))

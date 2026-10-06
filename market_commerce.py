@@ -14,7 +14,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Set
 
-DIRECT_MARKET_SCHEMA_VERSION = 2
+DIRECT_MARKET_SCHEMA_VERSION = 3
 DIRECT_MARKET_FLAG_KEY = "direct_market_enabled"
 
 
@@ -61,6 +61,15 @@ def install_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_ssh_accounts_customer_id "
         "ON ssh_accounts(customer_id)"
+    )
+    if "market_order_id" not in _table_columns(conn, "ssh_accounts"):
+        conn.execute(
+            "ALTER TABLE ssh_accounts "
+            "ADD COLUMN market_order_id INTEGER DEFAULT NULL"
+        )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_ssh_accounts_market_order_id "
+        "ON ssh_accounts(market_order_id) WHERE market_order_id IS NOT NULL"
     )
 
     conn.execute(
@@ -139,10 +148,35 @@ def install_schema(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             completed_at TEXT DEFAULT NULL,
+            duration_days INTEGER DEFAULT NULL,
+            users_limit INTEGER DEFAULT NULL,
+            connection_mode TEXT NOT NULL DEFAULT 'direct',
+            service_host TEXT DEFAULT NULL,
+            purchase_transaction_id INTEGER DEFAULT NULL,
+            provisioning_started_at TEXT DEFAULT NULL,
+            failed_at TEXT DEFAULT NULL,
             FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE RESTRICT,
             FOREIGN KEY(plan_id) REFERENCES market_plans(id) ON DELETE RESTRICT
         )
         """
+    )
+
+    order_columns = _table_columns(conn, "orders")
+    for column_name, ddl in (
+        ("duration_days", "INTEGER DEFAULT NULL"),
+        ("users_limit", "INTEGER DEFAULT NULL"),
+        ("connection_mode", "TEXT NOT NULL DEFAULT 'direct'"),
+        ("service_host", "TEXT DEFAULT NULL"),
+        ("purchase_transaction_id", "INTEGER DEFAULT NULL"),
+        ("provisioning_started_at", "TEXT DEFAULT NULL"),
+        ("failed_at", "TEXT DEFAULT NULL"),
+    ):
+        if column_name not in order_columns:
+            conn.execute(f"ALTER TABLE orders ADD COLUMN {column_name} {ddl}")
+
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_purchase_transaction_id "
+        "ON orders(purchase_transaction_id) WHERE purchase_transaction_id IS NOT NULL"
     )
 
     conn.execute(

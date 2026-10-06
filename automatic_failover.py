@@ -22,6 +22,7 @@ AUTO_FAILOVER_REASON_DIFFERENTIAL_NOT_CONFIRMED = "DIFFERENTIAL_NOT_CONFIRMED"
 AUTO_FAILOVER_REASON_DIFFERENTIAL_STALE = "DIFFERENTIAL_STALE"
 AUTO_FAILOVER_REASON_FAILURE_STREAK_LOW = "FAILURE_STREAK_LOW"
 AUTO_FAILOVER_REASON_PROVIDER_NOT_OK = "PROVIDER_NOT_OK"
+AUTO_FAILOVER_REASON_WIDESPREAD_OUTAGE = "WIDESPREAD_NETWORK_OUTAGE"
 AUTO_FAILOVER_REASON_SWITCH_COOLDOWN = "SWITCH_COOLDOWN_ACTIVE"
 AUTO_FAILOVER_REASON_ATTEMPT_COOLDOWN = "ATTEMPT_COOLDOWN_ACTIVE"
 AUTO_FAILOVER_REASON_NO_STANDBY = "NO_SAFE_STANDBY"
@@ -52,6 +53,7 @@ def evaluate_auto_failover(
     seconds_since_last_attempt: int,
     attempt_cooldown_seconds: int,
     safe_standby_count: int,
+    external_context_blocks_auto_failover: bool = False,
 ) -> AutoFailoverDecision:
     """Fail-closed Phase 6H policy.
 
@@ -71,6 +73,11 @@ def evaluate_auto_failover(
         return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_CONFIDENCE_NOT_HIGH)
     if str(diagnostic_reason or "").upper() != "FILTER_SUSPECTED":
         return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_DIAGNOSTIC_NOT_FILTER)
+    # External Radar context has a negative-only role. A fresh explicit widespread
+    # outage blocks AUTO before differential/cooldown evaluation so the operator
+    # sees one stable root cause instead of secondary block reasons.
+    if bool(external_context_blocks_auto_failover):
+        return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_WIDESPREAD_OUTAGE)
     if not bool(differential_confirmed):
         return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_DIFFERENTIAL_NOT_CONFIRMED)
     try:

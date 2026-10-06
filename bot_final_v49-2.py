@@ -16896,14 +16896,35 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             node_id,
         )
         if protected_profile:
+            if str(protected_profile.get("profile_state") or "").lower() != "verified":
+                await query.edit_message_text(
+                    "🛡 <b>Safe Node Move متوقف شد.</b> Stable Public Endpoint ابتدا باید verified باشد.\n\n"
+                    f"Public Endpoint: <code>{esc(protected_profile.get('public_address'))}</code>\n"
+                    f"Profile: <code>{esc(protected_profile.get('profile_state') or 'pending')}</code>",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🛠 Repair Public Endpoint", callback_data=f"mza_nrepair_{node_id}")],
+                        [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_node_{node_id}")],
+                    ]),
+                )
+                return
+            _mza_clear_node_move(
+                context,
+                cancel_session=True,
+                chat_id=query.message.chat_id,
+            )
+            context.user_data['state'] = 'MZA_NODE_MOVE_ADDRESS_INPUT'
+            context.user_data['mza_action_node'] = node_id
             await query.edit_message_text(
-                "🛡 <b>تغییر آدرس این Node در V123A عمداً قفل است.</b>\n\n"
-                f"Public Endpoint: <code>{esc(protected_profile.get('public_address'))}</code>\n\n"
-                "تغییر IP باید همراه با Verify دامنه عمومی و lifecycle امن انجام شود؛ "
-                "این مسیر در V123B اضافه می‌شود.",
+                "🌐 <b>V123B.3.2 · Safe Node Move / Change IP</b>\n"
+                "━━━━━━━━━━━━━━\n"
+                f"Public Endpoint  <code>{esc(protected_profile.get('public_address'))}</code>\n\n"
+                "IP یا hostname واقعی <b>سرور مقصد</b> را بفرستید.\n\n"
+                "NVL ابتدا مقصد را با SSH بررسی و Marzban-node + Certificate را آماده می‌کند. "
+                "در این مرحله Node ID، DNS و Public Hostها تغییر نمی‌کنند.",
                 parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_node_{node_id}")]
+                    [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nmove_cancel_{node_id}")]
                 ]),
             )
             return

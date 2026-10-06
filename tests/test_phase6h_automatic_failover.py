@@ -11,6 +11,7 @@ from automatic_failover import (
     AUTO_FAILOVER_REASON_PROVIDER_NOT_OK,
     AUTO_FAILOVER_REASON_READY,
     AUTO_FAILOVER_REASON_SWITCH_COOLDOWN,
+    AUTO_FAILOVER_REASON_WIDESPREAD_OUTAGE,
     evaluate_auto_failover,
     is_safe_standby_evidence,
     rank_safe_standbys,
@@ -87,6 +88,16 @@ class Phase6HPolicyTests(unittest.TestCase):
         decision = evaluate_auto_failover(**kwargs)
         self.assertFalse(decision.eligible)
         self.assertEqual(decision.reason, AUTO_FAILOVER_REASON_PROVIDER_NOT_OK)
+
+    def test_fresh_external_widespread_outage_blocks_auto_only(self):
+        kwargs = ready_kwargs()
+        kwargs["external_context_blocks_auto_failover"] = True
+        decision = evaluate_auto_failover(**kwargs)
+        self.assertFalse(decision.eligible)
+        self.assertEqual(
+            decision.reason,
+            AUTO_FAILOVER_REASON_WIDESPREAD_OUTAGE,
+        )
 
     def test_switch_cooldown_blocks_flapping(self):
         kwargs = ready_kwargs()

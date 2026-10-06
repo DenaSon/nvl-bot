@@ -156,7 +156,11 @@ class RadarRuntimePersistenceTests(unittest.TestCase):
         source = BOT_PATH.read_text(encoding="utf-8")
         self.assertIn("import radar_runtime", source)
         self.assertIn(
-            "radar_monitor = radar_runtime.RadarMonitor(DB_PATH)",
+            "radar_monitor = radar_runtime.RadarMonitor(",
+            source,
+        )
+        self.assertIn(
+            "on_snapshot=_handle_radar_snapshot",
             source,
         )
         self.assertIn(
@@ -191,6 +195,30 @@ class FakeApp:
 
 
 class RadarMonitorAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tick_invokes_optional_snapshot_callback_after_persist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = str(pathlib.Path(tmp) / "radar.db")
+            seen = []
+
+            async def on_snapshot(app, snapshot):
+                seen.append((
+                    snapshot.state,
+                    load_latest_radar_snapshot(db_path)["state"],
+                ))
+
+            monitor = RadarMonitor(
+                db_path,
+                client=FakeClient(),
+                interval_seconds=60,
+                initial_delay_seconds=0,
+                on_snapshot=on_snapshot,
+            )
+            app = FakeApp()
+
+            await monitor.tick(app)
+
+            self.assertEqual(seen, [("NORMAL", "NORMAL")])
+
     async def test_tick_updates_cache_and_persistence(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = str(pathlib.Path(tmp) / "radar.db")

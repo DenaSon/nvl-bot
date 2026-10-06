@@ -95,6 +95,8 @@ import v2ray_engine
 import marzban_admin
 import cloudflare_dns
 import radar_runtime
+import radar_notifications
+import radar_ui
 import marzban_node_bootstrap
 import marzban_node_install
 import marzban_asset_discovery
@@ -705,6 +707,15 @@ REGIONAL_PROVIDER_RECOVERY_SUCCESS_THRESHOLD = _phase6c_env_int(
 )
 REGIONAL_PROVIDER_ALERT_REPEAT_SECONDS = _phase6c_env_int(
     "NVL_REGIONAL_PROVIDER_ALERT_REPEAT_SECONDS", 1800
+)
+
+# Radar V3 — low-noise transition notifications. Provider failures remain
+# visible in monitoring UI/logs and never notify admins by themselves.
+RADAR_NOTIFICATION_DEGRADED_CONFIRM_ROUNDS = _phase6c_env_int(
+    "NVL_RADAR_DEGRADED_CONFIRM_ROUNDS", 2, minimum=1, maximum=6
+)
+RADAR_NOTIFICATION_RECOVERY_CONFIRM_ROUNDS = _phase6c_env_int(
+    "NVL_RADAR_RECOVERY_CONFIRM_ROUNDS", 2, minimum=1, maximum=6
 )
 
 FAST_SENTINEL_INTERVAL_SECONDS = _phase6c_env_int("NVL_FAST_SENTINEL_INTERVAL", 15)
@@ -13557,12 +13568,143 @@ def _failover_status_label_fa(value):
     return labels.get(str(value or "").upper(), "نامشخص")
 
 
+def _radar_notification_runtime():
+    def _int_setting(key, default="0"):
+        try:
+            return max(0, int(_db_get_setting(key, default)))
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        "effective_state": _db_get_setting(
+            "radar_notify_effective_state",
+            "UNKNOWN",
+        ),
+        "degraded_streak": _int_setting("radar_notify_degraded_streak"),
+        "normal_streak": _int_setting("radar_notify_normal_streak"),
+    }
+
+
+def _store_radar_notification_runtime(decision):
+    _db_update_setting(
+        "radar_notify_effective_state",
+        decision.effective_state,
+    )
+    _db_update_setting(
+        "radar_notify_degraded_streak",
+        str(decision.degraded_streak),
+    )
+    _db_update_setting(
+        "radar_notify_normal_streak",
+        str(decision.normal_streak),
+    )
+    if decision.notify:
+        _db_update_setting("radar_notify_last_kind", decision.kind)
+        _db_update_setting(
+            "radar_notify_last_sent_at",
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+
+
+def _radar_notification_message(snapshot, decision):
+    observed_at = esc(getattr(snapshot, "observed_at", None) or "—")
+    if decision.kind == radar_notifications.NOTIFY_OUTAGE:
+        return (
+            "🔴 <b>اختلال گسترده اینترنت ایران</b>\n\n"
+            "Cloudflare Radar یک Outage فعال ثبت کرده است.\n"
+            f"Outages فعال: <b>{snapshot.active_outage_count}</b>\n"
+            f"Traffic Anomalies فعال: <b>{snapshot.active_anomaly_count}</b>\n"
+            f"آخرین داده: <code>{observed_at}</code>\n\n"
+            "این اعلان فقط برای تغییر وضعیت مهم ارسال شده و به‌تنهایی "
+            "هیچ Failover یا تغییر مسیری ایجاد نمی‌کند."
+        )
+    if decision.kind == radar_notifications.NOTIFY_DEGRADED:
+        return (
+            "🟡 <b>اختلال نسبی اینترنت ایران</b>\n\n"
+            f"وضعیت DEGRADED پس از "
+            f"<b>{RADAR_NOTIFICATION_DEGRADED_CONFIRM_ROUNDS}</b> بررسی متوالی تأیید شد.\n"
+            f"Traffic Anomalies فعال: <b>{snapshot.active_anomaly_count}</b>\n"
+            f"آخرین داده: <code>{observed_at}</code>\n\n"
+            "تغییرات عددی Traffic/Latency به‌تنهایی اعلان ایجاد نمی‌کنند."
+        )
+    if decision.kind == radar_notifications.NOTIFY_RECOVERED:
+        return (
+            "🟢 <b>وضعیت اینترنت ایران عادی شد</b>\n\n"
+            f"بازیابی پس از <b>{RADAR_NOTIFICATION_RECOVERY_CONFIRM_ROUNDS}</b> "
+            "بررسی متوالی NORMAL تأیید شد.\n"
+            f"آخرین داده: <code>{observed_at}</code>"
+        )
+    return None
+
+
+async def _handle_radar_snapshot(app, snapshot):
+    """Radar V3 notification adapter. Provider errors remain silent."""
+    runtime = await asyncio.to_thread(_radar_notification_runtime)
+    decision = radar_notifications.evaluate_radar_notification(
+        previous_effective_state=runtime.get("effective_state"),
+        observed_state=getattr(snapshot, "state", "UNKNOWN"),
+        degraded_streak=runtime.get("degraded_streak", 0),
+        normal_streak=runtime.get("normal_streak", 0),
+        degraded_confirm_rounds=RADAR_NOTIFICATION_DEGRADED_CONFIRM_ROUNDS,
+        recovery_confirm_rounds=RADAR_NOTIFICATION_RECOVERY_CONFIRM_ROUNDS,
+    )
+    await asyncio.to_thread(_store_radar_notification_runtime, decision)
+
+    if not decision.notify:
+        return decision
+
+    message = _radar_notification_message(snapshot, decision)
+    if message:
+        await _notify_admins(app, message)
+    return decision
+
+
+async def _render_radar_monitor_panel(query):
+    snapshot = await asyncio.to_thread(
+        radar_runtime.load_latest_radar_snapshot,
+        DB_PATH,
+        scope_type="COUNTRY",
+        scope_value="IR",
+    )
+    provider = await asyncio.to_thread(
+        radar_runtime.get_radar_provider_runtime,
+        DB_PATH,
+    )
+    history = await asyncio.to_thread(
+        radar_runtime.load_recent_radar_snapshots,
+        DB_PATH,
+        scope_type="COUNTRY",
+        scope_value="IR",
+        limit=8,
+    )
+    text = radar_ui.render_detail(snapshot, provider, history)
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 بروزرسانی", callback_data="flt_radar")],
+            [InlineKeyboardButton("🔙 بازگشت به پایش", callback_data="hp_filtering")],
+        ]),
+        parse_mode="HTML",
+    )
+
+
 async def _render_filtering_monitor_panel(query, page=0):
     await asyncio.to_thread(_db_sync_host_pool)
     pool = await asyncio.to_thread(_db_get_host_pool)
     health = await asyncio.to_thread(_db_get_host_port_health_map)
     runtime = await asyncio.to_thread(_db_get_regional_provider_runtime)
     backoff = await asyncio.to_thread(_db_regional_backoff_remaining_seconds)
+    radar_snapshot = await asyncio.to_thread(
+        radar_runtime.load_latest_radar_snapshot,
+        DB_PATH,
+        scope_type="COUNTRY",
+        scope_value="IR",
+    )
+    radar_provider = await asyncio.to_thread(
+        radar_runtime.get_radar_provider_runtime,
+        DB_PATH,
+    )
+    radar_summary = radar_ui.render_summary(radar_snapshot, radar_provider)
 
     edge_rows = []
     for row in pool:
@@ -13639,6 +13781,8 @@ async def _render_filtering_monitor_panel(query, page=0):
         provider_line,
         failover_line,
         "",
+        radar_summary,
+        "",
     ]
     kb = []
 
@@ -13683,6 +13827,9 @@ async def _render_filtering_monitor_panel(query, page=0):
     if not edge_rows:
         lines.append("هیچ سرور لبه‌ای برای پایش ثبت نشده است.")
 
+    kb.append([
+        InlineKeyboardButton("🌐 جزئیات اینترنت ایران", callback_data="flt_radar")
+    ])
     if auto_enabled:
         kb.append([InlineKeyboardButton("🛑 غیرفعال‌سازی انتقال خودکار", callback_data="flt_auto_disable")])
     else:
@@ -23043,6 +23190,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d == "hp_filtering" and role == 'admin':
         await _render_filtering_monitor_panel(query)
 
+    elif d == "flt_radar" and role == 'admin':
+        await _render_radar_monitor_panel(query)
+
     elif d == "mzm_refresh" and role == 'admin':
         await query.answer("🔄 نمایش با آخرین داده‌های ذخیره‌شده بروزرسانی شد.", show_alert=False)
         await _render_marzban_monitor_panel(query, page="summary")
@@ -28284,7 +28434,10 @@ async def _post_init(app):
     app.bot_data['ip_pressure_monitor_task'] = asyncio.create_task(_ip_pressure_monitor_loop(app))
     app.bot_data['host_health_task'] = asyncio.create_task(_host_health_loop(app))
     app.bot_data['regional_filter_task'] = asyncio.create_task(_regional_filter_loop(app))
-    radar_monitor = radar_runtime.RadarMonitor(DB_PATH)
+    radar_monitor = radar_runtime.RadarMonitor(
+        DB_PATH,
+        on_snapshot=_handle_radar_snapshot,
+    )
     await asyncio.to_thread(radar_monitor.ensure_schema)
     app.bot_data['radar_monitor'] = radar_monitor
     app.bot_data['radar_monitor_task'] = asyncio.create_task(radar_monitor.loop(app))

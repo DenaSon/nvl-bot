@@ -1999,6 +1999,267 @@ class MarzbanAdminService:
         })
         return True, result
 
+    async def preview_node_public_profile_rename(
+        self,
+        node_id: int,
+        new_name: Any,
+        public_address: Any,
+        tags: Any = NVL_NODE_PUBLIC_HOST_TAGS,
+    ) -> ApiResult:
+        """GET-only V123B.3.1 preview for renaming a managed Node.
+
+        Rename is allowed only when the current Stable Public Endpoint profile is
+        already canonical. This keeps lifecycle changes separate from repair and
+        gives confirmation a deterministic fingerprint covering the Node,
+        managed Hosts, target name, and stable public endpoint.
+        """
+        try:
+            node_id = normalize_node_id(node_id)
+            target_name = normalize_node_changes(
+                {"name": new_name},
+                allow_status=False,
+            )["name"]
+            public = normalize_public_hostname(public_address)
+        except ValueError as exc:
+            return False, {
+                "stage": "rename_precheck",
+                "read_only": True,
+                "error": str(exc),
+            }
+
+        ok_plan, repair_plan = await self.preview_node_public_profile_repair(
+            node_id,
+            public,
+            tags,
+        )
+        if not ok_plan or not isinstance(repair_plan, dict):
+            return False, repair_plan
+
+        node = (
+            repair_plan.get("node")
+            if isinstance(repair_plan.get("node"), dict)
+            else {}
+        )
+        current_name = str(node.get("name") or "")
+        current_remark = str(repair_plan.get("managed_remark") or "")
+
+        issues: List[str] = []
+        if not repair_plan.get("repairable"):
+            issues.extend(map(str, repair_plan.get("issues") or ()))
+        if repair_plan.get("changed_tags"):
+            issues.append(
+                "Managed Public Host profile must be canonical before rename"
+            )
+        if repair_plan.get("missing_inbounds"):
+            issues.append(
+                "Required inbound(s) missing: "
+                + ", ".join(map(str, repair_plan.get("missing_inbounds") or ()))
+            )
+
+        ok_nodes, nodes = await self.get_nodes()
+        if not ok_nodes or not isinstance(nodes, list):
+            return False, {
+                "stage": "rename_precheck",
+                "read_only": True,
+                "node_id": node_id,
+                "node": node,
+                "error": (
+                    nodes
+                    if not ok_nodes
+                    else "Invalid Marzban node list during rename duplicate precheck"
+                ),
+            }
+
+        duplicate = find_duplicate_node(nodes, target_name)
+        if isinstance(duplicate, dict):
+            try:
+                duplicate_id = normalize_node_id(duplicate.get("id"))
+            except ValueError:
+                duplicate_id = None
+            if duplicate_id != node_id:
+                issues.append(f'Node "{target_name}" already exists')
+
+        base_fingerprint = str(repair_plan.get("fingerprint") or "")
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "base_fingerprint": base_fingerprint,
+                    "node_id": node_id,
+                    "old_name": current_name,
+                    "new_name": target_name,
+                    "public_address": public,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+        managed_tags = list(repair_plan.get("managed_tags") or ())
+        same_name = current_name == target_name
+        return True, {
+            "stage": "rename_preview",
+            "read_only": True,
+            "renameable": not issues,
+            "no_change": same_name,
+            "node_id": node_id,
+            "node": node,
+            "old_name": current_name,
+            "new_name": target_name,
+            "public_address": public,
+            "old_managed_remark": current_remark,
+            "new_managed_remark": node_generated_host_remark(target_name),
+            "managed_tags": managed_tags,
+            "changed_tags": [] if same_name else managed_tags,
+            "fingerprint": fingerprint,
+            "issues": issues,
+        }
+
+    async def rename_node_public_profile(
+        self,
+        node_id: int,
+        new_name: Any,
+        public_address: Any,
+        tags: Any = NVL_NODE_PUBLIC_HOST_TAGS,
+        *,
+        expected_fingerprint: Any,
+    ) -> ApiResult:
+        """Rename one managed Node, sync generated Host remarks, and verify.
+
+        The Node rename happens first. If Host reconciliation then fails, the
+        caller must keep local ownership pending; V123B.2 Repair can safely
+        recover the old generated-style remarks using the new Node name.
+        """
+        ok_preview, preview = await self.preview_node_public_profile_rename(
+            node_id,
+            new_name,
+            public_address,
+            tags,
+        )
+        if not ok_preview or not isinstance(preview, dict):
+            return False, preview
+        if not preview.get("renameable"):
+            failed = dict(preview)
+            failed.update({"stage": "rename_precheck", "read_only": True})
+            return False, failed
+
+        expected = str(expected_fingerprint or "")
+        current = str(preview.get("fingerprint") or "")
+        if not expected or expected != current:
+            return False, {
+                "stage": "rename_stale",
+                "read_only": True,
+                "renamed": False,
+                "node_id": preview.get("node_id"),
+                "public_address": preview.get("public_address"),
+                "expected_fingerprint": expected,
+                "current_fingerprint": current,
+                "error": "Node or Public Host state changed after rename preview",
+            }
+
+        if preview.get("no_change"):
+            return True, {
+                **preview,
+                "stage": "rename_verified",
+                "read_only": False,
+                "renamed": False,
+                "verified": True,
+                "changed_tags": [],
+            }
+
+        node_id = normalize_node_id(preview.get("node_id"))
+        target_name = str(preview.get("new_name") or "")
+        old_node = preview.get("node") if isinstance(preview.get("node"), dict) else {}
+        old_address = str(old_node.get("address") or "")
+
+        ok_rename, rename_response = await self.update_node_settings(
+            node_id,
+            name=target_name,
+        )
+        if not ok_rename:
+            return False, {
+                "stage": "rename_node_write",
+                "read_only": False,
+                "renamed": False,
+                "node_id": node_id,
+                "public_address": preview.get("public_address"),
+                "error": rename_response,
+            }
+
+        ok_node, renamed_node = await self.get_node(node_id)
+        if (
+            not ok_node
+            or not isinstance(renamed_node, dict)
+            or str(renamed_node.get("name") or "") != target_name
+            or str(renamed_node.get("address") or "") != old_address
+        ):
+            return False, {
+                "stage": "rename_node_verify",
+                "read_only": False,
+                "renamed": True,
+                "node_id": node_id,
+                "public_address": preview.get("public_address"),
+                "node": renamed_node if isinstance(renamed_node, dict) else None,
+                "error": (
+                    renamed_node
+                    if not ok_node
+                    else "Renamed Node identity/address did not verify"
+                ),
+            }
+
+        ok_repair_preview, repair_preview = await self.preview_node_public_profile_repair(
+            node_id,
+            preview.get("public_address"),
+            tags,
+        )
+        if (
+            not ok_repair_preview
+            or not isinstance(repair_preview, dict)
+            or not repair_preview.get("repairable")
+        ):
+            return False, {
+                "stage": "rename_host_precheck",
+                "read_only": False,
+                "renamed": True,
+                "node_id": node_id,
+                "public_address": preview.get("public_address"),
+                "node": renamed_node,
+                "error": repair_preview,
+            }
+
+        ok_sync, sync = await self.repair_node_public_profile(
+            node_id,
+            preview.get("public_address"),
+            tags,
+            expected_fingerprint=repair_preview.get("fingerprint"),
+        )
+        if not ok_sync or not isinstance(sync, dict) or not sync.get("verified"):
+            return False, {
+                "stage": "rename_host_sync",
+                "read_only": False,
+                "renamed": True,
+                "node_id": node_id,
+                "public_address": preview.get("public_address"),
+                "node": renamed_node,
+                "error": sync,
+            }
+
+        return True, {
+            "stage": "rename_verified",
+            "read_only": False,
+            "renamed": True,
+            "verified": True,
+            "node_id": node_id,
+            "node": renamed_node,
+            "old_name": preview.get("old_name"),
+            "new_name": target_name,
+            "public_address": preview.get("public_address"),
+            "old_managed_remark": preview.get("old_managed_remark"),
+            "new_managed_remark": preview.get("new_managed_remark"),
+            "managed_tags": preview.get("managed_tags"),
+            "changed_tags": list(sync.get("changed_tags") or ()),
+        }
+
     async def reconcile_node_public_hosts(
         self,
         node: Dict[str, Any],

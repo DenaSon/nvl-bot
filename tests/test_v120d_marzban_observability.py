@@ -360,7 +360,7 @@ class V120DSourceSafetyTests(unittest.TestCase):
 
     def test_bot_version_is_v120d(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V123B1-2026-10-06-adopt-public-endpoint"',
+            'BOT_VERSION_TAG = "V123B2-2026-10-06-repair-public-endpoint"',
             self.bot,
         )
 

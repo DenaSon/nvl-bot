@@ -8546,21 +8546,27 @@ async def _mza_show_node_create_review(target, context):
         for tag in marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS
     )
     preflight = draft.get("public_preflight") if isinstance(draft.get("public_preflight"), dict) else {}
-    matched = ", ".join(str(item) for item in preflight.get("matched_ips") or ()) or "Verify هنگام تایید"
+    matched = ", ".join(str(item) for item in preflight.get("matched_ips") or ()) or "pending / Verify هنگام تایید"
+    cf_state = (
+        "A record موجود · stale-safe verify هنگام Confirm"
+        if draft.get("cf_mode") == "existing"
+        else "A record جدید · create هنگام Confirm"
+    )
     text = (
         "✅ <b>بررسی نهایی Node</b>\n"
         "━━━━━━━━━━━━━━\n"
         f"نام  <b>{esc(payload['name'])}</b>\n"
         f"آدرس واقعی Node  <code>{esc(payload['address'])}</code>\n"
         f"Public Endpoint  <code>{esc(public_address)}</code>\n"
+        f"Cloudflare  <code>{esc(cf_state)}</code>\n"
         f"DNS Match  <code>{esc(matched)}</code>\n"
         f"Service Port  <code>{payload['port']}</code>\n"
         f"Xray API Port  <code>{payload['api_port']}</code>\n"
         f"Usage Ratio  <b>{esc(payload['usage_coefficient'])}</b>\n\n"
         "🌐 <b>Public Host profile · NVL</b>\n"
         f"{managed_hosts}\n\n"
-        "Node با آدرس واقعی خودش در Marzban ثبت می‌شود، اما Public Hostهای کاربران فقط از دامنه ثابت بالا استفاده می‌کنند. "
-        "DNS درست قبل از POST دوباره Verify خواهد شد."
+        "V123C ابتدا Cloudflare A record را Create/Verify می‌کند و resolver DNS را Verify می‌کند؛ "
+        "فقط بعد از آن Node POST اجرا می‌شود. Public Hostهای کاربران فقط از دامنه ثابت بالا استفاده می‌کنند."
     )
     kb = [
         [InlineKeyboardButton("✅ ساخت نود", callback_data=f"mza_ncreate_confirm_{nonce}")],
@@ -11522,28 +11528,74 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if state == 'MZA_NODE_CREATE_PUBLIC_INPUT':
                 public_address = marzban_admin.normalize_public_hostname(text)
+                try:
+                    cf_client = _mza_cloudflare_dns_client()
+                    target_ip = await asyncio.to_thread(
+                        cloudflare_dns.resolve_single_ipv4,
+                        draft.get("address"),
+                    )
+                    cf_snapshot = await asyncio.to_thread(
+                        cf_client.inspect_a_record,
+                        public_address,
+                    )
+                except Exception as exc:
+                    await update.message.reply_text(
+                        "❌ <b>V123C · Cloudflare Preflight ناموفق بود.</b>\n\n"
+                        f"Public Endpoint: <code>{esc(public_address)}</code>\n"
+                        f"Error: <code>{esc(type(exc).__name__)}: {esc(exc)}</code>\n\n"
+                        "هیچ DNS/Node mutation انجام نشد.",
+                        parse_mode='HTML',
+                    )
+                    return
+
+                cf_record = (
+                    cf_snapshot.get("record")
+                    if isinstance(cf_snapshot, dict) and isinstance(cf_snapshot.get("record"), dict)
+                    else {}
+                )
+                if cf_snapshot.get("exists"):
+                    if (
+                        bool(cf_record.get("proxied"))
+                        or str(cf_record.get("content") or "") != str(target_ip)
+                    ):
+                        await update.message.reply_text(
+                            "⛔️ <b>Public Endpoint از قبل با وضعیت دیگری در Cloudflare وجود دارد.</b>\n\n"
+                            f"Requested Node IP: <code>{esc(target_ip)}</code>\n"
+                            f"Cloudflare: <code>{esc(_mza_cf_record_summary(cf_snapshot))}</code>\n\n"
+                            "NVL برای ساخت Node هیچ رکورد موجودی را implicit overwrite نمی‌کند. یک hostname جدید انتخاب کنید یا ابتدا رکورد را آگاهانه اصلاح کنید.",
+                            parse_mode='HTML',
+                        )
+                        return
+                    cf_mode = "existing"
+                else:
+                    cf_mode = "create"
+
                 preflight = await asyncio.to_thread(
                     marzban_admin.preflight_public_endpoint,
                     draft.get("address"),
                     public_address,
                 )
-                if not preflight.get("ok"):
-                    node_ips = ", ".join(preflight.get("node_ips") or ()) or "—"
-                    public_ips = ", ".join(preflight.get("public_ips") or ()) or "—"
-                    await update.message.reply_text(
-                        "❌ <b>DNS Preflight ناموفق بود.</b>\n\n"
-                        f"Node: <code>{esc(draft.get('address') or '—')}</code> → <code>{esc(node_ips)}</code>\n"
-                        f"Public: <code>{esc(public_address)}</code> → <code>{esc(public_ips)}</code>\n"
-                        f"Reason: <code>{esc(preflight.get('error') or 'DNS mismatch')}</code>\n\n"
-                        "رکورد DNS را اصلاح کنید و همین دامنه را دوباره بفرستید.",
-                        parse_mode='HTML',
-                    )
-                    return
                 draft["public_address"] = public_address
                 draft["public_preflight"] = dict(preflight)
+                draft["cf_mode"] = cf_mode
+                draft["cf_target_ip"] = target_ip
+                draft["cf_zone_id"] = str(cf_snapshot.get("zone_id") or "")
+                draft["cf_record_id"] = str(cf_record.get("id") or "")
+                draft["cf_fingerprint"] = str(cf_snapshot.get("fingerprint") or "")
                 context.user_data['state'] = 'MZA_NODE_CREATE_PORTS_INPUT'
+
+                cf_line = (
+                    f"✅ Cloudflare A record موجود و روی <code>{esc(target_ip)}</code> است."
+                    if cf_mode == "existing"
+                    else "☁️ Cloudflare A record هنوز وجود ندارد؛ در Confirm و قبل از POST Node به‌صورت DNS-only ساخته می‌شود."
+                )
+                dns_line = (
+                    "✅ Resolver DNS Match فعلی تایید شد."
+                    if preflight.get("ok")
+                    else "⏳ Resolver propagation هنوز Match نیست؛ Confirm تا Verify شدن DNS هیچ Nodeی نمی‌سازد."
+                )
                 await update.message.reply_text(
-                    "✅ DNS Match تایید شد.\n\n"
+                    f"{cf_line}\n{dns_line}\n\n"
                     "🔌 <b>مرحله ۴ از ۵ · پورت‌های نود</b>\n\n"
                     "دو پورت را به‌ترتیب در یک پیام بفرستید:\n"
                     "1) <b>Service Port</b> برای ارتباط Marzban با Node\n"
@@ -11556,7 +11608,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            if state == 'MZA_NODE_CREATE_PORTS_INPUT':
+        if state == 'MZA_NODE_CREATE_PORTS_INPUT':
                 parts = text.replace(",", " ").replace(":", " ").split()
                 if len(parts) != 2:
                     raise ValueError("two ports required")

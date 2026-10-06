@@ -213,7 +213,7 @@ Validation on branch:
 
 ## 9. Phase 3 — Customer Wallet + Card-to-Card Top-up
 
-**Status: PLANNED**
+**Status: IMPLEMENTED ON BRANCH — FEATURE FLAG OFF / PRODUCTION ROLLOUT PENDING**
 
 ```text
 Customer -> Wallet -> amount -> system card -> receipt
@@ -229,6 +229,37 @@ Requirements:
 - Wallet balance update and ledger append are one DB transaction.
 - Top-up is not sales revenue.
 - Future gateways feed the same wallet-credit boundary.
+
+Implemented behavior:
+
+- Added `customer_topup_receipts` as an additive table; legacy Agent `receipts` remains untouched.
+- Direct Market schema version advanced to `2` only after all additive DDL succeeds.
+- Customer wallet is created lazily with zero balance.
+- Wallet screen now shows balance, available balance, reserved amount and pending top-up totals.
+- Customer can start a card-to-card top-up from the Wallet screen.
+- System `bank_card` setting is reused; if no system card is configured, the flow fails closed before a receipt can be submitted.
+- Amounts accept integer toman only and reject float/non-positive/oversized values.
+- Receipt submission is idempotent using the Telegram update identity.
+- Admin review callbacks contain only `receipt_id`; customer ID and amount are reloaded from SQLite.
+- Approval runs under an atomic SQLite write transaction and performs:
+  1. wallet credit,
+  2. immutable `wallet_transactions` append,
+  3. receipt approval/status link.
+- Duplicate approval returns `already_approved` and cannot credit twice.
+- Rejected receipts cannot later be approved.
+- Blocked customers cannot submit new top-up receipts.
+- Customer transaction history now reads directly from the immutable wallet ledger.
+- Customer callbacks remain explicit allowlist entries; all legacy Admin/Agent callbacks stay blocked.
+- Top-up remains cash-in/customer credit, not sales revenue. Revenue accounting is still deferred to completed Orders.
+
+Validation on branch:
+
+- Main Phase-3 implementation commit: `f68989715906b86052fdd9d52a0ad39386490a5a`
+- Final Phase-3 head after regression fixes: `e41f7def2193202e2e11b279d0e850ff23a10da8`
+- GitHub Actions `syntax-and-unit-tests`: **passed**
+- Full suite: **770 tests passed**
+- Direct Market Phase-3 tests: **13/13 passed**
+- Production behavior remains unchanged while `direct_market_enabled=0`.
 
 ## 10. Phase 4 — Direct SSH Purchase
 
@@ -298,7 +329,7 @@ Rollout:
 - [x] Architecture decisions recorded.
 - [x] Phase 1 implementation complete on branch; CI green. Production rollout gate remains pending.
 - [x] Phase 2 implementation complete on branch; CI green. Feature flag remains OFF pending controlled rollout.
-- [ ] Phase 3 complete.
+- [x] Phase 3 implementation complete on branch; CI green. Feature flag remains OFF pending controlled rollout.
 - [ ] Phase 4 complete.
 - [ ] Phase 5 complete.
 - [ ] Phase 6 complete.

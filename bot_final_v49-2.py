@@ -16055,6 +16055,43 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        expected_profile = await asyncio.to_thread(
+            _db_find_marzban_node_public_profile_for_host,
+            pending.get("expected_host"),
+        )
+        ok_current, current_resolved, current_error = await _mza_load_host_target(
+            context,
+            host_token,
+        )
+        if not ok_current:
+            _mza_clear_host_pending(context)
+            await query.edit_message_text(
+                f"❌ حذف متوقف شد؛ Host فعلی قابل Verify نیست: {esc(current_error)}",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Inbounds", callback_data="mza_inbounds")]
+                ]),
+            )
+            return
+        current_profile = await asyncio.to_thread(
+            _db_find_marzban_node_public_profile_for_host,
+            current_resolved.get("host"),
+        )
+        protected_profile = current_profile or expected_profile
+        if protected_profile:
+            _mza_clear_host_pending(context)
+            await query.edit_message_text(
+                "🛡 <b>حذف Managed Public Host مسدود شد.</b>\n\n"
+                f"Node ID: <code>{esc(protected_profile.get('node_id'))}</code>\n"
+                f"Stable Endpoint: <code>{esc(protected_profile.get('public_address'))}</code>\n\n"
+                "تاییدیه قدیمی یا عمومی حق حذف Host مدیریت‌شده NVL را ندارد.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_host_{host_token}")]
+                ]),
+            )
+            return
+
         if context.user_data.get("mza_host_delete_busy"):
             await query.message.reply_text("⏳ درخواست حذف Host قبلی هنوز در حال پردازش است.")
             return
@@ -16218,6 +16255,43 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ این عملیات منقضی شده است؛ Public Host را دوباره باز کنید.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔙 Inbounds", callback_data="mza_inbounds")]
+                ]),
+            )
+            return
+
+        expected_profile = await asyncio.to_thread(
+            _db_find_marzban_node_public_profile_for_host,
+            pending.get('expected_host'),
+        )
+        ok_current, current_resolved, current_error = await _mza_load_host_target(
+            context,
+            host_token,
+        )
+        if not ok_current:
+            _mza_clear_host_pending(context)
+            await query.edit_message_text(
+                f"❌ تغییر متوقف شد؛ Host فعلی قابل Verify نیست: {esc(current_error)}",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Inbounds", callback_data="mza_inbounds")]
+                ]),
+            )
+            return
+        current_profile = await asyncio.to_thread(
+            _db_find_marzban_node_public_profile_for_host,
+            current_resolved.get("host"),
+        )
+        protected_profile = current_profile or expected_profile
+        if protected_profile:
+            _mza_clear_host_pending(context)
+            await query.edit_message_text(
+                "🛡 <b>تغییر Managed Public Host مسدود شد.</b>\n\n"
+                f"Node ID: <code>{esc(protected_profile.get('node_id'))}</code>\n"
+                f"Stable Endpoint: <code>{esc(protected_profile.get('public_address'))}</code>\n\n"
+                "تاییدیه قدیمی یا عمومی حق تغییر Host مدیریت‌شده NVL را ندارد.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_host_{host_token}")]
                 ]),
             )
             return

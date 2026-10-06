@@ -13,6 +13,7 @@ def _inbounds(*tags):
     protocol_by_tag = {
         "Shadowsocks TCP": "shadowsocks",
         "VLESS TCP REALITY": "vless",
+        "VLESS TCP REALITY DIRECT": "vless",
         "Trojan WS": "trojan",
         "VMess WS": "vmess",
     }
@@ -61,7 +62,7 @@ class V123B1AdoptionInspectionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(report["adoptable"])
         self.assertTrue(report["verified"])
-        self.assertEqual(report["matched_hosts"], 3)
+        self.assertEqual(report["matched_hosts"], 4)
         self.assertEqual(report["missing_tags"], [])
         self.assertEqual(report["duplicate_tags"], {})
         self.assertEqual(report["unexpected_tags"], {})
@@ -192,7 +193,7 @@ class V123B1AdoptionUiTests(unittest.TestCase):
 
     def test_version_and_node_detail_expose_adoption_state(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V123B2-2026-10-06-repair-public-endpoint"',
+            'BOT_VERSION_TAG = "V123B2D-2026-10-06-direct-inbound-profile"',
             self.source,
         )
         region = self._region(

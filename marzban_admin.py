@@ -45,6 +45,7 @@ NODE_MUTABLE_STATUSES = {"disabled", "connecting"}
 NVL_NODE_PUBLIC_HOST_TAGS = (
     "Shadowsocks TCP",
     "VLESS TCP REALITY",
+    "VLESS TCP REALITY DIRECT",
     "Trojan WS",
 )
 

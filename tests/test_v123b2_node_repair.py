@@ -13,6 +13,7 @@ def _inbounds(*tags):
     protocol_by_tag = {
         "Shadowsocks TCP": "shadowsocks",
         "VLESS TCP REALITY": "vless",
+        "VLESS TCP REALITY DIRECT": "vless",
         "Trojan WS": "trojan",
         "VMess WS": "vmess",
     }
@@ -61,8 +62,9 @@ class V123B2RepairPlanningTests(unittest.TestCase):
         hosts = {
             "Shadowsocks TCP": [manual_ss, self._legacy("arGuS")],
             "VLESS TCP REALITY": [],
+            "VLESS TCP REALITY DIRECT": [self._legacy("Pingo")],
             "Trojan WS": [self._legacy("ArGuS")],
-            "VMess WS": [manual_extra, self._legacy("ARGUS")],
+            "VMess WS": [manual_extra],
         }
 
         plan = marzban_admin.plan_node_public_host_repair(
@@ -75,16 +77,21 @@ class V123B2RepairPlanningTests(unittest.TestCase):
         self.assertEqual(plan["added_tags"], ["VLESS TCP REALITY"])
         self.assertCountEqual(
             plan["normalized_tags"],
-            ["Shadowsocks TCP", "Trojan WS"],
+            ["Shadowsocks TCP", "VLESS TCP REALITY DIRECT", "Trojan WS"],
         )
         self.assertCountEqual(
             plan["claimed_legacy_tags"],
-            ["Shadowsocks TCP", "Trojan WS"],
+            ["Shadowsocks TCP", "VLESS TCP REALITY DIRECT", "Trojan WS"],
         )
-        self.assertEqual(plan["removed_unexpected_tags"], {"VMess WS": 1})
+        self.assertEqual(plan["removed_unexpected_tags"], {})
         self.assertCountEqual(
             plan["changed_tags"],
-            ["Shadowsocks TCP", "VLESS TCP REALITY", "Trojan WS", "VMess WS"],
+            [
+                "Shadowsocks TCP",
+                "VLESS TCP REALITY",
+                "VLESS TCP REALITY DIRECT",
+                "Trojan WS",
+            ],
         )
 
         repaired = copy.deepcopy(hosts)
@@ -94,6 +101,10 @@ class V123B2RepairPlanningTests(unittest.TestCase):
         self.assertIn(manual_ss, repaired["Shadowsocks TCP"])
         self.assertIn(manual_extra, repaired["VMess WS"])
         self.assertEqual(repaired["VLESS TCP REALITY"], [self.generated])
+        self.assertEqual(
+            repaired["VLESS TCP REALITY DIRECT"],
+            [self.generated],
+        )
 
         verified = marzban_admin.inspect_node_public_host_profile(
             repaired,
@@ -142,6 +153,27 @@ class V123B2RepairPlanningTests(unittest.TestCase):
             plan["desired_by_tag"]["Shadowsocks TCP"],
             [self.generated],
         )
+
+    def test_generated_host_outside_managed_profile_is_removed_but_manual_is_preserved(self):
+        manual = copy.deepcopy(self.generated)
+        manual["remark"] = "Manual VMess"
+        manual["address"] = "manual-vmess.example"
+
+        hosts = {
+            tag: [copy.deepcopy(self.generated)]
+            for tag in marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS
+        }
+        hosts["VMess WS"] = [manual, self._legacy("Old Node")]
+
+        plan = marzban_admin.plan_node_public_host_repair(
+            hosts,
+            self.node,
+            public_address=self.public,
+        )
+
+        self.assertTrue(plan["repairable"])
+        self.assertEqual(plan["removed_unexpected_tags"], {"VMess WS": 1})
+        self.assertEqual(plan["desired_by_tag"]["VMess WS"], [manual])
 
     def test_duplicate_owned_hosts_are_deduplicated(self):
         hosts = {
@@ -195,6 +227,7 @@ class V123B2RepairServiceTests(unittest.IsolatedAsyncioTestCase):
         return {
             "Shadowsocks TCP": [self._legacy("arGuS")],
             "VLESS TCP REALITY": [],
+            "VLESS TCP REALITY DIRECT": [self._legacy("Pingo")],
             "Trojan WS": [self._legacy("ArGuS")],
             "VMess WS": [],
         }
@@ -305,7 +338,12 @@ class V123B2RepairServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["verified"])
         self.assertCountEqual(
             put_tags,
-            ["Shadowsocks TCP", "VLESS TCP REALITY", "Trojan WS"],
+            [
+                "Shadowsocks TCP",
+                "VLESS TCP REALITY",
+                "VLESS TCP REALITY DIRECT",
+                "Trojan WS",
+            ],
         )
         verified = marzban_admin.inspect_node_public_host_profile(
             state,
@@ -344,7 +382,7 @@ class V123B2RepairUiTests(unittest.TestCase):
 
     def test_version_and_node_detail_expose_repair(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V123B2-2026-10-06-repair-public-endpoint"',
+            'BOT_VERSION_TAG = "V123B2D-2026-10-06-direct-inbound-profile"',
             self.source,
         )
         region = self._region(

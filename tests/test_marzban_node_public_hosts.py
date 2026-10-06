@@ -9,6 +9,7 @@ def _inbounds(*tags):
     protocol_by_tag = {
         "Shadowsocks TCP": "shadowsocks",
         "VLESS TCP REALITY": "vless",
+        "VLESS TCP REALITY DIRECT": "vless",
         "Trojan WS": "trojan",
         "VMess WS": "vmess",
     }
@@ -97,6 +98,7 @@ class ManagedNodePublicHostTests(unittest.IsolatedAsyncioTestCase):
         state = {
             "Shadowsocks TCP": [],
             "VLESS TCP REALITY": [],
+            "VLESS TCP REALITY DIRECT": [],
             "Trojan WS": [],
             "VMess WS": [dict(generated), manual],
         }
@@ -106,6 +108,7 @@ class ManagedNodePublicHostTests(unittest.IsolatedAsyncioTestCase):
             _inbounds(
                 "Shadowsocks TCP",
                 "VLESS TCP REALITY",
+                "VLESS TCP REALITY DIRECT",
                 "Trojan WS",
                 "VMess WS",
             ),

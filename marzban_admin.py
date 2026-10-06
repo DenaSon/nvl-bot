@@ -275,17 +275,19 @@ def preflight_public_endpoint(
             "error": f"Public hostname resolution failed: {type(exc).__name__}: {exc}",
         }
 
-    matched = tuple(sorted(set(node_ips).intersection(public_ips)))
+    node_ip_set = set(node_ips)
+    public_ip_set = set(public_ips)
+    matched = tuple(sorted(node_ip_set.intersection(public_ip_set)))
     if not node_ips:
         error = "Node address did not resolve to any IP"
     elif not public_ips:
         error = "Public hostname did not resolve to any IP"
-    elif not matched:
-        error = "Public hostname does not resolve to the Node address"
+    elif not public_ip_set.issubset(node_ip_set):
+        error = "Public hostname resolves outside the Node address set"
     else:
         error = None
     return {
-        "ok": bool(matched),
+        "ok": error is None,
         "node_address": node,
         "public_address": public,
         "node_ips": tuple(node_ips),

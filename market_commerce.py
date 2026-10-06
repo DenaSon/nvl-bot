@@ -14,7 +14,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Set
 
-DIRECT_MARKET_SCHEMA_VERSION = 1
+DIRECT_MARKET_SCHEMA_VERSION = 2
 DIRECT_MARKET_FLAG_KEY = "direct_market_enabled"
 
 
@@ -51,11 +51,6 @@ def install_schema(conn: sqlite3.Connection) -> None:
         "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)",
         (DIRECT_MARKET_FLAG_KEY, "0"),
     )
-    conn.execute(
-        "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)",
-        ("direct_market_schema_version", str(DIRECT_MARKET_SCHEMA_VERSION)),
-    )
-
     # Legacy service ownership remains untouched. Existing rows receive NULL,
     # which means "not owned by a direct-market customer".
     if "customer_id" not in _table_columns(conn, "ssh_accounts"):
@@ -175,6 +170,27 @@ def install_schema(conn: sqlite3.Connection) -> None:
     )
 
     conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS customer_topup_receipts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER NOT NULL,
+            amount_toman INTEGER NOT NULL
+                CHECK(typeof(amount_toman) = 'integer' AND amount_toman > 0),
+            photo_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending', 'approved', 'rejected')),
+            idempotency_key TEXT NOT NULL UNIQUE,
+            wallet_transaction_id INTEGER DEFAULT NULL UNIQUE,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            reviewed_at TEXT DEFAULT NULL,
+            reviewed_by_chat_id INTEGER DEFAULT NULL,
+            FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE RESTRICT,
+            FOREIGN KEY(wallet_transaction_id) REFERENCES wallet_transactions(id) ON DELETE RESTRICT
+        )
+        """
+    )
+
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_orders_customer_created "
         "ON orders(customer_id, created_at DESC)"
     )
@@ -193,6 +209,15 @@ def install_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_market_plans_active_sort "
         "ON market_plans(active, sort_order, id)"
+    )
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_customer_topup_receipts_status_created "
+        "ON customer_topup_receipts(status, created_at DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_customer_topup_receipts_customer_created "
+        "ON customer_topup_receipts(customer_id, created_at DESC)"
     )
 
     # Ledger rows are append-only. Corrections must be compensating entries,
@@ -214,6 +239,15 @@ def install_schema(conn: sqlite3.Connection) -> None:
             SELECT RAISE(ABORT, 'wallet_transactions is append-only');
         END
         """
+    )
+
+    # Mark the Direct Market schema version only after all additive DDL succeeds.
+    conn.execute(
+        """
+        INSERT INTO settings(key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """,
+        ("direct_market_schema_version", str(DIRECT_MARKET_SCHEMA_VERSION)),
     )
 
 

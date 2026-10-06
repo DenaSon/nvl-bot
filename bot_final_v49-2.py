@@ -106,6 +106,7 @@ import marzban_regional_filtering as marzban_regional
 import marzban_observability
 import market_commerce
 import market_customer
+import market_wallet
 import secrets
 
 import base64
@@ -6590,6 +6591,100 @@ def _db_upsert_market_customer(tg_user_id, chat_id, username, first_name):
         )
 
 
+def _db_get_market_wallet(customer_id):
+    with db_conn() as conn:
+        return market_wallet.get_wallet_snapshot(conn, customer_id)
+
+
+def _db_get_market_transactions(customer_id, limit=10):
+    with db_conn() as conn:
+        return market_wallet.list_wallet_transactions(conn, customer_id, limit=limit)
+
+
+def _db_create_market_topup_receipt(customer_id, amount_toman, photo_id, idempotency_key):
+    with db_conn() as conn:
+        return market_wallet.create_topup_receipt(
+            conn,
+            customer_id=customer_id,
+            amount_toman=amount_toman,
+            photo_id=photo_id,
+            idempotency_key=idempotency_key,
+        )
+
+
+def _db_approve_market_topup(receipt_id, reviewer_chat_id):
+    with db_conn() as conn:
+        return market_wallet.approve_topup_receipt(
+            conn,
+            receipt_id=receipt_id,
+            reviewer_chat_id=reviewer_chat_id,
+        )
+
+
+def _db_reject_market_topup(receipt_id, reviewer_chat_id):
+    with db_conn() as conn:
+        return market_wallet.reject_topup_receipt(
+            conn,
+            receipt_id=receipt_id,
+            reviewer_chat_id=reviewer_chat_id,
+        )
+
+
+async def _show_market_wallet(target, context, *, edit=False):
+    customer_id = context.user_data.get('customer_id')
+    if not customer_id:
+        await target.reply_text("❌ هویت مشتری نامعتبر است؛ /start را دوباره ارسال کنید.")
+        return
+    wallet = await asyncio.to_thread(_db_get_market_wallet, customer_id)
+    text = (
+        "💰 <b>کیف پول</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        f"موجودی: <b>{wallet['balance_toman']:,} تومان</b>\n"
+        f"قابل استفاده: <b>{wallet['available_toman']:,} تومان</b>"
+    )
+    if wallet['reserved_toman']:
+        text += f"\nرزرو خرید: {wallet['reserved_toman']:,} تومان"
+    if wallet['pending_topup_count']:
+        text += (
+            f"\n\n🕓 {wallet['pending_topup_count']} رسید در انتظار بررسی"
+            f" — {wallet['pending_topup_toman']:,} تومان"
+        )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ افزایش موجودی", callback_data="mkt_wallet_topup")],
+        [InlineKeyboardButton("🔄 بروزرسانی", callback_data="mkt_wallet_home")],
+    ])
+    if edit and hasattr(target, 'edit_message_text'):
+        await target.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await target.reply_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+async def _show_market_transactions(target, context):
+    customer_id = context.user_data.get('customer_id')
+    if not customer_id:
+        await target.reply_text("❌ هویت مشتری نامعتبر است؛ /start را دوباره ارسال کنید.")
+        return
+    rows = await asyncio.to_thread(_db_get_market_transactions, customer_id, 10)
+    if not rows:
+        await target.reply_text("🧾 هنوز تراکنشی برای کیف پول شما ثبت نشده است.")
+        return
+    labels = {
+        'topup': '➕ شارژ کیف پول',
+        'purchase': '🛒 خرید',
+        'refund': '↩️ بازگشت وجه',
+    }
+    lines = ["🧾 <b>آخرین تراکنش‌ها</b>", "━━━━━━━━━━━━━━"]
+    for tx in rows:
+        amount = tx['amount_toman']
+        sign = "+" if amount > 0 else ""
+        lines.append(
+            f"{labels.get(tx['kind'], tx['kind'])}\n"
+            f"{sign}{amount:,} تومان — مانده: {tx['balance_after_toman']:,} تومان\n"
+            f"<code>{esc(str(tx['created_at']))}</code>"
+        )
+    await target.reply_text("\n\n".join(lines), parse_mode="HTML")
+
+
 async def _activate_customer_session(update, context) -> bool:
     """Resolve Telegram identity to one customer and open the storefront."""
     if not _is_private_market_chat(update) or not update.effective_user:
@@ -12080,6 +12175,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data['state'] = 'LOGIN_USER'
                 await require_portal_login(update)
                 return
+            if text == market_customer.BUTTON_WALLET:
+                await _show_market_wallet(update.message, context)
+                return
+            if text == market_customer.BUTTON_TRANSACTIONS:
+                await _show_market_transactions(update.message, context)
+                return
             if text in market_customer.CUSTOMER_PLACEHOLDER_LABELS:
                 await update.message.reply_text(
                     market_customer.phase2_placeholder_text(text)
@@ -12269,9 +12370,41 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else: await require_login(update); context.user_data['state'] = 'LOGIN_USER'
         return
 
-    # Customer sessions never enter legacy state machines. Phase 2 accepts
-    # storefront keyboard navigation only.
+    # Customer sessions never enter legacy Agent/Admin state machines.
     if role == market_customer.ROLE_CUSTOMER:
+        if state == 'MARKET_TOPUP_AMOUNT':
+            raw_amount = fa_to_en_digits(text).replace(',', '').replace('٬', '').strip()
+            try:
+                amount = market_wallet.normalize_topup_amount(raw_amount)
+            except ValueError:
+                await update.message.reply_text(
+                    f"❌ مبلغ معتبر وارد کنید؛ فقط عدد مثبت تا {market_wallet.MAX_TOPUP_TOMAN:,} تومان."
+                )
+                return
+
+            bank_card = str(await asyncio.to_thread(_db_get_setting, 'bank_card', '') or '').strip()
+            if not bank_card or bank_card == 'تنظیم نشده':
+                safe_clear_context(context)
+                await update.message.reply_text(
+                    "⚠️ کارت بانکی سیستم هنوز توسط مدیریت تنظیم نشده است. لطفاً بعداً دوباره تلاش کنید."
+                )
+                return
+
+            context.user_data['market_topup_amount'] = amount
+            context.user_data['state'] = 'MARKET_TOPUP_PHOTO'
+            await update.message.reply_text(
+                f"💳 مبلغ <b>{amount:,} تومان</b> را به کارت زیر واریز کنید:\n\n"
+                f"<code>{esc(bank_card)}</code>\n\n"
+                "📸 سپس عکس رسید را در همین چت ارسال کنید.\n"
+                "برای انصراف می‌توانید یکی از گزینه‌های منوی اصلی را انتخاب کنید.",
+                parse_mode="HTML",
+            )
+            return
+
+        if state == 'MARKET_TOPUP_PHOTO':
+            await update.message.reply_text("📸 لطفاً عکس رسید بانکی را ارسال کنید.")
+            return
+
         await update.message.reply_text(market_customer.CUSTOMER_USE_MENU_TEXT)
         await show_main_menu(update, context)
         return
@@ -13281,6 +13414,73 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = context.user_data.get('state')
     role = context.user_data.get('role')
+
+    if state == 'MARKET_TOPUP_PHOTO' and role == market_customer.ROLE_CUSTOMER:
+        customer_id = context.user_data.get('customer_id')
+        amount = context.user_data.get('market_topup_amount')
+        if not customer_id or not amount:
+            safe_clear_context(context)
+            await update.message.reply_text("❌ اطلاعات درخواست شارژ ناقص شد؛ دوباره از کیف پول شروع کنید.")
+            return
+
+        photo_id = update.message.photo[-1].file_id
+        idempotency_key = f"market-topup:{customer_id}:telegram-update:{update.update_id}"
+        try:
+            receipt = await asyncio.to_thread(
+                _db_create_market_topup_receipt,
+                customer_id,
+                amount,
+                photo_id,
+                idempotency_key,
+            )
+        except Exception:
+            log.exception("خطا در ثبت رسید شارژ مشتری customer_id=%s", customer_id)
+            await update.message.reply_text("❌ ثبت رسید ناموفق بود؛ لطفاً دوباره تلاش کنید.")
+            return
+
+        receipt_id = receipt['id']
+        current_chat_id = update.effective_chat.id
+        admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
+        admin_ids = {a for a in admin_ids if a != current_chat_id}
+        customer_label = receipt.get('first_name') or receipt.get('username') or f"Customer #{customer_id}"
+        username_line = f"\n🔗 @{esc(receipt['username'])}" if receipt.get('username') else ""
+        cap = (
+            "🧾 <b>درخواست شارژ کیف پول مشتری</b>\n\n"
+            f"👤 {esc(customer_label)}{username_line}\n"
+            f"🆔 Customer ID: <code>{customer_id}</code>\n"
+            f"💰 مبلغ: <b>{int(amount):,} تومان</b>\n"
+            f"🧾 شناسه رسید: <code>{receipt_id}</code>\n\n"
+            "تایید، مبلغ و مالک را مستقیماً از دیتابیس بازخوانی می‌کند."
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ تایید و شارژ", callback_data=f"mkt_topup_acc_{receipt_id}")],
+            [InlineKeyboardButton("❌ رد رسید", callback_data=f"mkt_topup_rej_{receipt_id}")],
+        ])
+        sent = False
+        for admin_chat_id in admin_ids:
+            try:
+                await context.bot.send_photo(
+                    chat_id=admin_chat_id,
+                    photo=photo_id,
+                    caption=cap,
+                    reply_markup=kb,
+                    parse_mode="HTML",
+                )
+                sent = True
+            except Exception as exc:
+                log.error("خطا در ارسال رسید مشتری %s به ادمین %s: %s", receipt_id, admin_chat_id, exc)
+
+        safe_clear_context(context)
+        if sent:
+            await update.message.reply_text(
+                f"✅ رسید #{receipt_id} ثبت و برای مدیریت ارسال شد. پس از تایید، کیف پول شما شارژ می‌شود."
+            )
+        else:
+            await update.message.reply_text(
+                f"✅ رسید #{receipt_id} ثبت شد و در صف بررسی قرار گرفت. ارسال آنی به مدیریت ممکن است با تاخیر مواجه باشد."
+            )
+        await _show_market_wallet(update.message, context)
+        return
     
     if state == 'C2C_PHOTO' and role == 'agent':
         photo_id = update.message.photo[-1].file_id
@@ -15428,10 +15628,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); d = query.data
     role, ag_id = context.user_data.get('role'), context.user_data.get('agent_id', 0)
 
-    # Phase 2 security boundary: customer sessions are authenticated only for
-    # storefront identity, not for any legacy Admin/Agent callback. Customer
-    # callbacks are introduced explicitly in later phases.
+    # Direct Market customer callbacks are explicit allowlist entries. All
+    # legacy Admin/Agent callbacks remain fail-closed for this role.
     if role == market_customer.ROLE_CUSTOMER:
+        if d == 'mkt_wallet_home':
+            safe_clear_context(context)
+            await _show_market_wallet(query, context, edit=True)
+            return
+        if d == 'mkt_wallet_topup':
+            context.user_data['state'] = 'MARKET_TOPUP_AMOUNT'
+            await query.edit_message_text(
+                "➕ <b>افزایش موجودی کیف پول</b>\n\n"
+                "مبلغ موردنظر را به تومان و فقط به‌صورت عدد ارسال کنید.",
+                parse_mode="HTML",
+            )
+            return
         await query.message.reply_text("⛔️ این عملیات برای حساب مشتری در دسترس نیست.")
         return
 
@@ -20300,6 +20511,83 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return await query.edit_message_text("❌ <b>قابلیت متوقف شده است</b>\n\nفروش سرویس V2Ray حجمی در حال حاضر متوقف است.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="buy_back_start")]]), parse_mode="HTML")
             elif not is_vol_flow and not v2_unlimit_en:
                 return await query.edit_message_text("❌ <b>قابلیت متوقف شده است</b>\n\nفروش سرویس V2Ray نامحدود در حال حاضر متوقف است.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="buy_back_start")]]), parse_mode="HTML")
+
+    # Direct Market customer top-up review. Callback carries only the receipt ID;
+    # amount/customer ownership are authoritative only from SQLite.
+    if d.startswith("mkt_topup_acc_") or d.startswith("mkt_topup_rej_"):
+        if role != 'admin':
+            await query.message.reply_text("⛔️ بررسی رسید مشتری فقط برای مدیر مجاز است.")
+            return
+        try:
+            receipt_id = int(d.rsplit("_", 1)[1])
+        except (TypeError, ValueError):
+            await query.message.reply_text("❌ شناسه رسید نامعتبر است.")
+            return
+
+        if d.startswith("mkt_topup_acc_"):
+            result = await asyncio.to_thread(
+                _db_approve_market_topup,
+                receipt_id,
+                update.effective_chat.id,
+            )
+            outcome = result.get('outcome')
+            receipt = result.get('receipt')
+            if outcome == 'missing':
+                await query.message.reply_text("❌ رسید پیدا نشد.")
+                return
+            if outcome == 'rejected':
+                await query.message.reply_text("⚠️ این رسید قبلاً رد شده است و قابل تایید نیست.")
+                return
+
+            wallet = result.get('wallet') or {}
+            suffix = (
+                "\n\n✅ <b>تایید شد و کیف پول مشتری شارژ شد.</b>"
+                if outcome == 'approved'
+                else "\n\n✅ <b>این رسید قبلاً تایید شده بود؛ شارژ تکراری انجام نشد.</b>"
+            )
+            caption = (query.message.caption or "") + suffix
+            await query.edit_message_caption(caption=caption, parse_mode="HTML")
+            if receipt and receipt.get('telegram_chat_id'):
+                with contextlib.suppress(Exception):
+                    await context.bot.send_message(
+                        chat_id=receipt['telegram_chat_id'],
+                        text=(
+                            f"✅ رسید #{receipt_id} تایید شد.\n"
+                            f"💰 مبلغ {receipt['amount_toman']:,} تومان به کیف پول شما اضافه شد.\n"
+                            f"موجودی فعلی: {int(wallet.get('balance_toman', 0)):,} تومان"
+                        ),
+                    )
+            return
+
+        result = await asyncio.to_thread(
+            _db_reject_market_topup,
+            receipt_id,
+            update.effective_chat.id,
+        )
+        outcome = result.get('outcome')
+        receipt = result.get('receipt')
+        if outcome == 'missing':
+            await query.message.reply_text("❌ رسید پیدا نشد.")
+            return
+        if outcome == 'approved':
+            await query.message.reply_text("⚠️ این رسید قبلاً تایید شده است و قابل رد نیست.")
+            return
+        suffix = (
+            "\n\n❌ <b>رسید رد شد.</b>"
+            if outcome == 'rejected'
+            else "\n\n❌ <b>این رسید قبلاً رد شده بود.</b>"
+        )
+        await query.edit_message_caption(
+            caption=(query.message.caption or "") + suffix,
+            parse_mode="HTML",
+        )
+        if receipt and receipt.get('telegram_chat_id'):
+            with contextlib.suppress(Exception):
+                await context.bot.send_message(
+                    chat_id=receipt['telegram_chat_id'],
+                    text=f"❌ رسید شارژ #{receipt_id} توسط مدیریت رد شد. موجودی کیف پول تغییری نکرد.",
+                )
+        return
 
     # 🆕 تاییدیهٔ خروج (مشترک بین پنل ادمین و پنل نمایندگی)
     if d == "confirm_logout_yes":

@@ -95,6 +95,8 @@ import v2ray_engine
 import marzban_admin
 import cloudflare_dns
 import radar_runtime
+import radar_notifications
+import radar_ui
 import marzban_node_bootstrap
 import marzban_node_install
 import marzban_asset_discovery
@@ -705,6 +707,15 @@ REGIONAL_PROVIDER_RECOVERY_SUCCESS_THRESHOLD = _phase6c_env_int(
 )
 REGIONAL_PROVIDER_ALERT_REPEAT_SECONDS = _phase6c_env_int(
     "NVL_REGIONAL_PROVIDER_ALERT_REPEAT_SECONDS", 1800
+)
+
+# Radar V3 — low-noise transition notifications. Provider failures remain
+# visible in monitoring UI/logs and never notify admins by themselves.
+RADAR_NOTIFICATION_DEGRADED_CONFIRM_ROUNDS = _phase6c_env_int(
+    "NVL_RADAR_DEGRADED_CONFIRM_ROUNDS", 2, minimum=1, maximum=6
+)
+RADAR_NOTIFICATION_RECOVERY_CONFIRM_ROUNDS = _phase6c_env_int(
+    "NVL_RADAR_RECOVERY_CONFIRM_ROUNDS", 2, minimum=1, maximum=6
 )
 
 FAST_SENTINEL_INTERVAL_SECONDS = _phase6c_env_int("NVL_FAST_SENTINEL_INTERVAL", 15)

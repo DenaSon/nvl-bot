@@ -199,7 +199,7 @@ class V122BIntegrationShapeTests(unittest.TestCase):
 
     def test_final_runtime_marker_is_v122b(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V123A-2026-10-06-stable-public-endpoint"',
+            'BOT_VERSION_TAG = "V123B1-2026-10-06-adopt-public-endpoint"',
             self.source,
         )
         self.assertIn("V122B Marzban Observability", self.source)

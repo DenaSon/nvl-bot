@@ -78,6 +78,17 @@ class ManagedNodePublicHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(bad["ok"])
         self.assertEqual(bad["matched_ips"], ())
 
+        mixed = marzban_admin.preflight_public_endpoint(
+            "172.86.72.203",
+            "mixed.nvlsup.xyz",
+            resolver=lambda host: {
+                "mixed.nvlsup.xyz": ["172.86.72.203", "203.0.113.99"],
+            }.get(host, []),
+        )
+        self.assertFalse(mixed["ok"])
+        self.assertEqual(mixed["matched_ips"], ("172.86.72.203",))
+        self.assertIn("outside", mixed["error"])
+
     async def test_reconcile_keeps_only_nvl_profile_and_preserves_manual_hosts(self):
         generated = marzban_admin.node_generated_host_payload(self.node)
         manual = dict(generated)

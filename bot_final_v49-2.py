@@ -580,7 +580,7 @@ SUBPROCESS_TIMEOUT = 12.0      # تایم‌اوت دستورات حساس (user
 MONITOR_TIMEOUT = 8.0          # تایم‌اوت دستورات مانیتورینگ (ps/awk برای کاربران آنلاین)
 
 SUPER_ADMIN_ID = 1947045855    # 👑 آیدی تلگرام مدیر کل (Super Admin)
-ACCOUNTANT_IDS = (8404452597, 6455747868) # 📊 آیدی تلگرام حسابدارها (چند نفر)
+ACCOUNTANT_IDS = () # 📊 آیدی تلگرام حسابدارها (چند نفر)
 ACCOUNTING_DB_PATH = os.path.join(_SCRIPT_DIR, "accounting.db") # 🗄 مسیر دیتابیس دوم (حسابداری)
 
 # 🔴🔵 رمز تاییدِ عملیات سراسری RED & BLUE (قطع/وصل کامل سرور و افزودن روز به همه کاربران).

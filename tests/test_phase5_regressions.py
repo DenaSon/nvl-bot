@@ -45,10 +45,9 @@ class Phase5InboundHostRegressionTests(unittest.TestCase):
     def test_node_and_host_confirmation_domains_are_isolated(self):
         self.assertIn("node_edit_starter =", self.source)
         self.assertIn("host_edit_starter = d.startswith('mza_hedit_')", self.source)
-        self.assertIn(
-            "if not d.startswith('mza_nedit_confirm_') and not node_edit_starter:",
-            self.source,
-        )
+        self.assertIn("not d.startswith('mza_nedit_confirm_')", self.source)
+        self.assertIn("not d.startswith('mza_nrename_confirm_')", self.source)
+        self.assertIn("and not node_edit_starter", self.source)
         self.assertIn("host_delete_starter = d.startswith('mza_hdelete_')", self.source)
         self.assertIn("and not host_edit_starter", self.source)
         self.assertIn("and not host_delete_starter", self.source)

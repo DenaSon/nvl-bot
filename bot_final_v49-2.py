@@ -15709,6 +15709,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d.startswith('mza_nedit_name_'):
         node_id = marzban_admin.normalize_node_id(d[len('mza_nedit_name_'):])
+        protected_profile = await asyncio.to_thread(
+            _db_get_marzban_node_public_profile,
+            node_id,
+        )
+        if protected_profile:
+            await query.edit_message_text(
+                "🛡 <b>تغییر نام این Node در V123A عمداً قفل است.</b>\n\n"
+                f"Public Endpoint: <code>{esc(protected_profile.get('public_address'))}</code>\n\n"
+                "Rename باید Remarkهای Managed Public Host را هم به‌صورت اتمیک Sync کند؛ "
+                "این lifecycle در V123B اضافه می‌شود.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
         context.user_data['state'] = 'MZA_NODE_NAME_INPUT'
         context.user_data['mza_action_node'] = node_id
         context.user_data.pop('mza_node_pending_changes', None)
@@ -15723,6 +15739,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d.startswith('mza_nedit_address_'):
         node_id = marzban_admin.normalize_node_id(d[len('mza_nedit_address_'):])
+        protected_profile = await asyncio.to_thread(
+            _db_get_marzban_node_public_profile,
+            node_id,
+        )
+        if protected_profile:
+            await query.edit_message_text(
+                "🛡 <b>تغییر آدرس این Node در V123A عمداً قفل است.</b>\n\n"
+                f"Public Endpoint: <code>{esc(protected_profile.get('public_address'))}</code>\n\n"
+                "تغییر IP باید همراه با Verify دامنه عمومی و lifecycle امن انجام شود؛ "
+                "این مسیر در V123B اضافه می‌شود.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
         context.user_data['state'] = 'MZA_NODE_ADDRESS_INPUT'
         context.user_data['mza_action_node'] = node_id
         context.user_data.pop('mza_node_pending_changes', None)
@@ -15779,6 +15811,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop('mza_node_pending_changes', None)
             await query.edit_message_text(
                 "❌ این عملیات منقضی شده است.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+
+        protected_profile = await asyncio.to_thread(
+            _db_get_marzban_node_public_profile,
+            node_id,
+        )
+        if protected_profile and {"name", "address"}.intersection(pending):
+            context.user_data.pop('mza_action_node', None)
+            context.user_data.pop('mza_node_pending_changes', None)
+            await query.edit_message_text(
+                "🛡 <b>این تغییر برای Stable Public Endpoint در V123A قفل است.</b>\n\n"
+                f"Public Endpoint: <code>{esc(protected_profile.get('public_address'))}</code>\n\n"
+                "تاییدیه قدیمی اجرا نشد؛ Rename/Address lifecycle در V123B انجام می‌شود.",
+                parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_node_{node_id}")]
                 ]),

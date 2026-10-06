@@ -263,7 +263,7 @@ Validation on branch:
 
 ## 10. Phase 4 — Direct SSH Purchase
 
-**Status: PLANNED**
+**Status: IMPLEMENTED ON BRANCH — FEATURE FLAG OFF / PRODUCTION ROLLOUT PENDING**
 
 ```text
 select plan
@@ -277,6 +277,65 @@ select plan
 ```
 
 Failure releases the reservation. No active service may silently remain without matching customer settlement. Provisioning and order execution must be retry-safe/idempotent.
+
+Implemented behavior:
+
+- Added `market_orders.py` as the Direct Market order/state-machine domain; it does not use Agent balance, commission, cashback or emergency-credit logic.
+- Direct Market schema version advanced to `3` using additive-only changes.
+- Added nullable `ssh_accounts.market_order_id` with a unique partial index. Direct SSH ownership is now bound by both `customer_id` and `market_order_id`.
+- Extended the existing SSH finalizer with optional trailing `customer_id` / `market_order_id` arguments. Legacy Agent/Admin callers remain backward-compatible and continue to write NULL ownership metadata.
+- `orders` now snapshots the purchase contract at order creation: price, duration, users limit and connection mode. Later edits to `market_plans` cannot change an already-created order.
+- Retail SSH plans are read only from explicitly configured active `market_plans` rows. Phase 4 does **not** seed guessed/default retail prices and does not derive them from Agent pricing.
+- Phase-4 SSH uses `connection_mode='direct'`. Additional service types/modes are introduced only in their dedicated phases.
+
+Financial/state sequence:
+
+```text
+pending
+  -> funds_reserved      (wallet balance unchanged; available balance decreases)
+  -> provisioning
+  -> completed           (capture: balance decreases + reservation clears + purchase ledger)
+```
+
+- Funds are reserved **before** any Linux `useradd` side effect.
+- Order creation/reservation is idempotent. Replaying the same purchase callback cannot reserve twice or create a second billable Order.
+- Provisioning uses a single-writer claim; a concurrent/replayed callback sees `in_progress` instead of creating another service.
+- Wallet capture is allowed only after SQLite proves an active SSH row matching the exact username, customer and market order, with `agent_id=0`.
+- Successful capture atomically:
+  1. deducts `balance_toman`,
+  2. releases `reserved_toman`,
+  3. appends one immutable `purchase` wallet transaction,
+  4. marks the Order `completed`.
+- Re-running completion is idempotent and cannot charge twice.
+
+Failure/compensation rules:
+
+- If provisioning fails and cleanup is proven complete, the Order becomes `failed`, the reservation is released and wallet balance is not debited.
+- Funds cannot be released while any `ssh_accounts` row still references the Order.
+- If Linux/DB cleanup is uncertain, the Order stays in `provisioning`, receives a `RECOVERY_REQUIRED` reason, and the money remains **reserved but not captured**. Admins are notified automatically. This deliberately prefers a temporary hold over a free/unknown live service.
+- If wallet capture itself fails after service creation, the service is compensated/removed first; reservation is released only when that cleanup is proven safe.
+- Direct Market cleanup deletes only an artifact provably owned by the same customer/order attempt; it cannot broadly delete legacy Agent/Admin services.
+- The Direct Market customer action/callback/photo paths re-check the master `direct_market_enabled` flag, so a stale persisted Customer session cannot continue purchasing after an operator disables the market.
+- Order atomic functions preserve caller-owned SQLite transactions using SAVEPOINTs instead of committing unrelated outer work.
+
+Provisioning reuse:
+
+- Reuses the established SSH primitives for atomic username reservation, hidden hold scheduling, Linux `useradd` / `chpasswd`, DB finalization, PAM user-limit synchronization and invoice rendering.
+- The legacy Agent purchase path itself is not refactored in this phase.
+
+Deferred hardening:
+
+- Automatic startup reconciliation/retry of stale `provisioning` Orders is intentionally deferred to Phase 7 hardening. Phase 4 is fail-closed: callback replay does not provision twice, and ambiguous cleanup keeps funds reserved for operator review rather than guessing.
+- `📦 سرویس‌های من` remains Phase 6; Phase 4 returns the completed invoice directly after purchase.
+
+Validation on branch:
+
+- Main Phase-4 implementation commit: `82f306cb5c51319e72de25af4cfa282a87bfcb89`
+- Final Phase-4 code head after transaction-boundary hardening: `ab7fb5660fd6404853fcee1c09deb81205069a32`
+- GitHub Actions `syntax-and-unit-tests`: **passed**
+- Full suite: **790 tests passed**
+- Direct Market Phase-4 tests: **20/20 passed**
+- Production deployment/migration has **not** been performed and `direct_market_enabled` remains OFF by default.
 
 ## 11. Phase 5 — Direct Marzban/V2Ray Purchase
 
@@ -330,7 +389,7 @@ Rollout:
 - [x] Phase 1 implementation complete on branch; CI green. Production rollout gate remains pending.
 - [x] Phase 2 implementation complete on branch; CI green. Feature flag remains OFF pending controlled rollout.
 - [x] Phase 3 implementation complete on branch; CI green. Feature flag remains OFF pending controlled rollout.
-- [ ] Phase 4 complete.
+- [x] Phase 4 implementation complete on branch; CI green. Feature flag remains OFF pending controlled rollout.
 - [ ] Phase 5 complete.
 - [ ] Phase 6 complete.
 - [ ] Phase 7 complete / public rollout approved.

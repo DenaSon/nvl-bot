@@ -203,7 +203,7 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
 
     def test_release_marker_includes_phase6h_on_top_of_phase6g_engine(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V123B33D-2026-10-06-safe-node-delete"',
+            'BOT_VERSION_TAG = "V123C-2026-10-06-cloudflare-dns-automation"',
             self.source,
         )
 

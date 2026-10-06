@@ -7160,6 +7160,27 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         safe_clear_context(context)
         await show_main_menu(update, context)
 
+
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Emergency escape hatch for persisted/stateful bot workflows."""
+    chat_id = update.effective_chat.id if hasattr(update, 'effective_chat') else 0
+
+    # Cancel non-persistent in-memory wizard sessions as well as persisted
+    # user_data so /cancel is safe even after a navigation/state mismatch.
+    with contextlib.suppress(Exception):
+        _mig_cancel_session(chat_id)
+    with contextlib.suppress(Exception):
+        marzban_node_bootstrap.cancel_session(chat_id)
+
+    safe_clear_context(context)
+
+    if is_auth(context):
+        await update.message.reply_text("✅ عملیات جاری لغو شد.")
+        await show_main_menu(update, context)
+    else:
+        await require_login(update)
+
+
 # ==========================================
 # 🎯 توابع رابط‌های گرافیکی (نمایش اکانت‌ها)
 # ==========================================
@@ -14521,7 +14542,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             or node_bootstrap_starter
             or create_starter
         )
-        if not starters and input_state in (
+        # Node detail is navigation, not a text-input starter.  It is also
+        # grouped with bootstrap callbacks so an SSH bootstrap session can be
+        # resumed, but it must never preserve an unrelated pending text state.
+        # Otherwise a stale MZA_NODE_*_INPUT can survive while mza_action_node
+        # is cleared below, trapping every subsequent text message in an
+        # impossible validation loop.
+        if (not starters or d.startswith('mza_node_')) and input_state in (
             'MARZBAN_ADMIN_SEARCH',
             'MZA_SUBNAME_INPUT',
             'MZA_RENEW_INPUT',
@@ -25867,6 +25894,7 @@ if __name__ == '__main__':
         store_data=PersistenceInput(bot_data=False, chat_data=False, user_data=True, callback_data=False))
     app = ApplicationBuilder().token(TOKEN).persistence(persistence).post_init(_post_init).post_shutdown(_post_shutdown).build()
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("marzban_monitor", cmd_marzban_monitor))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))

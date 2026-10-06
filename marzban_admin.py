@@ -12,7 +12,9 @@ This module intentionally keeps the existing ``(ok, payload)`` contract used by
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
+import json
 import math
 import re
 import socket
@@ -743,6 +745,224 @@ def inspect_node_public_host_profile(
         "drifted_tags": drifted_tags,
         "invalid_host_lists": invalid_host_lists,
         "matched_hosts": len(exact_matches),
+    }
+
+
+_LEGACY_GENERATED_REMARK_SUFFIX = " ({USERNAME}) [{PROTOCOL} - {TRANSPORT}]"
+
+
+def _host_matches_generated_except_remark(
+    host: Dict[str, Any],
+    generated: Dict[str, Any],
+) -> bool:
+    """Return whether a Host is canonical except for its generated-style label."""
+    try:
+        current = _host_payload(host)
+    except ValueError:
+        return False
+    return all(
+        current.get(field) == generated.get(field)
+        for field in HOST_FIELDS
+        if field != "remark"
+    )
+
+
+def _is_legacy_generated_public_host(
+    host: Dict[str, Any],
+    generated: Dict[str, Any],
+) -> bool:
+    """Recognize a legacy Marzban-generated Host without claiming arbitrary manual Hosts.
+
+    V123B.2 only claims a Host when it points at the requested stable endpoint,
+    every ProxyHost field except remark is already canonical, and the remark
+    still has Marzban's generated template shape. A custom/manual remark is
+    deliberately not enough.
+    """
+    if not isinstance(host, dict):
+        return False
+    remark = str(host.get("remark") or "")
+    if not remark or remark == str(generated.get("remark") or ""):
+        return False
+    if (
+        not remark.endswith(_LEGACY_GENERATED_REMARK_SUFFIX)
+        or len(remark) <= len(_LEGACY_GENERATED_REMARK_SUFFIX)
+    ):
+        return False
+    expected_address = str(generated.get("address") or "").strip().rstrip(".").casefold()
+    current_address = str(host.get("address") or "").strip().rstrip(".").casefold()
+    if not expected_address or current_address != expected_address:
+        return False
+    return _host_matches_generated_except_remark(host, generated)
+
+
+def plan_node_public_host_repair(
+    hosts_payload: Any,
+    node: Dict[str, Any],
+    tags: Any = NVL_NODE_PUBLIC_HOST_TAGS,
+    *,
+    public_address: Any,
+) -> Dict[str, Any]:
+    """Build a deterministic, non-mutating repair plan for one stable Public Endpoint.
+
+    Ownership is intentionally conservative:
+    - exact canonical Hosts are managed;
+    - Hosts with the exact current Node-generated remark are managed even when
+      address/payload drifted;
+    - legacy generated-style Hosts are claimable only when their stable address
+      and every field except remark already match the canonical payload;
+    - arbitrary manual Hosts are preserved, and a manual Host on the requested
+      endpoint inside a managed inbound makes the plan ambiguous/fail-closed.
+    """
+    if not isinstance(hosts_payload, dict):
+        raise ValueError("invalid Marzban hosts response")
+    if not isinstance(node, dict):
+        raise ValueError("invalid Marzban node")
+
+    public = normalize_public_hostname(public_address)
+    generated = node_generated_host_payload(node, public_address=public)
+    expected_remark = str(generated["remark"])
+    expected_address = str(generated["address"]).strip().rstrip(".").casefold()
+
+    wanted: List[str] = []
+    seen = set()
+    for raw_tag in tags or ():
+        tag = normalize_inbound_tag(raw_tag)
+        if tag not in seen:
+            wanted.append(tag)
+            seen.add(tag)
+    if not wanted:
+        raise ValueError("at least one managed Public Host tag is required")
+
+    normalized_lists: Dict[str, List[Dict[str, Any]]] = {}
+    invalid_host_lists: List[str] = []
+    for raw_tag, raw_hosts in hosts_payload.items():
+        try:
+            tag = normalize_inbound_tag(raw_tag)
+        except ValueError:
+            continue
+        if not isinstance(raw_hosts, list):
+            if tag in wanted:
+                invalid_host_lists.append(tag)
+            continue
+        try:
+            normalized_lists[tag] = [_host_payload(item) for item in raw_hosts]
+        except ValueError:
+            if tag in wanted:
+                invalid_host_lists.append(tag)
+
+    for tag in wanted:
+        if tag not in normalized_lists and tag not in invalid_host_lists:
+            raw_hosts = hosts_payload.get(tag)
+            if raw_hosts is None:
+                normalized_lists[tag] = []
+
+    fingerprint_data = {
+        "node": {
+            "id": node.get("id"),
+            "name": node.get("name"),
+            "address": node.get("address"),
+        },
+        "public_address": public,
+        "wanted": wanted,
+        "hosts": {
+            tag: normalized_lists[tag]
+            for tag in sorted(normalized_lists)
+        },
+        "invalid_host_lists": sorted(invalid_host_lists),
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            fingerprint_data,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+    desired_by_tag: Dict[str, List[Dict[str, Any]]] = {}
+    added_tags: List[str] = []
+    normalized_tags: List[str] = []
+    claimed_legacy_tags: List[str] = []
+    deduplicated_tags: Dict[str, int] = {}
+    removed_unexpected_tags: Dict[str, int] = {}
+    ambiguous_tags: List[str] = []
+    issues: List[str] = []
+
+    all_tags = sorted(set(normalized_lists) | set(wanted))
+    for tag in all_tags:
+        if tag in invalid_host_lists:
+            continue
+        current = list(normalized_lists.get(tag, []))
+        owned: List[Dict[str, Any]] = []
+        manual: List[Dict[str, Any]] = []
+        legacy_count = 0
+        ambiguous_same_endpoint = False
+
+        for host in current:
+            remark = str(host.get("remark") or "")
+            address = str(host.get("address") or "").strip().rstrip(".").casefold()
+            exact = host == generated
+            current_remark_owned = remark == expected_remark
+            legacy = _is_legacy_generated_public_host(host, generated)
+            if exact or current_remark_owned or legacy:
+                owned.append(host)
+                if legacy:
+                    legacy_count += 1
+                continue
+            manual.append(host)
+            if tag in wanted and address == expected_address:
+                ambiguous_same_endpoint = True
+
+        if ambiguous_same_endpoint:
+            ambiguous_tags.append(tag)
+            issues.append(
+                f"{tag}: manual Host already uses the requested Public Endpoint"
+            )
+            continue
+
+        if tag in wanted:
+            desired = manual + [dict(generated)]
+            if not owned:
+                added_tags.append(tag)
+            else:
+                if legacy_count:
+                    claimed_legacy_tags.append(tag)
+                if len(owned) > 1:
+                    deduplicated_tags[tag] = len(owned) - 1
+                if len(owned) != 1 or owned[0] != generated:
+                    normalized_tags.append(tag)
+            if desired != current:
+                desired_by_tag[tag] = desired
+        else:
+            if owned:
+                desired = manual
+                removed_unexpected_tags[tag] = len(owned)
+                if desired != current:
+                    desired_by_tag[tag] = desired
+
+    if invalid_host_lists:
+        issues.append(
+            "invalid Public Host list: " + ", ".join(sorted(invalid_host_lists))
+        )
+
+    repairable = not issues
+    return {
+        "repairable": repairable,
+        "public_address": public,
+        "managed_remark": expected_remark,
+        "managed_tags": wanted,
+        "fingerprint": fingerprint,
+        "changed_tags": sorted(desired_by_tag),
+        "added_tags": added_tags,
+        "normalized_tags": normalized_tags,
+        "claimed_legacy_tags": claimed_legacy_tags,
+        "deduplicated_tags": deduplicated_tags,
+        "removed_unexpected_tags": removed_unexpected_tags,
+        "ambiguous_tags": ambiguous_tags,
+        "invalid_host_lists": invalid_host_lists,
+        "issues": issues,
+        "desired_by_tag": desired_by_tag,
     }
 
 
@@ -1548,6 +1768,235 @@ class MarzbanAdminService:
             "missing_inbounds": [],
         })
         return True, report
+
+    async def preview_node_public_profile_repair(
+        self,
+        node_id: int,
+        public_address: Any,
+        tags: Any = NVL_NODE_PUBLIC_HOST_TAGS,
+    ) -> ApiResult:
+        """GET-only V123B.2 preview for an existing/pending Public Endpoint."""
+        try:
+            node_id = normalize_node_id(node_id)
+            public = normalize_public_hostname(public_address)
+            wanted: List[str] = []
+            seen = set()
+            for raw_tag in tags or ():
+                tag = normalize_inbound_tag(raw_tag)
+                if tag not in seen:
+                    wanted.append(tag)
+                    seen.add(tag)
+            if not wanted:
+                raise ValueError("at least one managed Public Host tag is required")
+        except ValueError as exc:
+            return False, {
+                "stage": "repair_precheck",
+                "read_only": True,
+                "error": str(exc),
+            }
+
+        ok_node, node = await self.get_node(node_id)
+        if not ok_node or not isinstance(node, dict):
+            return False, {
+                "stage": "repair_precheck",
+                "read_only": True,
+                "node_id": node_id,
+                "error": node if not ok_node else "Invalid Marzban node response",
+            }
+
+        ok_inbounds, inbounds_payload = await self.get_inbounds()
+        if not ok_inbounds or not isinstance(inbounds_payload, dict):
+            return False, {
+                "stage": "repair_precheck",
+                "read_only": True,
+                "node_id": node_id,
+                "node": node,
+                "error": (
+                    inbounds_payload
+                    if not ok_inbounds
+                    else "Invalid Marzban inbounds response"
+                ),
+            }
+
+        available = {row["tag"] for row in flatten_marzban_inbounds(inbounds_payload)}
+        missing_inbounds = [tag for tag in wanted if tag not in available]
+        if missing_inbounds:
+            return True, {
+                "stage": "repair_preview",
+                "read_only": True,
+                "node_id": node_id,
+                "node": node,
+                "public_address": public,
+                "managed_remark": node_generated_host_remark(node.get("name")),
+                "managed_tags": wanted,
+                "repairable": False,
+                "missing_inbounds": missing_inbounds,
+                "issues": [
+                    "Required inbound(s) missing: " + ", ".join(missing_inbounds)
+                ],
+                "changed_tags": [],
+                "added_tags": [],
+                "normalized_tags": [],
+                "claimed_legacy_tags": [],
+                "deduplicated_tags": {},
+                "removed_unexpected_tags": {},
+                "ambiguous_tags": [],
+                "invalid_host_lists": [],
+                "fingerprint": None,
+                "desired_by_tag": {},
+            }
+
+        ok_hosts, hosts_payload = await self.get_hosts()
+        if not ok_hosts or not isinstance(hosts_payload, dict):
+            return False, {
+                "stage": "repair_precheck",
+                "read_only": True,
+                "node_id": node_id,
+                "node": node,
+                "error": (
+                    hosts_payload
+                    if not ok_hosts
+                    else "Invalid Marzban hosts response"
+                ),
+            }
+
+        try:
+            plan = plan_node_public_host_repair(
+                hosts_payload,
+                node,
+                wanted,
+                public_address=public,
+            )
+        except ValueError as exc:
+            return False, {
+                "stage": "repair_precheck",
+                "read_only": True,
+                "node_id": node_id,
+                "node": node,
+                "error": str(exc),
+            }
+
+        plan.update({
+            "stage": "repair_preview",
+            "read_only": True,
+            "node_id": node_id,
+            "node": node,
+            "missing_inbounds": [],
+        })
+        return True, plan
+
+    async def repair_node_public_profile(
+        self,
+        node_id: int,
+        public_address: Any,
+        tags: Any = NVL_NODE_PUBLIC_HOST_TAGS,
+        *,
+        expected_fingerprint: Any,
+    ) -> ApiResult:
+        """Apply one stale-safe Public Host repair and verify the canonical profile."""
+        ok_plan, plan = await self.preview_node_public_profile_repair(
+            node_id,
+            public_address,
+            tags,
+        )
+        if not ok_plan or not isinstance(plan, dict):
+            return False, plan
+        if not plan.get("repairable"):
+            failed = dict(plan)
+            failed.update({"stage": "repair_precheck", "read_only": True})
+            return False, failed
+
+        current_fingerprint = str(plan.get("fingerprint") or "")
+        expected = str(expected_fingerprint or "")
+        if not expected or current_fingerprint != expected:
+            return False, {
+                "stage": "repair_stale",
+                "read_only": True,
+                "node_id": plan.get("node_id"),
+                "public_address": plan.get("public_address"),
+                "expected_fingerprint": expected,
+                "current_fingerprint": current_fingerprint,
+                "error": "Public Host state changed after preview",
+            }
+
+        desired_by_tag = dict(plan.get("desired_by_tag") or {})
+        changed: List[str] = []
+        for tag in sorted(desired_by_tag):
+            ok_put, response = await self.request(
+                "PUT",
+                "/api/hosts",
+                json_data={tag: desired_by_tag[tag]},
+            )
+            if not ok_put:
+                return False, {
+                    "stage": "repair_write",
+                    "read_only": False,
+                    "node_id": plan.get("node_id"),
+                    "public_address": plan.get("public_address"),
+                    "changed_tags": changed,
+                    "failed_tag": tag,
+                    "partial_write": bool(changed),
+                    "error": response,
+                }
+            changed.append(tag)
+
+        ok_hosts, hosts_payload = await self.get_hosts()
+        if not ok_hosts or not isinstance(hosts_payload, dict):
+            return False, {
+                "stage": "repair_verify",
+                "read_only": False,
+                "node_id": plan.get("node_id"),
+                "public_address": plan.get("public_address"),
+                "changed_tags": changed,
+                "applied": bool(changed),
+                "error": (
+                    hosts_payload
+                    if not ok_hosts
+                    else "Invalid Marzban hosts response"
+                ),
+            }
+
+        node = plan.get("node") if isinstance(plan.get("node"), dict) else {}
+        try:
+            verification = inspect_node_public_host_profile(
+                hosts_payload,
+                node,
+                tags,
+                public_address=plan.get("public_address"),
+            )
+        except ValueError as exc:
+            return False, {
+                "stage": "repair_verify",
+                "read_only": False,
+                "node_id": plan.get("node_id"),
+                "public_address": plan.get("public_address"),
+                "changed_tags": changed,
+                "applied": bool(changed),
+                "error": str(exc),
+            }
+
+        if not verification.get("adoptable"):
+            return False, {
+                "stage": "repair_verify",
+                "read_only": False,
+                "node_id": plan.get("node_id"),
+                "public_address": plan.get("public_address"),
+                "changed_tags": changed,
+                "applied": bool(changed),
+                "verification": verification,
+                "error": "Canonical Public Host verification failed after repair",
+            }
+
+        result = dict(plan)
+        result.pop("desired_by_tag", None)
+        result.update({
+            "stage": "repair_verified",
+            "read_only": False,
+            "verified": True,
+            "changed_tags": changed,
+            "verification": verification,
+        })
+        return True, result
 
     async def reconcile_node_public_hosts(
         self,

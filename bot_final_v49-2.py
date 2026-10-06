@@ -356,7 +356,7 @@ from server_migration.telegram_wizard import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V123B1-2026-10-06-adopt-public-endpoint"
+BOT_VERSION_TAG = "V123B2-2026-10-06-repair-public-endpoint"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -7994,6 +7994,180 @@ def _mza_adopt_issue_summary(report):
     return " | ".join(issues) if issues else "—"
 
 
+_MZA_NODE_REPAIR_TEXT_STATES = {
+    "MZA_NODE_REPAIR_PUBLIC_INPUT",
+}
+
+
+def _mza_clear_node_repair(context):
+    if context.user_data.get("state") in _MZA_NODE_REPAIR_TEXT_STATES:
+        context.user_data.pop("state", None)
+    context.user_data.pop("mza_node_repair_draft", None)
+
+
+def _mza_repair_issue_summary(plan):
+    if not isinstance(plan, dict):
+        return "گزارش Repair نامعتبر است."
+    issues = list(plan.get("issues") or ())
+    missing = list(plan.get("missing_inbounds") or ())
+    if missing:
+        issues.insert(0, "Inbound موجود نیست: " + ", ".join(map(str, missing)))
+    ambiguous = list(plan.get("ambiguous_tags") or ())
+    if ambiguous and not issues:
+        issues.append("مالکیت Host مبهم است: " + ", ".join(map(str, ambiguous)))
+    return " | ".join(map(str, issues)) if issues else "—"
+
+
+def _mza_repair_action_lines(plan):
+    plan = plan if isinstance(plan, dict) else {}
+    added = set(plan.get("added_tags") or ())
+    normalized = set(plan.get("normalized_tags") or ())
+    claimed = set(plan.get("claimed_legacy_tags") or ())
+    deduped = dict(plan.get("deduplicated_tags") or {})
+    lines = []
+    for tag in marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS:
+        if tag in added:
+            action = "➕ ساخت Managed Host"
+        elif tag in normalized:
+            action = "♻️ Normalize به payload استاندارد"
+            if tag in claimed:
+                action += " · Claim legacy"
+        else:
+            action = "✅ بدون تغییر"
+        if deduped.get(tag):
+            action += f" · حذف {deduped[tag]} duplicate"
+        lines.append(f"• <code>{esc(tag)}</code>: {action}")
+    for tag, count in sorted(dict(plan.get("removed_unexpected_tags") or {}).items()):
+        lines.append(
+            f"• <code>{esc(tag)}</code>: 🧹 حذف {esc(count)} Host generated خارج از profile"
+        )
+    return "\n".join(lines)
+
+
+async def _mza_prepare_node_repair_preview(target, context, public_address):
+    draft = context.user_data.get("mza_node_repair_draft")
+    age = (
+        time.time() - float(draft.get("started_at") or 0)
+        if isinstance(draft, dict)
+        else float("inf")
+    )
+    if not isinstance(draft, dict) or age > 900:
+        _mza_clear_node_repair(context)
+        return await _mza_render(
+            target,
+            "❌ فرآیند Repair منقضی شده است؛ از صفحه Node دوباره شروع کنید.",
+            [[InlineKeyboardButton("🔙 Nodes", callback_data="mza_nodes")]],
+        )
+
+    try:
+        node_id = marzban_admin.normalize_node_id(draft.get("node_id"))
+        public = marzban_admin.normalize_public_hostname(public_address)
+    except ValueError as exc:
+        return await _mza_render(
+            target,
+            f"❌ Public Endpoint نامعتبر است: <code>{esc(exc)}</code>",
+            [[InlineKeyboardButton("❌ لغو", callback_data=f"mza_nrepair_cancel_{draft.get('node_id')}")]],
+        )
+
+    existing = await asyncio.to_thread(_db_get_marzban_node_public_profile, node_id)
+    if existing:
+        try:
+            mapped_public = marzban_admin.normalize_public_hostname(
+                existing.get("public_address")
+            )
+        except ValueError:
+            mapped_public = ""
+        if mapped_public != public:
+            _mza_clear_node_repair(context)
+            return await _mza_render(
+                target,
+                "🛡 <b>Repair متوقف شد.</b> Public Endpoint واردشده با mapping محلی Node یکسان نیست.",
+                [[InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]],
+            )
+
+    service = await _get_marzban_admin_service()
+    ok_plan, plan = await service.preview_node_public_profile_repair(
+        node_id,
+        public,
+        marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+    )
+    if not ok_plan or not isinstance(plan, dict):
+        return await _mza_render(
+            target,
+            "❌ Preview خواندنی Repair ناموفق بود. هیچ تغییری اعمال نشد.\n"
+            f"<code>{esc(plan)}</code>",
+            [[InlineKeyboardButton("❌ لغو", callback_data=f"mza_nrepair_cancel_{node_id}")]],
+        )
+
+    node = plan.get("node") if isinstance(plan.get("node"), dict) else {}
+    preflight = await asyncio.to_thread(
+        marzban_admin.preflight_public_endpoint,
+        node.get("address"),
+        public,
+    )
+    if not plan.get("repairable") or not preflight.get("ok"):
+        dns_reason = (
+            "DNS Match: ✅"
+            if preflight.get("ok")
+            else f"DNS Match: ❌ {esc(preflight.get('error') or 'mismatch')}"
+        )
+        return await _mza_render(
+            target,
+            "⚠️ <b>Repair فعلاً قابل اجرا نیست.</b>\n\n"
+            f"Node  <b>{esc(node.get('name') or node_id)}</b>\n"
+            f"Public Endpoint  <code>{esc(public)}</code>\n"
+            f"{dns_reason}\n\n"
+            f"Issue: <code>{esc(_mza_repair_issue_summary(plan))}</code>\n\n"
+            "Preview فقط GET بود؛ هیچ mapping یا PUT/DELETE انجام نشد.",
+            [[InlineKeyboardButton("❌ لغو", callback_data=f"mza_nrepair_cancel_{node_id}")]],
+        )
+
+    fingerprint = str(plan.get("fingerprint") or "")
+    if not fingerprint:
+        return await _mza_render(
+            target,
+            "❌ Repair fingerprint ساخته نشد؛ هیچ تغییری اعمال نشد.",
+            [[InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]],
+        )
+
+    nonce = secrets.token_hex(8)
+    draft.update({
+        "nonce": nonce,
+        "public_address": public,
+        "fingerprint": fingerprint,
+        "node_name": str(node.get("name") or ""),
+        "node_address": str(node.get("address") or ""),
+        "managed_remark": str(plan.get("managed_remark") or ""),
+        "previewed_at": time.time(),
+    })
+    context.user_data.pop("state", None)
+
+    changed = list(plan.get("changed_tags") or ())
+    change_text = (
+        f"{len(changed)} Inbound تغییر خواهد کرد"
+        if changed
+        else "Profile از قبل canonical است؛ فقط mapping Verify می‌شود"
+    )
+    return await _mza_render(
+        target,
+        "🛠 <b>V123B.2 · Repair Preview</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        f"Node  <b>{esc(node.get('name') or node_id)}</b>\n"
+        f"Real Address  <code>{esc(node.get('address') or '—')}</code>\n"
+        f"Public Endpoint  <code>{esc(public)}</code>\n"
+        "DNS Match  ✅\n\n"
+        f"{_mza_repair_action_lines(plan)}\n\n"
+        f"<b>{esc(change_text)}</b>\n\n"
+        "Hostهای دستی دست‌نخورده می‌مانند. هنگام تایید، وضعیت دوباره Inspect می‌شود؛ "
+        "mapping ابتدا <code>pending</code> ثبت می‌شود و فقط پس از Verify نهایی "
+        "<code>verified</code> خواهد شد.",
+        [
+            [InlineKeyboardButton("✅ اجرای Repair", callback_data=f"mza_nrepair_confirm_{nonce}")],
+            [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nrepair_cancel_{node_id}")],
+        ],
+    )
+
+
 _MZA_NODE_CREATE_TEXT_STATES = {
     "MZA_NODE_CREATE_NAME_INPUT",
     "MZA_NODE_CREATE_ADDRESS_INPUT",
@@ -8912,6 +9086,12 @@ async def _show_marzban_node_detail(target, context, node_id):
                 callback_data=f"mza_nadopt_{node_id}",
             )
         ])
+    kb.append([
+        InlineKeyboardButton(
+            "🛠 Repair Public Endpoint",
+            callback_data=f"mza_nrepair_{node_id}",
+        )
+    ])
     if phase7_ready:
         kb.append([
             InlineKeyboardButton(
@@ -10510,6 +10690,42 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop('mza_action_user', None)
             await _mza_show_addvol_confirm(update.message, username, amount)
             return
+
+    if state == 'MZA_NODE_REPAIR_PUBLIC_INPUT':
+        if role != 'admin':
+            _mza_clear_node_repair(context)
+            await update.message.reply_text("⛔️ دسترسی غیرمجاز.")
+            return
+
+        draft = context.user_data.get("mza_node_repair_draft")
+        age = (
+            time.time() - float(draft.get("started_at") or 0)
+            if isinstance(draft, dict)
+            else float("inf")
+        )
+        if not isinstance(draft, dict) or age > 900:
+            _mza_clear_node_repair(context)
+            await update.message.reply_text(
+                "❌ فرآیند Repair منقضی شده است؛ از صفحه Node دوباره شروع کنید."
+            )
+            return
+
+        try:
+            public_address = marzban_admin.normalize_public_hostname(text)
+        except ValueError as exc:
+            await update.message.reply_text(
+                f"❌ Public Endpoint نامعتبر است: <code>{esc(exc)}</code>\n"
+                "یک FQDN مثل <code>argus.nvlsup.xyz</code> بفرستید.",
+                parse_mode='HTML',
+            )
+            return
+
+        await _mza_prepare_node_repair_preview(
+            update.message,
+            context,
+            public_address,
+        )
+        return
 
     if state == 'MZA_NODE_ADOPT_PUBLIC_INPUT':
         if role != 'admin':
@@ -14283,6 +14499,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         node_create_starter = d == 'mza_ncreate' or d.startswith('mza_ncreate_')
         node_delete_starter = d.startswith('mza_ndelete_')
         node_adopt_starter = d.startswith('mza_nadopt_')
+        node_repair_starter = d.startswith('mza_nrepair_')
         node_bootstrap_starter = (
             d.startswith('mza_nboot_')
             or d.startswith('mza_ninstall_')
@@ -14300,6 +14517,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             or node_create_starter
             or node_delete_starter
             or node_adopt_starter
+            or node_repair_starter
             or node_bootstrap_starter
             or create_starter
         )
@@ -14313,6 +14531,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'MZA_NODE_PORTS_INPUT',
             'MZA_NODE_RATIO_INPUT',
             'MZA_NODE_ADOPT_PUBLIC_INPUT',
+            'MZA_NODE_REPAIR_PUBLIC_INPUT',
             'MZA_NODE_CREATE_NAME_INPUT',
             'MZA_NODE_CREATE_ADDRESS_INPUT',
             'MZA_NODE_CREATE_PUBLIC_INPUT',
@@ -14336,6 +14555,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not node_adopt_starter:
             _mza_clear_node_adopt(context)
+        if not node_repair_starter:
+            _mza_clear_node_repair(context)
 
         # Confirmation messages can outlive the screen that created them.
         # Only a new edit in the same domain may preserve that domain's pending
@@ -16001,6 +16222,228 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         await _show_marzban_node_detail(query, context, node_id)
+        return
+
+    elif d.startswith('mza_nrepair_confirm_'):
+        nonce = d[len('mza_nrepair_confirm_'):]
+        draft = context.user_data.get("mza_node_repair_draft")
+        age = (
+            time.time() - float(draft.get("started_at") or 0)
+            if isinstance(draft, dict)
+            else float("inf")
+        )
+        if (
+            not isinstance(draft, dict)
+            or age > 900
+            or not nonce
+            or nonce != str(draft.get("nonce") or "")
+        ):
+            _mza_clear_node_repair(context)
+            await query.edit_message_text(
+                "❌ تایید Repair منقضی شده است؛ از صفحه Node دوباره شروع کنید."
+            )
+            return
+
+        try:
+            node_id = marzban_admin.normalize_node_id(draft.get("node_id"))
+            public_address = marzban_admin.normalize_public_hostname(
+                draft.get("public_address")
+            )
+        except ValueError:
+            _mza_clear_node_repair(context)
+            await query.edit_message_text("❌ اطلاعات Repair نامعتبر یا منقضی شده است.")
+            return
+
+        existing = await asyncio.to_thread(
+            _db_get_marzban_node_public_profile,
+            node_id,
+        )
+        if existing:
+            try:
+                mapped_public = marzban_admin.normalize_public_hostname(
+                    existing.get("public_address")
+                )
+            except ValueError:
+                mapped_public = ""
+            if mapped_public != public_address:
+                _mza_clear_node_repair(context)
+                await query.edit_message_text(
+                    "🛡 Repair متوقف شد؛ mapping محلی Node به Public Endpoint دیگری اشاره می‌کند.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]
+                    ]),
+                )
+                return
+
+        service = await _get_marzban_admin_service()
+        ok_plan, plan = await service.preview_node_public_profile_repair(
+            node_id,
+            public_address,
+            marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+        )
+        node = (
+            plan.get("node")
+            if ok_plan and isinstance(plan, dict) and isinstance(plan.get("node"), dict)
+            else {}
+        )
+        preflight = (
+            await asyncio.to_thread(
+                marzban_admin.preflight_public_endpoint,
+                node.get("address"),
+                public_address,
+            )
+            if node
+            else {"ok": False, "error": "Node inspection failed"}
+        )
+        stale_identity = (
+            str(node.get("name") or "") != str(draft.get("node_name") or "")
+            or str(node.get("address") or "") != str(draft.get("node_address") or "")
+        )
+        stale_plan = (
+            not isinstance(plan, dict)
+            or str(plan.get("fingerprint") or "") != str(draft.get("fingerprint") or "")
+        )
+        if (
+            not ok_plan
+            or not isinstance(plan, dict)
+            or not plan.get("repairable")
+            or not preflight.get("ok")
+            or stale_identity
+            or stale_plan
+        ):
+            _mza_clear_node_repair(context)
+            await query.edit_message_text(
+                "⚠️ <b>Repair متوقف شد؛ وضعیت از زمان Preview تغییر کرده یا دیگر قابل Verify نیست.</b>\n\n"
+                "هیچ PUT جدیدی اجرا نشد. از صفحه Node دوباره Preview بگیرید.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+
+        managed_remark = str(plan.get("managed_remark") or "")
+        try:
+            await asyncio.to_thread(
+                _db_upsert_marzban_node_public_profile,
+                node_id,
+                public_address,
+                managed_remark,
+                "pending",
+            )
+        except Exception as exc:
+            log.exception("V123B.2 pending mapping persistence failed for node %s", node_id)
+            _mza_clear_node_repair(context)
+            await query.edit_message_text(
+                "❌ ثبت ownership به حالت pending شکست خورد؛ هیچ PUT روی Marzban انجام نشد.\n"
+                f"<code>{esc(type(exc).__name__)}: {esc(exc)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+
+        ok_repair, result = await service.repair_node_public_profile(
+            node_id,
+            public_address,
+            marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+            expected_fingerprint=draft.get("fingerprint"),
+        )
+        if not ok_repair or not isinstance(result, dict) or not result.get("verified"):
+            log.warning("V123B.2 repair failed for node %s: %r", node_id, result)
+            _mza_clear_node_repair(context)
+            await query.edit_message_text(
+                "⚠️ <b>Repair کامل Verify نشد.</b>\n\n"
+                f"Stage  <code>{esc(result.get('stage') if isinstance(result, dict) else 'unknown')}</code>\n"
+                "mapping محلی عمداً <code>pending</code> باقی ماند. Retry از صفحه Node "
+                "از وضعیت فعلی دوباره Plan می‌شود و Hostهای دستی را دست نمی‌زند.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🛠 Retry Repair", callback_data=f"mza_nrepair_{node_id}")],
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")],
+                ]),
+            )
+            return
+
+        try:
+            await asyncio.to_thread(
+                _db_upsert_marzban_node_public_profile,
+                node_id,
+                public_address,
+                managed_remark,
+                "verified",
+            )
+        except Exception as exc:
+            log.exception("V123B.2 verified mapping persistence failed for node %s", node_id)
+            _mza_clear_node_repair(context)
+            await query.edit_message_text(
+                "⚠️ Host profile Repair و Verify شد، اما ثبت نهایی mapping شکست خورد. "
+                "mapping به حالت pending باقی مانده و Repair مجدد امن است.\n"
+                f"<code>{esc(type(exc).__name__)}: {esc(exc)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🛠 Retry Repair", callback_data=f"mza_nrepair_{node_id}")]
+                ]),
+            )
+            return
+
+        changed_tags = list(result.get("changed_tags") or ())
+        _mza_clear_node_repair(context)
+        await query.edit_message_text(
+            "✅ <b>Public Endpoint Repair و Verify شد</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"Node  <b>{esc(node.get('name') or node_id)}</b>\n"
+            f"Public Endpoint  <code>{esc(public_address)}</code>\n"
+            f"Changed Inbounds  <b>{len(changed_tags)}</b>\n"
+            "Profile  <code>verified</code>\n\n"
+            "Managed Hostها canonical شدند و Hostهای دستی حفظ شدند.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🖥 مشاهده Node", callback_data=f"mza_node_{node_id}")],
+                [InlineKeyboardButton("🌐 Public Hosts", callback_data="mza_inbounds")],
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_nrepair_cancel_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nrepair_cancel_'):])
+        _mza_clear_node_repair(context)
+        await _show_marzban_node_detail(query, context, node_id)
+        return
+
+    elif d.startswith('mza_nrepair_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nrepair_'):])
+        existing = await asyncio.to_thread(
+            _db_get_marzban_node_public_profile,
+            node_id,
+        )
+        _mza_clear_node_repair(context)
+        context.user_data["mza_node_repair_draft"] = {
+            "node_id": node_id,
+            "started_at": time.time(),
+        }
+
+        if existing:
+            await _mza_prepare_node_repair_preview(
+                query,
+                context,
+                existing.get("public_address"),
+            )
+            return
+
+        context.user_data["state"] = "MZA_NODE_REPAIR_PUBLIC_INPUT"
+        await query.edit_message_text(
+            "🛠 <b>V123B.2 · Repair Public Endpoint</b>\n\n"
+            "این Node هنوز mapping محلی ندارد. دامنه Stable Endpoint را بفرستید.\n\n"
+            "Preview فقط GET است. اگر Host legacy با همان دامنه و امضای generated-style "
+            "وجود داشته باشد، NVL آن را فقط در مرحله Confirm claim/normalize می‌کند.\n\n"
+            "مثال: <code>argus.nvlsup.xyz</code>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nrepair_cancel_{node_id}")]
+            ]),
+        )
         return
 
     elif d.startswith('mza_nadopt_confirm_'):

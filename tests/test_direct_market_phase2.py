@@ -148,7 +148,7 @@ class DirectMarketRoutingTests(unittest.TestCase):
             )
         )
 
-    def test_phase2_menu_is_non_financial(self):
+    def test_customer_menu_contract_remains_stable_across_phases(self):
         self.assertEqual(
             set(market_customer.CUSTOMER_MENU_LABELS),
             {
@@ -159,9 +159,12 @@ class DirectMarketRoutingTests(unittest.TestCase):
                 "👨‍💼 ورود نماینده",
             },
         )
+        self.assertEqual(
+            set(market_customer.CUSTOMER_PLACEHOLDER_LABELS),
+            {"🛒 خرید اشتراک", "📦 سرویس‌های من"},
+        )
         for label in market_customer.CUSTOMER_PLACEHOLDER_LABELS:
-            message = market_customer.phase2_placeholder_text(label)
-            self.assertTrue(message)
+            self.assertTrue(market_customer.phase2_placeholder_text(label))
 
 
 class DirectMarketMainSourceGuardsTests(unittest.TestCase):
@@ -174,8 +177,12 @@ class DirectMarketMainSourceGuardsTests(unittest.TestCase):
 
     def test_customer_callback_boundary_is_fail_closed(self):
         self.assertIn(
-            "if role == market_customer.ROLE_CUSTOMER:\n"
-            "        await query.message.reply_text(\"⛔️ این عملیات برای حساب مشتری در دسترس نیست.\")",
+            "Direct Market customer callbacks are explicit allowlist entries.",
+            self.source,
+        )
+        self.assertIn("if role == market_customer.ROLE_CUSTOMER:", self.source)
+        self.assertIn(
+            'await query.message.reply_text("⛔️ این عملیات برای حساب مشتری در دسترس نیست.")',
             self.source,
         )
 
@@ -188,7 +195,7 @@ class DirectMarketMainSourceGuardsTests(unittest.TestCase):
 
     def test_customer_role_never_enters_legacy_state_machines(self):
         self.assertIn(
-            "# Customer sessions never enter legacy state machines.",
+            "# Customer sessions never enter legacy Agent/Admin state machines.",
             self.source,
         )
 

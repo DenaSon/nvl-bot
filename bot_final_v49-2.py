@@ -13712,6 +13712,22 @@ async def _render_filtering_monitor_panel(query, page=0):
         DB_PATH,
     )
     radar_summary = radar_ui.render_summary(radar_snapshot, radar_provider)
+    radar_gate_context = incident_correlation.evaluate_incident_correlation(
+        differential_confirmed=False,
+        differential_verdict="",
+        radar_snapshot=radar_snapshot,
+        radar_max_age_seconds=RADAR_FAILOVER_CONTEXT_MAX_AGE_SECONDS,
+    )
+    if (
+        radar_gate_context.failover_inhibited
+        and radar_gate_context.classification
+        == incident_correlation.CORRELATION_WIDESPREAD_NETWORK_OUTAGE
+    ):
+        radar_gate_line = "🛑 Radar Safety Gate: <b>Auto Failover موقتاً متوقف است</b>"
+    elif radar_snapshot:
+        radar_gate_line = "🟢 Radar Safety Gate: <b>مانع خارجی تازه‌ای ثبت نشده است</b>"
+    else:
+        radar_gate_line = "⚪️ Radar Safety Gate: <b>هنوز داده‌ای ندارد</b>"
 
     edge_rows = []
     for row in pool:
@@ -13789,6 +13805,7 @@ async def _render_filtering_monitor_panel(query, page=0):
         failover_line,
         "",
         radar_summary,
+        radar_gate_line,
         "",
     ]
     kb = []

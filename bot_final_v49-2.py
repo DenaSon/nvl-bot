@@ -93,6 +93,7 @@ import aiohttp
 import qrcode
 import v2ray_engine
 import marzban_admin
+import cloudflare_dns
 import marzban_node_bootstrap
 import marzban_node_install
 import marzban_asset_discovery
@@ -356,7 +357,7 @@ from server_migration.telegram_wizard import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V123B33D-2026-10-06-safe-node-delete"
+BOT_VERSION_TAG = "V123C-2026-10-06-cloudflare-dns-automation"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -483,8 +484,12 @@ MASTER_PASS = os.environ.get("MASTER_PASS")
 # should call require_cloudflare_api_token() at execution time and fail closed
 # if the secret is not configured.
 CLOUDFLARE_API_TOKEN_ENV = "NVL_CLOUDFLARE_API_TOKEN"
+CLOUDFLARE_ZONE_ID_ENV = "NVL_CLOUDFLARE_ZONE_ID"
 CLOUDFLARE_API_TOKEN = (
     os.environ.get(CLOUDFLARE_API_TOKEN_ENV) or ""
+).strip()
+CLOUDFLARE_ZONE_ID = (
+    os.environ.get(CLOUDFLARE_ZONE_ID_ENV) or ""
 ).strip()
 
 
@@ -495,6 +500,29 @@ def require_cloudflare_api_token():
             f"{CLOUDFLARE_API_TOKEN_ENV} is not configured for nvlbot.service"
         )
     return token
+
+
+def _mza_cloudflare_dns_client():
+    """Return the V123C per-Public-Endpoint DNS client.
+
+    This deliberately does not reuse the legacy/global SSH Cloudflare switcher:
+    Marzban Node Public Endpoints are separate records and must never mutate
+    public_domain/tls_domain as a side effect.
+    """
+    return cloudflare_dns.CloudflareDNSClient(
+        require_cloudflare_api_token(),
+        zone_id=CLOUDFLARE_ZONE_ID or None,
+    )
+
+
+def _mza_cf_record_summary(snapshot):
+    if not isinstance(snapshot, dict) or not snapshot.get("exists"):
+        return "missing"
+    record = snapshot.get("record") if isinstance(snapshot.get("record"), dict) else {}
+    return (
+        f"{record.get('content') or '—'} · "
+        + ("proxied" if record.get("proxied") else "DNS-only")
+    )
 # 🐛🔧 رفع باگِ واقعیِ «نماینده‌ها بعد از هر انتقال/ری‌استارتِ سرویس مجبور به ورود مجدد
 # می‌شدند»: مقدارهای پیش‌فرضِ زیر قبلاً مسیرِ نسبی («master_bot.db» و «bot_persistence.pickle»
 # بدونِ هیچ پوشه‌ای) بودن — یعنی محلِ واقعیِ این فایل‌ها کاملاً به WorkingDirectory سرویسِ

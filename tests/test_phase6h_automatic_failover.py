@@ -75,6 +75,17 @@ class Phase6HPolicyTests(unittest.TestCase):
             AUTO_FAILOVER_REASON_DIFFERENTIAL_NOT_CONFIRMED,
         )
 
+    def test_widespread_outage_is_root_cause_before_differential_gate(self):
+        kwargs = ready_kwargs()
+        kwargs["external_context_blocks_auto_failover"] = True
+        kwargs["differential_confirmed"] = False
+        decision = evaluate_auto_failover(**kwargs)
+        self.assertFalse(decision.eligible)
+        self.assertEqual(
+            decision.reason,
+            AUTO_FAILOVER_REASON_WIDESPREAD_OUTAGE,
+        )
+
     def test_stale_differential_confirmation_cannot_trigger(self):
         kwargs = ready_kwargs()
         kwargs["differential_age_seconds"] = 121

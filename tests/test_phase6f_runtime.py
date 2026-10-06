@@ -184,24 +184,34 @@ class Phase6FBotIntegrationStaticTests(unittest.TestCase):
             region,
         )
 
-    def test_provider_notifications_are_debounced_and_recovery_is_stable(self):
-        region = self._region(
+    def test_provider_health_is_ui_log_only_and_recovery_is_stable(self):
+        error_region = self._region(
             "async def _regional_provider_enter_error(",
+            "async def _regional_provider_mark_ok",
+        )
+        self.assertIn("regional_provider_error_streak", error_region)
+        self.assertIn("telegram_notify=False", error_region)
+        self.assertIn("edge_state_preserved=True", error_region)
+        self.assertNotIn("_notify_admins", error_region)
+
+        recovery_region = self._region(
+            "async def _regional_provider_mark_ok(",
             "def _new_regional_probe_provider",
         )
-        self.assertIn("regional_provider_error_streak", region)
-        self.assertIn("REGIONAL_PROVIDER_ERROR_ALERT_THRESHOLD", region)
-        self.assertIn("provider_error_alert_due", region)
-        self.assertIn("regional_provider_success_streak", region)
-        self.assertIn("REGIONAL_PROVIDER_RECOVERY_SUCCESS_THRESHOLD", region)
-        self.assertIn("provider_recovery_ready", region)
+        self.assertIn("regional_provider_success_streak", recovery_region)
+        self.assertIn("REGIONAL_PROVIDER_RECOVERY_SUCCESS_THRESHOLD", recovery_region)
+        self.assertIn("provider_recovery_ready", recovery_region)
+        self.assertIn("telegram_notify=False", recovery_region)
+        self.assertNotIn("_notify_admins", recovery_region)
 
-    def test_provider_limit_never_becomes_edge_failure(self):
+    def test_provider_limit_never_becomes_edge_failure_or_telegram_alert(self):
         region = self._region(
             "async def _regional_provider_enter_limited(",
-            "async def _regional_provider_mark_ok(",
+            "async def _regional_provider_enter_error(",
         )
         self.assertIn("PROVIDER_STATUS_LIMITED", region)
+        self.assertIn("telegram_notify=False", region)
+        self.assertNotIn("_notify_admins", region)
         self.assertNotIn("_db_record_regional_round", region)
         self.assertNotIn("regional_service_ok=0", region)
 

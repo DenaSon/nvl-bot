@@ -133,11 +133,14 @@ def _event_is_active(
     now: datetime,
 ) -> bool:
     start = _parse_timestamp(start_date)
-    if start is not None and start > now:
+    if start is None:
         return False
-    end = _parse_timestamp(end_date)
-    if end is not None and end < now:
+    if start > now:
         return False
+    if end_date:
+        end = _parse_timestamp(end_date)
+        if end is None or end < now:
+            return False
     return True
 
 
@@ -246,6 +249,7 @@ def derive_network_context(
         item
         for item in outage_rows
         if str(item.event_type or "").upper() == "OUTAGE"
+        and not bool(getattr(item, "is_instantaneous", False))
         and _event_is_active(item.start_date, item.end_date, now=current)
     )
 

@@ -36,7 +36,7 @@ class V123CSourceRegressionTests(unittest.TestCase):
         self.assertIn("cf_client.inspect_a_record", region)
         self.assertIn('"cf_record_id"', region)
         self.assertIn('"cf_fingerprint"', region)
-        self.assertIn("Cloudflare A record verified", region)
+        self.assertIn("Cloudflare  <b>✅ A record verified</b>", region)
         self.assertIn("resolve_single_ipv4", region)
 
     def test_move_confirm_rechecks_cloudflare_before_pending_and_remote_move(self):

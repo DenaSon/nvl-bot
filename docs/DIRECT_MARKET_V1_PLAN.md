@@ -339,14 +339,96 @@ Validation on branch:
 
 ## 11. Phase 5 — Direct Marzban/V2Ray Purchase
 
-**Status: PLANNED**
+**Status: IMPLEMENTED ON BRANCH — FEATURE FLAG OFF / PRODUCTION ROLLOUT PENDING**
 
 Products:
 
-- timed/unlimited V2Ray
-- volume V2Ray
+- timed V2Ray with optional daily data cap; NULL `data_limit_gb` means unlimited data
+- volumetric V2Ray with required total volume and optional expiry; NULL `duration_days` means unlimited time
 
 Reuse current Marzban provisioning/recovery logic. Retail plans live in `market_plans` and are independent from Agent pricing. Marzban is runtime state, not payment/ownership truth.
+
+Implemented behavior:
+
+- Added `market_v2ray.py` as the Telegram/DB-agnostic mapping between immutable Commerce Orders and the Marzban runtime contract.
+- Direct Market schema version advanced to `4` using additive-only migration. `orders.data_limit_gb` snapshots the purchased data contract alongside price, duration and users limit.
+- No guessed/default V2Ray retail prices are seeded and no Agent `v2ray_base_price` / `v2ray_vol_price` values are reused. Only explicitly configured active `market_plans` can be purchased.
+- The Customer Buy screen is now a product hub:
+  - SSH
+  - V2Ray timed
+  - V2Ray volume
+  - Wallet
+- Timed V2Ray plan contract:
+  - `service_type='v2ray'`
+  - `duration_days > 0` is required
+  - `users_limit > 0` is required
+  - `data_limit_gb = NULL` means unlimited data and `no_reset`
+  - a positive `data_limit_gb` means a daily data cap and uses Marzban `day` reset
+- Volumetric V2Ray plan contract:
+  - `service_type='v2ray_vol'`
+  - positive `data_limit_gb` is required
+  - `duration_days` is optional; NULL means no time limit
+  - Marzban reset strategy is `no_reset`
+  - the local service row keeps the existing NVL volumetric convention of `users_limit=0` for unlimited-user display/management semantics.
+
+Commerce/order invariants:
+
+```text
+select V2Ray plan
+ -> create idempotent Order
+ -> reserve customer funds
+ -> claim provisioning (single writer)
+ -> create + verify Marzban User
+ -> finalize exact local ownership
+ -> capture wallet
+ -> completed
+```
+
+- The same Phase-4 wallet reservation/capture engine is reused. No Agent balance, commission, cashback or emergency-credit path participates in Direct Market V2Ray settlement.
+- Each Order snapshots `price_toman`, `duration_days`, `data_limit_gb`, `users_limit` and `connection_mode='v2ray'`; later plan edits cannot mutate an in-flight purchase.
+- Telegram purchase callbacks use nonce-derived idempotency keys. Replays/double taps cannot create a second billable Order or reserve funds twice.
+- Funds are reserved before the remote Marzban create POST.
+- Successful wallet capture is still allowed only after SQLite proves an active service row matching the exact `customer_id + market_order_id + service_type`, with `agent_id=0`.
+- Capture atomically deducts balance, clears the reservation, appends one immutable negative `purchase` ledger entry and marks the Order completed.
+- Failure release is blocked while any local service row still references the Order.
+
+Marzban safety and ownership verification:
+
+- Before provisioning, Direct Market performs a Marzban/inbound preflight and builds the User from the currently authoritative supported inbound set rather than hard-coded stale tags.
+- Every Direct Market Marzban User receives a runtime ownership marker in `note`:
+  - `NVL_MARKET_ORDER:<order_id>;CUSTOMER:<customer_id>`
+  - timed plans additionally carry the existing `IP_LIMIT:<users_limit>` marker.
+- After create, the authoritative Marzban GET must match the exact username, active status, data limit, expiry, reset strategy (when returned) and Direct Market ownership marker before Commerce may capture money.
+- The subscription URL is taken from the verified payload when available, otherwise fetched through the existing Marzban service boundary. The completed purchase returns both subscription URL and QR code.
+- Local finalization binds `service_type`, `customer_id` and `market_order_id` before wallet capture.
+
+Failure/recovery behavior:
+
+- An explicit username collision is safe to retry with a newly reserved username.
+- `MarzbanAdminService.create_user` was hardened so pre-POST failures are explicitly non-side-effecting, while any non-collision failure after the create POST is treated as potentially side-effecting.
+- If POST/verify is ambiguous, Direct Market performs an authoritative GET reconciliation instead of blindly repeating the POST.
+- If GET proves the exact Order-owned User exists, provisioning resumes without duplicate creation.
+- If absence is proven and no local service remains, the Order fails safely and the wallet reservation is released with no debit.
+- If existence/ownership/cleanup cannot be proven, the Order remains `provisioning`, gets `RECOVERY_REQUIRED`, customer money stays reserved but not captured, and admins are notified.
+- Remote compensation is allowed only after the fetched Marzban User verifies the exact Direct Market marker/runtime contract. Local cleanup likewise deletes only the exact `customer_id + market_order_id + service_type` artifact.
+- If wallet capture fails after remote/local provisioning, compensation runs first; reserved funds are released only after both Marzban and local cleanup are proven safe.
+
+Compatibility and deferred work:
+
+- Existing Agent/Admin V2Ray sale paths are not migrated to the Direct Market wallet/order model in this phase.
+- The hardened Marzban create-error contract also makes legacy V2Ray sales safer: ambiguous non-collision POST failures now surface `created=True` and therefore retain the existing recovery marker rather than blind retrying.
+- `📦 سرویس‌های من`, customer-side runtime usage, renewal and add-volume actions remain Phase 6.
+- Automatic startup reconciliation of stale `provisioning/RECOVERY_REQUIRED` Orders remains Phase 7 hardening; Phase 5 is deliberately fail-closed rather than guessing after an uncertain remote side effect.
+
+Validation on branch:
+
+- Main Phase-5 implementation commit: `9f1aa9ffb49799d3743a17b37944f9cfe68432bc`
+- Marzban ambiguous-POST hardening commit: `2834df2de0e4694091ac14e64eded2abaf26780c`
+- GitHub Actions `syntax-and-unit-tests`: **passed**
+- Full suite: **812 tests passed**
+- Direct Market Phase-5 tests: **20/20 passed**
+- Additional Marzban create-boundary hardening tests: **2/2 passed**
+- Production deployment/migration has **not** been performed and `direct_market_enabled` remains OFF by default.
 
 ## 12. Phase 6 — My Services / Self-Service
 
@@ -390,7 +472,7 @@ Rollout:
 - [x] Phase 2 implementation complete on branch; CI green. Feature flag remains OFF pending controlled rollout.
 - [x] Phase 3 implementation complete on branch; CI green. Feature flag remains OFF pending controlled rollout.
 - [x] Phase 4 implementation complete on branch; CI green. Feature flag remains OFF pending controlled rollout.
-- [ ] Phase 5 complete.
+- [x] Phase 5 implementation complete on branch; CI green. Feature flag remains OFF pending controlled rollout.
 - [ ] Phase 6 complete.
 - [ ] Phase 7 complete / public rollout approved.
 

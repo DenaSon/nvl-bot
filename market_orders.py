@@ -45,18 +45,28 @@ class OrderStateError(MarketOrderError):
     pass
 
 
-def _begin_immediate(conn: sqlite3.Connection) -> None:
+def _begin_immediate(conn: sqlite3.Connection) -> bool:
+    """Start our atomic boundary without committing a caller-owned transaction."""
     if conn.in_transaction:
-        conn.commit()
+        conn.execute("SAVEPOINT market_order_atomic")
+        return False
     conn.execute("BEGIN IMMEDIATE")
+    return True
 
 
-def _commit(conn: sqlite3.Connection) -> None:
-    conn.commit()
+def _commit(conn: sqlite3.Connection, started_transaction: bool) -> None:
+    if started_transaction:
+        conn.commit()
+    else:
+        conn.execute("RELEASE SAVEPOINT market_order_atomic")
 
 
-def _rollback(conn: sqlite3.Connection) -> None:
-    conn.rollback()
+def _rollback(conn: sqlite3.Connection, started_transaction: bool) -> None:
+    if started_transaction:
+        conn.rollback()
+    else:
+        conn.execute("ROLLBACK TO SAVEPOINT market_order_atomic")
+        conn.execute("RELEASE SAVEPOINT market_order_atomic")
 
 
 def _plan_dict(row) -> dict | None:
@@ -193,7 +203,7 @@ def create_ssh_order_and_reserve(
     if not idem:
         raise ValueError("idempotency_key is required")
 
-    _begin_immediate(conn)
+    started_transaction = _begin_immediate(conn)
     try:
         existing = _get_order_by_idempotency(conn, idem)
         if existing:
@@ -203,7 +213,7 @@ def create_ssh_order_and_reserve(
                 or existing["service_type"] != SERVICE_SSH
             ):
                 raise OrderStateError("order idempotency key collision")
-            _commit(conn)
+            _commit(conn, started_transaction)
             return {"outcome": "existing", "order": existing}
 
         customer = conn.execute(
@@ -272,10 +282,10 @@ def create_ssh_order_and_reserve(
             (ORDER_FUNDS_RESERVED, order_id, ORDER_PENDING),
         )
         order = get_order(conn, order_id)
-        _commit(conn)
+        _commit(conn, started_transaction)
         return {"outcome": "created", "order": order}
     except Exception:
-        _rollback(conn)
+        _rollback(conn, started_transaction)
         raise
 
 
@@ -286,20 +296,20 @@ def claim_order_for_provisioning(
     customer_id: int,
 ) -> dict:
     """Single-writer claim: only funds_reserved may transition to provisioning."""
-    _begin_immediate(conn)
+    started_transaction = _begin_immediate(conn)
     try:
         order = get_order(conn, order_id)
         if not order or order["customer_id"] != int(customer_id):
             raise OrderStateError("order not found for customer")
 
         if order["status"] == ORDER_COMPLETED:
-            _commit(conn)
+            _commit(conn, started_transaction)
             return {"outcome": "completed", "order": order}
         if order["status"] == ORDER_FAILED:
-            _commit(conn)
+            _commit(conn, started_transaction)
             return {"outcome": "failed", "order": order}
         if order["status"] == ORDER_PROVISIONING:
-            _commit(conn)
+            _commit(conn, started_transaction)
             return {"outcome": "in_progress", "order": order}
         if order["status"] != ORDER_FUNDS_RESERVED:
             raise OrderStateError(f"cannot provision order in state {order['status']}")
@@ -321,10 +331,10 @@ def claim_order_for_provisioning(
         if cur.rowcount != 1:
             raise OrderStateError("order provisioning claim lost")
         order = get_order(conn, order_id)
-        _commit(conn)
+        _commit(conn, started_transaction)
         return {"outcome": "claimed", "order": order}
     except Exception:
-        _rollback(conn)
+        _rollback(conn, started_transaction)
         raise
 
 
@@ -366,14 +376,14 @@ def complete_ssh_order(
     customer_id: int,
 ) -> dict:
     """Capture reserved funds only after exact service ownership is proven."""
-    _begin_immediate(conn)
+    started_transaction = _begin_immediate(conn)
     try:
         order = get_order(conn, order_id)
         if not order or order["customer_id"] != int(customer_id):
             raise OrderStateError("order not found for customer")
         if order["status"] == ORDER_COMPLETED:
             wallet = market_wallet.get_wallet_snapshot(conn, customer_id)
-            _commit(conn)
+            _commit(conn, started_transaction)
             return {"outcome": "already_completed", "order": order, "wallet": wallet}
         if order["status"] != ORDER_PROVISIONING:
             raise OrderStateError(f"cannot complete order in state {order['status']}")
@@ -472,10 +482,10 @@ def complete_ssh_order(
             "order": get_order(conn, order_id),
             "wallet": market_wallet.get_wallet_snapshot(conn, customer_id),
         }
-        _commit(conn)
+        _commit(conn, started_transaction)
         return result
     except Exception:
-        _rollback(conn)
+        _rollback(conn, started_transaction)
         raise
 
 
@@ -487,14 +497,14 @@ def fail_ssh_order_and_release(
     failure_reason: str,
 ) -> dict:
     """Release held money only when no service row remains for this order."""
-    _begin_immediate(conn)
+    started_transaction = _begin_immediate(conn)
     try:
         order = get_order(conn, order_id)
         if not order or order["customer_id"] != int(customer_id):
             raise OrderStateError("order not found for customer")
         if order["status"] == ORDER_FAILED:
             wallet = market_wallet.get_wallet_snapshot(conn, customer_id)
-            _commit(conn)
+            _commit(conn, started_transaction)
             return {"outcome": "already_failed", "order": order, "wallet": wallet}
         if order["status"] == ORDER_COMPLETED:
             raise OrderStateError("completed order cannot release reserved funds")
@@ -538,10 +548,10 @@ def fail_ssh_order_and_release(
             "order": get_order(conn, order_id),
             "wallet": market_wallet.get_wallet_snapshot(conn, customer_id),
         }
-        _commit(conn)
+        _commit(conn, started_transaction)
         return result
     except Exception:
-        _rollback(conn)
+        _rollback(conn, started_transaction)
         raise
 
 

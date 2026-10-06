@@ -159,7 +159,7 @@ Validation on branch:
 
 ## 8. Phase 2 — Customer Identity + /start Routing
 
-**Status: PLANNED**
+**Status: IMPLEMENTED ON BRANCH — FEATURE FLAG OFF / PRODUCTION ROLLOUT PENDING**
 
 Routing:
 
@@ -184,6 +184,32 @@ Security:
 - Telegram user ID is the stable identity.
 - Authorization is based on `customer_id`, never display username/name.
 - Existing Agent/Admin session precedence remains compatible.
+
+Implemented behavior:
+
+- Customer identity is upserted by stable Telegram user ID; username/first name are refreshable metadata only.
+- Customer storefront is private-chat only.
+- Existing authenticated Admin/Agent/Accountant sessions retain precedence over Customer routing.
+- `direct_market_enabled` remains the master gate and defaults to OFF.
+- Customer home menu is available only when the gate is enabled:
+  - 🛒 خرید اشتراک
+  - 📦 سرویس‌های من
+  - 💰 کیف پول
+  - 🧾 تراکنش‌ها
+  - 👨‍💼 ورود نماینده
+- Phase-2 customer actions are non-financial placeholders; no order, wallet credit/debit or provisioning can occur.
+- Customer can explicitly enter the existing Agent/Admin credential flow from the storefront.
+- Customer sessions are fail-closed at the callback boundary and cannot execute legacy Agent/Admin callbacks.
+- Customer arbitrary text cannot fall through into legacy state machines.
+- A blocked customer is never reactivated by sending `/start`.
+
+Validation on branch:
+
+- Phase-2 commit: `0af828d80d8c1872159262b860f41c74fc2069c8`
+- GitHub Actions `syntax-and-unit-tests`: **passed**
+- Full suite: **757 tests passed**
+- Direct Market Phase-2 tests: **13/13 passed**
+- Production behavior is unchanged while `direct_market_enabled=0`.
 
 ## 9. Phase 3 — Customer Wallet + Card-to-Card Top-up
 
@@ -271,7 +297,7 @@ Rollout:
 - [x] Long-lived Direct Market branch created.
 - [x] Architecture decisions recorded.
 - [x] Phase 1 implementation complete on branch; CI green. Production rollout gate remains pending.
-- [ ] Phase 2 complete.
+- [x] Phase 2 implementation complete on branch; CI green. Feature flag remains OFF pending controlled rollout.
 - [ ] Phase 3 complete.
 - [ ] Phase 4 complete.
 - [ ] Phase 5 complete.

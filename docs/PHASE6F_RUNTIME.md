@@ -85,7 +85,8 @@ During provider backoff:
 - no new Check-Host request is sent;
 - the previous filtering state is preserved;
 - no fake regional failure is recorded;
-- the admin UI shows provider/backoff state.
+- the admin UI shows provider/backoff state;
+- provider LIMITED / ERROR / recovery transitions are log/UI-only and do not send Telegram admin notifications.
 
 ## External control
 

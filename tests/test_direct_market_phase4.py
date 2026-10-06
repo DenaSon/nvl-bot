@@ -185,6 +185,37 @@ class DirectMarketSSHOrderPhase4Tests(unittest.TestCase):
             0,
         )
 
+    def test_order_atomic_boundary_does_not_commit_caller_transaction(self):
+        self.conn.execute(
+            "INSERT INTO settings(key, value) VALUES ('outer-transaction-marker', '1')"
+        )
+        self.assertTrue(self.conn.in_transaction)
+
+        created = market_orders.create_ssh_order_and_reserve(
+            self.conn,
+            customer_id=self.customer_id,
+            plan_id=self.plan_id,
+            idempotency_key="nested-order",
+        )
+        self.assertEqual(created["order"]["status"], market_orders.ORDER_FUNDS_RESERVED)
+        self.assertTrue(self.conn.in_transaction)
+
+        self.conn.rollback()
+        self.assertIsNone(
+            self.conn.execute(
+                "SELECT value FROM settings WHERE key='outer-transaction-marker'"
+            ).fetchone()
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM orders WHERE idempotency_key='nested-order'"
+            ).fetchone()[0],
+            0,
+        )
+        wallet = market_wallet.get_wallet_snapshot(self.conn, self.customer_id)
+        self.assertEqual(wallet["balance_toman"], 500000)
+        self.assertEqual(wallet["reserved_toman"], 0)
+
     def test_provisioning_claim_is_single_writer(self):
         order = self._create()["order"]
         first = self._claim(order["id"])

@@ -13622,8 +13622,8 @@ def _radar_notification_message(snapshot, decision):
             f"Outages فعال: <b>{snapshot.active_outage_count}</b>\n"
             f"Traffic Anomalies فعال: <b>{snapshot.active_anomaly_count}</b>\n"
             f"آخرین داده: <code>{observed_at}</code>\n\n"
-            "این اعلان فقط برای تغییر وضعیت مهم ارسال شده و به‌تنهایی "
-            "هیچ Failover یا تغییر مسیری ایجاد نمی‌کند."
+            "تا وقتی این Outage تازه و فعال است، Radar Safety Gate انتقال خودکار را "
+            "موقتاً متوقف می‌کند. انتقال دستی و تشخیص فیلترینگ مستقل باقی می‌مانند."
         )
     if decision.kind == radar_notifications.NOTIFY_DEGRADED:
         return (
@@ -27214,6 +27214,11 @@ async def _incident_mark_failover_blocked(
         **{k: v for k, v in details.items() if k != "standby_rejections"},
     )
 
+    # Radar V3 already emits one transition-based OUTAGE notification.
+    # Persist/log the V4 auto-block incident, but do not duplicate that message.
+    if reason == REASON_WIDESPREAD_NETWORK_OUTAGE:
+        return
+
     rejection_lines = []
     for standby, failures in rejected.items():
         readable = "، ".join(
@@ -27349,6 +27354,25 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
     )
     if differential_age is None:
         differential_age = float("inf")
+
+    radar_snapshot = await asyncio.to_thread(
+        radar_runtime.load_latest_radar_snapshot,
+        DB_PATH,
+        scope_type="COUNTRY",
+        scope_value="IR",
+    )
+    correlation = incident_correlation.evaluate_incident_correlation(
+        differential_confirmed=differential_confirmed,
+        differential_verdict=differential.get("verdict") if differential else "",
+        radar_snapshot=radar_snapshot,
+        radar_max_age_seconds=RADAR_FAILOVER_CONTEXT_MAX_AGE_SECONDS,
+    )
+    radar_auto_inhibit = bool(
+        correlation.failover_inhibited
+        and correlation.classification
+        == incident_correlation.CORRELATION_WIDESPREAD_NETWORK_OUTAGE
+    )
+
     switch_age = await asyncio.to_thread(_db_seconds_since_last_ip_switch)
     attempt_age = await asyncio.to_thread(_db_seconds_since_auto_failover_attempt)
 
@@ -27370,6 +27394,7 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
         seconds_since_last_attempt=attempt_age,
         attempt_cooldown_seconds=AUTO_FAILOVER_ATTEMPT_COOLDOWN_SECONDS,
         safe_standby_count=len(safe_candidates),
+        external_context_blocks_auto_failover=radar_auto_inhibit,
     )
 
     incident = await asyncio.to_thread(_db_get_open_filter_incident, source_host)
@@ -27406,6 +27431,12 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
             differential_age_seconds=differential_age,
             differential_verdict=differential.get("verdict") if differential else None,
             differential_matches_current_round=differential_matches_current_round,
+            correlation_classification=correlation.classification,
+            correlation_reason=correlation.reason,
+            radar_state=correlation.radar_state,
+            radar_fresh=correlation.radar_fresh,
+            radar_age_seconds=correlation.radar_age_seconds,
+            radar_auto_inhibit=radar_auto_inhibit,
         )
         if filter_confirmed and incident:
             extra = {
@@ -27415,6 +27446,8 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
                 "differential_verdict": differential.get("verdict") if differential else None,
                 "differential_control": differential.get("control_host") if differential else None,
                 "differential_matches_current_round": differential_matches_current_round,
+                "correlation": correlation.to_dict(),
+                "radar_auto_inhibit": radar_auto_inhibit,
                 "active_standby_count": len(active_standbys),
                 "switch_cooldown_remaining": max(
                     0,

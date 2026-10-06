@@ -16033,8 +16033,162 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Re-run DNS immediately before POST to close the gap between the
-        # wizard input check and the actual Node creation.
+        service = await _get_marzban_admin_service()
+
+        # Read-only duplicate precheck must happen before any V123C DNS mutation.
+        ok_nodes, existing_nodes = await service.get_nodes()
+        if not ok_nodes or not isinstance(existing_nodes, list):
+            context.user_data.pop("mza_node_create_busy", None)
+            await query.edit_message_text(
+                "❌ Duplicate precheck قبل از Cloudflare mutation ناموفق بود؛ هیچ DNS/Node تغییری انجام نشد.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 بازبینی", callback_data="mza_ncreate_review")],
+                    [InlineKeyboardButton("✏️ شروع مجدد", callback_data="mza_ncreate")],
+                ]),
+            )
+            return
+        duplicate = marzban_admin.find_duplicate_node(existing_nodes, payload["name"])
+        if isinstance(duplicate, dict):
+            context.user_data.pop("mza_node_create_busy", None)
+            existing_id = duplicate.get("id")
+            try:
+                existing_id = marzban_admin.normalize_node_id(existing_id)
+            except ValueError:
+                existing_id = None
+            kb = []
+            if existing_id:
+                kb.append([
+                    InlineKeyboardButton(
+                        "🖥 مشاهده Node موجود",
+                        callback_data=f"mza_node_{existing_id}",
+                    )
+                ])
+            kb.extend([
+                [InlineKeyboardButton("✏️ ساخت با نام دیگر", callback_data="mza_ncreate")],
+                [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
+            ])
+            await query.edit_message_text(
+                "⛔️ <b>Node با این نام از قبل وجود دارد.</b>\n\n"
+                "Duplicate precheck قبل از Cloudflare mutation متوقف شد؛ هیچ DNS/Node تغییری انجام نشد.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(kb),
+            )
+            return
+
+        try:
+            cf_client = _mza_cloudflare_dns_client()
+            target_ip = str(draft.get("cf_target_ip") or "") or await asyncio.to_thread(
+                cloudflare_dns.resolve_single_ipv4,
+                payload["address"],
+            )
+            cf_now = await asyncio.to_thread(
+                cf_client.inspect_a_record,
+                public_address,
+            )
+        except Exception as exc:
+            context.user_data.pop("mza_node_create_busy", None)
+            await query.edit_message_text(
+                "❌ <b>Cloudflare re-check قبل از ساخت ناموفق بود.</b>\n\n"
+                f"<code>{esc(type(exc).__name__)}: {esc(exc)}</code>\n\n"
+                "هیچ Node جدیدی ساخته نشد.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 بازبینی", callback_data="mza_ncreate_review")],
+                    [InlineKeyboardButton("✏️ شروع مجدد", callback_data="mza_ncreate")],
+                ]),
+            )
+            return
+
+        cf_record = (
+            cf_now.get("record")
+            if isinstance(cf_now, dict) and isinstance(cf_now.get("record"), dict)
+            else {}
+        )
+        cf_mode = str(draft.get("cf_mode") or "")
+        provider_ready = False
+
+        if cf_mode == "existing":
+            provider_ready = (
+                bool(cf_now.get("exists"))
+                and str(cf_now.get("zone_id") or "") == str(draft.get("cf_zone_id") or "")
+                and str(cf_record.get("id") or "") == str(draft.get("cf_record_id") or "")
+                and str(cf_now.get("fingerprint") or "") == str(draft.get("cf_fingerprint") or "")
+                and str(cf_record.get("content") or "") == target_ip
+                and not bool(cf_record.get("proxied"))
+            )
+            if not provider_ready:
+                context.user_data.pop("mza_node_create_busy", None)
+                await query.edit_message_text(
+                    "⚠️ <b>Cloudflare record از زمان Preview تغییر کرده است.</b>\n\n"
+                    f"Provider: <code>{esc(_mza_cf_record_summary(cf_now))}</code>\n"
+                    "برای ایمنی هیچ DNS overwrite و هیچ Node POST اجرا نشد؛ از مرحله Public Endpoint دوباره شروع کنید.",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("✏️ شروع مجدد", callback_data="mza_ncreate")]
+                    ]),
+                )
+                return
+        else:
+            if cf_now.get("exists"):
+                provider_ready = (
+                    str(cf_record.get("content") or "") == target_ip
+                    and not bool(cf_record.get("proxied"))
+                )
+                if not provider_ready:
+                    context.user_data.pop("mza_node_create_busy", None)
+                    await query.edit_message_text(
+                        "⛔️ <b>Cloudflare record در فاصله Preview تا Confirm توسط وضعیت دیگری ایجاد شد.</b>\n\n"
+                        f"Provider: <code>{esc(_mza_cf_record_summary(cf_now))}</code>\n"
+                        "NVL آن را overwrite نمی‌کند و Node POST اجرا نشد.",
+                        parse_mode='HTML',
+                    )
+                    return
+            else:
+                try:
+                    created = await asyncio.to_thread(
+                        cf_client.create_a_record,
+                        public_address,
+                        target_ip,
+                    )
+                    cf_now = created.get("after") if isinstance(created, dict) else {}
+                    cf_record = (
+                        cf_now.get("record")
+                        if isinstance(cf_now, dict) and isinstance(cf_now.get("record"), dict)
+                        else {}
+                    )
+                    provider_ready = (
+                        bool(cf_now.get("exists"))
+                        and str(cf_record.get("content") or "") == target_ip
+                        and not bool(cf_record.get("proxied"))
+                    )
+                except Exception as exc:
+                    context.user_data.pop("mza_node_create_busy", None)
+                    await query.edit_message_text(
+                        "❌ <b>ساخت Cloudflare A record ناموفق بود.</b>\n\n"
+                        f"<code>{esc(type(exc).__name__)}: {esc(exc)}</code>\n\n"
+                        "Node POST اجرا نشد.",
+                        parse_mode='HTML',
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔄 بازبینی", callback_data="mza_ncreate_review")]
+                        ]),
+                    )
+                    return
+
+            if provider_ready:
+                draft["cf_mode"] = "existing"
+                draft["cf_zone_id"] = str(cf_now.get("zone_id") or "")
+                draft["cf_record_id"] = str(cf_record.get("id") or "")
+                draft["cf_fingerprint"] = str(cf_now.get("fingerprint") or "")
+                draft["cf_target_ip"] = target_ip
+
+        if not provider_ready:
+            context.user_data.pop("mza_node_create_busy", None)
+            await query.edit_message_text(
+                "❌ Cloudflare provider state Verify نشد؛ Node POST اجرا نشد."
+            )
+            return
+
+        # Resolver propagation is still required before Marzban Node POST.
         public_preflight = await asyncio.to_thread(
             marzban_admin.preflight_public_endpoint,
             payload["address"],
@@ -16044,21 +16198,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("mza_node_create_busy", None)
             draft["public_preflight"] = dict(public_preflight)
             await query.edit_message_text(
-                "❌ <b>DNS Preflight قبل از ساخت دیگر معتبر نیست.</b>\n\n"
-                f"Node: <code>{esc(payload['address'])}</code>\n"
+                "☁️ <b>Cloudflare A record آماده است؛ DNS propagation هنوز کامل نیست.</b>\n\n"
                 f"Public Endpoint: <code>{esc(public_address)}</code>\n"
-                f"Reason: <code>{esc(public_preflight.get('error') or 'DNS mismatch')}</code>\n\n"
-                "هیچ Node جدیدی ساخته نشد. DNS را اصلاح کنید و فرآیند را دوباره بررسی کنید.",
+                f"Provider A: <code>{esc(target_ip)}</code> ✅\n"
+                f"Resolver: <code>{esc(', '.join(public_preflight.get('public_ips') or ()) or 'pending')}</code>\n\n"
+                "هیچ Node جدیدی ساخته نشد. چند لحظه بعد «بازبینی» را بزنید؛ DNS را دستی تغییر ندهید.",
                 parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔄 بازبینی", callback_data="mza_ncreate_review")],
-                    [InlineKeyboardButton("✏️ شروع مجدد", callback_data="mza_ncreate")],
+                    [InlineKeyboardButton("❌ انصراف", callback_data="mza_ncreate_cancel")],
                 ]),
             )
             return
         draft["public_preflight"] = dict(public_preflight)
 
-        service = await _get_marzban_admin_service()
         ok_create, result = await service.create_node(
             payload["name"],
             payload["address"],

@@ -628,6 +628,124 @@ def find_node_generated_host_remark_matches(
     return matches
 
 
+def inspect_node_public_host_profile(
+    hosts_payload: Any,
+    node: Dict[str, Any],
+    tags: Any = NVL_NODE_PUBLIC_HOST_TAGS,
+    *,
+    public_address: Any,
+) -> Dict[str, Any]:
+    """Inspect whether an existing Node can be adopted without remote writes.
+
+    Adoption is intentionally stricter than ordinary discovery: each managed
+    inbound must contain exactly one canonical NVL-generated Host using the
+    stable public hostname, no generated Host may exist on an unmanaged inbound,
+    and the same generated remark must not point at another address.
+    """
+    if not isinstance(hosts_payload, dict):
+        raise ValueError("invalid Marzban hosts response")
+    if not isinstance(node, dict):
+        raise ValueError("invalid Marzban node")
+
+    public = normalize_public_hostname(public_address)
+    generated = node_generated_host_payload(node, public_address=public)
+
+    wanted: List[str] = []
+    seen = set()
+    for raw_tag in tags or ():
+        tag = normalize_inbound_tag(raw_tag)
+        if tag not in seen:
+            wanted.append(tag)
+            seen.add(tag)
+    if not wanted:
+        raise ValueError("at least one managed Public Host tag is required")
+
+    exact_matches = find_node_generated_hosts(
+        hosts_payload,
+        node,
+        public_address=public,
+    )
+    remark_matches = find_node_generated_host_remark_matches(hosts_payload, node)
+
+    counts: Dict[str, int] = {}
+    for item in exact_matches:
+        tag = item["tag"]
+        counts[tag] = counts.get(tag, 0) + 1
+
+    missing_tags = [tag for tag in wanted if counts.get(tag, 0) == 0]
+    duplicate_tags = {
+        tag: counts.get(tag, 0)
+        for tag in wanted
+        if counts.get(tag, 0) > 1
+    }
+    unexpected_tags = {
+        tag: count
+        for tag, count in counts.items()
+        if tag not in wanted and count
+    }
+
+    expected_address = public.casefold()
+    remark_conflicts: List[Dict[str, Any]] = []
+    for item in remark_matches:
+        host = item.get("host") if isinstance(item, dict) else None
+        address = (
+            str(host.get("address") or "").strip().rstrip(".").casefold()
+            if isinstance(host, dict)
+            else ""
+        )
+        if address != expected_address:
+            remark_conflicts.append({
+                "tag": item.get("tag"),
+                "index": item.get("index"),
+                "address": address,
+            })
+
+    drifted_tags: List[str] = []
+    for item in exact_matches:
+        tag = item.get("tag")
+        if tag not in wanted:
+            continue
+        try:
+            current = _host_payload(item.get("host"))
+        except ValueError:
+            if tag not in drifted_tags:
+                drifted_tags.append(tag)
+            continue
+        if current != generated and tag not in drifted_tags:
+            drifted_tags.append(tag)
+
+    invalid_host_lists: List[str] = []
+    for tag in wanted:
+        raw_hosts = hosts_payload.get(tag)
+        if raw_hosts is not None and not isinstance(raw_hosts, list):
+            invalid_host_lists.append(tag)
+
+    adoptable = not (
+        missing_tags
+        or duplicate_tags
+        or unexpected_tags
+        or remark_conflicts
+        or drifted_tags
+        or invalid_host_lists
+    )
+
+    return {
+        "adoptable": adoptable,
+        "verified": adoptable,
+        "public_address": public,
+        "managed_remark": generated["remark"],
+        "managed_tags": wanted,
+        "counts": counts,
+        "missing_tags": missing_tags,
+        "duplicate_tags": duplicate_tags,
+        "unexpected_tags": unexpected_tags,
+        "remark_conflicts": remark_conflicts,
+        "drifted_tags": drifted_tags,
+        "invalid_host_lists": invalid_host_lists,
+        "matched_hosts": len(exact_matches),
+    }
+
+
 def can_manage_v2ray_account(role: Optional[str], actor_agent_id: int, owner_agent_id: int) -> bool:
     """Return whether the current actor may read or mutate a V2Ray account.
 
@@ -1316,6 +1434,120 @@ class MarzbanAdminService:
 
     async def get_hosts(self) -> ApiResult:
         return await self.request("GET", "/api/hosts")
+
+
+    async def inspect_node_public_profile(
+        self,
+        node_id: int,
+        public_address: Any,
+        tags: Any = NVL_NODE_PUBLIC_HOST_TAGS,
+    ) -> ApiResult:
+        """Read-only inspection used before adopting an existing Public Endpoint.
+
+        This method performs GETs only. A non-adoptable topology is still a
+        successful inspection and returns a report with adoptable=False.
+        """
+        try:
+            node_id = normalize_node_id(node_id)
+            public = normalize_public_hostname(public_address)
+            wanted: List[str] = []
+            seen = set()
+            for raw_tag in tags or ():
+                tag = normalize_inbound_tag(raw_tag)
+                if tag not in seen:
+                    wanted.append(tag)
+                    seen.add(tag)
+            if not wanted:
+                raise ValueError("at least one managed Public Host tag is required")
+        except ValueError as exc:
+            return False, {
+                "stage": "adopt_precheck",
+                "read_only": True,
+                "error": str(exc),
+            }
+
+        ok_node, node = await self.get_node(node_id)
+        if not ok_node or not isinstance(node, dict):
+            return False, {
+                "stage": "adopt_precheck",
+                "read_only": True,
+                "node_id": node_id,
+                "error": node if not ok_node else "Invalid Marzban node response",
+            }
+
+        ok_inbounds, inbounds_payload = await self.get_inbounds()
+        if not ok_inbounds or not isinstance(inbounds_payload, dict):
+            return False, {
+                "stage": "adopt_precheck",
+                "read_only": True,
+                "node_id": node_id,
+                "error": (
+                    inbounds_payload
+                    if not ok_inbounds
+                    else "Invalid Marzban inbounds response"
+                ),
+            }
+
+        available = {row["tag"] for row in flatten_marzban_inbounds(inbounds_payload)}
+        missing_inbounds = [tag for tag in wanted if tag not in available]
+        if missing_inbounds:
+            return True, {
+                "stage": "adopt_inspect",
+                "read_only": True,
+                "node_id": node_id,
+                "node": node,
+                "public_address": public,
+                "managed_remark": node_generated_host_remark(node.get("name")),
+                "managed_tags": wanted,
+                "adoptable": False,
+                "verified": False,
+                "counts": {},
+                "missing_tags": list(missing_inbounds),
+                "missing_inbounds": list(missing_inbounds),
+                "duplicate_tags": {},
+                "unexpected_tags": {},
+                "remark_conflicts": [],
+                "drifted_tags": [],
+                "invalid_host_lists": [],
+                "matched_hosts": 0,
+            }
+
+        ok_hosts, hosts_payload = await self.get_hosts()
+        if not ok_hosts or not isinstance(hosts_payload, dict):
+            return False, {
+                "stage": "adopt_precheck",
+                "read_only": True,
+                "node_id": node_id,
+                "error": (
+                    hosts_payload
+                    if not ok_hosts
+                    else "Invalid Marzban hosts response"
+                ),
+            }
+
+        try:
+            report = inspect_node_public_host_profile(
+                hosts_payload,
+                node,
+                wanted,
+                public_address=public,
+            )
+        except ValueError as exc:
+            return False, {
+                "stage": "adopt_precheck",
+                "read_only": True,
+                "node_id": node_id,
+                "error": str(exc),
+            }
+
+        report.update({
+            "stage": "adopt_inspect",
+            "read_only": True,
+            "node_id": node_id,
+            "node": node,
+            "missing_inbounds": [],
+        })
+        return True, report
 
     async def reconcile_node_public_hosts(
         self,

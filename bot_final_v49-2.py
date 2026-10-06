@@ -356,7 +356,7 @@ from server_migration.telegram_wizard import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V123A-2026-10-06-stable-public-endpoint"
+BOT_VERSION_TAG = "V123B1-2026-10-06-adopt-public-endpoint"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -7946,6 +7946,54 @@ def _db_upsert_marzban_node_public_profile(
     }
 
 
+_MZA_NODE_ADOPT_TEXT_STATES = {
+    "MZA_NODE_ADOPT_PUBLIC_INPUT",
+}
+
+
+def _mza_clear_node_adopt(context):
+    if context.user_data.get("state") in _MZA_NODE_ADOPT_TEXT_STATES:
+        context.user_data.pop("state", None)
+    context.user_data.pop("mza_node_adopt_draft", None)
+
+
+def _mza_adopt_issue_summary(report):
+    if not isinstance(report, dict):
+        return "گزارش Inspect نامعتبر است."
+
+    issues = []
+    missing_inbounds = list(report.get("missing_inbounds") or ())
+    missing_tags = list(report.get("missing_tags") or ())
+    duplicate_tags = dict(report.get("duplicate_tags") or {})
+    unexpected_tags = dict(report.get("unexpected_tags") or {})
+    conflicts = list(report.get("remark_conflicts") or ())
+    drifted = list(report.get("drifted_tags") or ())
+    invalid_lists = list(report.get("invalid_host_lists") or ())
+
+    if missing_inbounds:
+        issues.append("Inbound موجود نیست: " + ", ".join(map(str, missing_inbounds)))
+    elif missing_tags:
+        issues.append("Managed Host موجود نیست: " + ", ".join(map(str, missing_tags)))
+    if duplicate_tags:
+        issues.append(
+            "Managed Host تکراری: "
+            + ", ".join(f"{tag}={count}" for tag, count in duplicate_tags.items())
+        )
+    if unexpected_tags:
+        issues.append(
+            "Managed Host خارج از profile: "
+            + ", ".join(f"{tag}={count}" for tag, count in unexpected_tags.items())
+        )
+    if conflicts:
+        issues.append("Remark یکسان روی آدرس دیگری دیده شد.")
+    if drifted:
+        issues.append("Host از payload استاندارد NVL فاصله دارد: " + ", ".join(map(str, drifted)))
+    if invalid_lists:
+        issues.append("ساختار Host نامعتبر است: " + ", ".join(map(str, invalid_lists)))
+
+    return " | ".join(issues) if issues else "—"
+
+
 _MZA_NODE_CREATE_TEXT_STATES = {
     "MZA_NODE_CREATE_NAME_INPUT",
     "MZA_NODE_CREATE_ADDRESS_INPUT",
@@ -8804,6 +8852,10 @@ async def _show_marzban_node_detail(target, context, node_id):
     xray_version = node.get("xray_version") or "—"
     ratio = node.get("usage_coefficient", 1)
     message = str(node.get("message") or "").strip()
+    public_profile = await asyncio.to_thread(
+        _db_get_marzban_node_public_profile,
+        node_id,
+    )
 
     usage = _mza_find_node_usage(usage_payload if ok_usage else None, node_id, name)
     if usage:
@@ -8833,12 +8885,33 @@ async def _show_marzban_node_detail(target, context, node_id):
         f"Usage Ratio  <b>{esc(ratio)}</b>",
         traffic_line,
     ]
+    if public_profile:
+        lines.extend([
+            "",
+            "🌍 <b>Stable Public Endpoint</b>",
+            f"Public Endpoint  <code>{esc(public_profile.get('public_address'))}</code>",
+            f"Profile  <code>{esc(public_profile.get('profile_state') or 'pending')}</code>",
+        ])
+    else:
+        lines.extend([
+            "",
+            "🌍 <b>Stable Public Endpoint</b>",
+            "Mapping  <code>not adopted</code>",
+        ])
+
     if message:
         lines.extend(["", f"⚠️ پیام Marzban: <code>{esc(message[:500])}</code>"])
 
     status_key = str(node.get("status") or "").lower()
     phase7_ready = _mza_phase7_ready_session(target, node_id) is not None
     kb = []
+    if not public_profile:
+        kb.append([
+            InlineKeyboardButton(
+                "🔗 Adopt Public Endpoint",
+                callback_data=f"mza_nadopt_{node_id}",
+            )
+        ])
     if phase7_ready:
         kb.append([
             InlineKeyboardButton(
@@ -10437,6 +10510,110 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop('mza_action_user', None)
             await _mza_show_addvol_confirm(update.message, username, amount)
             return
+
+    if state == 'MZA_NODE_ADOPT_PUBLIC_INPUT':
+        if role != 'admin':
+            _mza_clear_node_adopt(context)
+            await update.message.reply_text("⛔️ دسترسی غیرمجاز.")
+            return
+
+        draft = context.user_data.get("mza_node_adopt_draft")
+        draft_age = (
+            time.time() - float(draft.get("started_at") or 0)
+            if isinstance(draft, dict)
+            else float("inf")
+        )
+        if not isinstance(draft, dict) or draft_age > 900:
+            _mza_clear_node_adopt(context)
+            await update.message.reply_text("❌ فرآیند Adopt منقضی شده است؛ از صفحه Node دوباره شروع کنید.")
+            return
+
+        try:
+            node_id = marzban_admin.normalize_node_id(draft.get("node_id"))
+            public_address = marzban_admin.normalize_public_hostname(text)
+        except ValueError as exc:
+            await update.message.reply_text(
+                f"❌ Public Endpoint نامعتبر است: <code>{esc(exc)}</code>\n"
+                "یک FQDN مثل <code>argus.nvlsup.xyz</code> بفرستید.",
+                parse_mode='HTML',
+            )
+            return
+
+        service = await _get_marzban_admin_service()
+        ok_inspect, report = await service.inspect_node_public_profile(
+            node_id,
+            public_address,
+            marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+        )
+        if not ok_inspect or not isinstance(report, dict):
+            await update.message.reply_text(
+                "❌ Inspect خواندنی Marzban ناموفق بود. هیچ تغییری اعمال نشد.\n"
+                f"<code>{esc(report)}</code>",
+                parse_mode='HTML',
+            )
+            return
+
+        inspected_node = report.get("node") if isinstance(report.get("node"), dict) else {}
+        preflight = await asyncio.to_thread(
+            marzban_admin.preflight_public_endpoint,
+            inspected_node.get("address"),
+            public_address,
+        )
+        counts = dict(report.get("counts") or {})
+        count_lines = "\n".join(
+            f"• <code>{esc(tag)}</code>: <b>{esc(counts.get(tag, 0))}/1</b>"
+            for tag in marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS
+        )
+        if not report.get("adoptable") or not preflight.get("ok"):
+            dns_reason = (
+                "DNS Match: ✅"
+                if preflight.get("ok")
+                else f"DNS Match: ❌ {esc(preflight.get('error') or 'mismatch')}"
+            )
+            await update.message.reply_text(
+                "⚠️ <b>این Node فعلاً قابل Adopt نیست.</b>\n\n"
+                f"Node  <b>{esc(inspected_node.get('name') or node_id)}</b>\n"
+                f"Public Endpoint  <code>{esc(public_address)}</code>\n"
+                f"{dns_reason}\n\n"
+                f"{count_lines}\n\n"
+                f"Inspect: <code>{esc(_mza_adopt_issue_summary(report))}</code>\n\n"
+                "هیچ PUT/DELETE روی Marzban و هیچ mapping محلی انجام نشد. "
+                "پس از اصلاح وضعیت، دامنه را دوباره بفرستید.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nadopt_cancel_{node_id}")]
+                ]),
+            )
+            return
+
+        nonce = secrets.token_hex(8)
+        draft.update({
+            "nonce": nonce,
+            "public_address": public_address,
+            "node_name": str(inspected_node.get("name") or ""),
+            "node_address": str(inspected_node.get("address") or ""),
+            "managed_remark": str(report.get("managed_remark") or ""),
+            "inspected_at": time.time(),
+        })
+        context.user_data.pop("state", None)
+        await update.message.reply_text(
+            "🔗 <b>Adopt Existing Public Endpoint</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"Node ID  <code>{node_id}</code>\n"
+            f"Node  <b>{esc(inspected_node.get('name') or node_id)}</b>\n"
+            f"Real Address  <code>{esc(inspected_node.get('address') or '—')}</code>\n"
+            f"Public Endpoint  <code>{esc(public_address)}</code>\n"
+            "DNS Match  ✅\n\n"
+            f"{count_lines}\n\n"
+            "Inspect کاملاً read-only بود. با تایید، فقط mapping محلی NVL به حالت "
+            "<code>verified</code> ثبت می‌شود؛ کانفیگ Marzban تغییر نمی‌کند.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ تایید Adopt", callback_data=f"mza_nadopt_confirm_{nonce}")],
+                [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nadopt_cancel_{node_id}")],
+            ]),
+        )
+        return
 
     if state in _MZA_NODE_CREATE_TEXT_STATES:
         if role != 'admin':
@@ -14105,6 +14282,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         host_delete_starter = d.startswith('mza_hdelete_')
         node_create_starter = d == 'mza_ncreate' or d.startswith('mza_ncreate_')
         node_delete_starter = d.startswith('mza_ndelete_')
+        node_adopt_starter = d.startswith('mza_nadopt_')
         node_bootstrap_starter = (
             d.startswith('mza_nboot_')
             or d.startswith('mza_ninstall_')
@@ -14121,6 +14299,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             or host_delete_starter
             or node_create_starter
             or node_delete_starter
+            or node_adopt_starter
             or node_bootstrap_starter
             or create_starter
         )
@@ -14133,6 +14312,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'MZA_NODE_ADDRESS_INPUT',
             'MZA_NODE_PORTS_INPUT',
             'MZA_NODE_RATIO_INPUT',
+            'MZA_NODE_ADOPT_PUBLIC_INPUT',
             'MZA_NODE_CREATE_NAME_INPUT',
             'MZA_NODE_CREATE_ADDRESS_INPUT',
             'MZA_NODE_CREATE_PUBLIC_INPUT',
@@ -14153,6 +14333,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop('mza_action_node', None)
             context.user_data.pop('mza_node_pending_changes', None)
             _mza_clear_host_pending(context)
+
+        if not node_adopt_starter:
+            _mza_clear_node_adopt(context)
 
         # Confirmation messages can outlive the screen that created them.
         # Only a new edit in the same domain may preserve that domain's pending
@@ -15818,6 +16001,188 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         await _show_marzban_node_detail(query, context, node_id)
+        return
+
+    elif d.startswith('mza_nadopt_confirm_'):
+        nonce = d[len('mza_nadopt_confirm_'):]
+        draft = context.user_data.get("mza_node_adopt_draft")
+        draft_age = (
+            time.time() - float(draft.get("started_at") or 0)
+            if isinstance(draft, dict)
+            else float("inf")
+        )
+        if (
+            not isinstance(draft, dict)
+            or not nonce
+            or draft.get("nonce") != nonce
+            or draft_age > 900
+        ):
+            _mza_clear_node_adopt(context)
+            await query.edit_message_text(
+                "❌ تایید Adopt منقضی یا نامعتبر است؛ از صفحه Node دوباره شروع کنید."
+            )
+            return
+
+        node_id = marzban_admin.normalize_node_id(draft.get("node_id"))
+        public_address = marzban_admin.normalize_public_hostname(draft.get("public_address"))
+        existing = await asyncio.to_thread(
+            _db_get_marzban_node_public_profile,
+            node_id,
+        )
+        if existing:
+            _mza_clear_node_adopt(context)
+            if (
+                str(existing.get("public_address") or "").rstrip(".").casefold()
+                == public_address.casefold()
+                and str(existing.get("profile_state") or "").lower() == "verified"
+            ):
+                await query.edit_message_text(
+                    "✅ این Node قبلاً با همین Public Endpoint Adopt شده است.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]
+                    ]),
+                )
+            else:
+                await query.edit_message_text(
+                    "🛡 Mapping دیگری برای این Node وجود دارد؛ Adopt جدید برای ایمنی اجرا نشد.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]
+                    ]),
+                )
+            return
+
+        service = await _get_marzban_admin_service()
+        ok_inspect, report = await service.inspect_node_public_profile(
+            node_id,
+            public_address,
+            marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+        )
+        inspected_node = (
+            report.get("node")
+            if ok_inspect and isinstance(report, dict) and isinstance(report.get("node"), dict)
+            else {}
+        )
+        preflight = (
+            await asyncio.to_thread(
+                marzban_admin.preflight_public_endpoint,
+                inspected_node.get("address"),
+                public_address,
+            )
+            if inspected_node
+            else {"ok": False, "error": "Node inspection failed"}
+        )
+        stale_identity = (
+            str(inspected_node.get("name") or "") != str(draft.get("node_name") or "")
+            or str(inspected_node.get("address") or "") != str(draft.get("node_address") or "")
+        )
+        if (
+            not ok_inspect
+            or not isinstance(report, dict)
+            or not report.get("adoptable")
+            or not preflight.get("ok")
+            or stale_identity
+        ):
+            _mza_clear_node_adopt(context)
+            await query.edit_message_text(
+                "⚠️ <b>Adopt متوقف شد؛ وضعیت از زمان Inspect تغییر کرده یا دیگر قابل Verify نیست.</b>\n\n"
+                "هیچ mapping ثبت نشد و هیچ تغییری روی Marzban انجام نشد. از صفحه Node دوباره Inspect کنید.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+
+        managed_remark = str(report.get("managed_remark") or "")
+        try:
+            await asyncio.to_thread(
+                _db_upsert_marzban_node_public_profile,
+                node_id,
+                public_address,
+                managed_remark,
+                "verified",
+            )
+        except Exception as exc:
+            log.exception("V123B.1 adopt mapping persistence failed for node %s", node_id)
+            _mza_clear_node_adopt(context)
+            await query.edit_message_text(
+                "❌ Inspect موفق بود اما ثبت mapping محلی شکست خورد. "
+                "کانفیگ Marzban دست‌نخورده باقی ماند.\n"
+                f"<code>{esc(type(exc).__name__)}: {esc(exc)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+
+        _mza_clear_node_adopt(context)
+        await query.edit_message_text(
+            "✅ <b>Public Endpoint با موفقیت Adopt شد</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"Node ID  <code>{node_id}</code>\n"
+            f"Node  <b>{esc(inspected_node.get('name') or node_id)}</b>\n"
+            f"Public Endpoint  <code>{esc(public_address)}</code>\n"
+            f"Managed Hosts  <b>{len(marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS)}</b>\n"
+            "Profile  <code>verified</code>\n\n"
+            "فقط mapping مالکیت داخل NVL ثبت شد؛ هیچ Host یا تنظیم Node در Marzban تغییر نکرد.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🖥 مشاهده Node", callback_data=f"mza_node_{node_id}")],
+                [InlineKeyboardButton("🌐 Public Hosts", callback_data="mza_inbounds")],
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_nadopt_cancel_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nadopt_cancel_'):])
+        _mza_clear_node_adopt(context)
+        await _show_marzban_node_detail(query, context, node_id)
+        return
+
+    elif d.startswith('mza_nadopt_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nadopt_'):])
+        existing = await asyncio.to_thread(
+            _db_get_marzban_node_public_profile,
+            node_id,
+        )
+        if existing:
+            await query.edit_message_text(
+                "🛡 این Node از قبل Public Endpoint mapping دارد. Adopt دوباره اجرا نشد.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+
+        service = await _get_marzban_admin_service()
+        ok_node, node = await service.get_node(node_id)
+        if not ok_node or not isinstance(node, dict):
+            await query.edit_message_text(
+                "❌ دریافت Node از Marzban ناموفق بود؛ Adopt شروع نشد."
+            )
+            return
+
+        _mza_clear_node_adopt(context)
+        context.user_data["mza_node_adopt_draft"] = {
+            "node_id": node_id,
+            "started_at": time.time(),
+            "node_name": str(node.get("name") or ""),
+            "node_address": str(node.get("address") or ""),
+        }
+        context.user_data["state"] = "MZA_NODE_ADOPT_PUBLIC_INPUT"
+        await query.edit_message_text(
+            "🔗 <b>V123B.1 · Adopt Public Endpoint</b>\n\n"
+            f"Node  <b>{esc(node.get('name') or node_id)}</b>\n"
+            f"Real Address  <code>{esc(node.get('address') or '—')}</code>\n\n"
+            "دامنه عمومی فعلی این Node را بفرستید. NVL فقط DNS، Inboundها و Hostها را "
+            "با GET بررسی می‌کند و در این مرحله هیچ تغییری روی Marzban نمی‌دهد.\n\n"
+            "مثال: <code>argus.nvlsup.xyz</code>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nadopt_cancel_{node_id}")]
+            ]),
+        )
         return
 
     elif d.startswith('mza_nedit_name_'):

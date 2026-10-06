@@ -538,6 +538,7 @@ class RadarMonitor:
         initial_delay_seconds: Optional[int] = None,
         retention_days: Optional[int] = None,
         client: Optional[CloudflareRadarClient] = None,
+        on_snapshot: Optional[Callable[[Any, NetworkContextDecision], Any]] = None,
     ) -> None:
         self.db_path = str(db_path)
         self.location = str(
@@ -574,6 +575,7 @@ class RadarMonitor:
             )
         )
         self.client = client
+        self.on_snapshot = on_snapshot
 
     def ensure_schema(self) -> None:
         ensure_radar_schema(self.db_path)
@@ -600,6 +602,11 @@ class RadarMonitor:
             get_radar_provider_runtime,
             self.db_path,
         )
+
+        if self.on_snapshot is not None:
+            callback_result = self.on_snapshot(app, snapshot)
+            if asyncio.iscoroutine(callback_result):
+                await callback_result
 
         log.info(
             "Radar V2 context state=%s reason=%s provider=%s "

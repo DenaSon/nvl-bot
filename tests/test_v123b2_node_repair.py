@@ -378,6 +378,28 @@ class V123B2RepairUiTests(unittest.TestCase):
         self.assertIn('"pending"', region)
         self.assertIn('"verified"', region)
 
+    def test_node_detail_navigation_clears_stale_node_text_input(self):
+        nav = self._region(
+            "# Leaving a text-input screen through an inline button",
+            "# 🛡 Central V2Ray authorization boundary.",
+        )
+        self.assertIn(
+            "if (not starters or d.startswith('mza_node_')) and input_state in (",
+            nav,
+        )
+        self.assertIn("'MZA_NODE_ADDRESS_INPUT'", nav)
+
+    def test_cancel_command_is_registered_as_persistent_state_escape_hatch(self):
+        self.assertIn("async def cmd_cancel(", self.source)
+        self.assertIn('CommandHandler("cancel", cmd_cancel)', self.source)
+        cancel_region = self._region(
+            "async def cmd_cancel(",
+            "# ==========================================\n# 🎯 توابع رابط‌های گرافیکی",
+        )
+        self.assertIn("safe_clear_context(context)", cancel_region)
+        self.assertIn("_mig_cancel_session(chat_id)", cancel_region)
+        self.assertIn("marzban_node_bootstrap.cancel_session(chat_id)", cancel_region)
+
     def test_failure_keeps_pending_and_navigation_clears_repair_draft(self):
         confirm = self._region(
             "elif d.startswith('mza_nrepair_confirm_'):",

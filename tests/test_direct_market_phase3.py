@@ -44,7 +44,7 @@ class DirectMarketWalletPhase3Tests(unittest.TestCase):
             self.conn.execute(
                 "SELECT value FROM settings WHERE key='direct_market_schema_version'"
             ).fetchone()[0],
-            "2",
+            str(market_commerce.DIRECT_MARKET_SCHEMA_VERSION),
         )
 
     def test_wallet_is_created_lazily_with_zero_balance(self):

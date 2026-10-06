@@ -20,7 +20,7 @@ class V123CSourceRegressionTests(unittest.TestCase):
 
     def test_runtime_marker_and_cloudflare_module_are_wired(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V123C-2026-10-06-cloudflare-dns-automation"',
+            'BOT_VERSION_TAG = "V124-2026-10-07-critical-only-regional-notifications"',
             self.source,
         )
         self.assertIn("import cloudflare_dns", self.source)

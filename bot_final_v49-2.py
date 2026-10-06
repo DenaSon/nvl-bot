@@ -361,7 +361,7 @@ from server_migration.telegram_wizard import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V123C-2026-10-06-cloudflare-dns-automation"
+BOT_VERSION_TAG = "V124-2026-10-07-critical-only-regional-notifications"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)

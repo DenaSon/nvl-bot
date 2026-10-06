@@ -112,7 +112,7 @@ class V119AFastDetectionStaticTests(unittest.TestCase):
 
     def test_release_marker(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V123C-2026-10-06-cloudflare-dns-automation"',
+            'BOT_VERSION_TAG = "V124-2026-10-07-critical-only-regional-notifications"',
             self.source,
         )
 

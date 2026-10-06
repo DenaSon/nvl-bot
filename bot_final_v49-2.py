@@ -10490,6 +10490,324 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+    # 🌐 V123B.3.2 Safe Node Move input.  Move metadata in user_data is
+    # non-secret; SSH passwords live only in the in-memory bootstrap session.
+    if state in _MZA_NODE_MOVE_TEXT_STATES:
+        if role != 'admin':
+            _mza_clear_node_move(context, cancel_session=True, chat_id=chat_id)
+            context.user_data.pop('mza_action_node', None)
+            await update.message.reply_text("⛔️ دسترسی غیرمجاز.")
+            return
+
+        if state == 'MZA_NODE_MOVE_ADDRESS_INPUT':
+            try:
+                node_id = marzban_admin.normalize_node_id(
+                    context.user_data.get('mza_action_node')
+                )
+                target_address = marzban_admin.normalize_node_changes(
+                    {"address": text},
+                    allow_status=False,
+                )["address"]
+            except ValueError as exc:
+                await update.message.reply_text(
+                    f"❌ آدرس مقصد نامعتبر است: <code>{esc(exc)}</code>",
+                    parse_mode='HTML',
+                )
+                return
+
+            service = await _get_marzban_admin_service()
+            profile = await asyncio.to_thread(
+                _db_get_marzban_node_public_profile,
+                node_id,
+            )
+            if (
+                not profile
+                or str(profile.get("profile_state") or "").lower() != "verified"
+            ):
+                _mza_clear_node_move(context, cancel_session=True, chat_id=chat_id)
+                context.user_data.pop('mza_action_node', None)
+                await update.message.reply_text(
+                    "🛡 Stable Public Endpoint دیگر verified نیست؛ Move متوقف شد."
+                )
+                return
+
+            ok_plan, plan = await service.preview_node_public_profile_move(
+                node_id,
+                target_address,
+                profile.get("public_address"),
+                marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+            )
+            if not ok_plan or not isinstance(plan, dict):
+                await update.message.reply_text(
+                    "❌ Preview خواندنی Move ناموفق بود. هیچ تغییری اعمال نشد.\n"
+                    f"<code>{esc(plan)}</code>",
+                    parse_mode='HTML',
+                )
+                return
+            if not plan.get("moveable"):
+                issues = " | ".join(map(str, plan.get("issues") or ())) or "move precheck failed"
+                await update.message.reply_text(
+                    "⛔️ <b>Safe Node Move قابل شروع نیست.</b>\n\n"
+                    f"<code>{esc(issues)}</code>\n\n"
+                    "هیچ تغییری روی Node، DNS یا Hostها انجام نشد.",
+                    parse_mode='HTML',
+                )
+                return
+            if plan.get("no_change"):
+                context.user_data.pop('state', None)
+                context.user_data.pop('mza_action_node', None)
+                await update.message.reply_text(
+                    "✅ آدرس مقصد با Address فعلی Node یکسان است؛ Move لازم نیست."
+                )
+                return
+
+            node = plan.get("node") if isinstance(plan.get("node"), dict) else {}
+            try:
+                session = marzban_node_bootstrap.begin_session(
+                    chat_id,
+                    node_id=node_id,
+                    host=plan.get("new_address"),
+                    service_port=node.get("port", 62050),
+                    api_port=node.get("api_port", 62051),
+                )
+            except Exception as exc:
+                await update.message.reply_text(
+                    f"❌ ساخت نشست SSH مقصد ناموفق بود: <code>{esc(exc)}</code>",
+                    parse_mode='HTML',
+                )
+                return
+
+            context.user_data["mza_node_move_draft"] = {
+                "node_id": node_id,
+                "old_address": str(plan.get("old_address") or ""),
+                "new_address": str(plan.get("new_address") or ""),
+                "public_address": str(plan.get("public_address") or ""),
+                "managed_remark": str(plan.get("managed_remark") or ""),
+                "node_name": str(node.get("name") or ""),
+                "port": int(node.get("port") or 62050),
+                "api_port": int(node.get("api_port") or 62051),
+                "initial_fingerprint": str(plan.get("fingerprint") or ""),
+                "destination_ready": False,
+                "control_plane_ready": False,
+                "started_at": time.time(),
+            }
+            context.user_data.pop('state', None)
+            context.user_data.pop('mza_action_node', None)
+            await update.message.reply_text(
+                "🌐 <b>V123B.3.2 · Destination Preflight</b>\n"
+                "━━━━━━━━━━━━━━\n"
+                f"Node  <b>{esc(node.get('name') or node_id)}</b>\n"
+                f"Old Address  <code>{esc(plan.get('old_address'))}</code>\n"
+                f"Destination  <code>{esc(plan.get('new_address'))}</code>\n"
+                f"Public Endpoint  <code>{esc(plan.get('public_address'))}</code>\n\n"
+                "فعلاً فقط SSH و آمادگی مقصد بررسی می‌شود؛ Node ID، DNS و Public Hostها ثابت‌اند.\n\n"
+                "SSH مقصد روی چه پورتی در دسترس است؟",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ پورت 22", callback_data=f"mza_nmove_port22_{node_id}")],
+                    [InlineKeyboardButton("✏️ پورت دیگر", callback_data=f"mza_nmove_portcustom_{node_id}")],
+                    [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nmove_cancel_{node_id}")],
+                ]),
+            )
+            return
+
+        session = marzban_node_bootstrap.get_session(chat_id)
+        draft = context.user_data.get("mza_node_move_draft")
+        if session is None or not isinstance(draft, dict):
+            _mza_clear_node_move(context, cancel_session=True, chat_id=chat_id)
+            await update.message.reply_text(
+                "⚠️ نشست Safe Node Move پس از restart یا timeout موجود نیست. "
+                "از صفحه Node دوباره «آدرس» را بزنید."
+            )
+            return
+
+        if state == 'MZA_NODE_MOVE_SSH_PORT_INPUT':
+            try:
+                marzban_node_bootstrap.set_ssh_port(session, text)
+            except ValueError:
+                await update.message.reply_text(
+                    "❌ پورت SSH معتبر نیست. عددی بین 1 تا 65535 بفرستید.",
+                    parse_mode='HTML',
+                )
+                return
+            except Exception as exc:
+                _mza_clear_node_move(context, cancel_session=True, chat_id=chat_id)
+                await update.message.reply_text(
+                    f"❌ نشست Move نامعتبر است: <code>{esc(exc)}</code>",
+                    parse_mode='HTML',
+                )
+                return
+            context.user_data.pop('state', None)
+            await _mza_probe_node_move_host_key(update.message, context, session)
+            return
+
+        if state == 'MZA_NODE_MOVE_PASSWORD_INPUT':
+            with contextlib.suppress(Exception):
+                await update.message.delete()
+            try:
+                marzban_node_bootstrap.set_password(session, text)
+            except ValueError:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ رمز SSH خالی یا بیش از حد طولانی است. دوباره ارسال کنید.",
+                )
+                return
+            except Exception as exc:
+                _mza_clear_node_move(context, cancel_session=True, chat_id=chat_id)
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"❌ نشست Move نامعتبر است: <code>{esc(exc)}</code>",
+                    parse_mode='HTML',
+                )
+                return
+
+            context.user_data.pop('state', None)
+            status_message = await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "⏳ <b>Destination SSH Preflight در حال اجراست...</b>\n"
+                    f"<code>{esc(session.host)}:{esc(session.ssh_port)}</code>\n"
+                    "هیچ تغییری روی مقصد یا Marzban اعمال نمی‌شود."
+                ),
+                parse_mode='HTML',
+            )
+            report = await asyncio.to_thread(
+                marzban_node_bootstrap.run_preflight,
+                session,
+            )
+            await status_message.edit_text(
+                _mza_node_bootstrap_report_text(report),
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(
+                    _mza_node_move_report_kb(
+                        context,
+                        session.node_id,
+                        ready=report.ready,
+                    )
+                ),
+            )
+            return
+
+        if state == 'MZA_NODE_MOVE_INSTALL_PASSWORD_INPUT':
+            with contextlib.suppress(Exception):
+                await update.message.delete()
+            try:
+                marzban_node_install.set_install_password(session, text)
+            except ValueError:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ رمز SSH خالی یا بیش از حد طولانی است. دوباره ارسال کنید.",
+                )
+                return
+            except Exception as exc:
+                context.user_data.pop('state', None)
+                session.scrub_secret()
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"❌ نشست نصب مقصد نامعتبر است: <code>{esc(exc)}</code>",
+                    parse_mode='HTML',
+                )
+                return
+
+            context.user_data.pop('state', None)
+            service = await _get_marzban_admin_service()
+            profile = await asyncio.to_thread(
+                _db_get_marzban_node_public_profile,
+                session.node_id,
+            )
+            (ok_node, current_node), (ok_settings, settings_payload) = await asyncio.gather(
+                service.get_node(session.node_id),
+                service.get_node_settings(),
+            )
+            stale = (
+                not isinstance(draft, dict)
+                or not profile
+                or str(profile.get("profile_state") or "").lower() != "verified"
+                or str(profile.get("public_address") or "").rstrip(".").casefold()
+                    != str(draft.get("public_address") or "").rstrip(".").casefold()
+                or not ok_node
+                or not isinstance(current_node, dict)
+                or str(current_node.get("address") or "").rstrip(".").casefold()
+                    != str(draft.get("old_address") or "").rstrip(".").casefold()
+                or str(current_node.get("name") or "") != str(draft.get("node_name") or "")
+            )
+            if stale:
+                session.scrub_secret()
+                session.stage = "INSTALL_FAILED"
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "⛔️ <b>Node یا mapping از زمان شروع Move تغییر کرده است.</b>\n"
+                        "هیچ نصب Remote شروع نشد. Move را از صفحه Node دوباره شروع کنید."
+                    ),
+                    parse_mode='HTML',
+                )
+                return
+            if not ok_settings or not isinstance(settings_payload, dict):
+                session.scrub_secret()
+                session.stage = "INSTALL_FAILED"
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "❌ <b>Certificate از Marzban دریافت نشد.</b>\n"
+                        f"<code>{esc(settings_payload)}</code>\n"
+                        "هیچ نصب Remote شروع نشد."
+                    ),
+                    parse_mode='HTML',
+                )
+                return
+
+            status_message = await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "⏳ <b>آماده‌سازی مقصد در حال اجراست...</b>\n"
+                    f"<code>{esc(session.host)}</code>\n\n"
+                    "Docker/Compose → Certificate → Marzban-node → Listener Verify\n"
+                    "هنوز Node.address و DNS تغییر نمی‌کنند."
+                ),
+                parse_mode='HTML',
+            )
+            report = await asyncio.to_thread(
+                marzban_node_install.run_install,
+                session,
+                certificate=str(settings_payload.get("certificate") or ""),
+            )
+            if not report.success:
+                await status_message.edit_text(
+                    _mza_node_install_result_text(report),
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 تلاش مجدد نصب مقصد", callback_data=f"mza_nmove_install_{session.node_id}")],
+                        [InlineKeyboardButton("❌ لغو Move", callback_data=f"mza_nmove_cancel_{session.node_id}")],
+                    ]),
+                )
+                return
+
+            draft["destination_ready"] = True
+            draft["destination_host_key"] = str(session.host_key_sha256 or "")
+            draft["destination_ssh_port"] = int(session.ssh_port)
+            draft["installed_at"] = time.time()
+            context.user_data["mza_node_move_draft"] = draft
+            await status_message.edit_text(
+                "✅ <b>Destination Ready</b>\n"
+                "━━━━━━━━━━━━━━\n"
+                f"Node ID  <code>{esc(session.node_id)}</code>\n"
+                f"Old Address  <code>{esc(draft.get('old_address'))}</code>\n"
+                f"New Address  <code>{esc(draft.get('new_address'))}</code>\n"
+                f"Public Endpoint  <code>{esc(draft.get('public_address'))}</code>\n"
+                "Certificate  <b>✅ installed</b>\n"
+                "Marzban-node  <b>✅ running</b>\n"
+                f"Service {esc(session.service_port)}  <b>{'✅ listening' if report.service_port_listening else '⚠️ not detected'}</b>\n"
+                f"Xray API {esc(session.api_port)}  <b>{'✅ listening' if report.api_port_listening else '⏳ pending until control-plane connect'}</b>\n\n"
+                "هنوز هیچ Cutoverی انجام نشده است. قدم بعدی فقط Preview تغییر Control Plane است.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔎 Cutover Preview", callback_data=f"mza_nmove_cutover_{session.node_id}")],
+                    [InlineKeyboardButton("❌ لغو Move", callback_data=f"mza_nmove_cancel_{session.node_id}")],
+                ]),
+            )
+            return
+
     # 🚀 Marzban Node bootstrap Phase 6 input. Password stays only in the
     # module-level in-memory session and is scrubbed after every preflight.
     if state in (

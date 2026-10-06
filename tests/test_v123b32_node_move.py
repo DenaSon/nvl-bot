@@ -280,23 +280,29 @@ class V123B32MoveUiTests(unittest.TestCase):
         self.assertIn("Managed Hosts", region)
         self.assertIn("rollback", region.lower())
 
-    def test_confirm_persists_pending_before_remote_move_and_keeps_pending_until_dns_finalize(self):
+    def test_confirm_persists_pending_before_remote_move_then_switches_cloudflare(self):
         region = self._region(
             "elif d.startswith('mza_nmove_confirm_'):",
             "elif d.startswith('mza_nmove_finalize_'):",
         )
         pending_pos = region.index("_db_upsert_marzban_node_public_profile")
         move_pos = region.index("service.move_node_public_profile(")
+        cf_pos = region.index("cf_client.switch_a_record")
         self.assertLess(pending_pos, move_pos)
+        self.assertLess(move_pos, cf_pos)
         self.assertIn('"pending"', region)
         self.assertIn("control_plane_ready", region)
-        self.assertIn("DNS Public Endpoint", region)
+        self.assertIn("_mza_rollback_node_move_to_old", region)
+        self.assertNotIn("DNS را تغییر دادم", region)
 
-    def test_finalize_requires_new_dns_connected_node_and_canonical_hosts(self):
+    def test_finalize_requires_cloudflare_new_dns_connected_node_and_canonical_hosts(self):
         region = self._region(
             "elif d.startswith('mza_nmove_finalize_'):",
             "elif d.startswith('mza_nedit_name_'):",
         )
+        self.assertIn("cf_client.inspect_a_record", region)
+        self.assertIn("cf_client.switch_a_record", region)
+        self.assertIn("provider_ok", region)
         self.assertIn("preflight_public_endpoint", region)
         self.assertIn('"connected"', region)
         self.assertIn("preview_node_public_profile_repair", region)

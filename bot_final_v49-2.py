@@ -14718,9 +14718,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         node_adopt_starter = d.startswith('mza_nadopt_')
         node_repair_starter = d.startswith('mza_nrepair_')
         node_rename_starter = d.startswith('mza_nrename_')
+        node_move_starter = d.startswith('mza_nmove_')
         node_bootstrap_starter = (
             d.startswith('mza_nboot_')
             or d.startswith('mza_ninstall_')
+            or d.startswith('mza_nmove_')
             or d.startswith('mza_node_')
         )
         create_starter = d == 'mza_create' or d.startswith('mza_c') or d.startswith('mza_create_')
@@ -14737,6 +14739,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             or node_adopt_starter
             or node_repair_starter
             or node_rename_starter
+            or node_move_starter
             or node_bootstrap_starter
             or create_starter
         )
@@ -14757,6 +14760,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'MZA_NODE_RATIO_INPUT',
             'MZA_NODE_ADOPT_PUBLIC_INPUT',
             'MZA_NODE_REPAIR_PUBLIC_INPUT',
+            'MZA_NODE_MOVE_ADDRESS_INPUT',
+            'MZA_NODE_MOVE_SSH_PORT_INPUT',
+            'MZA_NODE_MOVE_PASSWORD_INPUT',
+            'MZA_NODE_MOVE_INSTALL_PASSWORD_INPUT',
             'MZA_NODE_CREATE_NAME_INPUT',
             'MZA_NODE_CREATE_ADDRESS_INPUT',
             'MZA_NODE_CREATE_PUBLIC_INPUT',
@@ -14784,6 +14791,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _mza_clear_node_repair(context)
         if not node_rename_starter and not node_edit_starter:
             context.user_data.pop("mza_node_rename_guard", None)
+        if not node_move_starter and not d.startswith('mza_nedit_address_'):
+            # Do not discard a post-cutover pending move silently; the draft is
+            # non-secret recovery metadata and Repair can still finalize it.
+            draft = context.user_data.get("mza_node_move_draft")
+            if not (isinstance(draft, dict) and draft.get("control_plane_ready")):
+                _mza_clear_node_move(context)
 
         # Confirmation messages can outlive the screen that created them.
         # Only a new edit in the same domain may preserve that domain's pending

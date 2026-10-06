@@ -3,7 +3,13 @@ import unittest
 
 from incident_observability import (
     INCIDENT_STATE_CONFIRMING,
+    INCIDENT_STATE_EVIDENCE_DEGRADED,
+    INCIDENT_STATE_FAILOVER_BLOCKED,
+    INCIDENT_STATE_FAILOVER_FAILED,
+    INCIDENT_STATE_FAILOVER_STARTED,
+    INCIDENT_STATE_FAILOVER_SUCCEEDED,
     INCIDENT_STATE_FILTER_CONFIRMED,
+    INCIDENT_STATE_RECOVERED,
     INCIDENT_STATE_SUSPECTED,
     REASON_CONFIRMATION_PENDING,
     REASON_FILTER_CONFIRMED,
@@ -91,21 +97,68 @@ class V119BIncidentPolicyTests(unittest.TestCase):
         self.assertNotIn("CORE_PATH_NOT_OK", failures)
         self.assertIn("EXTERNAL_NOT_OK", failures)
 
-    def test_same_state_and_reason_does_not_notify_again(self):
+    def test_noncritical_incident_states_are_quiet(self):
+        for state in (
+            INCIDENT_STATE_SUSPECTED,
+            INCIDENT_STATE_CONFIRMING,
+            INCIDENT_STATE_EVIDENCE_DEGRADED,
+            INCIDENT_STATE_RECOVERED,
+            INCIDENT_STATE_FAILOVER_STARTED,
+            INCIDENT_STATE_FAILOVER_SUCCEEDED,
+        ):
+            with self.subTest(state=state):
+                self.assertFalse(
+                    should_notify_incident(
+                        previous_state=None,
+                        previous_reason=None,
+                        new_state=state,
+                        new_reason="TEST",
+                    )
+                )
+
+    def test_filter_confirmed_notifies_only_when_entering_state(self):
+        self.assertTrue(
+            should_notify_incident(
+                previous_state=INCIDENT_STATE_SUSPECTED,
+                previous_reason=REASON_REGIONAL_SUSPECTED,
+                new_state=INCIDENT_STATE_FILTER_CONFIRMED,
+                new_reason=REASON_FILTER_CONFIRMED,
+            )
+        )
         self.assertFalse(
             should_notify_incident(
-                previous_state="FAILOVER_BLOCKED",
+                previous_state=INCIDENT_STATE_FILTER_CONFIRMED,
+                previous_reason=REASON_FILTER_CONFIRMED,
+                new_state=INCIDENT_STATE_FILTER_CONFIRMED,
+                new_reason=REASON_FILTER_CONFIRMED,
+            )
+        )
+
+    def test_reason_change_inside_same_critical_state_is_quiet(self):
+        self.assertFalse(
+            should_notify_incident(
+                previous_state=INCIDENT_STATE_FAILOVER_BLOCKED,
                 previous_reason="NO_STANDBY",
-                new_state="FAILOVER_BLOCKED",
-                new_reason="NO_STANDBY",
+                new_state=INCIDENT_STATE_FAILOVER_BLOCKED,
+                new_reason="NO_SAFE_STANDBY",
+            )
+        )
+
+    def test_blocked_and_failed_transitions_are_critical(self):
+        self.assertTrue(
+            should_notify_incident(
+                previous_state=INCIDENT_STATE_FILTER_CONFIRMED,
+                previous_reason=REASON_FILTER_CONFIRMED,
+                new_state=INCIDENT_STATE_FAILOVER_BLOCKED,
+                new_reason="NO_SAFE_STANDBY",
             )
         )
         self.assertTrue(
             should_notify_incident(
-                previous_state="FAILOVER_BLOCKED",
-                previous_reason="NO_STANDBY",
-                new_state="FAILOVER_BLOCKED",
-                new_reason="NO_SAFE_STANDBY",
+                previous_state=INCIDENT_STATE_FAILOVER_BLOCKED,
+                previous_reason="NO_SAFE_STANDBY",
+                new_state=INCIDENT_STATE_FAILOVER_FAILED,
+                new_reason="FAILOVER_EXCEPTION",
             )
         )
 

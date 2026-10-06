@@ -72,6 +72,21 @@ class RadarV4IntegrationTests(unittest.TestCase):
         self.assertIn("Radar Safety Gate", region)
         self.assertIn("انتقال دستی", region)
 
+    def test_filtering_monitor_surfaces_radar_safety_gate(self):
+        region = self.region(
+            "async def _render_filtering_monitor_panel",
+            "async def _render_filtering_edge_detail",
+        )
+        self.assertIn("Radar Safety Gate", region)
+        self.assertIn(
+            "CORRELATION_WIDESPREAD_NETWORK_OUTAGE",
+            region,
+        )
+        self.assertIn(
+            "RADAR_FAILOVER_CONTEXT_MAX_AGE_SECONDS",
+            region,
+        )
+
     def test_reason_is_normalized_and_human_readable(self):
         self.assertEqual(
             normalize_auto_block_reason("WIDESPREAD_NETWORK_OUTAGE"),

@@ -17957,10 +17957,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             draft.get("public_address"),
         )
         if old_dns.get("ok"):
-            dns_state = "Old Backend ✅ (preferred)"
+            dns_state = "Old Backend ✅"
             dns_mode = "old"
         elif new_dns.get("ok"):
-            dns_state = "New Backend ⚠️ (DNS already switched)"
+            dns_state = "New Backend ⚠️ (already switched)"
             dns_mode = "new"
         else:
             await query.edit_message_text(
@@ -17968,11 +17968,65 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Public Endpoint  <code>{esc(draft.get('public_address'))}</code>\n"
                 f"Old Backend  <code>{esc(draft.get('old_address'))}</code> ❌\n"
                 f"New Backend  <code>{esc(draft.get('new_address'))}</code> ❌\n\n"
-                "Cutover اجرا نشد. DNS باید فعلاً روی Backend قدیمی باشد؛ اگر قبلاً تغییرش داده‌اید، باید دقیقاً به مقصد جدید resolve شود.",
+                "Cutover اجرا نشد؛ ابتدا DNS باید دقیقاً روی Backend فعلی یا مقصد جدید resolve شود.",
                 parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔄 بررسی دوباره", callback_data=f"mza_nmove_cutover_{node_id}")],
                     [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nmove_cancel_{node_id}")],
+                ]),
+            )
+            return
+
+        try:
+            cf_client = _mza_cloudflare_dns_client()
+            old_ip = await asyncio.to_thread(
+                cloudflare_dns.resolve_single_ipv4,
+                draft.get("old_address"),
+            )
+            new_ip = await asyncio.to_thread(
+                cloudflare_dns.resolve_single_ipv4,
+                draft.get("new_address"),
+            )
+            cf_snapshot = await asyncio.to_thread(
+                cf_client.inspect_a_record,
+                draft.get("public_address"),
+            )
+        except Exception as exc:
+            await query.edit_message_text(
+                "⛔️ <b>V123C · Cloudflare Preflight ناموفق بود.</b>\n\n"
+                f"Public Endpoint  <code>{esc(draft.get('public_address'))}</code>\n"
+                f"Error  <code>{esc(type(exc).__name__)}: {esc(exc)}</code>\n\n"
+                "هیچ Cutoverی انجام نشد. Token باید DNS Write داشته باشد؛ اگر Zone ID تنظیم نشده، Zone Read هم لازم است.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 بررسی دوباره", callback_data=f"mza_nmove_cutover_{node_id}")],
+                    [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nmove_cancel_{node_id}")],
+                ]),
+            )
+            return
+
+        cf_record = (
+            cf_snapshot.get("record")
+            if isinstance(cf_snapshot, dict) and isinstance(cf_snapshot.get("record"), dict)
+            else {}
+        )
+        expected_cf_content = old_ip if dns_mode == "old" else new_ip
+        if (
+            not cf_snapshot.get("exists")
+            or not cf_record.get("id")
+            or bool(cf_record.get("proxied"))
+            or str(cf_record.get("content") or "") != str(expected_cf_content)
+        ):
+            await query.edit_message_text(
+                "⛔️ <b>Cloudflare A record قابل Commit امن نیست.</b>\n\n"
+                f"Public Endpoint  <code>{esc(draft.get('public_address'))}</code>\n"
+                f"Expected  <code>{esc(expected_cf_content)}</code>\n"
+                f"Provider  <code>{esc(_mza_cf_record_summary(cf_snapshot))}</code>\n\n"
+                "رکورد باید دقیقاً یک A record و DNS-only باشد و محتوای آن با وضعیت فعلی DNS Match کند. هیچ Cutoverی اجرا نشد.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 بررسی دوباره", callback_data=f"mza_nmove_cutover_{node_id}")],
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")],
                 ]),
             )
             return
@@ -17987,6 +18041,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "public_address": str(draft.get("public_address") or ""),
             "managed_remark": str(draft.get("managed_remark") or ""),
             "dns_mode": dns_mode,
+            "old_ip": old_ip,
+            "new_ip": new_ip,
+            "cf_zone_id": str(cf_snapshot.get("zone_id") or ""),
+            "cf_record_id": str(cf_record.get("id") or ""),
+            "cf_fingerprint": str(cf_snapshot.get("fingerprint") or ""),
+            "cf_content": str(cf_record.get("content") or ""),
             "started_at": time.time(),
         }
         await query.edit_message_text(
@@ -17998,10 +18058,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"New Address  <code>{esc(draft.get('new_address'))}</code>\n"
             f"Public Endpoint  <code>{esc(draft.get('public_address'))}</code> · unchanged\n"
             f"DNS Now  <b>{esc(dns_state)}</b>\n"
+            f"Cloudflare  <b>✅ A record verified</b> · <code>{esc(cf_record.get('content'))}</code>\n"
             "Certificate  <b>✅ destination prepared</b>\n"
             f"Managed Hosts  <b>{len(marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS)} · unchanged</b>\n\n"
-            "Confirm فقط Node.address را روی همین Node ID تغییر می‌دهد، reconnect می‌کند و connected شدن مقصد را Verify می‌کند. "
-            "اگر مقصد connected نشود، NVL Address قبلی را خودکار rollback می‌کند.\n\n"
+            "Confirm ابتدا Node.address را روی همین Node ID تغییر می‌دهد و connected شدن مقصد را Verify می‌کند؛ "
+            "سپس V123C همان Cloudflare A record را با fingerprint قفل‌شده به مقصد جدید PATCH می‌کند. "
+            "اگر تغییر Cloudflare شکست بخورد، Control Plane به Backend قبلی rollback می‌شود.\n\n"
             "<b>Public Host address و Hostهای دستی تغییر نمی‌کنند.</b>",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([

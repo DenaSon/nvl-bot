@@ -200,7 +200,7 @@ class V123B33UiRegressionTests(unittest.TestCase):
 
     def test_release_marker_and_safe_delete_preview_are_present(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V123C-2026-10-06-cloudflare-dns-automation"',
+            'BOT_VERSION_TAG = "V124-2026-10-07-critical-only-regional-notifications"',
             self.source,
         )
         starter = self._region(

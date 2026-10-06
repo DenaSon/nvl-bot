@@ -98,6 +98,27 @@ class RadarContextTests(unittest.TestCase):
         self.assertEqual(result.state, NETWORK_STATE_OUTAGE)
         self.assertEqual(result.active_outage_count, 1)
 
+    def test_instantaneous_outage_does_not_stay_active(self):
+        item = outage()
+        item = RadarOutage(
+            annotation_id=item.annotation_id,
+            event_type=item.event_type,
+            description=item.description,
+            data_source=item.data_source,
+            scope=item.scope,
+            start_date=item.start_date,
+            end_date=item.end_date,
+            outage_cause=item.outage_cause,
+            outage_type=item.outage_type,
+            locations=item.locations,
+            asns=item.asns,
+            tags=item.tags,
+            is_instantaneous=True,
+        )
+        result = self.base(outages=(item,))
+        self.assertEqual(result.state, NETWORK_STATE_NORMAL)
+        self.assertEqual(result.active_outage_count, 0)
+
     def test_verified_active_anomaly_is_degraded(self):
         result = self.base(anomalies=(anomaly(),))
         self.assertEqual(result.state, NETWORK_STATE_DEGRADED)

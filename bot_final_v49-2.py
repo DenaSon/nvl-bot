@@ -356,7 +356,7 @@ from server_migration.telegram_wizard import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V122B-2026-10-06-monitoring-metrics"
+BOT_VERSION_TAG = "V123A-2026-10-06-stable-public-endpoint"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -1042,6 +1042,16 @@ def init_db():
             "INSERT OR IGNORE INTO settings VALUES (?,?)",
             [(key, value) for key, value in _marzban_bootstrap if value],
         )
+
+        # V123A — durable ownership of the stable user-facing endpoint created
+        # for new Nodes. Lifecycle migration/rename/delete support is completed
+        # in V123B; V123A stores the authoritative mapping after Host verify.
+        c.execute('''CREATE TABLE IF NOT EXISTS marzban_node_public_profiles (
+                        node_id INTEGER PRIMARY KEY,
+                        public_address TEXT NOT NULL,
+                        managed_remark TEXT NOT NULL,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)''')
 
         # V120-A — persistent read-only inventory for Marzban Main/Nodes/Public Hosts.
         marzban_asset_discovery.install_schema(conn)
@@ -7844,9 +7854,53 @@ async def _mza_show_node_edit_confirm(target, context, node_id, changes):
 
 
 
+def _db_get_marzban_node_public_profile(node_id):
+    node_id = marzban_admin.normalize_node_id(node_id)
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT node_id, public_address, managed_remark, created_at, updated_at "
+            "FROM marzban_node_public_profiles WHERE node_id=?",
+            (node_id,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "node_id": int(row[0]),
+        "public_address": str(row[1]),
+        "managed_remark": str(row[2]),
+        "created_at": row[3],
+        "updated_at": row[4],
+    }
+
+
+def _db_upsert_marzban_node_public_profile(node_id, public_address, managed_remark):
+    node_id = marzban_admin.normalize_node_id(node_id)
+    public_address = marzban_admin.normalize_public_hostname(public_address)
+    managed_remark = str(managed_remark or "").strip()
+    if not managed_remark:
+        raise ValueError("managed Public Host remark is required")
+    with db_conn() as conn:
+        conn.execute(
+            """INSERT INTO marzban_node_public_profiles
+                   (node_id, public_address, managed_remark, created_at, updated_at)
+               VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+               ON CONFLICT(node_id) DO UPDATE SET
+                   public_address=excluded.public_address,
+                   managed_remark=excluded.managed_remark,
+                   updated_at=CURRENT_TIMESTAMP""",
+            (node_id, public_address, managed_remark),
+        )
+    return {
+        "node_id": node_id,
+        "public_address": public_address,
+        "managed_remark": managed_remark,
+    }
+
+
 _MZA_NODE_CREATE_TEXT_STATES = {
     "MZA_NODE_CREATE_NAME_INPUT",
     "MZA_NODE_CREATE_ADDRESS_INPUT",
+    "MZA_NODE_CREATE_PUBLIC_INPUT",
     "MZA_NODE_CREATE_PORTS_INPUT",
     "MZA_NODE_CREATE_RATIO_INPUT",
 }
@@ -7884,8 +7938,10 @@ async def _mza_show_node_create_review(target, context):
             port=draft.get("port", 62050),
             api_port=draft.get("api_port", 62051),
             usage_coefficient=draft.get("usage_coefficient", 1.0),
-            # Never let Marzban's all-inbounds switch run from the NVL wizard.
             add_as_new_host=False,
+        )
+        public_address = marzban_admin.normalize_public_hostname(
+            draft.get("public_address")
         )
     except ValueError as exc:
         return await _mza_render(
@@ -7900,21 +7956,27 @@ async def _mza_show_node_create_review(target, context):
     nonce = secrets.token_hex(8)
     draft["confirm_nonce"] = nonce
     draft.update(payload)
+    draft["public_address"] = public_address
     managed_hosts = "\n".join(
         f"• <code>{esc(tag)}</code>"
         for tag in marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS
     )
+    preflight = draft.get("public_preflight") if isinstance(draft.get("public_preflight"), dict) else {}
+    matched = ", ".join(str(item) for item in preflight.get("matched_ips") or ()) or "Verify هنگام تایید"
     text = (
         "✅ <b>بررسی نهایی Node</b>\n"
         "━━━━━━━━━━━━━━\n"
         f"نام  <b>{esc(payload['name'])}</b>\n"
-        f"آدرس سرور Node  <code>{esc(payload['address'])}</code>\n"
+        f"آدرس واقعی Node  <code>{esc(payload['address'])}</code>\n"
+        f"Public Endpoint  <code>{esc(public_address)}</code>\n"
+        f"DNS Match  <code>{esc(matched)}</code>\n"
         f"Service Port  <code>{payload['port']}</code>\n"
         f"Xray API Port  <code>{payload['api_port']}</code>\n"
         f"Usage Ratio  <b>{esc(payload['usage_coefficient'])}</b>\n\n"
         "🌐 <b>Public Host profile · NVL</b>\n"
         f"{managed_hosts}\n\n"
-        "Marzban ابتدا Node را بدون ساخت Host عمومی ثبت می‌کند؛ سپس NVL فقط همین Hostها را به‌صورت کنترل‌شده ایجاد و Verify می‌کند."
+        "Node با آدرس واقعی خودش در Marzban ثبت می‌شود، اما Public Hostهای کاربران فقط از دامنه ثابت بالا استفاده می‌کنند. "
+        "DNS درست قبل از POST دوباره Verify خواهد شد."
     )
     kb = [
         [InlineKeyboardButton("✅ ساخت نود", callback_data=f"mza_ncreate_confirm_{nonce}")],
@@ -10322,9 +10384,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 draft.update(changes)
                 context.user_data['state'] = 'MZA_NODE_CREATE_ADDRESS_INPUT'
                 await update.message.reply_text(
-                    "🌐 <b>مرحله ۲ از ۴ · آدرس نود</b>\n\n"
+                    "🌐 <b>مرحله ۲ از ۵ · آدرس واقعی Node</b>\n\n"
                     "IP یا hostname <b>خود سرور Node</b> را بفرستید؛ همان سروری که Marzban-node روی آن اجرا می‌شود.\n"
-                    "دامنه یا IP پنل اصلی Marzban را وارد نکنید، مگر اینکه همان سرور Node باشد.\n\n"
+                    "این مقدار برای ارتباط Marzban با Node است و داخل Subscription کاربران منتشر نمی‌شود.\n\n"
                     "بدون <code>http://</code> یا <code>https://</code>\n"
                     "مثال: <code>203.0.113.20</code>",
                     parse_mode='HTML',
@@ -10337,14 +10399,49 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if state == 'MZA_NODE_CREATE_ADDRESS_INPUT':
                 changes = marzban_admin.normalize_node_changes({"address": text})
                 draft.update(changes)
+                context.user_data['state'] = 'MZA_NODE_CREATE_PUBLIC_INPUT'
+                await update.message.reply_text(
+                    "🌍 <b>مرحله ۳ از ۵ · دامنه عمومی Node</b>\n\n"
+                    "دامنه ثابتی را بفرستید که داخل Subscription کاربران قرار می‌گیرد.\n"
+                    "این دامنه باید از قبل در DNS ساخته شده باشد و به IP همین Node Resolve شود.\n\n"
+                    "فقط hostname؛ بدون http/https، بدون Port و بدون IP مستقیم.\n"
+                    "مثال: <code>argus.nvlsup.xyz</code>",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("❌ لغو", callback_data="mza_ncreate_cancel")]
+                    ]),
+                )
+                return
+
+            if state == 'MZA_NODE_CREATE_PUBLIC_INPUT':
+                public_address = marzban_admin.normalize_public_hostname(text)
+                preflight = await asyncio.to_thread(
+                    marzban_admin.preflight_public_endpoint,
+                    draft.get("address"),
+                    public_address,
+                )
+                if not preflight.get("ok"):
+                    node_ips = ", ".join(preflight.get("node_ips") or ()) or "—"
+                    public_ips = ", ".join(preflight.get("public_ips") or ()) or "—"
+                    await update.message.reply_text(
+                        "❌ <b>DNS Preflight ناموفق بود.</b>\n\n"
+                        f"Node: <code>{esc(draft.get('address') or '—')}</code> → <code>{esc(node_ips)}</code>\n"
+                        f"Public: <code>{esc(public_address)}</code> → <code>{esc(public_ips)}</code>\n"
+                        f"Reason: <code>{esc(preflight.get('error') or 'DNS mismatch')}</code>\n\n"
+                        "رکورد DNS را اصلاح کنید و همین دامنه را دوباره بفرستید.",
+                        parse_mode='HTML',
+                    )
+                    return
+                draft["public_address"] = public_address
+                draft["public_preflight"] = dict(preflight)
                 context.user_data['state'] = 'MZA_NODE_CREATE_PORTS_INPUT'
                 await update.message.reply_text(
-                    "🔌 <b>مرحله ۳ از ۴ · پورت‌های نود</b>\n\n"
+                    "✅ DNS Match تایید شد.\n\n"
+                    "🔌 <b>مرحله ۴ از ۵ · پورت‌های نود</b>\n\n"
                     "دو پورت را به‌ترتیب در یک پیام بفرستید:\n"
                     "1) <b>Service Port</b> برای ارتباط Marzban با Node\n"
                     "2) <b>Xray API Port</b> برای API داخلی Xray\n\n"
-                    "اگر تنظیم خاصی ندارید، پیش‌فرض را بفرستید:\n"
-                    "<code>62050 62051</code>",
+                    "پیش‌فرض: <code>62050 62051</code>",
                     parse_mode='HTML',
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("❌ لغو", callback_data="mza_ncreate_cancel")]
@@ -10363,7 +10460,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 draft.update(changes)
                 context.user_data['state'] = 'MZA_NODE_CREATE_RATIO_INPUT'
                 await update.message.reply_text(
-                    "📊 <b>مرحله ۴ از ۴ · Usage Ratio</b>\n\n"
+                    "📊 <b>مرحله ۵ از ۵ · Usage Ratio</b>\n\n"
                     "ضریب محاسبه مصرف ترافیک این Node را بفرستید.\n"
                     "اگر سیاست خاصی برای وزن‌دهی ترافیک ندارید، <code>1</code> انتخاب استاندارد است.\n\n"
                     "مثال: <code>1</code> یا <code>1.5</code>",
@@ -10378,20 +10475,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "usage_coefficient": text.strip(),
             })
             draft.update(changes)
-        except ValueError:
+        except ValueError as exc:
             hints = {
                 'MZA_NODE_CREATE_NAME_INPUT': "نام باید بین ۱ تا ۸۰ کاراکتر باشد.",
                 'MZA_NODE_CREATE_ADDRESS_INPUT': "IP یا hostname خود سرور Node را بدون http/https و بدون فاصله وارد کنید.",
+                'MZA_NODE_CREATE_PUBLIC_INPUT': "یک FQDN مثل argus.nvlsup.xyz وارد کنید؛ IP مستقیم پذیرفته نمی‌شود.",
                 'MZA_NODE_CREATE_PORTS_INPUT': "Service Port و Xray API Port را به‌ترتیب وارد کنید؛ مثال: 62050 62051",
                 'MZA_NODE_CREATE_RATIO_INPUT': "ضریب باید عدد مثبت باشد؛ اگر مطمئن نیستید 1 وارد کنید.",
             }
             await update.message.reply_text(
-                f"❌ مقدار نامعتبر است.\n{hints.get(state, '')}"
+                f"❌ مقدار نامعتبر است: {esc(exc)}\n{hints.get(state, '')}",
+                parse_mode='HTML',
             )
             return
 
-        # NVL owns the Public Host policy.  The native Marzban switch would
-        # create one Host for every inbound, which pollutes subscriptions.
         draft["add_as_new_host"] = False
         context.user_data.pop('state', None)
         await _mza_show_node_create_review(update.message, context)
@@ -13955,6 +14052,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'MZA_NODE_RATIO_INPUT',
             'MZA_NODE_CREATE_NAME_INPUT',
             'MZA_NODE_CREATE_ADDRESS_INPUT',
+            'MZA_NODE_CREATE_PUBLIC_INPUT',
             'MZA_NODE_CREATE_PORTS_INPUT',
             'MZA_NODE_CREATE_RATIO_INPUT',
             'MZA_NODE_BOOTSTRAP_PORT_INPUT',
@@ -14646,7 +14744,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "➕ <b>افزودن نود جدید Marzban</b>\n"
             "━━━━━━━━━━━━━━\n"
-            "مرحله ۱ از ۴ · <b>نام نود</b>\n\n"
+            "مرحله ۱ از ۵ · <b>نام نود</b>\n\n"
             "یک نام کوتاه و یکتا برای شناسایی این سرور در Marzban بفرستید.\n"
             "این نام فقط برچسب مدیریتی Node است.\n\n"
             "مثال: <code>USA-2</code>",

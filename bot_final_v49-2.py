@@ -1043,15 +1043,24 @@ def init_db():
             [(key, value) for key, value in _marzban_bootstrap if value],
         )
 
-        # V123A — durable ownership of the stable user-facing endpoint created
-        # for new Nodes. Lifecycle migration/rename/delete support is completed
-        # in V123B; V123A stores the authoritative mapping after Host verify.
+        # V123A — durable ownership intent for the stable user-facing endpoint.
+        # The row is written as pending before remote Host writes, then promoted
+        # to verified only after reconciliation succeeds. This keeps lifecycle
+        # guards effective even across partial remote writes or process crashes.
         c.execute('''CREATE TABLE IF NOT EXISTS marzban_node_public_profiles (
                         node_id INTEGER PRIMARY KEY,
                         public_address TEXT NOT NULL,
                         managed_remark TEXT NOT NULL,
+                        profile_state TEXT NOT NULL DEFAULT 'pending',
                         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)''')
+        try:
+            c.execute(
+                "ALTER TABLE marzban_node_public_profiles "
+                "ADD COLUMN profile_state TEXT NOT NULL DEFAULT 'pending'"
+            )
+        except sqlite3.OperationalError:
+            pass
 
         # V120-A — persistent read-only inventory for Marzban Main/Nodes/Public Hosts.
         marzban_asset_discovery.install_schema(conn)
@@ -7858,7 +7867,8 @@ def _db_get_marzban_node_public_profile(node_id):
     node_id = marzban_admin.normalize_node_id(node_id)
     with db_conn() as conn:
         row = conn.execute(
-            "SELECT node_id, public_address, managed_remark, created_at, updated_at "
+            "SELECT node_id, public_address, managed_remark, profile_state, "
+            "created_at, updated_at "
             "FROM marzban_node_public_profiles WHERE node_id=?",
             (node_id,),
         ).fetchone()
@@ -7868,32 +7878,43 @@ def _db_get_marzban_node_public_profile(node_id):
         "node_id": int(row[0]),
         "public_address": str(row[1]),
         "managed_remark": str(row[2]),
-        "created_at": row[3],
-        "updated_at": row[4],
+        "profile_state": str(row[3] or "pending"),
+        "created_at": row[4],
+        "updated_at": row[5],
     }
 
 
-def _db_upsert_marzban_node_public_profile(node_id, public_address, managed_remark):
+def _db_upsert_marzban_node_public_profile(
+    node_id,
+    public_address,
+    managed_remark,
+    profile_state="verified",
+):
     node_id = marzban_admin.normalize_node_id(node_id)
     public_address = marzban_admin.normalize_public_hostname(public_address)
     managed_remark = str(managed_remark or "").strip()
+    profile_state = str(profile_state or "").strip().lower()
     if not managed_remark:
         raise ValueError("managed Public Host remark is required")
+    if profile_state not in {"pending", "verified"}:
+        raise ValueError("invalid Marzban Public Endpoint profile state")
     with db_conn() as conn:
         conn.execute(
             """INSERT INTO marzban_node_public_profiles
-                   (node_id, public_address, managed_remark, created_at, updated_at)
-               VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                   (node_id, public_address, managed_remark, profile_state, created_at, updated_at)
+               VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                ON CONFLICT(node_id) DO UPDATE SET
                    public_address=excluded.public_address,
                    managed_remark=excluded.managed_remark,
+                   profile_state=excluded.profile_state,
                    updated_at=CURRENT_TIMESTAMP""",
-            (node_id, public_address, managed_remark),
+            (node_id, public_address, managed_remark, profile_state),
         )
     return {
         "node_id": node_id,
         "public_address": public_address,
         "managed_remark": managed_remark,
+        "profile_state": profile_state,
     }
 
 
@@ -14960,6 +14981,48 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             node_id = None
 
+        if not node_id:
+            _mza_clear_node_create(context)
+            await query.edit_message_text(
+                "⚠️ Node ساخته و Verify شد، اما Node ID معتبر برای ثبت Stable Endpoint در دسترس نیست. "
+                "برای ایمنی هیچ Public Host جدیدی ساخته نشد؛ Node را دوباره نسازید و وضعیت را بررسی کنید.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))]
+                ]),
+            )
+            return
+
+        managed_remark = marzban_admin.node_generated_host_remark(
+            verified.get("name") or payload["name"]
+        )
+        try:
+            await asyncio.to_thread(
+                _db_upsert_marzban_node_public_profile,
+                node_id,
+                public_address,
+                managed_remark,
+                "pending",
+            )
+        except Exception as exc:
+            log.exception(
+                "V123A pending profile persistence failed before Public Host reconciliation for node %s",
+                node_id,
+            )
+            _mza_clear_node_create(context)
+            await query.edit_message_text(
+                "⚠️ <b>Node ساخته شد، اما ثبت مالکیت Stable Endpoint ناموفق بود.</b>\n\n"
+                f"Node ID: <code>{node_id}</code>\n"
+                f"Public Endpoint: <code>{esc(public_address)}</code>\n"
+                f"خطا: <code>{esc(type(exc).__name__)}: {esc(exc)}</code>\n\n"
+                "برای ایمنی Public Host جدیدی نوشته نشد. Node را دوباره نسازید؛ ابتدا Mapping را Repair کنید.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🖥 مشاهده Node", callback_data=f"mza_node_{node_id}")],
+                    [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
+                ]),
+            )
+            return
+
         ok_hosts, host_result = await service.reconcile_node_public_hosts(
             verified,
             marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
@@ -14980,49 +15043,38 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
             ])
             await query.edit_message_text(
-                "⚠️ <b>Node ساخته و Verify شد، اما Public Host profile کامل نشد.</b>\n\n"
-                f"Node ID: <code>{esc(node_id if node_id is not None else 'نامشخص')}</code>\n"
+                "⚠️ <b>Node ساخته شد، اما Public Host profile کامل نشد.</b>\n\n"
+                f"Node ID: <code>{node_id}</code>\n"
+                f"Public Endpoint: <code>{esc(public_address)}</code>\n"
+                f"Mapping: <code>pending</code>\n"
                 f"خطا: <code>{esc(host_result)}</code>\n\n"
-                "Node را دوباره نسازید؛ POST موفق بوده است. فقط Hostهای مدیریت‌شده را بررسی/اصلاح کنید.",
+                "Node را دوباره نسازید یا حذف نکنید؛ مالکیت endpoint ثبت شده و V123B/Repair باید وضعیت Hostها را تکمیل کند.",
                 parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup(kb),
             )
             return
 
-        # Persist ownership only after the remote Public Host profile has
-        # verified. If this local write fails, do not recreate the Node.
-        if not node_id:
-            _mza_clear_node_create(context)
-            await query.edit_message_text(
-                "⚠️ Node و Public Hostها ساخته شدند، اما Node ID معتبر برای ثبت Stable Endpoint در دسترس نیست. "
-                "Node را دوباره نسازید؛ وضعیت را از پنل بررسی کنید.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))]
-                ]),
-            )
-            return
+        # Promote the pre-write ownership row only after remote reconciliation verifies.
         try:
-            managed_remark = marzban_admin.node_generated_host_remark(
-                verified.get("name") or payload["name"]
-            )
             await asyncio.to_thread(
                 _db_upsert_marzban_node_public_profile,
                 node_id,
                 public_address,
                 managed_remark,
+                "verified",
             )
         except Exception as exc:
             log.exception(
-                "V123A profile persistence failed after Node/Public Host creation for node %s",
+                "V123A profile promotion failed after Node/Public Host verification for node %s",
                 node_id,
             )
             _mza_clear_node_create(context)
             await query.edit_message_text(
-                "⚠️ <b>Node و Public Hostها ساخته و Verify شدند، اما Mapping محلی ذخیره نشد.</b>\n\n"
+                "⚠️ <b>Node و Public Hostها Verify شدند، اما Mapping محلی از pending به verified ارتقا پیدا نکرد.</b>\n\n"
                 f"Node ID: <code>{node_id}</code>\n"
                 f"Public Endpoint: <code>{esc(public_address)}</code>\n"
                 f"خطا: <code>{esc(type(exc).__name__)}: {esc(exc)}</code>\n\n"
-                "Node را دوباره نسازید و فعلاً حذف نکنید؛ Mapping باید Repair شود.",
+                "Node را دوباره نسازید و فعلاً حذف نکنید؛ رکورد pending باقی مانده و باید Repair شود.",
                 parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🖥 مشاهده Node", callback_data=f"mza_node_{node_id}")],

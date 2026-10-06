@@ -739,6 +739,26 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0]["host"]["remark"], auto["remark"])
 
+    async def test_delete_node_fails_closed_when_generated_remark_uses_stable_address(self):
+        current = {"id": 4, "name": "Old Node", "address": "1.2.3.4"}
+        stable = {
+            "remark": "Old Node ({USERNAME}) [{PROTOCOL} - {TRANSPORT}]",
+            "address": "edge.example.com",
+        }
+        self.service.get_node = AsyncMock(return_value=(True, current))
+        self.service.get_hosts = AsyncMock(return_value=(True, {"VLESS": [stable]}))
+        self.service.get_nodes = AsyncMock()
+        self.service.request = AsyncMock()
+
+        ok, result = await self.service.delete_node(4)
+
+        self.assertFalse(ok)
+        self.assertEqual(result["stage"], "host_precheck")
+        self.assertFalse(result["deleted"])
+        self.assertEqual(len(result["ambiguous_public_hosts"]), 1)
+        self.service.request.assert_not_awaited()
+        self.service.get_nodes.assert_not_awaited()
+
     async def test_delete_node_reports_partial_cleanup_without_retrying_node_delete(self):
         current = {"id": 4, "name": "Old Node", "address": "1.2.3.4"}
         auto = {

@@ -111,7 +111,7 @@ The legacy flow can provision an external service before financial settlement fu
 
 ## 7. Phase 1 — Safety Baseline + Commerce Foundation
 
-**Status: IN PROGRESS**
+**Status: IMPLEMENTED ON BRANCH — PRODUCTION ROLLOUT PENDING**
 
 Scope:
 
@@ -148,6 +148,14 @@ Release gate:
 7. Post-deploy integrity + Agent/SSH/Marzban smoke tests.
 
 Critical comparison set: `COUNT(agents)`, `COUNT(ssh_accounts)`, service distribution, `COUNT(receipts)`, `COUNT(activity_log)`, `SUM(agents.balance)`, and sample ownership rows.
+
+Validation on branch:
+
+- Phase-1 commit: `cf9b2b7bf7c6b5e82fbf28856dd559dc5b9a7185`
+- GitHub Actions `syntax-and-unit-tests`: **passed**
+- Full suite: **744 tests passed**
+- Direct Market Phase-1 regression tests: **5/5 passed**
+- Production DB migration/deployment has **not** been performed yet; the release gate above is still mandatory.
 
 ## 8. Phase 2 — Customer Identity + /start Routing
 
@@ -262,7 +270,7 @@ Rollout:
 
 - [x] Long-lived Direct Market branch created.
 - [x] Architecture decisions recorded.
-- [ ] Phase 1 complete and reviewed.
+- [x] Phase 1 implementation complete on branch; CI green. Production rollout gate remains pending.
 - [ ] Phase 2 complete.
 - [ ] Phase 3 complete.
 - [ ] Phase 4 complete.

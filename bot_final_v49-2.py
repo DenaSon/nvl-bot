@@ -97,6 +97,7 @@ import cloudflare_dns
 import radar_runtime
 import radar_notifications
 import radar_ui
+import incident_correlation
 import marzban_node_bootstrap
 import marzban_node_install
 import marzban_asset_discovery
@@ -314,6 +315,7 @@ from incident_observability import (
     REASON_FAILOVER_SUCCEEDED,
     REASON_FILTER_RECOVERED,
     REASON_NO_DEFAULT_EDGE,
+    REASON_WIDESPREAD_NETWORK_OUTAGE,
     classify_filter_incident,
     normalize_auto_block_reason,
     normalize_failover_result_reason,
@@ -716,6 +718,11 @@ RADAR_NOTIFICATION_DEGRADED_CONFIRM_ROUNDS = _phase6c_env_int(
 )
 RADAR_NOTIFICATION_RECOVERY_CONFIRM_ROUNDS = _phase6c_env_int(
     "NVL_RADAR_RECOVERY_CONFIRM_ROUNDS", 2, minimum=1, maximum=6
+)
+# Radar V4 — only a fresh explicit OUTAGE may inhibit automatic failover.
+# Missing/stale/DEGRADED Radar context never blocks an otherwise valid auto path.
+RADAR_FAILOVER_CONTEXT_MAX_AGE_SECONDS = _phase6c_env_int(
+    "NVL_RADAR_FAILOVER_CONTEXT_MAX_AGE", 1200, minimum=300, maximum=3600
 )
 
 FAST_SENTINEL_INTERVAL_SECONDS = _phase6c_env_int("NVL_FAST_SENTINEL_INTERVAL", 15)

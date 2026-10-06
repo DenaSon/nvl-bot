@@ -282,7 +282,6 @@ from filtering_runtime import (
     TRANSITION_WARNING,
     classify_filter_transition,
     provider_backoff_until,
-    provider_error_alert_due,
     provider_recovery_ready,
 )
 from safe_failover import (
@@ -26406,18 +26405,14 @@ async def _regional_provider_enter_limited(app, host, error):
     )
     seconds = max(0, int((until_dt - datetime.now()).total_seconds()))
     if previous_status != PROVIDER_STATUS_LIMITED:
-        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        await asyncio.to_thread(
-            _db_update_setting,
-            "regional_provider_last_alert_at",
-            now_text,
-        )
-        await _notify_admins(
-            app,
-            "⚠️ <b>بررسی منطقه‌ای موقتاً محدود شد</b>\n\n"
-            "سرویس بررسی بیرونی موقتاً محدودیت درخواست اعمال کرده است. "
-            f"برای جلوگیری از فشار بیشتر، بررسی‌ها حدود {max(1, seconds // 60)} دقیقه متوقف می‌شوند.\n"
-            "این وضعیت به معنی فیلترشدن سرور نیست و آخرین نتیجهٔ معتبر حفظ می‌شود."
+        _incident_log(
+            "regional_provider_limited",
+            None,
+            level="warning",
+            host=host,
+            provider=REGIONAL_PROBE_PROVIDER_NAME,
+            backoff_seconds=seconds,
+            telegram_notify=False,
         )
     return seconds
 
@@ -26447,13 +26442,6 @@ async def _regional_provider_enter_error(app, host, provider_name, error):
         provider_name,
     )
     incident = await asyncio.to_thread(_db_get_open_filter_incident, host)
-    alert_age = _regional_provider_timestamp_age_seconds(state.get("last_alert_at"))
-    notify_due = provider_error_alert_due(
-        error_streak,
-        seconds_since_last_alert=alert_age,
-        threshold=REGIONAL_PROVIDER_ERROR_ALERT_THRESHOLD,
-        repeat_seconds=REGIONAL_PROVIDER_ALERT_REPEAT_SECONDS,
-    )
     _incident_log(
         "regional_provider_error",
         incident.get("incident_id") if incident else None,
@@ -26462,31 +26450,9 @@ async def _regional_provider_enter_error(app, host, provider_name, error):
         provider=provider_name,
         error=str(error),
         error_streak=error_streak,
-        notify_due=notify_due,
+        telegram_notify=False,
         edge_state_preserved=True,
     )
-    if notify_due:
-        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        await asyncio.to_thread(
-            _db_update_setting,
-            "regional_provider_last_alert_at",
-            now_text,
-        )
-        incident_line = (
-            f"Incident: <code>{esc(incident['incident_id'])}</code>\n"
-            if incident else ""
-        )
-        await _notify_admins(
-            app,
-            "🟠 <b>سرویس بررسی منطقه‌ای ناپایدار است</b>\n\n"
-            f"{incident_line}"
-            f"سرویس: <code>{esc(provider_name)}</code>\n"
-            f"Edge: <code>{esc(host)}</code>\n"
-            f"خطاهای متوالی: <b>{error_streak}</b>\n"
-            f"خطا: <code>{esc(str(error)[:500])}</code>\n\n"
-            "این خطا به معنی فیلترشدن سرور نیست و آخرین نتیجهٔ معتبر حفظ می‌شود. "
-            "هشدار فقط پس از چند خطای متوالی ارسال می‌شود."
-        )
 
 
 async def _regional_provider_mark_ok(app, regional_decision=None):
@@ -26533,12 +26499,12 @@ async def _regional_provider_mark_ok(app, regional_decision=None):
         error="",
     )
     if previous_status in {PROVIDER_STATUS_LIMITED, PROVIDER_STATUS_ERROR}:
-        await _notify_admins(
-            app,
-            "✅ <b>سرویس بررسی منطقه‌ای دوباره پایدار شد</b>\n"
-            f"سرویس: <code>{esc(REGIONAL_PROBE_PROVIDER_NAME)}</code>\n"
-            f"بررسی‌های موفق متوالی: <b>{success_streak}</b>\n"
-            "پایش منطقه‌ای دوباره در وضعیت عادی قرار گرفت."
+        _incident_log(
+            "regional_provider_recovered",
+            None,
+            provider=REGIONAL_PROBE_PROVIDER_NAME,
+            success_streak=success_streak,
+            telegram_notify=False,
         )
     return True
 

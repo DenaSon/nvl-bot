@@ -73,6 +73,11 @@ def evaluate_auto_failover(
         return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_CONFIDENCE_NOT_HIGH)
     if str(diagnostic_reason or "").upper() != "FILTER_SUSPECTED":
         return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_DIAGNOSTIC_NOT_FILTER)
+    # External Radar context has a negative-only role. A fresh explicit widespread
+    # outage blocks AUTO before differential/cooldown evaluation so the operator
+    # sees one stable root cause instead of secondary block reasons.
+    if bool(external_context_blocks_auto_failover):
+        return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_WIDESPREAD_OUTAGE)
     if not bool(differential_confirmed):
         return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_DIFFERENTIAL_NOT_CONFIRMED)
     try:
@@ -85,8 +90,6 @@ def evaluate_auto_failover(
         return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_FAILURE_STREAK_LOW)
     if str(provider_status or "").upper() != "OK":
         return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_PROVIDER_NOT_OK)
-    if bool(external_context_blocks_auto_failover):
-        return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_WIDESPREAD_OUTAGE)
     try:
         switch_age = float(seconds_since_last_switch)
     except (TypeError, ValueError):

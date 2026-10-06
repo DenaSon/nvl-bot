@@ -17,7 +17,7 @@ RECEIPT_REJECTED = "rejected"
 
 
 def normalize_topup_amount(value: Any) -> int:
-    if isinstance(value, bool):
+    if isinstance(value, (bool, float)):
         raise ValueError("amount must be an integer toman value")
     try:
         amount = int(value)

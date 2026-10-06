@@ -216,16 +216,15 @@ class V119BIntegrationStaticTests(unittest.TestCase):
         self.assertIn("existing.get(\"state\") in operational_states", region)
         self.assertIn("existing.get(\"last_reason\")", region)
 
-    def test_provider_error_preserves_edge_state_and_notifies_once(self):
+    def test_provider_error_preserves_edge_state_without_telegram_alert(self):
         region = self._region(
             "async def _regional_provider_enter_error(",
             "async def _regional_provider_mark_ok",
         )
         self.assertIn("PROVIDER_STATUS_ERROR", region)
-        self.assertIn("provider_error_alert_due", region)
-        self.assertIn("REGIONAL_PROVIDER_ERROR_ALERT_THRESHOLD", region)
         self.assertIn("edge_state_preserved=True", region)
-        self.assertIn("به معنی فیلترشدن سرور نیست", region)
+        self.assertIn("telegram_notify=False", region)
+        self.assertNotIn("_notify_admins", region)
         self.assertNotIn("_db_record_regional_round", region)
 
     def test_confirmed_filter_block_records_exact_reason(self):

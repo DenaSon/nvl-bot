@@ -303,6 +303,74 @@ def preflight_public_endpoint(
     }
 
 
+
+def preflight_public_endpoint_detached(
+    node_address: Any,
+    public_hostname: Any,
+    *,
+    resolver=None,
+) -> Dict[str, Any]:
+    """Verify that a stable Public Endpoint no longer resolves to this Node.
+
+    B.3.3 requires a positive DNS-detach proof before destructive Node deletion.
+    Resolution failure is UNKNOWN and therefore fails closed; a mixed DNS answer
+    containing even one Node IP is still considered attached.
+    """
+    node = normalize_node_changes(
+        {"address": node_address},
+        allow_status=False,
+    )["address"]
+    public = normalize_public_hostname(public_hostname)
+
+    try:
+        node_ips = _resolve_endpoint_ips(node, resolver=resolver)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "detached": False,
+            "node_address": node,
+            "public_address": public,
+            "node_ips": (),
+            "public_ips": (),
+            "matched_ips": (),
+            "error": f"Node address resolution failed: {type(exc).__name__}: {exc}",
+        }
+    try:
+        public_ips = _resolve_endpoint_ips(public, resolver=resolver)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "detached": False,
+            "node_address": node,
+            "public_address": public,
+            "node_ips": tuple(node_ips),
+            "public_ips": (),
+            "matched_ips": (),
+            "error": f"Public hostname resolution failed: {type(exc).__name__}: {exc}",
+        }
+
+    node_ip_set = set(node_ips)
+    public_ip_set = set(public_ips)
+    matched = tuple(sorted(node_ip_set.intersection(public_ip_set)))
+    if not node_ips:
+        error = "Node address did not resolve to any IP"
+    elif not public_ips:
+        error = "Public hostname did not resolve to any IP"
+    elif matched:
+        error = "Public hostname still resolves to the Node address"
+    else:
+        error = None
+    return {
+        "ok": error is None,
+        "detached": error is None,
+        "node_address": node,
+        "public_address": public,
+        "node_ips": tuple(node_ips),
+        "public_ips": tuple(public_ips),
+        "matched_ips": matched,
+        "error": error,
+    }
+
 def find_duplicate_node(nodes: Any, name: Any) -> Optional[Dict[str, Any]]:
     """Return an existing Marzban node whose name matches case-insensitively."""
     expected = normalize_node_changes({"name": name}, allow_status=False)["name"].casefold()
@@ -591,6 +659,78 @@ def find_node_generated_hosts(
             })
     return matches
 
+
+
+def managed_public_host_payload(
+    public_address: Any,
+    managed_remark: Any,
+) -> Dict[str, Any]:
+    """Canonical NVL-managed Host payload identified without a live Node row."""
+    public = normalize_public_hostname(public_address)
+    remark = _CONTROL_CHARS_RE.sub("", str(managed_remark or "")).strip()
+    if not remark or len(remark) > 160:
+        raise ValueError("managed Public Host remark is invalid")
+    if not remark.endswith(" ({USERNAME}) [{PROTOCOL} - {TRANSPORT}]"):
+        raise ValueError("managed Public Host remark is not a generated Node remark")
+    return _host_payload({
+        "remark": remark,
+        "address": public,
+        "port": None,
+        "sni": None,
+        "host": None,
+        "path": None,
+        "security": "inbound_default",
+        "alpn": "",
+        "fingerprint": "",
+        "allowinsecure": None,
+        "is_disabled": False,
+        "mux_enable": False,
+        "fragment_setting": None,
+        "noise_setting": None,
+        "random_user_agent": False,
+        "use_sni_as_host": False,
+    })
+
+
+def find_managed_public_hosts_by_identity(
+    hosts_payload: Any,
+    public_address: Any,
+    managed_remark: Any,
+    tags: Any = NVL_NODE_PUBLIC_HOST_TAGS,
+) -> List[Dict[str, Any]]:
+    """Find only exact canonical NVL-owned Hosts for delete/recovery.
+
+    Manual Hosts are intentionally ignored even when they share the same
+    Public Endpoint.
+    """
+    if not isinstance(hosts_payload, dict):
+        return []
+    try:
+        expected = managed_public_host_payload(public_address, managed_remark)
+        wanted = {normalize_inbound_tag(tag) for tag in (tags or ())}
+    except ValueError:
+        return []
+    matches: List[Dict[str, Any]] = []
+    for raw_tag, hosts in hosts_payload.items():
+        try:
+            tag = normalize_inbound_tag(raw_tag)
+        except ValueError:
+            continue
+        if tag not in wanted or not isinstance(hosts, list):
+            continue
+        for index, host in enumerate(hosts):
+            try:
+                current = _host_payload(host)
+            except ValueError:
+                continue
+            if current != expected:
+                continue
+            matches.append({
+                "tag": tag,
+                "index": index,
+                "host": host_snapshot(host),
+            })
+    return matches
 
 def find_node_generated_host_remark_matches(
     hosts_payload: Any,
@@ -1640,6 +1780,388 @@ class MarzbanAdminService:
             "response": response,
             "host_candidates": host_candidates,
             "hosts_deleted": int(cleanup_result.get("deleted_count") or 0),
+        }
+
+
+    async def preview_node_public_profile_delete(
+        self,
+        node_id: int,
+        public_address: Any,
+        managed_remark: Any,
+        tags: Any = NVL_NODE_PUBLIC_HOST_TAGS,
+    ) -> ApiResult:
+        """GET-only B.3.3 preview for deleting a managed Stable Endpoint Node."""
+        try:
+            node_id = normalize_node_id(node_id)
+            public = normalize_public_hostname(public_address)
+            remark = _CONTROL_CHARS_RE.sub("", str(managed_remark or "")).strip()
+            wanted: List[str] = []
+            seen = set()
+            for raw_tag in tags or ():
+                tag = normalize_inbound_tag(raw_tag)
+                if tag not in seen:
+                    wanted.append(tag)
+                    seen.add(tag)
+            if not wanted:
+                raise ValueError("at least one managed Public Host tag is required")
+            managed_public_host_payload(public, remark)
+        except ValueError as exc:
+            return False, {
+                "stage": "managed_delete_precheck",
+                "read_only": True,
+                "deleted": False,
+                "error": str(exc),
+            }
+
+        ok_node, node = await self.get_node(node_id)
+        if not ok_node or not isinstance(node, dict):
+            return False, {
+                "stage": "managed_delete_precheck",
+                "read_only": True,
+                "deleted": False,
+                "node_id": node_id,
+                "error": node if not ok_node else "Invalid Marzban node response",
+            }
+
+        expected_remark = node_generated_host_remark(node.get("name"))
+        if expected_remark != remark:
+            return True, {
+                "stage": "managed_delete_preview",
+                "read_only": True,
+                "deleted": False,
+                "node_id": node_id,
+                "node": node,
+                "public_address": public,
+                "managed_remark": remark,
+                "managed_tags": wanted,
+                "deletable": False,
+                "issues": ["Managed remark does not match the current Node name"],
+                "fingerprint": None,
+                "host_candidates": [],
+            }
+
+        ok_hosts, hosts_payload = await self.get_hosts()
+        if not ok_hosts or not isinstance(hosts_payload, dict):
+            return False, {
+                "stage": "managed_delete_precheck",
+                "read_only": True,
+                "deleted": False,
+                "node_id": node_id,
+                "node": node,
+                "error": (
+                    hosts_payload
+                    if not ok_hosts
+                    else "Invalid Marzban hosts response"
+                ),
+            }
+
+        try:
+            profile = inspect_node_public_host_profile(
+                hosts_payload,
+                node,
+                wanted,
+                public_address=public,
+            )
+        except ValueError as exc:
+            return False, {
+                "stage": "managed_delete_precheck",
+                "read_only": True,
+                "deleted": False,
+                "node_id": node_id,
+                "node": node,
+                "error": str(exc),
+            }
+
+        candidates = find_managed_public_hosts_by_identity(
+            hosts_payload,
+            public,
+            remark,
+            wanted,
+        )
+        counts: Dict[str, int] = {}
+        for item in candidates:
+            tag = item["tag"]
+            counts[tag] = counts.get(tag, 0) + 1
+
+        issues: List[str] = []
+        if not profile.get("adoptable"):
+            if profile.get("missing_tags"):
+                issues.append("Missing managed Host(s): " + ", ".join(profile["missing_tags"]))
+            if profile.get("duplicate_tags"):
+                issues.append("Duplicate managed Host(s)")
+            if profile.get("unexpected_tags"):
+                issues.append("Managed Host exists outside the managed profile")
+            if profile.get("remark_conflicts"):
+                issues.append("Managed remark exists on a different address")
+            if profile.get("drifted_tags"):
+                issues.append("Managed Host payload drift detected")
+            if profile.get("invalid_host_lists"):
+                issues.append("Invalid managed Host list")
+        missing_candidates = [tag for tag in wanted if counts.get(tag) != 1]
+        if missing_candidates:
+            issues.append(
+                "Canonical delete candidate count is not exactly one for: "
+                + ", ".join(missing_candidates)
+            )
+
+        total_hosts = sum(
+            len(items) for items in hosts_payload.values()
+            if isinstance(items, list)
+        )
+        fingerprint_data = {
+            "node": {
+                "id": node.get("id"),
+                "name": node.get("name"),
+                "address": node.get("address"),
+                "port": node.get("port"),
+                "api_port": node.get("api_port"),
+                "status": node.get("status"),
+            },
+            "public_address": public,
+            "managed_remark": remark,
+            "managed_tags": wanted,
+            "hosts": hosts_payload,
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                fingerprint_data,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+
+        return True, {
+            "stage": "managed_delete_preview",
+            "read_only": True,
+            "deleted": False,
+            "node_id": node_id,
+            "node": node,
+            "public_address": public,
+            "managed_remark": remark,
+            "managed_tags": wanted,
+            "deletable": not issues,
+            "issues": issues,
+            "fingerprint": fingerprint,
+            "host_candidates": candidates,
+            "managed_host_count": len(candidates),
+            "manual_hosts_preserved": max(0, total_hosts - len(candidates)),
+        }
+
+    async def cleanup_managed_public_hosts(
+        self,
+        public_address: Any,
+        managed_remark: Any,
+        tags: Any = NVL_NODE_PUBLIC_HOST_TAGS,
+    ) -> ApiResult:
+        """Idempotently remove exact NVL-owned Hosts after a Node is absent."""
+        try:
+            public = normalize_public_hostname(public_address)
+            remark = _CONTROL_CHARS_RE.sub("", str(managed_remark or "")).strip()
+            wanted = [normalize_inbound_tag(tag) for tag in (tags or ())]
+            if not wanted:
+                raise ValueError("at least one managed Public Host tag is required")
+            managed_public_host_payload(public, remark)
+        except ValueError as exc:
+            return False, {
+                "stage": "managed_host_cleanup",
+                "deleted_count": 0,
+                "error": str(exc),
+            }
+
+        ok_hosts, hosts_payload = await self.get_hosts()
+        if not ok_hosts or not isinstance(hosts_payload, dict):
+            return False, {
+                "stage": "managed_host_cleanup",
+                "deleted_count": 0,
+                "error": (
+                    hosts_payload
+                    if not ok_hosts
+                    else "Invalid Marzban hosts response"
+                ),
+            }
+
+        candidates = find_managed_public_hosts_by_identity(
+            hosts_payload,
+            public,
+            remark,
+            wanted,
+        )
+        if candidates:
+            ok_cleanup, cleanup = await self.delete_node_generated_hosts(candidates)
+            if not ok_cleanup:
+                return False, {
+                    "stage": "managed_host_cleanup",
+                    "deleted_count": int(cleanup.get("deleted_count") or 0),
+                    "error": cleanup,
+                }
+        else:
+            cleanup = {
+                "stage": "host_cleanup",
+                "deleted_count": 0,
+                "deleted_hosts": [],
+            }
+
+        ok_verify, verify_payload = await self.get_hosts()
+        if not ok_verify or not isinstance(verify_payload, dict):
+            return False, {
+                "stage": "managed_host_cleanup_verify",
+                "deleted_count": int(cleanup.get("deleted_count") or 0),
+                "error": (
+                    verify_payload
+                    if not ok_verify
+                    else "Invalid Marzban hosts response after cleanup"
+                ),
+            }
+        remaining = find_managed_public_hosts_by_identity(
+            verify_payload,
+            public,
+            remark,
+            wanted,
+        )
+        if remaining:
+            return False, {
+                "stage": "managed_host_cleanup_verify",
+                "deleted_count": int(cleanup.get("deleted_count") or 0),
+                "remaining_hosts": remaining,
+                "error": "Managed Public Hosts remain after cleanup",
+            }
+        return True, {
+            "stage": "managed_host_cleanup_verify",
+            "verified": True,
+            "deleted_count": int(cleanup.get("deleted_count") or 0),
+            "remaining_hosts": [],
+        }
+
+    async def delete_node_public_profile(
+        self,
+        node_id: int,
+        public_address: Any,
+        managed_remark: Any,
+        tags: Any = NVL_NODE_PUBLIC_HOST_TAGS,
+        *,
+        expected_fingerprint: str,
+    ) -> ApiResult:
+        """Delete one managed Node, then its exact NVL-owned Public Hosts."""
+        ok_preview, preview = await self.preview_node_public_profile_delete(
+            node_id,
+            public_address,
+            managed_remark,
+            tags,
+        )
+        if not ok_preview or not isinstance(preview, dict):
+            return False, preview
+        if not preview.get("deletable"):
+            return False, {
+                **preview,
+                "stage": "managed_delete_precheck",
+                "error": "Managed Node delete precheck is not safe",
+            }
+        if (
+            not expected_fingerprint
+            or str(preview.get("fingerprint") or "") != str(expected_fingerprint)
+        ):
+            return False, {
+                **preview,
+                "stage": "managed_delete_stale",
+                "deleted": False,
+                "error": "Node or Public Host state changed since confirmation",
+            }
+
+        node_id = normalize_node_id(node_id)
+        node = preview.get("node") if isinstance(preview.get("node"), dict) else {}
+        candidates = list(preview.get("host_candidates") or ())
+
+        ok_delete, response = await self.request("DELETE", f"/api/node/{node_id}")
+        if not ok_delete:
+            return False, {
+                **preview,
+                "stage": "managed_node_delete",
+                "deleted": False,
+                "error": response,
+            }
+
+        ok_nodes, nodes = await self.get_nodes()
+        if not ok_nodes or not isinstance(nodes, list):
+            return False, {
+                **preview,
+                "stage": "managed_node_verify",
+                "deleted": True,
+                "node_verified_absent": False,
+                "error": (
+                    nodes
+                    if not ok_nodes
+                    else "Invalid Marzban node list after DELETE"
+                ),
+            }
+        for item in nodes:
+            if not isinstance(item, dict):
+                continue
+            try:
+                if normalize_node_id(item.get("id")) == node_id:
+                    return False, {
+                        **preview,
+                        "stage": "managed_node_verify",
+                        "deleted": True,
+                        "node_verified_absent": False,
+                        "error": "Node is still present after DELETE",
+                    }
+            except ValueError:
+                continue
+
+        ok_cleanup, cleanup = await self.delete_node_generated_hosts(candidates)
+        if not ok_cleanup:
+            return False, {
+                **preview,
+                "stage": "managed_host_cleanup",
+                "deleted": True,
+                "node_verified_absent": True,
+                "hosts_deleted": int(cleanup.get("deleted_count") or 0),
+                "error": cleanup,
+            }
+
+        ok_verify, verify_payload = await self.get_hosts()
+        if not ok_verify or not isinstance(verify_payload, dict):
+            return False, {
+                **preview,
+                "stage": "managed_host_cleanup_verify",
+                "deleted": True,
+                "node_verified_absent": True,
+                "hosts_deleted": int(cleanup.get("deleted_count") or 0),
+                "error": (
+                    verify_payload
+                    if not ok_verify
+                    else "Invalid Marzban hosts response after managed cleanup"
+                ),
+            }
+        remaining = find_managed_public_hosts_by_identity(
+            verify_payload,
+            public_address,
+            managed_remark,
+            tags,
+        )
+        if remaining:
+            return False, {
+                **preview,
+                "stage": "managed_host_cleanup_verify",
+                "deleted": True,
+                "node_verified_absent": True,
+                "hosts_deleted": int(cleanup.get("deleted_count") or 0),
+                "remaining_hosts": remaining,
+                "error": "Managed Public Hosts remain after Node deletion",
+            }
+
+        return True, {
+            **preview,
+            "stage": "managed_delete_verified",
+            "deleted": True,
+            "verified": True,
+            "node_verified_absent": True,
+            "node": node,
+            "response": response,
+            "hosts_deleted": int(cleanup.get("deleted_count") or 0),
+            "remaining_hosts": [],
         }
 
     async def reconnect_node(self, node_id: int) -> ApiResult:

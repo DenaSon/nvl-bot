@@ -189,7 +189,7 @@ class V119CIntegrationShapeTests(unittest.TestCase):
 
     def test_release_marker(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V123B2D-2026-10-06-direct-inbound-profile"',
+            'BOT_VERSION_TAG = "V123B3R-2026-10-06-node-rename-lifecycle"',
             self.source,
         )
 

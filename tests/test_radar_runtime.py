@@ -156,7 +156,11 @@ class RadarRuntimePersistenceTests(unittest.TestCase):
         source = BOT_PATH.read_text(encoding="utf-8")
         self.assertIn("import radar_runtime", source)
         self.assertIn(
-            "radar_monitor = radar_runtime.RadarMonitor(DB_PATH)",
+            "radar_monitor = radar_runtime.RadarMonitor(",
+            source,
+        )
+        self.assertIn(
+            "on_snapshot=_handle_radar_snapshot",
             source,
         )
         self.assertIn(

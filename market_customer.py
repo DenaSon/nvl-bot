@@ -25,7 +25,13 @@ CUSTOMER_PLACEHOLDER_LABELS = frozenset(
     {BUTTON_BUY, BUTTON_SERVICES}
 )
 CUSTOMER_MENU_LABELS = frozenset(
-    set(CUSTOMER_PLACEHOLDER_LABELS) | {BUTTON_AGENT_LOGIN}
+    {
+        BUTTON_BUY,
+        BUTTON_SERVICES,
+        BUTTON_WALLET,
+        BUTTON_TRANSACTIONS,
+        BUTTON_AGENT_LOGIN,
+    }
 )
 
 LEGACY_PORTAL_ROLES = frozenset({"admin", "agent", "accountant"})

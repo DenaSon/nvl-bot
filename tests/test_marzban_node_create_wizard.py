@@ -183,16 +183,21 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
         self.assertIn("مرحله ۳ از ۵ · دامنه عمومی Node", region)
         self.assertIn("argus.nvlsup.xyz", region)
 
-    def test_v123a_rechecks_dns_before_post_and_uses_public_address_for_hosts(self):
+    def test_v123c_provisions_cloudflare_and_rechecks_dns_before_node_post(self):
         region = self._region(
             "elif d.startswith('mza_ncreate_confirm_'):",
             "elif d == 'mza_nodes':",
         )
+        self.assertIn("cf_client.create_a_record", region)
         self.assertIn("preflight_public_endpoint", region)
-        self.assertIn("DNS Preflight قبل از ساخت", region)
+        self.assertIn("provider_ready", region)
         self.assertIn("public_address=public_address", region)
+        duplicate_pos = region.index("find_duplicate_node")
+        cf_pos = region.index("cf_client.create_a_record")
         preflight_pos = region.index("preflight_public_endpoint")
         post_pos = region.index("service.create_node(")
+        self.assertLess(duplicate_pos, cf_pos)
+        self.assertLess(cf_pos, preflight_pos)
         self.assertLess(preflight_pos, post_pos)
 
     def test_v123a_persists_pending_ownership_before_host_write_then_promotes(self):

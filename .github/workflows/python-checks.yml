@@ -28,7 +28,7 @@ jobs:
 
       - name: Compile changed Python modules
         run: |
-          python -m py_compile bot_final_v49-2.py market_commerce.py market_customer.py market_wallet.py market_orders.py v2ray_engine.py marzban_admin.py marzban_node_bootstrap.py marzban_node_install.py edge_observability.py checkhost_probe.py regional_probe_provider.py incident_observability.py standby_readiness.py marzban_asset_discovery.py marzban_local_health.py marzban_regional_filtering.py marzban_observability.py regional_filtering.py differential_filtering.py regional_probe_coordinator.py filtering_runtime.py safe_failover.py automatic_failover.py promote_standby_for_filtered_edge.py cloudflare_radar.py radar_context.py radar_runtime.py radar_notifications.py radar_ui.py incident_correlation.py
+          python -m py_compile bot_final_v49-2.py market_commerce.py market_customer.py market_wallet.py market_orders.py market_v2ray.py v2ray_engine.py marzban_admin.py marzban_node_bootstrap.py marzban_node_install.py edge_observability.py checkhost_probe.py regional_probe_provider.py incident_observability.py standby_readiness.py marzban_asset_discovery.py marzban_local_health.py marzban_regional_filtering.py marzban_observability.py regional_filtering.py differential_filtering.py regional_probe_coordinator.py filtering_runtime.py safe_failover.py automatic_failover.py promote_standby_for_filtered_edge.py cloudflare_radar.py radar_context.py radar_runtime.py radar_notifications.py radar_ui.py incident_correlation.py
           python -m compileall -q server_migration
 
       - name: Run unit tests

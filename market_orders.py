@@ -1,8 +1,8 @@
-"""Direct Market order state machine for paid SSH purchases.
+"""Direct Market order state machine for paid service purchases.
 
-Phase 4 deliberately separates customer money/order state from provisioning.
-Money is reserved before any Linux side effect. A purchase is captured only
-after an active SSH service is proven to belong to the same customer/order.
+Commerce reserves money before provisioning and captures it only after the
+local service registry proves exact customer/order ownership. Provisioning
+implementations remain service-specific; financial state stays shared.
 """
 
 from __future__ import annotations
@@ -13,6 +13,9 @@ import sqlite3
 import market_wallet
 
 SERVICE_SSH = "ssh"
+SERVICE_V2RAY = "v2ray"
+SERVICE_V2RAY_VOL = "v2ray_vol"
+V2RAY_SERVICE_TYPES = frozenset({SERVICE_V2RAY, SERVICE_V2RAY_VOL})
 
 ORDER_PENDING = "pending"
 ORDER_FUNDS_RESERVED = "funds_reserved"
@@ -132,6 +135,63 @@ def list_active_ssh_plans(conn: sqlite3.Connection) -> list[dict]:
     return [_plan_dict(row) for row in rows]
 
 
+def _valid_v2ray_plan(plan: dict | None, service_type: str) -> bool:
+    if not plan or service_type not in V2RAY_SERVICE_TYPES:
+        return False
+    if plan["service_type"] != service_type or plan["price_toman"] <= 0:
+        return False
+    if plan["users_limit"] <= 0:
+        return False
+    if service_type == SERVICE_V2RAY:
+        return plan["duration_days"] is not None and plan["duration_days"] > 0
+    return plan["data_limit_gb"] is not None and plan["data_limit_gb"] > 0
+
+
+def get_v2ray_plan(
+    conn: sqlite3.Connection,
+    plan_id: int,
+    *,
+    service_type: str,
+    require_active: bool = True,
+) -> dict | None:
+    if service_type not in V2RAY_SERVICE_TYPES:
+        return None
+    row = conn.execute(
+        """
+        SELECT id, code, service_type, title, duration_days, data_limit_gb,
+               users_limit, price_toman, active, sort_order
+        FROM market_plans
+        WHERE id=?
+        """,
+        (int(plan_id),),
+    ).fetchone()
+    plan = _plan_dict(row)
+    if require_active and plan and not plan["active"]:
+        return None
+    return plan if _valid_v2ray_plan(plan, service_type) else None
+
+
+def list_active_v2ray_plans(
+    conn: sqlite3.Connection,
+    *,
+    service_type: str,
+) -> list[dict]:
+    if service_type not in V2RAY_SERVICE_TYPES:
+        raise ValueError("invalid V2Ray market service type")
+    rows = conn.execute(
+        """
+        SELECT id, code, service_type, title, duration_days, data_limit_gb,
+               users_limit, price_toman, active, sort_order
+        FROM market_plans
+        WHERE service_type=? AND active=1
+        ORDER BY sort_order ASC, id ASC
+        """,
+        (service_type,),
+    ).fetchall()
+    plans = [_plan_dict(row) for row in rows]
+    return [plan for plan in plans if _valid_v2ray_plan(plan, service_type)]
+
+
 def _order_dict(row) -> dict | None:
     if not row:
         return None
@@ -150,22 +210,23 @@ def _order_dict(row) -> dict | None:
         "updated_at": row[11],
         "completed_at": row[12],
         "duration_days": int(row[13]) if row[13] is not None else None,
-        "users_limit": int(row[14]) if row[14] is not None else None,
-        "connection_mode": str(row[15] or "direct"),
-        "service_host": row[16],
+        "data_limit_gb": int(row[14]) if row[14] is not None else None,
+        "users_limit": int(row[15]) if row[15] is not None else None,
+        "connection_mode": str(row[16] or "direct"),
+        "service_host": row[17],
         "purchase_transaction_id": (
-            int(row[17]) if row[17] is not None else None
+            int(row[18]) if row[18] is not None else None
         ),
-        "provisioning_started_at": row[18],
-        "failed_at": row[19],
+        "provisioning_started_at": row[19],
+        "failed_at": row[20],
     }
 
 
 _ORDER_SELECT = """
     SELECT id, order_no, customer_id, plan_id, service_type, status,
            price_toman, idempotency_key, service_username, failure_reason,
-           created_at, updated_at, completed_at, duration_days, users_limit,
-           connection_mode, service_host, purchase_transaction_id,
+           created_at, updated_at, completed_at, duration_days, data_limit_gb,
+           users_limit, connection_mode, service_host, purchase_transaction_id,
            provisioning_started_at, failed_at
     FROM orders
 """
@@ -289,6 +350,117 @@ def create_ssh_order_and_reserve(
         raise
 
 
+def create_v2ray_order_and_reserve(
+    conn: sqlite3.Connection,
+    *,
+    customer_id: int,
+    plan_id: int,
+    service_type: str,
+    idempotency_key: str,
+) -> dict:
+    """Create one V2Ray order and reserve its immutable retail price."""
+    if service_type not in V2RAY_SERVICE_TYPES:
+        raise ValueError("invalid V2Ray market service type")
+
+    customer_id = int(customer_id)
+    plan_id = int(plan_id)
+    idem = str(idempotency_key or "").strip()
+    if not idem:
+        raise ValueError("idempotency_key is required")
+
+    started_transaction = _begin_immediate(conn)
+    try:
+        existing = _get_order_by_idempotency(conn, idem)
+        if existing:
+            if (
+                existing["customer_id"] != customer_id
+                or existing["plan_id"] != plan_id
+                or existing["service_type"] != service_type
+            ):
+                raise OrderStateError("order idempotency key collision")
+            _commit(conn, started_transaction)
+            return {"outcome": "existing", "order": existing}
+
+        customer = conn.execute(
+            "SELECT status FROM customers WHERE id=?",
+            (customer_id,),
+        ).fetchone()
+        if not customer or str(customer[0] or "") != "active":
+            raise PermissionError("customer is not active")
+
+        plan = get_v2ray_plan(
+            conn,
+            plan_id,
+            service_type=service_type,
+            require_active=True,
+        )
+        if not plan:
+            raise PlanUnavailableError("V2Ray plan is unavailable")
+
+        wallet_id = market_wallet.ensure_wallet(conn, customer_id)
+        wallet_row = conn.execute(
+            "SELECT balance_toman, reserved_toman FROM wallets WHERE id=?",
+            (wallet_id,),
+        ).fetchone()
+        balance = int(wallet_row[0] or 0)
+        reserved = int(wallet_row[1] or 0)
+        available = balance - reserved
+        price = int(plan["price_toman"])
+        if available < price:
+            raise InsufficientFundsError(price, available)
+
+        prefix = "DMV2-" if service_type == SERVICE_V2RAY else "DMV2V-"
+        order_no = prefix + hashlib.sha256(idem.encode("utf-8")).hexdigest()[:16].upper()
+        cur = conn.execute(
+            """
+            INSERT INTO orders(
+                order_no, customer_id, plan_id, service_type, status,
+                price_toman, idempotency_key, duration_days, data_limit_gb,
+                users_limit, connection_mode
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'v2ray')
+            """,
+            (
+                order_no,
+                customer_id,
+                plan_id,
+                service_type,
+                ORDER_PENDING,
+                price,
+                idem,
+                plan["duration_days"],
+                plan["data_limit_gb"],
+                int(plan["users_limit"]),
+            ),
+        )
+        order_id = int(cur.lastrowid)
+
+        updated = conn.execute(
+            """
+            UPDATE wallets
+            SET reserved_toman=reserved_toman+?, updated_at=CURRENT_TIMESTAMP
+            WHERE id=? AND (balance_toman-reserved_toman)>=?
+            """,
+            (price, wallet_id, price),
+        )
+        if updated.rowcount != 1:
+            raise InsufficientFundsError(price, available)
+
+        conn.execute(
+            """
+            UPDATE orders
+            SET status=?, updated_at=CURRENT_TIMESTAMP
+            WHERE id=? AND status=?
+            """,
+            (ORDER_FUNDS_RESERVED, order_id, ORDER_PENDING),
+        )
+        order = get_order(conn, order_id)
+        _commit(conn, started_transaction)
+        return {"outcome": "created", "order": order}
+    except Exception:
+        _rollback(conn, started_transaction)
+        raise
+
+
 def claim_order_for_provisioning(
     conn: sqlite3.Connection,
     *,
@@ -369,18 +541,21 @@ def set_provisioning_target(
     return get_order(conn, order_id)
 
 
-def complete_ssh_order(
+def _complete_order(
     conn: sqlite3.Connection,
     *,
     order_id: int,
     customer_id: int,
+    allowed_service_types: frozenset[str],
 ) -> dict:
-    """Capture reserved funds only after exact service ownership is proven."""
+    """Capture a reserved purchase after exact local ownership is proven."""
     started_transaction = _begin_immediate(conn)
     try:
         order = get_order(conn, order_id)
         if not order or order["customer_id"] != int(customer_id):
             raise OrderStateError("order not found for customer")
+        if order["service_type"] not in allowed_service_types:
+            raise OrderStateError("order service type does not match completion boundary")
         if order["status"] == ORDER_COMPLETED:
             wallet = market_wallet.get_wallet_snapshot(conn, customer_id)
             _commit(conn, started_transaction)
@@ -395,16 +570,17 @@ def complete_ssh_order(
             SELECT username
             FROM ssh_accounts
             WHERE username=? AND customer_id=? AND market_order_id=?
-              AND agent_id=0 AND service_type='ssh' AND status='🟢 فعال'
+              AND agent_id=0 AND service_type=? AND status='🟢 فعال'
             """,
             (
                 order["service_username"],
                 int(customer_id),
                 int(order_id),
+                order["service_type"],
             ),
         ).fetchone()
         if not service:
-            raise OrderStateError("active SSH service ownership is not proven")
+            raise OrderStateError("active service ownership is not proven")
 
         wallet_id = market_wallet.ensure_wallet(conn, customer_id)
         wallet_row = conn.execute(
@@ -489,6 +665,33 @@ def complete_ssh_order(
         raise
 
 
+def complete_ssh_order(
+    conn: sqlite3.Connection,
+    *,
+    order_id: int,
+    customer_id: int,
+) -> dict:
+    return _complete_order(
+        conn,
+        order_id=order_id,
+        customer_id=customer_id,
+        allowed_service_types=frozenset({SERVICE_SSH}),
+    )
+
+
+def complete_v2ray_order(
+    conn: sqlite3.Connection,
+    *,
+    order_id: int,
+    customer_id: int,
+) -> dict:
+    return _complete_order(
+        conn,
+        order_id=order_id,
+        customer_id=customer_id,
+        allowed_service_types=V2RAY_SERVICE_TYPES,
+    )
+
 def fail_ssh_order_and_release(
     conn: sqlite3.Connection,
     *,
@@ -553,6 +756,22 @@ def fail_ssh_order_and_release(
     except Exception:
         _rollback(conn, started_transaction)
         raise
+
+
+def fail_v2ray_order_and_release(
+    conn: sqlite3.Connection,
+    *,
+    order_id: int,
+    customer_id: int,
+    failure_reason: str,
+) -> dict:
+    # The release invariant is service-neutral: no row may still reference the order.
+    return fail_ssh_order_and_release(
+        conn,
+        order_id=order_id,
+        customer_id=customer_id,
+        failure_reason=failure_reason,
+    )
 
 
 def mark_order_recovery_required(

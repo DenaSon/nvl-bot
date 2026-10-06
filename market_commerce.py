@@ -14,7 +14,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Set
 
-DIRECT_MARKET_SCHEMA_VERSION = 3
+DIRECT_MARKET_SCHEMA_VERSION = 4
 DIRECT_MARKET_FLAG_KEY = "direct_market_enabled"
 
 
@@ -149,6 +149,7 @@ def install_schema(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             completed_at TEXT DEFAULT NULL,
             duration_days INTEGER DEFAULT NULL,
+            data_limit_gb INTEGER DEFAULT NULL,
             users_limit INTEGER DEFAULT NULL,
             connection_mode TEXT NOT NULL DEFAULT 'direct',
             service_host TEXT DEFAULT NULL,
@@ -164,6 +165,7 @@ def install_schema(conn: sqlite3.Connection) -> None:
     order_columns = _table_columns(conn, "orders")
     for column_name, ddl in (
         ("duration_days", "INTEGER DEFAULT NULL"),
+        ("data_limit_gb", "INTEGER DEFAULT NULL"),
         ("users_limit", "INTEGER DEFAULT NULL"),
         ("connection_mode", "TEXT NOT NULL DEFAULT 'direct'"),
         ("service_host", "TEXT DEFAULT NULL"),

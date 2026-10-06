@@ -98,7 +98,7 @@ class DirectMarketSSHOrderPhase4Tests(unittest.TestCase):
             self.conn.execute(
                 "SELECT value FROM settings WHERE key='direct_market_schema_version'"
             ).fetchone()[0],
-            "3",
+            str(market_commerce.DIRECT_MARKET_SCHEMA_VERSION),
         )
         order_cols = {
             row[1] for row in self.conn.execute("PRAGMA table_info(orders)")

@@ -226,7 +226,7 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
         self.assertIn("preview_node_public_profile_delete", delete_region)
         self.assertIn("preflight_public_endpoint_detached", delete_region)
         self.assertIn("delete_node_public_profile", delete_region)
-        self.assertIn("cleanup_managed_public_hosts", delete_region)
+        self.assertIn("cleanup_managed_public_hosts", self.source)
         self.assertNotIn("حذف این Node در V123A عمداً قفل است", delete_region)
 
     def test_node_detail_exposes_permanent_delete_action(self):

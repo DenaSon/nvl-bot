@@ -584,6 +584,48 @@ def find_node_generated_hosts(
     return matches
 
 
+def find_node_generated_host_remark_matches(
+    hosts_payload: Any,
+    node: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Find exact generated remarks regardless of address.
+
+    V123A uses this only as a fail-closed lifecycle guard. A generated remark
+    found on a different address may be a stable Public Endpoint and must not
+    be orphaned by legacy Node deletion logic.
+    """
+    if not isinstance(hosts_payload, dict) or not isinstance(node, dict):
+        return []
+    try:
+        expected_remark = node_generated_host_remark(node.get("name"))
+    except ValueError:
+        return []
+
+    matches: List[Dict[str, Any]] = []
+    for raw_tag, hosts in hosts_payload.items():
+        if not isinstance(hosts, list):
+            continue
+        try:
+            tag = normalize_inbound_tag(raw_tag)
+        except ValueError:
+            continue
+        for index, host in enumerate(hosts):
+            if not isinstance(host, dict):
+                continue
+            if str(host.get("remark") or "") != expected_remark:
+                continue
+            try:
+                snapshot = host_snapshot(host)
+            except ValueError:
+                continue
+            matches.append({
+                "tag": tag,
+                "index": index,
+                "host": snapshot,
+            })
+    return matches
+
+
 def can_manage_v2ray_account(role: Optional[str], actor_agent_id: int, owner_agent_id: int) -> bool:
     """Return whether the current actor may read or mutate a V2Ray account.
 
@@ -1154,6 +1196,32 @@ class MarzbanAdminService:
                 ),
             }
         host_candidates = find_node_generated_hosts(hosts_payload, current)
+        remark_matches = find_node_generated_host_remark_matches(
+            hosts_payload,
+            current,
+        )
+        exact_keys = {
+            (item["tag"], item["index"])
+            for item in host_candidates
+        }
+        address_mismatch = [
+            item
+            for item in remark_matches
+            if (item["tag"], item["index"]) not in exact_keys
+        ]
+        if address_mismatch:
+            return False, {
+                "stage": "host_precheck",
+                "deleted": False,
+                "node_id": node_id,
+                "node": current,
+                "host_candidates": host_candidates,
+                "ambiguous_public_hosts": address_mismatch,
+                "error": (
+                    "Generated Public Host remark exists on a different address; "
+                    "stable-endpoint lifecycle cleanup is required before Node deletion"
+                ),
+            }
 
         ok_delete, response = await self.request("DELETE", f"/api/node/{node_id}")
         if not ok_delete:

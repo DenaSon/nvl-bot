@@ -14821,6 +14821,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 usage_coefficient=draft.get("usage_coefficient", 1.0),
                 add_as_new_host=False,
             )
+            public_address = marzban_admin.normalize_public_hostname(
+                draft.get("public_address")
+            )
         except ValueError as exc:
             context.user_data.pop("mza_node_create_busy", None)
             await query.edit_message_text(
@@ -14831,6 +14834,31 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]),
             )
             return
+
+        # Re-run DNS immediately before POST to close the gap between the
+        # wizard input check and the actual Node creation.
+        public_preflight = await asyncio.to_thread(
+            marzban_admin.preflight_public_endpoint,
+            payload["address"],
+            public_address,
+        )
+        if not public_preflight.get("ok"):
+            context.user_data.pop("mza_node_create_busy", None)
+            draft["public_preflight"] = dict(public_preflight)
+            await query.edit_message_text(
+                "❌ <b>DNS Preflight قبل از ساخت دیگر معتبر نیست.</b>\n\n"
+                f"Node: <code>{esc(payload['address'])}</code>\n"
+                f"Public Endpoint: <code>{esc(public_address)}</code>\n"
+                f"Reason: <code>{esc(public_preflight.get('error') or 'DNS mismatch')}</code>\n\n"
+                "هیچ Node جدیدی ساخته نشد. DNS را اصلاح کنید و فرآیند را دوباره بررسی کنید.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 بازبینی", callback_data="mza_ncreate_review")],
+                    [InlineKeyboardButton("✏️ شروع مجدد", callback_data="mza_ncreate")],
+                ]),
+            )
+            return
+        draft["public_preflight"] = dict(public_preflight)
 
         service = await _get_marzban_admin_service()
         ok_create, result = await service.create_node(
@@ -14934,6 +14962,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ok_hosts, host_result = await service.reconcile_node_public_hosts(
             verified,
             marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+            public_address=public_address,
         )
         if not ok_hosts:
             _mza_clear_node_create(context)
@@ -14956,6 +14985,48 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Node را دوباره نسازید؛ POST موفق بوده است. فقط Hostهای مدیریت‌شده را بررسی/اصلاح کنید.",
                 parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup(kb),
+            )
+            return
+
+        # Persist ownership only after the remote Public Host profile has
+        # verified. If this local write fails, do not recreate the Node.
+        if not node_id:
+            _mza_clear_node_create(context)
+            await query.edit_message_text(
+                "⚠️ Node و Public Hostها ساخته شدند، اما Node ID معتبر برای ثبت Stable Endpoint در دسترس نیست. "
+                "Node را دوباره نسازید؛ وضعیت را از پنل بررسی کنید.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))]
+                ]),
+            )
+            return
+        try:
+            managed_remark = marzban_admin.node_generated_host_remark(
+                verified.get("name") or payload["name"]
+            )
+            await asyncio.to_thread(
+                _db_upsert_marzban_node_public_profile,
+                node_id,
+                public_address,
+                managed_remark,
+            )
+        except Exception as exc:
+            log.exception(
+                "V123A profile persistence failed after Node/Public Host creation for node %s",
+                node_id,
+            )
+            _mza_clear_node_create(context)
+            await query.edit_message_text(
+                "⚠️ <b>Node و Public Hostها ساخته و Verify شدند، اما Mapping محلی ذخیره نشد.</b>\n\n"
+                f"Node ID: <code>{node_id}</code>\n"
+                f"Public Endpoint: <code>{esc(public_address)}</code>\n"
+                f"خطا: <code>{esc(type(exc).__name__)}: {esc(exc)}</code>\n\n"
+                "Node را دوباره نسازید و فعلاً حذف نکنید؛ Mapping باید Repair شود.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🖥 مشاهده Node", callback_data=f"mza_node_{node_id}")],
+                    [InlineKeyboardButton("🌐 Public Hosts", callback_data="apps_marzban_hosts")],
+                ]),
             )
             return
 
@@ -14987,7 +15058,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "━━━━━━━━━━━━━━",
             f"Node ID  <code>{esc(node_id if node_id is not None else 'نامشخص')}</code>",
             f"Name  <b>{esc(verified.get('name') or payload['name'])}</b>",
-            f"Address  <code>{esc(verified.get('address') or payload['address'])}</code>",
+            f"Node Address  <code>{esc(verified.get('address') or payload['address'])}</code>",
+            f"Public Endpoint  <code>{esc(public_address)}</code>",
             f"Port  <code>{esc(verified.get('port') or payload['port'])}</code>",
             f"API Port  <code>{esc(verified.get('api_port') or payload['api_port'])}</code>",
             f"Public Hosts  <b>{len(marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS)} · NVL profile</b>",
@@ -15412,6 +15484,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        protected_profile = await asyncio.to_thread(
+            _db_get_marzban_node_public_profile,
+            node_id,
+        )
+        if protected_profile:
+            context.user_data.pop("mza_node_delete_pending", None)
+            context.user_data.pop("mza_node_delete_busy", None)
+            await query.edit_message_text(
+                "🛡 <b>حذف این Node در V123A عمداً قفل است.</b>\n\n"
+                f"Public Endpoint: <code>{esc(protected_profile.get('public_address'))}</code>\n\n"
+                "این Node از Stable Public Endpoint استفاده می‌کند. Cleanup امن Rename/Delete در V123B اضافه می‌شود؛ "
+                "برای جلوگیری از باقی‌ماندن Host یتیم، DELETE اجرا نشد.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ بازگشت به Node", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+
         if context.user_data.get("mza_node_delete_busy"):
             await query.message.reply_text("⏳ درخواست حذف قبلی هنوز در حال پردازش است.")
             return
@@ -15500,6 +15591,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ دریافت Node از Marzban ناموفق بود.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))]
+                ]),
+            )
+            return
+        protected_profile = await asyncio.to_thread(
+            _db_get_marzban_node_public_profile,
+            node_id,
+        )
+        if protected_profile:
+            await query.edit_message_text(
+                "🛡 <b>حذف این Node در V123A عمداً قفل است.</b>\n\n"
+                f"Public Endpoint: <code>{esc(protected_profile.get('public_address'))}</code>\n\n"
+                "تا تکمیل V123B، Nodeهای دارای Stable Public Endpoint حذف نمی‌شوند تا Public Host یتیم ایجاد نشود.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ Node", callback_data=f"mza_node_{node_id}")]
                 ]),
             )
             return

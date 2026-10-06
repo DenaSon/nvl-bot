@@ -12,8 +12,10 @@ This module intentionally keeps the existing ``(ok, payload)`` contract used by
 
 from __future__ import annotations
 
+import ipaddress
 import math
 import re
+import socket
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -29,6 +31,7 @@ _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 MARZBAN_USER_PROTOCOLS = {"vless", "vmess", "trojan", "shadowsocks"}
 MARZBAN_RESET_STRATEGIES = {"no_reset", "day", "week", "month", "year"}
 _USER_CREATE_USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
+_PUBLIC_HOSTNAME_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 
 NODE_MUTABLE_FIELDS = {"name", "address", "port", "api_port", "status", "usage_coefficient"}
 NODE_MUTABLE_STATUSES = {"disabled", "connecting"}
@@ -186,6 +189,112 @@ def normalize_node_create(
         "add_as_new_host",
     )
     return payload
+
+
+def normalize_public_hostname(value: Any) -> str:
+    """Validate a stable user-facing DNS hostname for generated Public Hosts."""
+    raw = _CONTROL_CHARS_RE.sub("", str(value or "")).strip().rstrip(".").lower()
+    if not raw or len(raw) > 253 or any(ch.isspace() for ch in raw):
+        raise ValueError("public hostname must be a non-empty DNS name without spaces")
+    if "://" in raw or "/" in raw or ":" in raw or "*" in raw:
+        raise ValueError("public hostname must not include scheme, path, port, or wildcard")
+    try:
+        ipaddress.ip_address(raw)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("public hostname must be a DNS name, not an IP address")
+
+    labels = raw.split(".")
+    if len(labels) < 2 or any(not _PUBLIC_HOSTNAME_LABEL_RE.fullmatch(label) for label in labels):
+        raise ValueError("public hostname must be a valid FQDN such as edge.example.com")
+    return raw
+
+
+def _resolve_endpoint_ips(value: str, resolver=None) -> Tuple[str, ...]:
+    """Resolve a node address/hostname to canonical IPs for DNS preflight."""
+    raw = str(value or "").strip().strip("[]")
+    try:
+        return (str(ipaddress.ip_address(raw)),)
+    except ValueError:
+        pass
+
+    if resolver is not None:
+        values = resolver(raw)
+        canonical = {
+            str(ipaddress.ip_address(str(item).strip()))
+            for item in values
+            if str(item).strip()
+        }
+        return tuple(sorted(canonical))
+
+    infos = socket.getaddrinfo(raw, None, type=socket.SOCK_STREAM)
+    values = {
+        str(ipaddress.ip_address(info[4][0]))
+        for info in infos
+        if info and len(info) > 4 and info[4]
+    }
+    return tuple(sorted(values))
+
+
+def preflight_public_endpoint(
+    node_address: Any,
+    public_hostname: Any,
+    *,
+    resolver=None,
+) -> Dict[str, Any]:
+    """Verify the stable hostname currently resolves to the Node address."""
+    node = normalize_node_changes(
+        {"address": node_address},
+        allow_status=False,
+    )["address"]
+    public = normalize_public_hostname(public_hostname)
+
+    try:
+        node_ips = _resolve_endpoint_ips(node, resolver=resolver)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "node_address": node,
+            "public_address": public,
+            "node_ips": (),
+            "public_ips": (),
+            "matched_ips": (),
+            "error": f"Node address resolution failed: {type(exc).__name__}: {exc}",
+        }
+    try:
+        public_ips = _resolve_endpoint_ips(public, resolver=resolver)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "node_address": node,
+            "public_address": public,
+            "node_ips": tuple(node_ips),
+            "public_ips": (),
+            "matched_ips": (),
+            "error": f"Public hostname resolution failed: {type(exc).__name__}: {exc}",
+        }
+
+    node_ip_set = set(node_ips)
+    public_ip_set = set(public_ips)
+    matched = tuple(sorted(node_ip_set.intersection(public_ip_set)))
+    if not node_ips:
+        error = "Node address did not resolve to any IP"
+    elif not public_ips:
+        error = "Public hostname did not resolve to any IP"
+    elif not public_ip_set.issubset(node_ip_set):
+        error = "Public hostname resolves outside the Node address set"
+    else:
+        error = None
+    return {
+        "ok": error is None,
+        "node_address": node,
+        "public_address": public,
+        "node_ips": tuple(node_ips),
+        "public_ips": tuple(public_ips),
+        "matched_ips": matched,
+        "error": error,
+    }
 
 
 def find_duplicate_node(nodes: Any, name: Any) -> Optional[Dict[str, Any]]:
@@ -371,11 +480,15 @@ def node_generated_host_remark(node_name: Any) -> str:
     return f"{name} ({{USERNAME}}) [{{PROTOCOL}} - {{TRANSPORT}}]"
 
 
-def node_generated_host_payload(node: Dict[str, Any]) -> Dict[str, Any]:
+def node_generated_host_payload(
+    node: Dict[str, Any],
+    *,
+    public_address: Any = None,
+) -> Dict[str, Any]:
     """Build the canonical Public Host payload for one Marzban Node.
 
-    The values intentionally mirror Marzban's own add_as_new_host output while
-    leaving the effective service port to the referenced inbound.
+    node.address stays the Marzban-to-Node control address. V123A may pass a
+    separate stable DNS public_address for user-facing subscriptions.
     """
     if not isinstance(node, dict):
         raise ValueError("invalid Marzban node")
@@ -384,10 +497,13 @@ def node_generated_host_payload(node: Dict[str, Any]) -> Dict[str, Any]:
         {"name": node.get("name")},
         allow_status=False,
     )["name"]
-    address = normalize_node_changes(
-        {"address": node.get("address")},
-        allow_status=False,
-    )["address"]
+    if public_address is None:
+        address = normalize_node_changes(
+            {"address": node.get("address")},
+            allow_status=False,
+        )["address"]
+    else:
+        address = normalize_public_hostname(public_address)
 
     return _host_payload({
         "remark": node_generated_host_remark(name),
@@ -414,6 +530,8 @@ def node_generated_host_payload(node: Dict[str, Any]) -> Dict[str, Any]:
 def find_node_generated_hosts(
     hosts_payload: Any,
     node: Dict[str, Any],
+    *,
+    public_address: Any = None,
 ) -> List[Dict[str, Any]]:
     """Find only Public Hosts that match Marzban's automatic Node-host signature.
 
@@ -428,8 +546,16 @@ def find_node_generated_hosts(
     except ValueError:
         return []
 
-    expected_address = str(node.get("address") or "").strip().casefold()
-    if not expected_address:
+    try:
+        expected_address = (
+            normalize_public_hostname(public_address)
+            if public_address is not None
+            else normalize_node_changes(
+                {"address": node.get("address")},
+                allow_status=False,
+            )["address"]
+        ).casefold()
+    except ValueError:
         return []
 
     matches: List[Dict[str, Any]] = []
@@ -447,6 +573,48 @@ def find_node_generated_hosts(
                 str(host.get("address") or "").strip().casefold() != expected_address
                 or str(host.get("remark") or "") != expected_remark
             ):
+                continue
+            try:
+                snapshot = host_snapshot(host)
+            except ValueError:
+                continue
+            matches.append({
+                "tag": tag,
+                "index": index,
+                "host": snapshot,
+            })
+    return matches
+
+
+def find_node_generated_host_remark_matches(
+    hosts_payload: Any,
+    node: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Find exact generated remarks regardless of address.
+
+    V123A uses this only as a fail-closed lifecycle guard. A generated remark
+    found on a different address may be a stable Public Endpoint and must not
+    be orphaned by legacy Node deletion logic.
+    """
+    if not isinstance(hosts_payload, dict) or not isinstance(node, dict):
+        return []
+    try:
+        expected_remark = node_generated_host_remark(node.get("name"))
+    except ValueError:
+        return []
+
+    matches: List[Dict[str, Any]] = []
+    for raw_tag, hosts in hosts_payload.items():
+        if not isinstance(hosts, list):
+            continue
+        try:
+            tag = normalize_inbound_tag(raw_tag)
+        except ValueError:
+            continue
+        for index, host in enumerate(hosts):
+            if not isinstance(host, dict):
+                continue
+            if str(host.get("remark") or "") != expected_remark:
                 continue
             try:
                 snapshot = host_snapshot(host)
@@ -1030,6 +1198,32 @@ class MarzbanAdminService:
                 ),
             }
         host_candidates = find_node_generated_hosts(hosts_payload, current)
+        remark_matches = find_node_generated_host_remark_matches(
+            hosts_payload,
+            current,
+        )
+        exact_keys = {
+            (item["tag"], item["index"])
+            for item in host_candidates
+        }
+        address_mismatch = [
+            item
+            for item in remark_matches
+            if (item["tag"], item["index"]) not in exact_keys
+        ]
+        if address_mismatch:
+            return False, {
+                "stage": "host_precheck",
+                "deleted": False,
+                "node_id": node_id,
+                "node": current,
+                "host_candidates": host_candidates,
+                "ambiguous_public_hosts": address_mismatch,
+                "error": (
+                    "Generated Public Host remark exists on a different address; "
+                    "stable-endpoint lifecycle cleanup is required before Node deletion"
+                ),
+            }
 
         ok_delete, response = await self.request("DELETE", f"/api/node/{node_id}")
         if not ok_delete:
@@ -1127,6 +1321,8 @@ class MarzbanAdminService:
         self,
         node: Dict[str, Any],
         tags: Any = NVL_NODE_PUBLIC_HOST_TAGS,
+        *,
+        public_address: Any = None,
     ) -> ApiResult:
         """Reconcile one Node to an explicit Public Host allow-list.
 
@@ -1143,7 +1339,10 @@ class MarzbanAdminService:
             }
 
         try:
-            generated = node_generated_host_payload(node)
+            generated = node_generated_host_payload(
+                node,
+                public_address=public_address,
+            )
             wanted: List[str] = []
             seen = set()
             for raw_tag in tags or ():
@@ -1282,7 +1481,11 @@ class MarzbanAdminService:
                 ),
             }
 
-        matches = find_node_generated_hosts(verify_payload, node)
+        matches = find_node_generated_hosts(
+            verify_payload,
+            node,
+            public_address=public_address,
+        )
         counts: Dict[str, int] = {}
         for item in matches:
             tag = item["tag"]

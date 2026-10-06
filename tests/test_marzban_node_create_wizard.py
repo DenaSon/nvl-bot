@@ -30,6 +30,7 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
         for state in (
             "MZA_NODE_CREATE_NAME_INPUT",
             "MZA_NODE_CREATE_ADDRESS_INPUT",
+            "MZA_NODE_CREATE_PUBLIC_INPUT",
             "MZA_NODE_CREATE_PORTS_INPUT",
             "MZA_NODE_CREATE_RATIO_INPUT",
         ):
@@ -46,6 +47,7 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
         for token in (
             'draft.get("name")',
             'draft.get("address")',
+            'draft.get("public_address")',
             'draft.get("port", 62050)',
             'draft.get("api_port", 62051)',
             'draft.get("usage_coefficient", 1.0)',
@@ -161,7 +163,7 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
             "if state in _MZA_NODE_CREATE_TEXT_STATES:",
             "node_input_states = {",
         )
-        self.assertIn("مرحله ۲ از ۴ · آدرس نود", region)
+        self.assertIn("مرحله ۲ از ۵ · آدرس واقعی Node", region)
         self.assertIn("خود سرور Node", region)
         self.assertIn("پنل اصلی Marzban", region)
         self.assertIn("203.0.113.20", region)
@@ -171,14 +173,56 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
             "if state in _MZA_NODE_CREATE_TEXT_STATES:",
             "node_input_states = {",
         )
-        self.assertIn("مرحله ۳ از ۴ · پورت‌های نود", region)
+        self.assertIn("مرحله ۴ از ۵ · پورت‌های نود", region)
         self.assertIn("Service Port", region)
         self.assertIn("Xray API Port", region)
-        self.assertIn("مرحله ۴ از ۴ · Usage Ratio", region)
+        self.assertIn("مرحله ۵ از ۵ · Usage Ratio", region)
         self.assertIn("اگر سیاست خاصی", region)
         self.assertIn('draft["add_as_new_host"] = False', region)
         self.assertIn("_mza_show_node_create_review(update.message, context)", region)
-        self.assertNotIn("مرحله ۵ از ۵ · Public Host", region)
+        self.assertIn("مرحله ۳ از ۵ · دامنه عمومی Node", region)
+        self.assertIn("argus.nvlsup.xyz", region)
+
+    def test_v123a_rechecks_dns_before_post_and_uses_public_address_for_hosts(self):
+        region = self._region(
+            "elif d.startswith('mza_ncreate_confirm_'):",
+            "elif d == 'mza_nodes':",
+        )
+        self.assertIn("preflight_public_endpoint", region)
+        self.assertIn("DNS Preflight قبل از ساخت", region)
+        self.assertIn("public_address=public_address", region)
+        preflight_pos = region.index("preflight_public_endpoint")
+        post_pos = region.index("service.create_node(")
+        self.assertLess(preflight_pos, post_pos)
+
+    def test_v123a_persists_pending_ownership_before_host_write_then_promotes(self):
+        region = self._region(
+            "elif d.startswith('mza_ncreate_confirm_'):",
+            "elif d == 'mza_nodes':",
+        )
+        first_persist = region.index("_db_upsert_marzban_node_public_profile")
+        reconcile_pos = region.index("service.reconcile_node_public_hosts(")
+        second_persist = region.index(
+            "_db_upsert_marzban_node_public_profile",
+            first_persist + 1,
+        )
+        self.assertLess(first_persist, reconcile_pos)
+        self.assertLess(reconcile_pos, second_persist)
+        self.assertIn('"pending"', region)
+        self.assertIn('"verified"', region)
+        self.assertIn("managed_remark", region)
+        self.assertIn("Node را دوباره نسازید", region)
+
+    def test_v123a_schema_and_fail_closed_delete_guard_are_present(self):
+        self.assertIn("CREATE TABLE IF NOT EXISTS marzban_node_public_profiles", self.source)
+        self.assertIn("profile_state TEXT NOT NULL DEFAULT 'pending'", self.source)
+        self.assertIn("_db_get_marzban_node_public_profile", self.source)
+        delete_region = self._region(
+            "elif d.startswith('mza_ndelete_confirm_'):",
+            "elif d.startswith('mza_nreconnect_'):",
+        )
+        self.assertIn("حذف این Node در V123A عمداً قفل است", delete_region)
+        self.assertIn("_db_get_marzban_node_public_profile", delete_region)
 
     def test_node_detail_exposes_permanent_delete_action(self):
         region = self._region(
@@ -223,6 +267,17 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
         uncertain_start = region.index("if deleted_but_unverified:")
         uncertain_end = region.index("await query.edit_message_text(", uncertain_start + 50)
         self.assertNotIn("service.delete_node(", region[uncertain_start:uncertain_end])
+
+    def test_v123a_blocks_rename_address_and_stale_confirm_until_v123b(self):
+        self.assertIn("تغییر نام این Node در V123A عمداً قفل است", self.source)
+        self.assertIn("تغییر آدرس این Node در V123A عمداً قفل است", self.source)
+        confirm_region = self._region(
+            "elif d.startswith('mza_nedit_confirm_'):",
+            "elif d.startswith('mza_hedit_'):",
+        )
+        self.assertIn("_db_get_marzban_node_public_profile", confirm_region)
+        self.assertIn('{"name", "address"}.intersection(pending)', confirm_region)
+        self.assertIn("تاییدیه قدیمی اجرا نشد", confirm_region)
 
     def test_origin_aware_navigation_is_preserved(self):
         region = self._region(

@@ -13694,6 +13694,17 @@ async def _render_filtering_monitor_panel(query, page=0):
     health = await asyncio.to_thread(_db_get_host_port_health_map)
     runtime = await asyncio.to_thread(_db_get_regional_provider_runtime)
     backoff = await asyncio.to_thread(_db_regional_backoff_remaining_seconds)
+    radar_snapshot = await asyncio.to_thread(
+        radar_runtime.load_latest_radar_snapshot,
+        DB_PATH,
+        scope_type="COUNTRY",
+        scope_value="IR",
+    )
+    radar_provider = await asyncio.to_thread(
+        radar_runtime.get_radar_provider_runtime,
+        DB_PATH,
+    )
+    radar_summary = radar_ui.render_summary(radar_snapshot, radar_provider)
 
     edge_rows = []
     for row in pool:
@@ -13770,6 +13781,8 @@ async def _render_filtering_monitor_panel(query, page=0):
         provider_line,
         failover_line,
         "",
+        radar_summary,
+        "",
     ]
     kb = []
 
@@ -13814,6 +13827,9 @@ async def _render_filtering_monitor_panel(query, page=0):
     if not edge_rows:
         lines.append("هیچ سرور لبه‌ای برای پایش ثبت نشده است.")
 
+    kb.append([
+        InlineKeyboardButton("🌐 جزئیات اینترنت ایران", callback_data="flt_radar")
+    ])
     if auto_enabled:
         kb.append([InlineKeyboardButton("🛑 غیرفعال‌سازی انتقال خودکار", callback_data="flt_auto_disable")])
     else:
@@ -23174,6 +23190,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d == "hp_filtering" and role == 'admin':
         await _render_filtering_monitor_panel(query)
 
+    elif d == "flt_radar" and role == 'admin':
+        await _render_radar_monitor_panel(query)
+
     elif d == "mzm_refresh" and role == 'admin':
         await query.answer("🔄 نمایش با آخرین داده‌های ذخیره‌شده بروزرسانی شد.", show_alert=False)
         await _render_marzban_monitor_panel(query, page="summary")
@@ -28415,7 +28434,10 @@ async def _post_init(app):
     app.bot_data['ip_pressure_monitor_task'] = asyncio.create_task(_ip_pressure_monitor_loop(app))
     app.bot_data['host_health_task'] = asyncio.create_task(_host_health_loop(app))
     app.bot_data['regional_filter_task'] = asyncio.create_task(_regional_filter_loop(app))
-    radar_monitor = radar_runtime.RadarMonitor(DB_PATH)
+    radar_monitor = radar_runtime.RadarMonitor(
+        DB_PATH,
+        on_snapshot=_handle_radar_snapshot,
+    )
     await asyncio.to_thread(radar_monitor.ensure_schema)
     app.bot_data['radar_monitor'] = radar_monitor
     app.bot_data['radar_monitor_task'] = asyncio.create_task(radar_monitor.loop(app))

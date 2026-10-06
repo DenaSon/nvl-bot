@@ -748,9 +748,7 @@ def inspect_node_public_host_profile(
     }
 
 
-_LEGACY_GENERATED_REMARK_RE = re.compile(
-    r"^.+ \\(\\{USERNAME\\}\\) \\[\\{PROTOCOL\\} - \\{TRANSPORT\\}\\]$"
-)
+_LEGACY_GENERATED_REMARK_SUFFIX = " ({USERNAME}) [{PROTOCOL} - {TRANSPORT}]"
 
 
 def _host_matches_generated_except_remark(
@@ -785,7 +783,10 @@ def _is_legacy_generated_public_host(
     remark = str(host.get("remark") or "")
     if not remark or remark == str(generated.get("remark") or ""):
         return False
-    if not _LEGACY_GENERATED_REMARK_RE.fullmatch(remark):
+    if (
+        not remark.endswith(_LEGACY_GENERATED_REMARK_SUFFIX)
+        or len(remark) <= len(_LEGACY_GENERATED_REMARK_SUFFIX)
+    ):
         return False
     expected_address = str(generated.get("address") or "").strip().rstrip(".").casefold()
     current_address = str(host.get("address") or "").strip().rstrip(".").casefold()

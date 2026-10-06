@@ -11608,7 +11608,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-        if state == 'MZA_NODE_CREATE_PORTS_INPUT':
+            if state == 'MZA_NODE_CREATE_PORTS_INPUT':
                 parts = text.replace(",", " ").replace(":", " ").split()
                 if len(parts) != 2:
                     raise ValueError("two ports required")

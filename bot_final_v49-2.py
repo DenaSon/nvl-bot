@@ -7785,6 +7785,47 @@ def _mza_clear_node_move(context, *, cancel_session=False, chat_id=None):
         marzban_node_bootstrap.cancel_session(chat_id)
 
 
+async def _mza_rollback_node_move_to_old(
+    service,
+    node_id,
+    old_address,
+    public_address,
+):
+    """Reverse a completed control-plane move without touching Public Hosts/DNS."""
+    ok_plan, plan = await service.preview_node_public_profile_move(
+        node_id,
+        old_address,
+        public_address,
+        marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+    )
+    if not ok_plan or not isinstance(plan, dict) or not plan.get("moveable"):
+        return False, {
+            "stage": "v123c_rollback_preview",
+            "rolled_back": False,
+            "error": plan,
+        }
+    if plan.get("no_change"):
+        ok_node, node = await service.get_node(node_id)
+        connected = (
+            ok_node
+            and isinstance(node, dict)
+            and str(node.get("status") or "").lower() == "connected"
+        )
+        return connected, {
+            "stage": "v123c_rollback_noop",
+            "rolled_back": True,
+            "rollback_connected": connected,
+            "node": node if isinstance(node, dict) else None,
+        }
+    return await service.move_node_public_profile(
+        node_id,
+        old_address,
+        public_address,
+        marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+        expected_fingerprint=plan.get("fingerprint"),
+    )
+
+
 def _mza_node_move_report_kb(context, node_id, *, ready=False):
     kb = []
     if ready:

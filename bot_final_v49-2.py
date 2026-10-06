@@ -356,7 +356,7 @@ from server_migration.telegram_wizard import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V123B2D-2026-10-06-direct-inbound-profile"
+BOT_VERSION_TAG = "V123B3R-2026-10-06-node-rename-lifecycle"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -7863,6 +7863,129 @@ async def _mza_show_node_edit_confirm(target, context, node_id, changes):
     }
     context.user_data["mza_action_node"] = node_id
     context.user_data["mza_node_pending_changes"] = dict(changes)
+    context.user_data.pop("mza_node_rename_guard", None)
+
+    protected_profile = await asyncio.to_thread(
+        _db_get_marzban_node_public_profile,
+        node_id,
+    )
+    if protected_profile and set(changes) == {"name"}:
+        if str(protected_profile.get("profile_state") or "").lower() != "verified":
+            context.user_data.pop("mza_action_node", None)
+            context.user_data.pop("mza_node_pending_changes", None)
+            return await _mza_render(
+                target,
+                "🛡 <b>Rename متوقف شد.</b> Stable Public Endpoint ابتدا باید verified باشد.\n\n"
+                f"Profile: <code>{esc(protected_profile.get('profile_state') or 'pending')}</code>\n"
+                "ابتدا Repair Public Endpoint را اجرا کنید.",
+                [
+                    [InlineKeyboardButton("🛠 Repair Public Endpoint", callback_data=f"mza_nrepair_{node_id}")],
+                    [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_node_{node_id}")],
+                ],
+            )
+
+        service = await _get_marzban_admin_service()
+        ok_plan, plan = await service.preview_node_public_profile_rename(
+            node_id,
+            changes.get("name"),
+            protected_profile.get("public_address"),
+            marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+        )
+        if not ok_plan or not isinstance(plan, dict):
+            context.user_data.pop("mza_action_node", None)
+            context.user_data.pop("mza_node_pending_changes", None)
+            return await _mza_render(
+                target,
+                "❌ Preview خواندنی Rename ناموفق بود. هیچ تغییری اعمال نشد.\n"
+                f"<code>{esc(plan)}</code>",
+                [[InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_node_{node_id}")]],
+            )
+
+        node = plan.get("node") if isinstance(plan.get("node"), dict) else {}
+        preflight = await asyncio.to_thread(
+            marzban_admin.preflight_public_endpoint,
+            node.get("address"),
+            protected_profile.get("public_address"),
+        )
+        mapping_remark_ok = (
+            str(protected_profile.get("managed_remark") or "")
+            == str(plan.get("old_managed_remark") or "")
+        )
+        if (
+            not plan.get("renameable")
+            or not preflight.get("ok")
+            or not mapping_remark_ok
+        ):
+            context.user_data.pop("mza_action_node", None)
+            context.user_data.pop("mza_node_pending_changes", None)
+            issues = list(plan.get("issues") or ())
+            if not mapping_remark_ok:
+                issues.append("local managed remark does not match canonical profile")
+            if not preflight.get("ok"):
+                issues.append(str(preflight.get("error") or "DNS mismatch"))
+            issue_text = " | ".join(map(str, issues)) or "rename precheck failed"
+            return await _mza_render(
+                target,
+                "⚠️ <b>V123B.3.1 Rename فعلاً قابل اجرا نیست.</b>\n\n"
+                f"Node  <b>{esc(node.get('name') or node_id)}</b>\n"
+                f"Public Endpoint  <code>{esc(protected_profile.get('public_address'))}</code>\n"
+                f"Issue  <code>{esc(issue_text)}</code>\n\n"
+                "هیچ PUT روی Node یا Hostها انجام نشد.",
+                [
+                    [InlineKeyboardButton("🛠 Repair Public Endpoint", callback_data=f"mza_nrepair_{node_id}")],
+                    [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_node_{node_id}")],
+                ],
+            )
+
+        if plan.get("no_change"):
+            context.user_data.pop("mza_action_node", None)
+            context.user_data.pop("mza_node_pending_changes", None)
+            return await _mza_render(
+                target,
+                "✅ نام Node از قبل همین مقدار است؛ هیچ تغییری لازم نیست.\n\n"
+                f"Node  <b>{esc(plan.get('old_name'))}</b>\n"
+                f"Public Endpoint  <code>{esc(plan.get('public_address'))}</code>",
+                [[InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]],
+            )
+
+        nonce = secrets.token_hex(8)
+        context.user_data["mza_node_rename_guard"] = {
+            "node_id": node_id,
+            "nonce": nonce,
+            "fingerprint": str(plan.get("fingerprint") or ""),
+            "old_name": str(plan.get("old_name") or ""),
+            "new_name": str(plan.get("new_name") or ""),
+            "node_address": str(node.get("address") or ""),
+            "public_address": str(plan.get("public_address") or ""),
+            "old_managed_remark": str(plan.get("old_managed_remark") or ""),
+            "new_managed_remark": str(plan.get("new_managed_remark") or ""),
+            "started_at": time.time(),
+        }
+        changed = list(plan.get("changed_tags") or ())
+        managed_lines = "\n".join(
+            f"• <code>{esc(tag)}</code>: ♻️ Sync generated remark"
+            for tag in changed
+        )
+        return await _mza_render(
+            target,
+            "✏️ <b>V123B.3.1 · Rename Preview</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"Node ID  <code>{node_id}</code>\n"
+            f"Old Name  <b>{esc(plan.get('old_name'))}</b>\n"
+            f"New Name  <b>{esc(plan.get('new_name'))}</b>\n"
+            f"Real Address  <code>{esc(node.get('address') or '—')}</code>\n"
+            f"Public Endpoint  <code>{esc(plan.get('public_address'))}</code>\n"
+            "DNS Match  ✅\n\n"
+            f"{managed_lines}\n\n"
+            f"<b>{len(changed)} Managed Host remark همگام خواهد شد.</b>\n\n"
+            "Public Endpoint و Host address تغییر نمی‌کنند؛ Hostهای دستی دست‌نخورده می‌مانند. "
+            "هنگام تایید، Node و Hostها دوباره Inspect می‌شوند و mapping قبل از اولین PUT "
+            "به <code>pending</code> می‌رود.",
+            [
+                [InlineKeyboardButton("✅ اجرای Rename", callback_data=f"mza_nrename_confirm_{nonce}")],
+                [InlineKeyboardButton("❌ لغو", callback_data=f"mza_node_{node_id}")],
+            ],
+        )
 
     lines = [
         "✏️ <b>تایید تغییر تنظیمات نود</b>",
@@ -7881,7 +8004,6 @@ async def _mza_show_node_edit_confirm(target, context, node_id, changes):
         [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_node_{node_id}")],
     ]
     await _mza_render(target, "\n".join(lines), kb)
-
 
 
 def _db_get_marzban_node_public_profile(node_id):
@@ -14521,6 +14643,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         node_delete_starter = d.startswith('mza_ndelete_')
         node_adopt_starter = d.startswith('mza_nadopt_')
         node_repair_starter = d.startswith('mza_nrepair_')
+        node_rename_starter = d.startswith('mza_nrename_')
         node_bootstrap_starter = (
             d.startswith('mza_nboot_')
             or d.startswith('mza_ninstall_')
@@ -14539,6 +14662,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             or node_delete_starter
             or node_adopt_starter
             or node_repair_starter
+            or node_rename_starter
             or node_bootstrap_starter
             or create_starter
         )
@@ -14584,13 +14708,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _mza_clear_node_adopt(context)
         if not node_repair_starter:
             _mza_clear_node_repair(context)
+        if not node_rename_starter and not node_edit_starter:
+            context.user_data.pop("mza_node_rename_guard", None)
 
         # Confirmation messages can outlive the screen that created them.
         # Only a new edit in the same domain may preserve that domain's pending
         # state; crossing Node↔Host or entering another Marzban flow invalidates it.
-        if not d.startswith('mza_nedit_confirm_') and not node_edit_starter:
+        if (
+            not d.startswith('mza_nedit_confirm_')
+            and not d.startswith('mza_nrename_confirm_')
+            and not node_edit_starter
+        ):
             context.user_data.pop('mza_action_node', None)
             context.user_data.pop('mza_node_pending_changes', None)
+            context.user_data.pop('mza_node_rename_guard', None)
         if (
             not d.startswith('mza_hconfirm_')
             and not host_edit_starter
@@ -16657,27 +16788,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d.startswith('mza_nedit_name_'):
         node_id = marzban_admin.normalize_node_id(d[len('mza_nedit_name_'):])
+        context.user_data['state'] = 'MZA_NODE_NAME_INPUT'
+        context.user_data['mza_action_node'] = node_id
+        context.user_data.pop('mza_node_pending_changes', None)
+        context.user_data.pop('mza_node_rename_guard', None)
         protected_profile = await asyncio.to_thread(
             _db_get_marzban_node_public_profile,
             node_id,
         )
-        if protected_profile:
-            await query.edit_message_text(
-                "🛡 <b>تغییر نام این Node در V123A عمداً قفل است.</b>\n\n"
-                f"Public Endpoint: <code>{esc(protected_profile.get('public_address'))}</code>\n\n"
-                "Rename باید Remarkهای Managed Public Host را هم به‌صورت اتمیک Sync کند؛ "
-                "این lifecycle در V123B اضافه می‌شود.",
-                parse_mode='HTML',
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_node_{node_id}")]
-                ]),
-            )
-            return
-        context.user_data['state'] = 'MZA_NODE_NAME_INPUT'
-        context.user_data['mza_action_node'] = node_id
-        context.user_data.pop('mza_node_pending_changes', None)
+        title = (
+            "✏️ <b>V123B.3.1 · Rename Managed Node</b>"
+            if protected_profile
+            else "✏️ <b>تغییر نام نود</b>"
+        )
+        hint = (
+            "\n\nStable Public Endpoint ثابت می‌ماند و قبل از تایید، Managed Hostها Preview می‌شوند."
+            if protected_profile
+            else ""
+        )
         await query.edit_message_text(
-            "✏️ <b>تغییر نام نود</b>\n\nنام جدید را بفرستید:",
+            f"{title}\n\nنام جدید را بفرستید:{hint}",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_node_{node_id}")]
@@ -16706,6 +16836,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['state'] = 'MZA_NODE_ADDRESS_INPUT'
         context.user_data['mza_action_node'] = node_id
         context.user_data.pop('mza_node_pending_changes', None)
+        context.user_data.pop('mza_node_rename_guard', None)
         await query.edit_message_text(
             "🌐 <b>تغییر آدرس نود</b>\n\nIP یا hostname جدید را بدون http/https بفرستید:",
             parse_mode='HTML',
@@ -16720,6 +16851,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['state'] = 'MZA_NODE_PORTS_INPUT'
         context.user_data['mza_action_node'] = node_id
         context.user_data.pop('mza_node_pending_changes', None)
+        context.user_data.pop('mza_node_rename_guard', None)
         await query.edit_message_text(
             "🔌 <b>تغییر پورت‌های نود</b>\n\n"
             "Port و API Port را در یک پیام بفرستید.\n"
@@ -16736,12 +16868,228 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['state'] = 'MZA_NODE_RATIO_INPUT'
         context.user_data['mza_action_node'] = node_id
         context.user_data.pop('mza_node_pending_changes', None)
+        context.user_data.pop('mza_node_rename_guard', None)
         await query.edit_message_text(
             "📊 <b>تغییر Usage Ratio</b>\n\n"
             "ضریب مصرف جدید را بفرستید؛ مثال: <code>1</code> یا <code>1.5</code>",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_node_{node_id}")]
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_nrename_confirm_'):
+        nonce = d[len('mza_nrename_confirm_'):]
+        guard = context.user_data.get("mza_node_rename_guard")
+        pending = context.user_data.get("mza_node_pending_changes")
+        age = (
+            time.time() - float(guard.get("started_at") or 0)
+            if isinstance(guard, dict)
+            else float("inf")
+        )
+        try:
+            node_id = marzban_admin.normalize_node_id(
+                guard.get("node_id") if isinstance(guard, dict) else None
+            )
+        except ValueError:
+            node_id = None
+
+        if (
+            not isinstance(guard, dict)
+            or age > 600
+            or not nonce
+            or nonce != str(guard.get("nonce") or "")
+            or node_id is None
+            or not isinstance(pending, dict)
+            or set(pending) != {"name"}
+            or str(pending.get("name") or "") != str(guard.get("new_name") or "")
+        ):
+            context.user_data.pop("mza_node_rename_guard", None)
+            context.user_data.pop("mza_action_node", None)
+            context.user_data.pop("mza_node_pending_changes", None)
+            await query.edit_message_text(
+                "❌ تایید Rename منقضی یا نامعتبر است؛ از صفحه Node دوباره شروع کنید."
+            )
+            return
+
+        protected_profile = await asyncio.to_thread(
+            _db_get_marzban_node_public_profile,
+            node_id,
+        )
+        if (
+            not protected_profile
+            or str(protected_profile.get("profile_state") or "").lower() != "verified"
+            or str(protected_profile.get("public_address") or "").rstrip(".").lower()
+                != str(guard.get("public_address") or "").rstrip(".").lower()
+            or str(protected_profile.get("managed_remark") or "")
+                != str(guard.get("old_managed_remark") or "")
+        ):
+            context.user_data.pop("mza_node_rename_guard", None)
+            context.user_data.pop("mza_action_node", None)
+            context.user_data.pop("mza_node_pending_changes", None)
+            await query.edit_message_text(
+                "🛡 Rename متوقف شد؛ mapping محلی از زمان Preview تغییر کرده است.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+
+        service = await _get_marzban_admin_service()
+        ok_plan, current_plan = await service.preview_node_public_profile_rename(
+            node_id,
+            guard.get("new_name"),
+            guard.get("public_address"),
+            marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+        )
+        node = (
+            current_plan.get("node")
+            if ok_plan and isinstance(current_plan, dict)
+            and isinstance(current_plan.get("node"), dict)
+            else {}
+        )
+        preflight = (
+            await asyncio.to_thread(
+                marzban_admin.preflight_public_endpoint,
+                node.get("address"),
+                guard.get("public_address"),
+            )
+            if node
+            else {"ok": False, "error": "Node inspection failed"}
+        )
+        stale = (
+            not ok_plan
+            or not isinstance(current_plan, dict)
+            or not current_plan.get("renameable")
+            or str(current_plan.get("fingerprint") or "")
+                != str(guard.get("fingerprint") or "")
+            or str(node.get("name") or "") != str(guard.get("old_name") or "")
+            or str(node.get("address") or "") != str(guard.get("node_address") or "")
+            or not preflight.get("ok")
+        )
+        if stale:
+            context.user_data.pop("mza_node_rename_guard", None)
+            context.user_data.pop("mza_action_node", None)
+            context.user_data.pop("mza_node_pending_changes", None)
+            await query.edit_message_text(
+                "⚠️ <b>Rename متوقف شد؛ Node، DNS یا Managed Hostها از زمان Preview تغییر کرده‌اند.</b>\n\n"
+                "هیچ PUT جدیدی اجرا نشد. دوباره از صفحه Node Preview بگیرید.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+
+        try:
+            await asyncio.to_thread(
+                _db_upsert_marzban_node_public_profile,
+                node_id,
+                guard.get("public_address"),
+                guard.get("old_managed_remark"),
+                "pending",
+            )
+        except Exception as exc:
+            log.exception("V123B.3.1 pending mapping persistence failed for node %s", node_id)
+            context.user_data.pop("mza_node_rename_guard", None)
+            context.user_data.pop("mza_action_node", None)
+            context.user_data.pop("mza_node_pending_changes", None)
+            await query.edit_message_text(
+                "❌ ثبت ownership به حالت pending شکست خورد؛ هیچ PUT روی Marzban انجام نشد.\n"
+                f"<code>{esc(type(exc).__name__)}: {esc(exc)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+
+        ok_rename, result = await service.rename_node_public_profile(
+            node_id,
+            guard.get("new_name"),
+            guard.get("public_address"),
+            marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+            expected_fingerprint=guard.get("fingerprint"),
+        )
+        context.user_data.pop("mza_node_rename_guard", None)
+        context.user_data.pop("mza_action_node", None)
+        context.user_data.pop("mza_node_pending_changes", None)
+
+        if not ok_rename or not isinstance(result, dict) or not result.get("verified"):
+            renamed = isinstance(result, dict) and bool(result.get("renamed"))
+            if not renamed:
+                try:
+                    await asyncio.to_thread(
+                        _db_upsert_marzban_node_public_profile,
+                        node_id,
+                        guard.get("public_address"),
+                        guard.get("old_managed_remark"),
+                        "verified",
+                    )
+                except Exception:
+                    log.exception(
+                        "V123B.3.1 failed to restore verified mapping for node %s",
+                        node_id,
+                    )
+            log.warning("V123B.3.1 rename failed for node %s: %r", node_id, result)
+            if renamed:
+                await query.edit_message_text(
+                    "⚠️ <b>Node Rename شد، اما Sync/Verify نهایی Hostها کامل نشد.</b>\n\n"
+                    f"Stage  <code>{esc(result.get('stage') if isinstance(result, dict) else 'unknown')}</code>\n"
+                    "mapping عمداً <code>pending</code> باقی مانده است. "
+                    "Repair Public Endpoint می‌تواند Remarkهای Managed Host را از وضعیت فعلی recover کند.",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🛠 Repair Public Endpoint", callback_data=f"mza_nrepair_{node_id}")],
+                        [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")],
+                    ]),
+                )
+                return
+
+            await query.edit_message_text(
+                "❌ Rename قبل از تغییر Node متوقف شد. mapping به حالت verified قبلی برگردانده شد.\n"
+                f"<code>{esc(result)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+
+        try:
+            await asyncio.to_thread(
+                _db_upsert_marzban_node_public_profile,
+                node_id,
+                guard.get("public_address"),
+                result.get("new_managed_remark"),
+                "verified",
+            )
+        except Exception as exc:
+            log.exception("V123B.3.1 final mapping persistence failed for node %s", node_id)
+            await query.edit_message_text(
+                "⚠️ Node و Managed Hostها Rename/Verify شدند، اما ذخیره mapping نهایی شکست خورد.\n"
+                "برای ایمنی mapping محلی را قبل از عملیات بعدی بررسی کنید.\n"
+                f"<code>{esc(type(exc).__name__)}: {esc(exc)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+
+        await query.edit_message_text(
+            "✅ <b>Managed Node Rename و Verify شد</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"Old Name  <b>{esc(result.get('old_name'))}</b>\n"
+            f"New Name  <b>{esc(result.get('new_name'))}</b>\n"
+            f"Public Endpoint  <code>{esc(result.get('public_address'))}</code>\n"
+            f"Synced Hosts  <b>{len(result.get('changed_tags') or ())}</b>\n"
+            "Profile  <code>verified</code>\n\n"
+            "Public Endpoint و Host address ثابت ماندند و Hostهای دستی حفظ شدند.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]
             ]),
         )
         return

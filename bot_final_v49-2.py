@@ -104,6 +104,7 @@ import marzban_asset_discovery
 import marzban_local_health
 import marzban_regional_filtering as marzban_regional
 import marzban_observability
+import market_commerce
 import secrets
 
 import base64
@@ -1113,6 +1114,8 @@ def init_db():
         marzban_local_health.install_schema(conn)
         marzban_regional.install_schema(conn)
         marzban_observability.install_schema(conn)
+        # Direct Market V1 Phase 1 — additive, feature-gated commerce schema.
+        market_commerce.install_schema(conn)
         # ---------------------------------------------------------
         
 

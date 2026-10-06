@@ -152,6 +152,23 @@ class RadarRuntimePersistenceTests(unittest.TestCase):
         self.assertEqual(runtime["success_streak"], 0)
         self.assertEqual(runtime["error_streak"], 1)
 
+    def test_bot_wires_radar_monitor_into_clean_lifecycle(self):
+        source = BOT_PATH.read_text(encoding="utf-8")
+        self.assertIn("import radar_runtime", source)
+        self.assertIn(
+            "radar_monitor = radar_runtime.RadarMonitor(DB_PATH)",
+            source,
+        )
+        self.assertIn(
+            "app.bot_data['radar_monitor_task'] = asyncio.create_task("
+            "radar_monitor.loop(app))",
+            source,
+        )
+        self.assertIn(
+            "('radar_monitor_task', '🌐 Cloudflare Radar Network Context')",
+            source,
+        )
+
     def test_runtime_source_has_no_operational_side_effect_hooks(self):
         source = RUNTIME_PATH.read_text(encoding="utf-8")
         for forbidden in (

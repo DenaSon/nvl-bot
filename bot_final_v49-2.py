@@ -356,7 +356,7 @@ from server_migration.telegram_wizard import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V123B3R-2026-10-06-node-rename-lifecycle"
+BOT_VERSION_TAG = "V123B32M-2026-10-06-safe-node-move"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -7738,6 +7738,80 @@ def _mza_node_install_result_text(report, node=None):
             "Firewall/Security Group یا دسترسی Main Server به Service Port را بررسی کنید.",
         ])
     return "\n".join(lines)
+
+
+_MZA_NODE_MOVE_TEXT_STATES = {
+    "MZA_NODE_MOVE_ADDRESS_INPUT",
+    "MZA_NODE_MOVE_SSH_PORT_INPUT",
+    "MZA_NODE_MOVE_PASSWORD_INPUT",
+    "MZA_NODE_MOVE_INSTALL_PASSWORD_INPUT",
+}
+
+
+def _mza_clear_node_move(context, *, cancel_session=False, chat_id=None):
+    if context.user_data.get("state") in _MZA_NODE_MOVE_TEXT_STATES:
+        context.user_data.pop("state", None)
+    context.user_data.pop("mza_node_move_guard", None)
+    context.user_data.pop("mza_node_move_draft", None)
+    if cancel_session and chat_id is not None:
+        marzban_node_bootstrap.cancel_session(chat_id)
+
+
+def _mza_node_move_report_kb(context, node_id, *, ready=False):
+    kb = []
+    if ready:
+        kb.append([
+            InlineKeyboardButton(
+                "🚀 آماده‌سازی مقصد + Certificate",
+                callback_data=f"mza_nmove_install_{node_id}",
+            )
+        ])
+    kb.extend([
+        [InlineKeyboardButton("🔄 اجرای دوباره Preflight", callback_data=f"mza_nmove_restart_{node_id}")],
+        [InlineKeyboardButton("❌ لغو Move", callback_data=f"mza_nmove_cancel_{node_id}")],
+    ])
+    return kb
+
+
+async def _mza_probe_node_move_host_key(target, context, session):
+    try:
+        info = await asyncio.to_thread(
+            marzban_node_bootstrap.discover_host_key,
+            session,
+        )
+    except Exception as exc:
+        await _mza_render(
+            target,
+            "❌ <b>دریافت SSH Host Key مقصد ناموفق بود.</b>\n\n"
+            f"Destination: <code>{esc(session.host)}:{esc(session.ssh_port)}</code>\n"
+            f"خطا: <code>{esc(type(exc).__name__)}: {esc(exc)}</code>\n\n"
+            "هیچ تغییری روی Node، DNS یا Public Hostها انجام نشد.",
+            [
+                [InlineKeyboardButton("🔄 تلاش مجدد", callback_data=f"mza_nmove_probe_{session.node_id}")],
+                [InlineKeyboardButton("✏️ شروع مجدد Move", callback_data=f"mza_nedit_address_{session.node_id}")],
+                [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nmove_cancel_{session.node_id}")],
+            ],
+        )
+        return False
+
+    await _mza_render(
+        target,
+        "🔐 <b>V123B.3.2 · تایید هویت SSH مقصد</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        f"Destination  <code>{esc(session.host)}:{esc(session.ssh_port)}</code>\n"
+        f"Key Type  <code>{esc(info.algorithm)}</code>\n"
+        f"Fingerprint  <code>{esc(info.sha256)}</code>\n\n"
+        "Fingerprint را با کنسول/پنل VPS مقصد مقایسه کنید. پس از تایید، تمام SSHهای این Move فقط با همین Host Key پذیرفته می‌شوند.",
+        [
+            [InlineKeyboardButton(
+                "✅ Fingerprint را تایید می‌کنم",
+                callback_data=f"mza_nmove_fp_{session.node_id}_{session.host_key_nonce}",
+            )],
+            [InlineKeyboardButton("✏️ تغییر SSH Port", callback_data=f"mza_nmove_restart_{session.node_id}")],
+            [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nmove_cancel_{session.node_id}")],
+        ],
+    )
+    return True
 
 
 async def _mza_probe_node_bootstrap_host_key(target, context, session):

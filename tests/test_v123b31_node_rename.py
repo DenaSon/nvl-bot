@@ -295,13 +295,14 @@ class V123B31RenameUiTests(unittest.TestCase):
         self.assertIn("fingerprint", confirm)
         self.assertIn("nonce", confirm)
 
-    def test_address_lifecycle_remains_locked_for_next_subphase(self):
+    def test_address_lifecycle_is_delegated_to_v123b32_safe_move(self):
         address = self._region(
             "elif d.startswith('mza_nedit_address_'):",
             "elif d.startswith('mza_nedit_ports_'):",
         )
-        self.assertIn("تغییر آدرس این Node در V123A عمداً قفل است", address)
-        self.assertIn("این مسیر در V123B اضافه می‌شود", address)
+        self.assertIn("V123B.3.2 · Safe Node Move / Change IP", address)
+        self.assertIn("MZA_NODE_MOVE_ADDRESS_INPUT", address)
+        self.assertIn("mza_nmove_cancel_", address)
 
     def test_partial_rename_keeps_pending_and_offers_repair(self):
         confirm = self._region(

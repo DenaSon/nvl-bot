@@ -105,6 +105,7 @@ import marzban_local_health
 import marzban_regional_filtering as marzban_regional
 import marzban_observability
 import market_commerce
+import market_customer
 import secrets
 
 import base64
@@ -6006,7 +6007,7 @@ def safe_clear_context(context):
     # نمایندهٔ خاص» روی کاربری عملیات انجام می‌داد (تغییر پسورد/افزایش ظرفیت/حذف)، دکمهٔ
     # «بازگشت» بعد از آن به لیست کامل همهٔ کاربران می‌رفت نه لیست فیلترشدهٔ همان نماینده.
     # این دو کلید هم نگه داشته می‌شوند تا ناوبری در بخش نمایندگان درست بماند.
-    keep = {k: context.user_data[k] for k in ['logged_in', 'role', 'agent_id', 'users_agent_filter', 'user_page'] if k in context.user_data}
+    keep = {k: context.user_data[k] for k in ['logged_in', 'role', 'agent_id', 'customer_id', 'users_agent_filter', 'user_page'] if k in context.user_data}
     context.user_data.clear(); context.user_data.update(keep)
 
 def is_auth(context): return context.user_data.get('logged_in', False)
@@ -6555,6 +6556,70 @@ async def require_login(update):
     text = "⛔️ <b>سیستم قفل است.</b>\n\n👤 لطفاً نام کاربری (Username) خود را بفرستید:"
     if update.message: await update.message.reply_text(text, parse_mode="HTML")
     else: await update.effective_message.reply_text(text, parse_mode="HTML")
+
+
+async def require_portal_login(update):
+    text = (
+        "👨‍💼 <b>ورود نماینده / مدیر</b>\n\n"
+        "👤 لطفاً نام کاربری (Username) خود را بفرستید:\n\n"
+        "برای بازگشت به بازار، /start را ارسال کنید."
+    )
+    if update.message:
+        await update.message.reply_text(text, parse_mode="HTML")
+    else:
+        await update.effective_message.reply_text(text, parse_mode="HTML")
+
+
+def _is_private_market_chat(update) -> bool:
+    return str(getattr(getattr(update, 'effective_chat', None), 'type', '') or '').lower() == 'private'
+
+
+def _db_direct_market_enabled() -> bool:
+    with db_conn() as conn:
+        return market_commerce.is_direct_market_enabled(conn)
+
+
+def _db_upsert_market_customer(tg_user_id, chat_id, username, first_name):
+    with db_conn() as conn:
+        return market_commerce.upsert_customer_identity(
+            conn,
+            telegram_user_id=tg_user_id,
+            telegram_chat_id=chat_id,
+            username=username,
+            first_name=first_name,
+        )
+
+
+async def _activate_customer_session(update, context) -> bool:
+    """Resolve Telegram identity to one customer and open the storefront."""
+    if not _is_private_market_chat(update) or not update.effective_user:
+        return False
+
+    customer = await asyncio.to_thread(
+        _db_upsert_market_customer,
+        update.effective_user.id,
+        update.effective_chat.id,
+        getattr(update.effective_user, 'username', None),
+        getattr(update.effective_user, 'first_name', None),
+    )
+    if customer.get('status') != 'active':
+        context.user_data.clear()
+        await update.effective_message.reply_text(
+            "⛔️ حساب بازار شما در حال حاضر فعال نیست. لطفاً با پشتیبانی تماس بگیرید."
+        )
+        return True
+
+    context.user_data.clear()
+    context.user_data.update({
+        'logged_in': True,
+        'role': market_customer.ROLE_CUSTOMER,
+        'agent_id': 0,
+        'customer_id': customer['id'],
+        'state': None,
+    })
+    await show_main_menu(update, context)
+    return True
+
 
 PORTAL_DISPLAY_NAME = "NeVeL"  # 🔒 نام ثابت پورتال و مدیریت — با تغییر «نام برند» در تنظیمات عوض نمی‌شود
 
@@ -7150,6 +7215,8 @@ async def show_main_menu(update_or_query, context):
         kb = [['📊 خروجی مالی امروز (اکسل)', '📅 خروجی مالی این هفته (اکسل)'],
               ['👑 آمار فروش ادمین']]
         text = "📊 پنل اختصاصی حسابداری\n\nجهت دریافت گزارشات مالی از دکمه‌های زیر استفاده نمایید:"
+    elif role == market_customer.ROLE_CUSTOMER:
+        kb = [list(row) for row in market_customer.CUSTOMER_HOME_KEYBOARD]
     else:
         kb = [
             ['➕ فروش اشتراک', '👥 کاربران'],
@@ -7168,6 +7235,8 @@ async def show_main_menu(update_or_query, context):
             "━━━━━━━━━━━━━━\n"
             "فروش، کاربران و زیرساخت از مسیرهای جدا و مشخص مدیریت می‌شوند."
         )
+    elif role == market_customer.ROLE_CUSTOMER:
+        text = market_customer.CUSTOMER_HOME_TEXT
     elif role != 'accountant':
         text = (
             "🏛 پنل نمایندگی\n"
@@ -7202,12 +7271,26 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_main_menu(update, context)
         return
 
-    if not is_auth(context):
-        context.user_data.clear(); context.user_data['state'] = 'LOGIN_USER'
-        await require_login(update)
-    else: 
+    # Existing authenticated control-plane roles always keep precedence.
+    current_role = context.user_data.get('role') if is_auth(context) else None
+    if current_role in market_customer.LEGACY_PORTAL_ROLES:
         safe_clear_context(context)
         await show_main_menu(update, context)
+        return
+
+    market_enabled = await asyncio.to_thread(_db_direct_market_enabled)
+    if market_customer.should_open_customer_market(
+        direct_market_enabled=market_enabled,
+        is_private_chat=_is_private_market_chat(update),
+        authenticated_role=current_role,
+    ):
+        if await _activate_customer_session(update, context):
+            return
+
+    # Feature OFF/non-private chat keeps the exact legacy login entry path.
+    context.user_data.clear()
+    context.user_data['state'] = 'LOGIN_USER'
+    await require_login(update)
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7227,6 +7310,13 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ عملیات جاری لغو شد.")
         await show_main_menu(update, context)
     else:
+        market_enabled = await asyncio.to_thread(_db_direct_market_enabled)
+        if market_customer.should_open_customer_market(
+            direct_market_enabled=market_enabled,
+            is_private_chat=_is_private_market_chat(update),
+            authenticated_role=None,
+        ) and await _activate_customer_session(update, context):
+            return
         await require_login(update)
 
 
@@ -11952,6 +12042,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '🛡 بررسی فیلترینگ', '🛰 بررسی مرزبان',
         '🛠 V2Ray / Marzban', '🧩 برنامه‌ها', '🧩 برنامه ها', '📦 بکاپ',
         '💳 شارژ حساب', '💰 کیف پول و حساب',
+        market_customer.BUTTON_SERVICES, market_customer.BUTTON_WALLET,
+        market_customer.BUTTON_TRANSACTIONS, market_customer.BUTTON_AGENT_LOGIN,
         '✏️ نام برند', '💳 کارت اختصاصی',
         # Backward-compatible aliases from pre-5.6 keyboards/messages
         '🛒 خرید اشتراک', '👥 مدیریت کاربران', '💼 مدیریت نماینده‌ها', '📊 آمار و لاگ',
@@ -11979,6 +12071,23 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text in main_menus and is_auth(context):
         safe_clear_context(context)
+
+        # Direct Market customer is a separate actor. Never let customer text
+        # fall through into legacy Agent/Admin menu actions.
+        if role == market_customer.ROLE_CUSTOMER:
+            if text == market_customer.BUTTON_AGENT_LOGIN:
+                context.user_data.clear()
+                context.user_data['state'] = 'LOGIN_USER'
+                await require_portal_login(update)
+                return
+            if text in market_customer.CUSTOMER_PLACEHOLDER_LABELS:
+                await update.message.reply_text(
+                    market_customer.phase2_placeholder_text(text)
+                )
+                return
+            await update.message.reply_text("⛔️ این گزینه برای حساب مشتری در دسترس نیست.")
+            return
+
         if text == '👑 تنظیمات سوپر ادمین' and chat_id == SUPER_ADMIN_ID:
             kb = [[InlineKeyboardButton("📊 فعالیت‌های سیستم (ادمین)", callback_data="super_admin_stats")],
                   [InlineKeyboardButton("💼 سوابق مالی نمایندگان", callback_data="super_agent_list")],
@@ -12016,7 +12125,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                    InlineKeyboardButton("↩️ خیر، انصراف", callback_data="confirm_logout_no")]]
             await update.message.reply_text("⚠️ آیا مطمئن هستید که می‌خواهید از ربات خارج شوید؟", reply_markup=InlineKeyboardMarkup(kb))
             return
-        elif text in ('➕ فروش / ساخت اشتراک', '➕ فروش اشتراک', '🛒 خرید اشتراک'):
+        elif text in ('➕ فروش / ساخت اشتراک', '➕ فروش اشتراک', '🛒 خرید اشتراک') and role in ('admin', 'agent'):
             await _show_buy_start(update, context)
             return
         elif text in ('👥 کاربران', '👥 کاربران من', '👥 مدیریت کاربران') and role in ('admin', 'agent'):
@@ -12158,6 +12267,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await update.message.reply_text("❌ نام کاربری را اشتباه وارد کرده‌اید.\n\n👤 لطفاً دوباره نام کاربری (Username) را بفرستید:")
                         context.user_data['state'] = 'LOGIN_USER'
         else: await require_login(update); context.user_data['state'] = 'LOGIN_USER'
+        return
+
+    # Customer sessions never enter legacy state machines. Phase 2 accepts
+    # storefront keyboard navigation only.
+    if role == market_customer.ROLE_CUSTOMER:
+        await update.message.reply_text(market_customer.CUSTOMER_USE_MENU_TEXT)
+        await show_main_menu(update, context)
         return
 
     # 💼 ساخت و مدیریت نماینده
@@ -15311,6 +15427,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_auth(context): return
     query = update.callback_query; await query.answer(); d = query.data
     role, ag_id = context.user_data.get('role'), context.user_data.get('agent_id', 0)
+
+    # Phase 2 security boundary: customer sessions are authenticated only for
+    # storefront identity, not for any legacy Admin/Agent callback. Customer
+    # callbacks are introduced explicitly in later phases.
+    if role == market_customer.ROLE_CUSTOMER:
+        await query.message.reply_text("⛔️ این عملیات برای حساب مشتری در دسترس نیست.")
+        return
 
     # 🚨 گارد اجباری بودن برند نماینده در کالبک‌ها (بررسی مستقیم از دیتابیس)
     if role == 'agent':

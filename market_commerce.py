@@ -215,3 +215,88 @@ def install_schema(conn: sqlite3.Connection) -> None:
         END
         """
     )
+
+
+def is_direct_market_enabled(conn: sqlite3.Connection) -> bool:
+    """Read the master Direct Market feature flag without mutating it."""
+    row = conn.execute(
+        "SELECT value FROM settings WHERE key=?",
+        (DIRECT_MARKET_FLAG_KEY,),
+    ).fetchone()
+    return bool(row and str(row[0]).strip() == "1")
+
+
+def _normalize_telegram_id(value: int, field: str, *, allow_negative: bool = False) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be an integer Telegram id")
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be an integer Telegram id") from exc
+    if normalized == 0 or (normalized < 0 and not allow_negative):
+        raise ValueError(f"{field} is invalid")
+    return normalized
+
+
+def _normalize_optional_identity_text(value: object, max_length: int) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if not normalized:
+        return None
+    return normalized[:max_length]
+
+
+def upsert_customer_identity(
+    conn: sqlite3.Connection,
+    *,
+    telegram_user_id: int,
+    telegram_chat_id: int,
+    username: str | None = None,
+    first_name: str | None = None,
+) -> dict:
+    """Create/refresh one Telegram customer identity and return its DB record.
+
+    Status is deliberately never overwritten here: a future blocked/disabled
+    customer cannot reactivate itself just by sending /start again.
+    """
+    user_id = _normalize_telegram_id(telegram_user_id, "telegram_user_id")
+    chat_id = _normalize_telegram_id(
+        telegram_chat_id,
+        "telegram_chat_id",
+        allow_negative=True,
+    )
+    username_n = _normalize_optional_identity_text(username, 64)
+    first_name_n = _normalize_optional_identity_text(first_name, 255)
+
+    conn.execute(
+        """
+        INSERT INTO customers(
+            telegram_user_id, telegram_chat_id, username, first_name
+        ) VALUES (?, ?, ?, ?)
+        ON CONFLICT(telegram_user_id) DO UPDATE SET
+            telegram_chat_id=excluded.telegram_chat_id,
+            username=excluded.username,
+            first_name=excluded.first_name,
+            updated_at=CURRENT_TIMESTAMP
+        """,
+        (user_id, chat_id, username_n, first_name_n),
+    )
+    row = conn.execute(
+        """
+        SELECT id, telegram_user_id, telegram_chat_id, username, first_name, status
+        FROM customers
+        WHERE telegram_user_id=?
+        """,
+        (user_id,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("customer identity upsert did not return a record")
+    return {
+        "id": int(row[0]),
+        "telegram_user_id": int(row[1]),
+        "telegram_chat_id": int(row[2]),
+        "username": row[3],
+        "first_name": row[4],
+        "status": str(row[5] or ""),
+    }

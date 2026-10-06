@@ -193,7 +193,7 @@ class V123B1AdoptionUiTests(unittest.TestCase):
 
     def test_version_and_node_detail_expose_adoption_state(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V123B3R-2026-10-06-node-rename-lifecycle"',
+            'BOT_VERSION_TAG = "V123B32M-2026-10-06-safe-node-move"',
             self.source,
         )
         region = self._region(

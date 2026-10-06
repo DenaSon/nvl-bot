@@ -203,7 +203,7 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
 
     def test_release_marker_includes_phase6h_on_top_of_phase6g_engine(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V123B3R-2026-10-06-node-rename-lifecycle"',
+            'BOT_VERSION_TAG = "V123B32M-2026-10-06-safe-node-move"',
             self.source,
         )
 

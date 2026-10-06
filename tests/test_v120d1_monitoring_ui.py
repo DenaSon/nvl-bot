@@ -96,7 +96,7 @@ class V120D1MonitoringUITests(unittest.TestCase):
 
     def test_release_marker(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V123B3R-2026-10-06-node-rename-lifecycle"',
+            'BOT_VERSION_TAG = "V123B32M-2026-10-06-safe-node-move"',
             self.source,
         )
 

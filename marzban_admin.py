@@ -12,12 +12,15 @@ This module intentionally keeps the existing ``(ok, payload)`` contract used by
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
 import ipaddress
 import json
 import math
 import re
 import socket
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1998,6 +2001,347 @@ class MarzbanAdminService:
             "verification": verification,
         })
         return True, result
+
+    async def preview_node_public_profile_move(
+        self,
+        node_id: int,
+        new_address: Any,
+        public_address: Any,
+        tags: Any = NVL_NODE_PUBLIC_HOST_TAGS,
+    ) -> ApiResult:
+        """GET-only V123B.3.2 preview for moving one managed Node backend.
+
+        The Stable Public Endpoint and managed Host payloads must already be
+        canonical. This preview never changes DNS, Node settings, or Hosts.
+        """
+        try:
+            node_id = normalize_node_id(node_id)
+            target_address = normalize_node_changes(
+                {"address": new_address},
+                allow_status=False,
+            )["address"]
+            public = normalize_public_hostname(public_address)
+        except ValueError as exc:
+            return False, {
+                "stage": "move_precheck",
+                "read_only": True,
+                "error": str(exc),
+            }
+
+        ok_plan, repair_plan = await self.preview_node_public_profile_repair(
+            node_id,
+            public,
+            tags,
+        )
+        if not ok_plan or not isinstance(repair_plan, dict):
+            return False, repair_plan
+
+        node = (
+            repair_plan.get("node")
+            if isinstance(repair_plan.get("node"), dict)
+            else {}
+        )
+        current_address = str(node.get("address") or "")
+        issues: List[str] = []
+        if not repair_plan.get("repairable"):
+            issues.extend(map(str, repair_plan.get("issues") or ()))
+        if repair_plan.get("changed_tags"):
+            issues.append(
+                "Managed Public Host profile must be canonical before move"
+            )
+        if repair_plan.get("missing_inbounds"):
+            issues.append(
+                "Required inbound(s) missing: "
+                + ", ".join(map(str, repair_plan.get("missing_inbounds") or ()))
+            )
+        if str(node.get("status") or "").lower() == "disabled":
+            issues.append("Disabled Node cannot be moved because connectivity cannot be verified")
+
+        ok_nodes, nodes = await self.get_nodes()
+        if not ok_nodes or not isinstance(nodes, list):
+            return False, {
+                "stage": "move_precheck",
+                "read_only": True,
+                "node_id": node_id,
+                "node": node,
+                "error": (
+                    nodes
+                    if not ok_nodes
+                    else "Invalid Marzban node list during move destination precheck"
+                ),
+            }
+
+        try:
+            target_port = int(node.get("port") or 0)
+        except (TypeError, ValueError):
+            target_port = 0
+        for other in nodes:
+            if not isinstance(other, dict):
+                continue
+            try:
+                other_id = normalize_node_id(other.get("id"))
+            except ValueError:
+                continue
+            if other_id == node_id:
+                continue
+            other_address = str(other.get("address") or "").strip().rstrip(".").casefold()
+            try:
+                other_port = int(other.get("port") or 0)
+            except (TypeError, ValueError):
+                other_port = 0
+            if (
+                other_address == str(target_address).strip().rstrip(".").casefold()
+                and other_port == target_port
+            ):
+                issues.append(
+                    f"Another Node already uses destination {target_address}:{target_port}"
+                )
+                break
+
+        no_change = (
+            current_address.strip().rstrip(".").casefold()
+            == str(target_address).strip().rstrip(".").casefold()
+        )
+        base_fingerprint = str(repair_plan.get("fingerprint") or "")
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "base_fingerprint": base_fingerprint,
+                    "node_id": node_id,
+                    "name": node.get("name"),
+                    "old_address": current_address,
+                    "new_address": target_address,
+                    "port": node.get("port"),
+                    "api_port": node.get("api_port"),
+                    "status": node.get("status"),
+                    "public_address": public,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+
+        return True, {
+            "stage": "move_preview",
+            "read_only": True,
+            "moveable": not issues,
+            "no_change": no_change,
+            "node_id": node_id,
+            "node": node,
+            "old_address": current_address,
+            "new_address": target_address,
+            "public_address": public,
+            "managed_remark": str(repair_plan.get("managed_remark") or ""),
+            "managed_tags": list(repair_plan.get("managed_tags") or ()),
+            "fingerprint": fingerprint,
+            "issues": issues,
+        }
+
+    async def move_node_public_profile(
+        self,
+        node_id: int,
+        new_address: Any,
+        public_address: Any,
+        tags: Any = NVL_NODE_PUBLIC_HOST_TAGS,
+        *,
+        expected_fingerprint: Any,
+        connect_timeout: int = 45,
+        rollback_timeout: int = 30,
+    ) -> ApiResult:
+        """Switch one managed Node backend and fail-safe rollback on connect failure.
+
+        Public Hosts are never rewritten here: their stable hostname must remain
+        unchanged. DNS is finalized only after this control-plane switch succeeds.
+        """
+        ok_preview, preview = await self.preview_node_public_profile_move(
+            node_id,
+            new_address,
+            public_address,
+            tags,
+        )
+        if not ok_preview or not isinstance(preview, dict):
+            return False, preview
+        if not preview.get("moveable"):
+            failed = dict(preview)
+            failed.update({"stage": "move_precheck", "read_only": True})
+            return False, failed
+
+        expected = str(expected_fingerprint or "")
+        current = str(preview.get("fingerprint") or "")
+        if not expected or expected != current:
+            return False, {
+                "stage": "move_stale",
+                "read_only": True,
+                "moved": False,
+                "node_id": preview.get("node_id"),
+                "old_address": preview.get("old_address"),
+                "new_address": preview.get("new_address"),
+                "public_address": preview.get("public_address"),
+                "expected_fingerprint": expected,
+                "current_fingerprint": current,
+                "error": "Node or Public Host state changed after move preview",
+            }
+
+        if preview.get("no_change"):
+            return True, {
+                **preview,
+                "stage": "move_verified",
+                "read_only": False,
+                "moved": False,
+                "rolled_back": False,
+                "verified": True,
+                "connected": str(
+                    (preview.get("node") or {}).get("status") or ""
+                ).lower() == "connected",
+            }
+
+        node_id = normalize_node_id(preview.get("node_id"))
+        old_node = (
+            preview.get("node")
+            if isinstance(preview.get("node"), dict)
+            else {}
+        )
+        old_address = str(preview.get("old_address") or "")
+        target_address = str(preview.get("new_address") or "")
+        expected_name = str(old_node.get("name") or "")
+        try:
+            expected_port = int(old_node.get("port") or 0)
+            expected_api_port = int(old_node.get("api_port") or 0)
+        except (TypeError, ValueError):
+            expected_port = 0
+            expected_api_port = 0
+
+        async def wait_connected(timeout: int):
+            deadline = time.monotonic() + max(1, int(timeout))
+            last = None
+            while time.monotonic() < deadline:
+                ok_node, current_node = await self.get_node(node_id)
+                if ok_node and isinstance(current_node, dict):
+                    last = current_node
+                    if str(current_node.get("status") or "").lower() == "connected":
+                        return True, current_node
+                await asyncio.sleep(2)
+            return False, last
+
+        async def rollback(reason: Any):
+            ok_rollback, rollback_response = await self.update_node_settings(
+                node_id,
+                address=old_address,
+            )
+            rollback_connected = False
+            rollback_node = None
+            if ok_rollback:
+                with contextlib.suppress(Exception):
+                    await self.reconnect_node(node_id)
+                rollback_connected, rollback_node = await wait_connected(
+                    rollback_timeout
+                )
+            return False, {
+                "stage": "move_connect_rollback",
+                "read_only": False,
+                "moved": True,
+                "rolled_back": bool(ok_rollback),
+                "rollback_connected": bool(rollback_connected),
+                "node_id": node_id,
+                "old_address": old_address,
+                "new_address": target_address,
+                "public_address": preview.get("public_address"),
+                "rollback_response": rollback_response,
+                "rollback_node": rollback_node,
+                "error": reason,
+            }
+
+        ok_move, move_response = await self.update_node_settings(
+            node_id,
+            address=target_address,
+        )
+        if not ok_move:
+            return False, {
+                "stage": "move_node_write",
+                "read_only": False,
+                "moved": False,
+                "rolled_back": False,
+                "node_id": node_id,
+                "old_address": old_address,
+                "new_address": target_address,
+                "public_address": preview.get("public_address"),
+                "error": move_response,
+            }
+
+        ok_node, moved_node = await self.get_node(node_id)
+        try:
+            moved_port = int(moved_node.get("port") or 0) if isinstance(moved_node, dict) else 0
+            moved_api_port = int(moved_node.get("api_port") or 0) if isinstance(moved_node, dict) else 0
+        except (TypeError, ValueError):
+            moved_port = 0
+            moved_api_port = 0
+        moved_identity_ok = (
+            ok_node
+            and isinstance(moved_node, dict)
+            and str(moved_node.get("address") or "").strip().rstrip(".").casefold()
+                == target_address.strip().rstrip(".").casefold()
+            and str(moved_node.get("name") or "") == expected_name
+            and moved_port == expected_port
+            and moved_api_port == expected_api_port
+        )
+        if not moved_identity_ok:
+            return await rollback(
+                moved_node
+                if not ok_node
+                else "Moved Node identity/ports did not verify"
+            )
+
+        ok_hosts, hosts_payload = await self.get_hosts()
+        if not ok_hosts or not isinstance(hosts_payload, dict):
+            return await rollback(
+                hosts_payload
+                if not ok_hosts
+                else "Invalid Marzban hosts response after Node address update"
+            )
+        try:
+            verification = inspect_node_public_host_profile(
+                hosts_payload,
+                moved_node,
+                tags,
+                public_address=preview.get("public_address"),
+            )
+        except ValueError as exc:
+            return await rollback(str(exc))
+        if not verification.get("adoptable"):
+            return await rollback(
+                {
+                    "error": "Stable Public Host profile changed during move",
+                    "verification": verification,
+                }
+            )
+
+        with contextlib.suppress(Exception):
+            await self.reconnect_node(node_id)
+        connected, connected_node = await wait_connected(connect_timeout)
+        if not connected:
+            return await rollback(
+                "Destination Node did not reach connected state before timeout"
+            )
+
+        return True, {
+            "stage": "move_verified",
+            "read_only": False,
+            "moved": True,
+            "rolled_back": False,
+            "verified": True,
+            "connected": True,
+            "node_id": node_id,
+            "node": connected_node,
+            "old_address": old_address,
+            "new_address": target_address,
+            "public_address": preview.get("public_address"),
+            "managed_remark": preview.get("managed_remark"),
+            "managed_tags": preview.get("managed_tags"),
+            "host_verification": verification,
+            "response": move_response,
+        }
 
     async def preview_node_public_profile_rename(
         self,

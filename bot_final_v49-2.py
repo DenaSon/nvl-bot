@@ -356,7 +356,7 @@ from server_migration.telegram_wizard import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V123B3R-2026-10-06-node-rename-lifecycle"
+BOT_VERSION_TAG = "V123B32M-2026-10-06-safe-node-move"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -7740,6 +7740,80 @@ def _mza_node_install_result_text(report, node=None):
     return "\n".join(lines)
 
 
+_MZA_NODE_MOVE_TEXT_STATES = {
+    "MZA_NODE_MOVE_ADDRESS_INPUT",
+    "MZA_NODE_MOVE_SSH_PORT_INPUT",
+    "MZA_NODE_MOVE_PASSWORD_INPUT",
+    "MZA_NODE_MOVE_INSTALL_PASSWORD_INPUT",
+}
+
+
+def _mza_clear_node_move(context, *, cancel_session=False, chat_id=None):
+    if context.user_data.get("state") in _MZA_NODE_MOVE_TEXT_STATES:
+        context.user_data.pop("state", None)
+    context.user_data.pop("mza_node_move_guard", None)
+    context.user_data.pop("mza_node_move_draft", None)
+    if cancel_session and chat_id is not None:
+        marzban_node_bootstrap.cancel_session(chat_id)
+
+
+def _mza_node_move_report_kb(context, node_id, *, ready=False):
+    kb = []
+    if ready:
+        kb.append([
+            InlineKeyboardButton(
+                "🚀 آماده‌سازی مقصد + Certificate",
+                callback_data=f"mza_nmove_install_{node_id}",
+            )
+        ])
+    kb.extend([
+        [InlineKeyboardButton("🔄 اجرای دوباره Preflight", callback_data=f"mza_nmove_restart_{node_id}")],
+        [InlineKeyboardButton("❌ لغو Move", callback_data=f"mza_nmove_cancel_{node_id}")],
+    ])
+    return kb
+
+
+async def _mza_probe_node_move_host_key(target, context, session):
+    try:
+        info = await asyncio.to_thread(
+            marzban_node_bootstrap.discover_host_key,
+            session,
+        )
+    except Exception as exc:
+        await _mza_render(
+            target,
+            "❌ <b>دریافت SSH Host Key مقصد ناموفق بود.</b>\n\n"
+            f"Destination: <code>{esc(session.host)}:{esc(session.ssh_port)}</code>\n"
+            f"خطا: <code>{esc(type(exc).__name__)}: {esc(exc)}</code>\n\n"
+            "هیچ تغییری روی Node، DNS یا Public Hostها انجام نشد.",
+            [
+                [InlineKeyboardButton("🔄 تلاش مجدد", callback_data=f"mza_nmove_probe_{session.node_id}")],
+                [InlineKeyboardButton("✏️ شروع مجدد Move", callback_data=f"mza_nedit_address_{session.node_id}")],
+                [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nmove_cancel_{session.node_id}")],
+            ],
+        )
+        return False
+
+    await _mza_render(
+        target,
+        "🔐 <b>V123B.3.2 · تایید هویت SSH مقصد</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        f"Destination  <code>{esc(session.host)}:{esc(session.ssh_port)}</code>\n"
+        f"Key Type  <code>{esc(info.algorithm)}</code>\n"
+        f"Fingerprint  <code>{esc(info.sha256)}</code>\n\n"
+        "Fingerprint را با کنسول/پنل VPS مقصد مقایسه کنید. پس از تایید، تمام SSHهای این Move فقط با همین Host Key پذیرفته می‌شوند.",
+        [
+            [InlineKeyboardButton(
+                "✅ Fingerprint را تایید می‌کنم",
+                callback_data=f"mza_nmove_fp_{session.node_id}_{session.host_key_nonce}",
+            )],
+            [InlineKeyboardButton("✏️ تغییر SSH Port", callback_data=f"mza_nmove_restart_{session.node_id}")],
+            [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nmove_cancel_{session.node_id}")],
+        ],
+    )
+    return True
+
+
 async def _mza_probe_node_bootstrap_host_key(target, context, session):
     try:
         info = await asyncio.to_thread(
@@ -10413,6 +10487,324 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"❌ خطا: <code>{_mig_error_text(exc)}</code>",
                 parse_mode='HTML',
+            )
+            return
+
+    # 🌐 V123B.3.2 Safe Node Move input.  Move metadata in user_data is
+    # non-secret; SSH passwords live only in the in-memory bootstrap session.
+    if state in _MZA_NODE_MOVE_TEXT_STATES:
+        if role != 'admin':
+            _mza_clear_node_move(context, cancel_session=True, chat_id=chat_id)
+            context.user_data.pop('mza_action_node', None)
+            await update.message.reply_text("⛔️ دسترسی غیرمجاز.")
+            return
+
+        if state == 'MZA_NODE_MOVE_ADDRESS_INPUT':
+            try:
+                node_id = marzban_admin.normalize_node_id(
+                    context.user_data.get('mza_action_node')
+                )
+                target_address = marzban_admin.normalize_node_changes(
+                    {"address": text},
+                    allow_status=False,
+                )["address"]
+            except ValueError as exc:
+                await update.message.reply_text(
+                    f"❌ آدرس مقصد نامعتبر است: <code>{esc(exc)}</code>",
+                    parse_mode='HTML',
+                )
+                return
+
+            service = await _get_marzban_admin_service()
+            profile = await asyncio.to_thread(
+                _db_get_marzban_node_public_profile,
+                node_id,
+            )
+            if (
+                not profile
+                or str(profile.get("profile_state") or "").lower() != "verified"
+            ):
+                _mza_clear_node_move(context, cancel_session=True, chat_id=chat_id)
+                context.user_data.pop('mza_action_node', None)
+                await update.message.reply_text(
+                    "🛡 Stable Public Endpoint دیگر verified نیست؛ Move متوقف شد."
+                )
+                return
+
+            ok_plan, plan = await service.preview_node_public_profile_move(
+                node_id,
+                target_address,
+                profile.get("public_address"),
+                marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+            )
+            if not ok_plan or not isinstance(plan, dict):
+                await update.message.reply_text(
+                    "❌ Preview خواندنی Move ناموفق بود. هیچ تغییری اعمال نشد.\n"
+                    f"<code>{esc(plan)}</code>",
+                    parse_mode='HTML',
+                )
+                return
+            if not plan.get("moveable"):
+                issues = " | ".join(map(str, plan.get("issues") or ())) or "move precheck failed"
+                await update.message.reply_text(
+                    "⛔️ <b>Safe Node Move قابل شروع نیست.</b>\n\n"
+                    f"<code>{esc(issues)}</code>\n\n"
+                    "هیچ تغییری روی Node، DNS یا Hostها انجام نشد.",
+                    parse_mode='HTML',
+                )
+                return
+            if plan.get("no_change"):
+                context.user_data.pop('state', None)
+                context.user_data.pop('mza_action_node', None)
+                await update.message.reply_text(
+                    "✅ آدرس مقصد با Address فعلی Node یکسان است؛ Move لازم نیست."
+                )
+                return
+
+            node = plan.get("node") if isinstance(plan.get("node"), dict) else {}
+            try:
+                session = marzban_node_bootstrap.begin_session(
+                    chat_id,
+                    node_id=node_id,
+                    host=plan.get("new_address"),
+                    service_port=node.get("port", 62050),
+                    api_port=node.get("api_port", 62051),
+                )
+            except Exception as exc:
+                await update.message.reply_text(
+                    f"❌ ساخت نشست SSH مقصد ناموفق بود: <code>{esc(exc)}</code>",
+                    parse_mode='HTML',
+                )
+                return
+
+            context.user_data["mza_node_move_draft"] = {
+                "node_id": node_id,
+                "old_address": str(plan.get("old_address") or ""),
+                "new_address": str(plan.get("new_address") or ""),
+                "public_address": str(plan.get("public_address") or ""),
+                "managed_remark": str(plan.get("managed_remark") or ""),
+                "node_name": str(node.get("name") or ""),
+                "port": int(node.get("port") or 62050),
+                "api_port": int(node.get("api_port") or 62051),
+                "initial_fingerprint": str(plan.get("fingerprint") or ""),
+                "destination_ready": False,
+                "control_plane_ready": False,
+                "started_at": time.time(),
+            }
+            context.user_data.pop('state', None)
+            context.user_data.pop('mza_action_node', None)
+            await update.message.reply_text(
+                "🌐 <b>V123B.3.2 · Destination Preflight</b>\n"
+                "━━━━━━━━━━━━━━\n"
+                f"Node  <b>{esc(node.get('name') or node_id)}</b>\n"
+                f"Old Address  <code>{esc(plan.get('old_address'))}</code>\n"
+                f"Destination  <code>{esc(plan.get('new_address'))}</code>\n"
+                f"Public Endpoint  <code>{esc(plan.get('public_address'))}</code>\n\n"
+                "فعلاً فقط SSH و آمادگی مقصد بررسی می‌شود؛ Node ID، DNS و Public Hostها ثابت‌اند.\n\n"
+                "SSH مقصد روی چه پورتی در دسترس است؟",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ پورت 22", callback_data=f"mza_nmove_port22_{node_id}")],
+                    [InlineKeyboardButton("✏️ پورت دیگر", callback_data=f"mza_nmove_portcustom_{node_id}")],
+                    [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nmove_cancel_{node_id}")],
+                ]),
+            )
+            return
+
+        session = marzban_node_bootstrap.get_session(chat_id)
+        draft = context.user_data.get("mza_node_move_draft")
+        if session is None or not isinstance(draft, dict):
+            _mza_clear_node_move(context, cancel_session=True, chat_id=chat_id)
+            await update.message.reply_text(
+                "⚠️ نشست Safe Node Move پس از restart یا timeout موجود نیست. "
+                "از صفحه Node دوباره «آدرس» را بزنید."
+            )
+            return
+
+        if state == 'MZA_NODE_MOVE_SSH_PORT_INPUT':
+            try:
+                marzban_node_bootstrap.set_ssh_port(session, text)
+            except ValueError:
+                await update.message.reply_text(
+                    "❌ پورت SSH معتبر نیست. عددی بین 1 تا 65535 بفرستید.",
+                    parse_mode='HTML',
+                )
+                return
+            except Exception as exc:
+                _mza_clear_node_move(context, cancel_session=True, chat_id=chat_id)
+                await update.message.reply_text(
+                    f"❌ نشست Move نامعتبر است: <code>{esc(exc)}</code>",
+                    parse_mode='HTML',
+                )
+                return
+            context.user_data.pop('state', None)
+            await _mza_probe_node_move_host_key(update.message, context, session)
+            return
+
+        if state == 'MZA_NODE_MOVE_PASSWORD_INPUT':
+            with contextlib.suppress(Exception):
+                await update.message.delete()
+            try:
+                marzban_node_bootstrap.set_password(session, text)
+            except ValueError:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ رمز SSH خالی یا بیش از حد طولانی است. دوباره ارسال کنید.",
+                )
+                return
+            except Exception as exc:
+                _mza_clear_node_move(context, cancel_session=True, chat_id=chat_id)
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"❌ نشست Move نامعتبر است: <code>{esc(exc)}</code>",
+                    parse_mode='HTML',
+                )
+                return
+
+            context.user_data.pop('state', None)
+            status_message = await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "⏳ <b>Destination SSH Preflight در حال اجراست...</b>\n"
+                    f"<code>{esc(session.host)}:{esc(session.ssh_port)}</code>\n"
+                    "هیچ تغییری روی مقصد یا Marzban اعمال نمی‌شود."
+                ),
+                parse_mode='HTML',
+            )
+            report = await asyncio.to_thread(
+                marzban_node_bootstrap.run_preflight,
+                session,
+            )
+            await status_message.edit_text(
+                _mza_node_bootstrap_report_text(report),
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(
+                    _mza_node_move_report_kb(
+                        context,
+                        session.node_id,
+                        ready=report.ready,
+                    )
+                ),
+            )
+            return
+
+        if state == 'MZA_NODE_MOVE_INSTALL_PASSWORD_INPUT':
+            with contextlib.suppress(Exception):
+                await update.message.delete()
+            try:
+                marzban_node_install.set_install_password(session, text)
+            except ValueError:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ رمز SSH خالی یا بیش از حد طولانی است. دوباره ارسال کنید.",
+                )
+                return
+            except Exception as exc:
+                context.user_data.pop('state', None)
+                session.scrub_secret()
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"❌ نشست نصب مقصد نامعتبر است: <code>{esc(exc)}</code>",
+                    parse_mode='HTML',
+                )
+                return
+
+            context.user_data.pop('state', None)
+            service = await _get_marzban_admin_service()
+            profile = await asyncio.to_thread(
+                _db_get_marzban_node_public_profile,
+                session.node_id,
+            )
+            (ok_node, current_node), (ok_settings, settings_payload) = await asyncio.gather(
+                service.get_node(session.node_id),
+                service.get_node_settings(),
+            )
+            stale = (
+                not isinstance(draft, dict)
+                or not profile
+                or str(profile.get("profile_state") or "").lower() != "verified"
+                or str(profile.get("public_address") or "").rstrip(".").casefold()
+                    != str(draft.get("public_address") or "").rstrip(".").casefold()
+                or not ok_node
+                or not isinstance(current_node, dict)
+                or str(current_node.get("address") or "").rstrip(".").casefold()
+                    != str(draft.get("old_address") or "").rstrip(".").casefold()
+                or str(current_node.get("name") or "") != str(draft.get("node_name") or "")
+            )
+            if stale:
+                session.scrub_secret()
+                session.stage = "INSTALL_FAILED"
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "⛔️ <b>Node یا mapping از زمان شروع Move تغییر کرده است.</b>\n"
+                        "هیچ نصب Remote شروع نشد. Move را از صفحه Node دوباره شروع کنید."
+                    ),
+                    parse_mode='HTML',
+                )
+                return
+            if not ok_settings or not isinstance(settings_payload, dict):
+                session.scrub_secret()
+                session.stage = "INSTALL_FAILED"
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "❌ <b>Certificate از Marzban دریافت نشد.</b>\n"
+                        f"<code>{esc(settings_payload)}</code>\n"
+                        "هیچ نصب Remote شروع نشد."
+                    ),
+                    parse_mode='HTML',
+                )
+                return
+
+            status_message = await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "⏳ <b>آماده‌سازی مقصد در حال اجراست...</b>\n"
+                    f"<code>{esc(session.host)}</code>\n\n"
+                    "Docker/Compose → Certificate → Marzban-node → Listener Verify\n"
+                    "هنوز Node.address و DNS تغییر نمی‌کنند."
+                ),
+                parse_mode='HTML',
+            )
+            report = await asyncio.to_thread(
+                marzban_node_install.run_install,
+                session,
+                certificate=str(settings_payload.get("certificate") or ""),
+            )
+            if not report.success:
+                await status_message.edit_text(
+                    _mza_node_install_result_text(report),
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 تلاش مجدد نصب مقصد", callback_data=f"mza_nmove_install_{session.node_id}")],
+                        [InlineKeyboardButton("❌ لغو Move", callback_data=f"mza_nmove_cancel_{session.node_id}")],
+                    ]),
+                )
+                return
+
+            draft["destination_ready"] = True
+            draft["destination_host_key"] = str(session.host_key_sha256 or "")
+            draft["destination_ssh_port"] = int(session.ssh_port)
+            draft["installed_at"] = time.time()
+            context.user_data["mza_node_move_draft"] = draft
+            await status_message.edit_text(
+                "✅ <b>Destination Ready</b>\n"
+                "━━━━━━━━━━━━━━\n"
+                f"Node ID  <code>{esc(session.node_id)}</code>\n"
+                f"Old Address  <code>{esc(draft.get('old_address'))}</code>\n"
+                f"New Address  <code>{esc(draft.get('new_address'))}</code>\n"
+                f"Public Endpoint  <code>{esc(draft.get('public_address'))}</code>\n"
+                "Certificate  <b>✅ installed</b>\n"
+                "Marzban-node  <b>✅ running</b>\n"
+                f"Service {esc(session.service_port)}  <b>{'✅ listening' if report.service_port_listening else '⚠️ not detected'}</b>\n"
+                f"Xray API {esc(session.api_port)}  <b>{'✅ listening' if report.api_port_listening else '⏳ pending until control-plane connect'}</b>\n\n"
+                "هنوز هیچ Cutoverی انجام نشده است. قدم بعدی فقط Preview تغییر Control Plane است.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔎 Cutover Preview", callback_data=f"mza_nmove_cutover_{session.node_id}")],
+                    [InlineKeyboardButton("❌ لغو Move", callback_data=f"mza_nmove_cancel_{session.node_id}")],
+                ]),
             )
             return
 
@@ -14644,9 +15036,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         node_adopt_starter = d.startswith('mza_nadopt_')
         node_repair_starter = d.startswith('mza_nrepair_')
         node_rename_starter = d.startswith('mza_nrename_')
+        node_move_starter = d.startswith('mza_nmove_')
         node_bootstrap_starter = (
             d.startswith('mza_nboot_')
             or d.startswith('mza_ninstall_')
+            or d.startswith('mza_nmove_')
             or d.startswith('mza_node_')
         )
         create_starter = d == 'mza_create' or d.startswith('mza_c') or d.startswith('mza_create_')
@@ -14663,6 +15057,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             or node_adopt_starter
             or node_repair_starter
             or node_rename_starter
+            or node_move_starter
             or node_bootstrap_starter
             or create_starter
         )
@@ -14683,6 +15078,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'MZA_NODE_RATIO_INPUT',
             'MZA_NODE_ADOPT_PUBLIC_INPUT',
             'MZA_NODE_REPAIR_PUBLIC_INPUT',
+            'MZA_NODE_MOVE_ADDRESS_INPUT',
+            'MZA_NODE_MOVE_SSH_PORT_INPUT',
+            'MZA_NODE_MOVE_PASSWORD_INPUT',
+            'MZA_NODE_MOVE_INSTALL_PASSWORD_INPUT',
             'MZA_NODE_CREATE_NAME_INPUT',
             'MZA_NODE_CREATE_ADDRESS_INPUT',
             'MZA_NODE_CREATE_PUBLIC_INPUT',
@@ -14710,6 +15109,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _mza_clear_node_repair(context)
         if not node_rename_starter and not node_edit_starter:
             context.user_data.pop("mza_node_rename_guard", None)
+        if not node_move_starter and not d.startswith('mza_nedit_address_'):
+            # Do not discard a post-cutover pending move silently; the draft is
+            # non-secret recovery metadata and Repair can still finalize it.
+            draft = context.user_data.get("mza_node_move_draft")
+            if not (isinstance(draft, dict) and draft.get("control_plane_ready")):
+                _mza_clear_node_move(context)
 
         # Confirmation messages can outlive the screen that created them.
         # Only a new edit in the same domain may preserve that domain's pending
@@ -16786,6 +17191,609 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    elif d.startswith('mza_nmove_cancel_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nmove_cancel_'):])
+        draft = context.user_data.get("mza_node_move_draft")
+        if isinstance(draft, dict) and draft.get("control_plane_ready"):
+            await query.edit_message_text(
+                "🛡 <b>Move بعد از Control-Plane Cutover قابل لغو ساده نیست.</b>\n\n"
+                "Node اکنون روی مقصد جدید connected شده و mapping عمداً pending است. "
+                "DNS را به مقصد جدید ببرید و Finalize کنید؛ یا از Repair برای recovery استفاده کنید.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Finalize Move", callback_data=f"mza_nmove_finalize_{node_id}")],
+                    [InlineKeyboardButton("🛠 Repair Public Endpoint", callback_data=f"mza_nrepair_{node_id}")],
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")],
+                ]),
+            )
+            return
+        _mza_clear_node_move(
+            context,
+            cancel_session=True,
+            chat_id=query.message.chat_id,
+        )
+        context.user_data.pop('mza_action_node', None)
+        await _show_marzban_node_detail(query, context, node_id)
+        return
+
+    elif d.startswith('mza_nmove_restart_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nmove_restart_'):])
+        draft = context.user_data.get("mza_node_move_draft")
+        if (
+            not isinstance(draft, dict)
+            or int(draft.get("node_id") or 0) != node_id
+            or draft.get("control_plane_ready")
+        ):
+            await query.edit_message_text(
+                "❌ نشست Move قابل شروع مجدد نیست؛ از صفحه Node دوباره «آدرس» را بزنید.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+        try:
+            session = marzban_node_bootstrap.begin_session(
+                query.message.chat_id,
+                node_id=node_id,
+                host=draft.get("new_address"),
+                service_port=draft.get("port"),
+                api_port=draft.get("api_port"),
+            )
+        except Exception as exc:
+            await query.edit_message_text(
+                f"❌ شروع مجدد Move ناموفق بود: <code>{esc(exc)}</code>",
+                parse_mode='HTML',
+            )
+            return
+        context.user_data.pop('state', None)
+        await query.edit_message_text(
+            "🌐 <b>Destination SSH · شروع مجدد</b>\n\n"
+            f"Destination  <code>{esc(session.host)}</code>\n"
+            "SSH مقصد روی چه پورتی در دسترس است؟",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ پورت 22", callback_data=f"mza_nmove_port22_{node_id}")],
+                [InlineKeyboardButton("✏️ پورت دیگر", callback_data=f"mza_nmove_portcustom_{node_id}")],
+                [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nmove_cancel_{node_id}")],
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_nmove_port22_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nmove_port22_'):])
+        try:
+            session = marzban_node_bootstrap.require_session(query.message.chat_id)
+            if session.node_id != node_id:
+                raise marzban_node_bootstrap.NodeBootstrapError("Move target changed")
+            marzban_node_bootstrap.set_ssh_port(session, 22)
+        except Exception as exc:
+            await query.edit_message_text(
+                f"❌ نشست Move نامعتبر است: <code>{esc(exc)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✏️ شروع مجدد", callback_data=f"mza_nmove_restart_{node_id}")]
+                ]),
+            )
+            return
+        context.user_data.pop('state', None)
+        await _mza_probe_node_move_host_key(query, context, session)
+        return
+
+    elif d.startswith('mza_nmove_portcustom_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nmove_portcustom_'):])
+        try:
+            session = marzban_node_bootstrap.require_session(query.message.chat_id)
+            if session.node_id != node_id:
+                raise marzban_node_bootstrap.NodeBootstrapError("Move target changed")
+        except Exception:
+            await query.edit_message_text(
+                "❌ نشست Move منقضی شده است.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✏️ شروع مجدد", callback_data=f"mza_nmove_restart_{node_id}")]
+                ]),
+            )
+            return
+        context.user_data['state'] = 'MZA_NODE_MOVE_SSH_PORT_INPUT'
+        await query.edit_message_text(
+            "🔌 <b>SSH Port مقصد</b>\n\nپورت SSH را بفرستید؛ مثال: <code>22</code> یا <code>2222</code>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nmove_cancel_{node_id}")]
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_nmove_probe_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nmove_probe_'):])
+        try:
+            session = marzban_node_bootstrap.require_session(query.message.chat_id)
+            if session.node_id != node_id:
+                raise marzban_node_bootstrap.NodeBootstrapError("Move target changed")
+        except Exception:
+            await query.edit_message_text(
+                "❌ نشست Move منقضی شده است.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✏️ شروع مجدد", callback_data=f"mza_nmove_restart_{node_id}")]
+                ]),
+            )
+            return
+        await _mza_probe_node_move_host_key(query, context, session)
+        return
+
+    elif d.startswith('mza_nmove_fp_'):
+        rest = d[len('mza_nmove_fp_'):]
+        try:
+            raw_node_id, nonce = rest.split('_', 1)
+            node_id = marzban_admin.normalize_node_id(raw_node_id)
+            session = marzban_node_bootstrap.require_session(query.message.chat_id)
+            if session.node_id != node_id:
+                raise marzban_node_bootstrap.NodeBootstrapError("Move target changed")
+            marzban_node_bootstrap.confirm_host_key(session, nonce)
+        except Exception as exc:
+            context.user_data.pop('state', None)
+            await query.edit_message_text(
+                "❌ تایید SSH Host Key منقضی یا نامعتبر است.\n"
+                f"<code>{esc(type(exc).__name__)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✏️ شروع مجدد", callback_data=f"mza_nmove_restart_{raw_node_id if 'raw_node_id' in locals() else 0}")]
+                ]),
+            )
+            return
+
+        context.user_data['state'] = 'MZA_NODE_MOVE_PASSWORD_INPUT'
+        await query.edit_message_text(
+            "🔑 <b>Destination SSH Password</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"Server  <code>{esc(session.host)}:{esc(session.ssh_port)}</code>\n"
+            f"Pinned Host Key  <code>{esc(session.host_key_sha256)}</code>\n\n"
+            "رمز root مقصد را بفرستید. رمز فقط در RAM نگه‌داری می‌شود و بلافاصله بعد از Preflight پاک می‌شود.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nmove_cancel_{node_id}")]
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_nmove_install_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nmove_install_'):])
+        draft = context.user_data.get("mza_node_move_draft")
+        try:
+            session = marzban_node_bootstrap.require_session(query.message.chat_id)
+            if (
+                session.node_id != node_id
+                or not isinstance(draft, dict)
+                or int(draft.get("node_id") or 0) != node_id
+            ):
+                raise marzban_node_bootstrap.NodeBootstrapError("Move target changed")
+            marzban_node_install.prepare_install(session)
+        except Exception as exc:
+            context.user_data.pop('state', None)
+            await query.edit_message_text(
+                "⚠️ <b>Destination Preflight معتبر پیدا نشد.</b>\n\n"
+                f"<code>{esc(type(exc).__name__)}: {esc(exc)}</code>\n"
+                "برای ایمنی Preflight مقصد را دوباره اجرا کنید.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 شروع مجدد Preflight", callback_data=f"mza_nmove_restart_{node_id}")],
+                    [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nmove_cancel_{node_id}")],
+                ]),
+            )
+            return
+
+        context.user_data['state'] = 'MZA_NODE_MOVE_INSTALL_PASSWORD_INPUT'
+        await query.edit_message_text(
+            "🚀 <b>آماده‌سازی Destination</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"Server  <code>{esc(session.host)}:{esc(session.ssh_port)}</code>\n"
+            f"Pinned Host Key  <code>{esc(session.host_key_sha256)}</code>\n"
+            f"Service Port  <code>{esc(session.service_port)}</code>\n"
+            f"Xray API Port  <code>{esc(session.api_port)}</code>\n\n"
+            "رمز root را دوباره بفرستید. NVL ممکن است Docker/Compose را نصب کند، Certificate فعلی Marzban را بنویسد و marzban-node را اجرا کند.\n\n"
+            "<b>Node.address و DNS هنوز تغییر نمی‌کنند.</b>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nmove_cancel_{node_id}")]
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_nmove_cutover_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nmove_cutover_'):])
+        draft = context.user_data.get("mza_node_move_draft")
+        if (
+            not isinstance(draft, dict)
+            or int(draft.get("node_id") or 0) != node_id
+            or not draft.get("destination_ready")
+            or draft.get("control_plane_ready")
+        ):
+            await query.edit_message_text(
+                "❌ مقصد آماده یا Move draft معتبر نیست؛ Destination Preflight/Install را دوباره انجام دهید.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+
+        profile = await asyncio.to_thread(_db_get_marzban_node_public_profile, node_id)
+        if (
+            not profile
+            or str(profile.get("profile_state") or "").lower() != "verified"
+            or str(profile.get("public_address") or "").rstrip(".").casefold()
+                != str(draft.get("public_address") or "").rstrip(".").casefold()
+        ):
+            await query.edit_message_text(
+                "🛡 mapping از زمان آماده‌سازی مقصد تغییر کرده است؛ Cutover متوقف شد.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🛠 Repair Public Endpoint", callback_data=f"mza_nrepair_{node_id}")],
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")],
+                ]),
+            )
+            return
+
+        service = await _get_marzban_admin_service()
+        ok_plan, plan = await service.preview_node_public_profile_move(
+            node_id,
+            draft.get("new_address"),
+            draft.get("public_address"),
+            marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+        )
+        if not ok_plan or not isinstance(plan, dict) or not plan.get("moveable"):
+            await query.edit_message_text(
+                "⛔️ Cutover Preview ناموفق بود؛ هیچ تغییری انجام نشد.\n"
+                f"<code>{esc(plan)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]
+                ]),
+            )
+            return
+        if plan.get("no_change"):
+            await query.edit_message_text(
+                "⚠️ Node.address از قبل روی مقصد جدید است. برای recovery از Repair/Finalize استفاده کنید.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Finalize Move", callback_data=f"mza_nmove_finalize_{node_id}")],
+                    [InlineKeyboardButton("🛠 Repair Public Endpoint", callback_data=f"mza_nrepair_{node_id}")],
+                ]),
+            )
+            return
+
+        old_dns = await asyncio.to_thread(
+            marzban_admin.preflight_public_endpoint,
+            draft.get("old_address"),
+            draft.get("public_address"),
+        )
+        new_dns = await asyncio.to_thread(
+            marzban_admin.preflight_public_endpoint,
+            draft.get("new_address"),
+            draft.get("public_address"),
+        )
+        if old_dns.get("ok"):
+            dns_state = "Old Backend ✅ (preferred)"
+            dns_mode = "old"
+        elif new_dns.get("ok"):
+            dns_state = "New Backend ⚠️ (DNS already switched)"
+            dns_mode = "new"
+        else:
+            await query.edit_message_text(
+                "⛔️ <b>DNS وضعیت قابل‌اعتماد ندارد.</b>\n\n"
+                f"Public Endpoint  <code>{esc(draft.get('public_address'))}</code>\n"
+                f"Old Backend  <code>{esc(draft.get('old_address'))}</code> ❌\n"
+                f"New Backend  <code>{esc(draft.get('new_address'))}</code> ❌\n\n"
+                "Cutover اجرا نشد. DNS باید فعلاً روی Backend قدیمی باشد؛ اگر قبلاً تغییرش داده‌اید، باید دقیقاً به مقصد جدید resolve شود.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 بررسی دوباره", callback_data=f"mza_nmove_cutover_{node_id}")],
+                    [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nmove_cancel_{node_id}")],
+                ]),
+            )
+            return
+
+        nonce = secrets.token_hex(8)
+        context.user_data["mza_node_move_guard"] = {
+            "node_id": node_id,
+            "nonce": nonce,
+            "fingerprint": str(plan.get("fingerprint") or ""),
+            "old_address": str(draft.get("old_address") or ""),
+            "new_address": str(draft.get("new_address") or ""),
+            "public_address": str(draft.get("public_address") or ""),
+            "managed_remark": str(draft.get("managed_remark") or ""),
+            "dns_mode": dns_mode,
+            "started_at": time.time(),
+        }
+        await query.edit_message_text(
+            "🌐 <b>V123B.3.2 · Control-Plane Cutover Preview</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"Node ID  <code>{node_id}</code> · unchanged\n"
+            f"Node  <b>{esc((plan.get('node') or {}).get('name') or node_id)}</b>\n"
+            f"Old Address  <code>{esc(draft.get('old_address'))}</code>\n"
+            f"New Address  <code>{esc(draft.get('new_address'))}</code>\n"
+            f"Public Endpoint  <code>{esc(draft.get('public_address'))}</code> · unchanged\n"
+            f"DNS Now  <b>{esc(dns_state)}</b>\n"
+            "Certificate  <b>✅ destination prepared</b>\n"
+            f"Managed Hosts  <b>{len(marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS)} · unchanged</b>\n\n"
+            "Confirm فقط Node.address را روی همین Node ID تغییر می‌دهد، reconnect می‌کند و connected شدن مقصد را Verify می‌کند. "
+            "اگر مقصد connected نشود، NVL Address قبلی را خودکار rollback می‌کند.\n\n"
+            "<b>Public Host address و Hostهای دستی تغییر نمی‌کنند.</b>",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ اجرای Control-Plane Cutover", callback_data=f"mza_nmove_confirm_{nonce}")],
+                [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nmove_cancel_{node_id}")],
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_nmove_confirm_'):
+        nonce = d[len('mza_nmove_confirm_'):]
+        guard = context.user_data.get("mza_node_move_guard")
+        draft = context.user_data.get("mza_node_move_draft")
+        age = (
+            time.time() - float(guard.get("started_at") or 0)
+            if isinstance(guard, dict)
+            else float("inf")
+        )
+        try:
+            node_id = marzban_admin.normalize_node_id(
+                guard.get("node_id") if isinstance(guard, dict) else None
+            )
+        except ValueError:
+            node_id = None
+        if (
+            not isinstance(guard, dict)
+            or not isinstance(draft, dict)
+            or age > 600
+            or node_id is None
+            or nonce != str(guard.get("nonce") or "")
+            or int(draft.get("node_id") or 0) != node_id
+            or not draft.get("destination_ready")
+            or draft.get("control_plane_ready")
+        ):
+            context.user_data.pop("mza_node_move_guard", None)
+            await query.edit_message_text(
+                "❌ تایید Cutover منقضی یا نامعتبر است؛ Preview را دوباره بگیرید."
+            )
+            return
+
+        profile = await asyncio.to_thread(_db_get_marzban_node_public_profile, node_id)
+        service = await _get_marzban_admin_service()
+        ok_plan, plan = await service.preview_node_public_profile_move(
+            node_id,
+            guard.get("new_address"),
+            guard.get("public_address"),
+            marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+        )
+        old_dns = await asyncio.to_thread(
+            marzban_admin.preflight_public_endpoint,
+            guard.get("old_address"),
+            guard.get("public_address"),
+        )
+        new_dns = await asyncio.to_thread(
+            marzban_admin.preflight_public_endpoint,
+            guard.get("new_address"),
+            guard.get("public_address"),
+        )
+        stale = (
+            not profile
+            or str(profile.get("profile_state") or "").lower() != "verified"
+            or str(profile.get("public_address") or "").rstrip(".").casefold()
+                != str(guard.get("public_address") or "").rstrip(".").casefold()
+            or str(profile.get("managed_remark") or "") != str(guard.get("managed_remark") or "")
+            or not ok_plan
+            or not isinstance(plan, dict)
+            or not plan.get("moveable")
+            or plan.get("no_change")
+            or str(plan.get("fingerprint") or "") != str(guard.get("fingerprint") or "")
+            or not (old_dns.get("ok") or new_dns.get("ok"))
+        )
+        if stale:
+            context.user_data.pop("mza_node_move_guard", None)
+            await query.edit_message_text(
+                "⚠️ <b>Cutover متوقف شد؛ Node، mapping، DNS یا Managed Hostها از زمان Preview تغییر کرده‌اند.</b>\n\n"
+                "هیچ PUT جدیدی اجرا نشد.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Preview دوباره", callback_data=f"mza_nmove_cutover_{node_id}")],
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")],
+                ]),
+            )
+            return
+
+        try:
+            await asyncio.to_thread(
+                _db_upsert_marzban_node_public_profile,
+                node_id,
+                guard.get("public_address"),
+                guard.get("managed_remark"),
+                "pending",
+            )
+        except Exception as exc:
+            context.user_data.pop("mza_node_move_guard", None)
+            await query.edit_message_text(
+                "❌ ثبت mapping به حالت pending شکست خورد؛ هیچ PUT روی Marzban انجام نشد.\n"
+                f"<code>{esc(type(exc).__name__)}: {esc(exc)}</code>",
+                parse_mode='HTML',
+            )
+            return
+
+        await query.edit_message_text(
+            "⏳ <b>Control-Plane Cutover در حال اجراست...</b>\n\n"
+            f"<code>{esc(guard.get('old_address'))}</code> → <code>{esc(guard.get('new_address'))}</code>\n"
+            "Node update → Reconnect → Connected Verify\n"
+            "در صورت شکست، rollback خودکار به Address قبلی اجرا می‌شود.",
+            parse_mode='HTML',
+        )
+        ok_move, result = await service.move_node_public_profile(
+            node_id,
+            guard.get("new_address"),
+            guard.get("public_address"),
+            marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+            expected_fingerprint=guard.get("fingerprint"),
+        )
+        context.user_data.pop("mza_node_move_guard", None)
+
+        if not ok_move or not isinstance(result, dict) or not result.get("verified"):
+            dns_back = await asyncio.to_thread(
+                marzban_admin.preflight_public_endpoint,
+                guard.get("old_address"),
+                guard.get("public_address"),
+            )
+            safe_rollback = (
+                isinstance(result, dict)
+                and result.get("rolled_back")
+                and result.get("rollback_connected")
+                and dns_back.get("ok")
+            )
+            if safe_rollback:
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(
+                        _db_upsert_marzban_node_public_profile,
+                        node_id,
+                        guard.get("public_address"),
+                        guard.get("managed_remark"),
+                        "verified",
+                    )
+            await query.edit_message_text(
+                (
+                    "↩️ <b>Cutover موفق نشد؛ Address قبلی rollback و connected شد.</b>\n"
+                    if safe_rollback
+                    else "⚠️ <b>Cutover کامل نشد و وضعیت نیاز به بررسی دارد.</b>\n"
+                )
+                + "━━━━━━━━━━━━━━\n"
+                + f"Stage  <code>{esc(result.get('stage') if isinstance(result, dict) else 'unknown')}</code>\n"
+                + f"Old Address  <code>{esc(guard.get('old_address'))}</code>\n"
+                + f"New Address  <code>{esc(guard.get('new_address'))}</code>\n"
+                + (
+                    "Profile  <code>verified</code>\n"
+                    if safe_rollback
+                    else "Profile  <code>pending</code>\n"
+                )
+                + "\nDNS را تغییر ندهید تا وضعیت Node بررسی شود.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")],
+                    [InlineKeyboardButton("🛠 Repair Public Endpoint", callback_data=f"mza_nrepair_{node_id}")],
+                ]),
+            )
+            return
+
+        draft["control_plane_ready"] = True
+        draft["control_plane_at"] = time.time()
+        context.user_data["mza_node_move_draft"] = draft
+        await query.edit_message_text(
+            "✅ <b>Control Plane روی مقصد جدید متصل شد</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"Node ID  <code>{node_id}</code> · unchanged\n"
+            f"Real Address  <code>{esc(result.get('new_address'))}</code>\n"
+            f"Public Endpoint  <code>{esc(result.get('public_address'))}</code> · unchanged\n"
+            "Node Status  <b>🟢 connected</b>\n"
+            "Managed Hosts  <b>✅ unchanged / verified</b>\n"
+            "Profile  <code>pending</code>\n\n"
+            "<b>حالا DNS Public Endpoint را به IP مقصد جدید تغییر دهید.</b>\n"
+            "بعد از propagation، Finalize را بزنید. تا آن زمان mapping عمداً pending می‌ماند.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ DNS را تغییر دادم · Finalize", callback_data=f"mza_nmove_finalize_{node_id}")],
+                [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")],
+            ]),
+        )
+        return
+
+    elif d.startswith('mza_nmove_finalize_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_nmove_finalize_'):])
+        draft = context.user_data.get("mza_node_move_draft")
+        if (
+            not isinstance(draft, dict)
+            or int(draft.get("node_id") or 0) != node_id
+            or not draft.get("control_plane_ready")
+        ):
+            await query.edit_message_text(
+                "❌ Move draft نهایی موجود نیست. اگر Node قبلاً منتقل شده، Repair Public Endpoint را اجرا کنید.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🛠 Repair Public Endpoint", callback_data=f"mza_nrepair_{node_id}")],
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")],
+                ]),
+            )
+            return
+
+        service = await _get_marzban_admin_service()
+        ok_node, node = await service.get_node(node_id)
+        dns = await asyncio.to_thread(
+            marzban_admin.preflight_public_endpoint,
+            draft.get("new_address"),
+            draft.get("public_address"),
+        )
+        ok_profile, plan = await service.preview_node_public_profile_repair(
+            node_id,
+            draft.get("public_address"),
+            marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+        )
+        node_ok = (
+            ok_node
+            and isinstance(node, dict)
+            and str(node.get("address") or "").rstrip(".").casefold()
+                == str(draft.get("new_address") or "").rstrip(".").casefold()
+            and str(node.get("status") or "").lower() == "connected"
+        )
+        profile_ok = (
+            ok_profile
+            and isinstance(plan, dict)
+            and plan.get("repairable")
+            and not plan.get("changed_tags")
+        )
+        if not dns.get("ok") or not node_ok or not profile_ok:
+            reason = []
+            if not dns.get("ok"):
+                reason.append("DNS هنوز به مقصد جدید Match نیست")
+            if not node_ok:
+                reason.append("Node روی مقصد جدید connected نیست")
+            if not profile_ok:
+                reason.append("Managed Public Host profile canonical نیست")
+            await query.edit_message_text(
+                "⏳ <b>Finalize هنوز قابل انجام نیست.</b>\n\n"
+                + "\n".join(f"• {esc(item)}" for item in reason)
+                + "\n\nهیچ mapping نهایی ثبت نشد.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 بررسی دوباره", callback_data=f"mza_nmove_finalize_{node_id}")],
+                    [InlineKeyboardButton("🛠 Repair Public Endpoint", callback_data=f"mza_nrepair_{node_id}")],
+                ]),
+            )
+            return
+
+        await asyncio.to_thread(
+            _db_upsert_marzban_node_public_profile,
+            node_id,
+            draft.get("public_address"),
+            plan.get("managed_remark") or draft.get("managed_remark"),
+            "verified",
+        )
+        public_address = str(draft.get("public_address") or "")
+        new_address = str(draft.get("new_address") or "")
+        _mza_clear_node_move(
+            context,
+            cancel_session=True,
+            chat_id=query.message.chat_id,
+        )
+        context.user_data.pop('mza_action_node', None)
+        await query.edit_message_text(
+            "✅ <b>V123B.3.2 · Safe Node Move Verify شد</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"Node ID  <code>{node_id}</code> · unchanged\n"
+            f"Real Address  <code>{esc(new_address)}</code>\n"
+            f"Public Endpoint  <code>{esc(public_address)}</code>\n"
+            "DNS Match  ✅\n"
+            "Node Status  <b>🟢 connected</b>\n"
+            f"Managed Hosts  <b>{len(marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS)} · canonical</b>\n"
+            "Profile  <code>verified</code>\n\n"
+            "Node جدید ساخته نشد؛ همان Node ID به Backend جدید منتقل شد و Public Endpoint کاربران ثابت ماند.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")],
+                [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
+            ]),
+        )
+        return
+
     elif d.startswith('mza_nedit_name_'):
         node_id = marzban_admin.normalize_node_id(d[len('mza_nedit_name_'):])
         context.user_data['state'] = 'MZA_NODE_NAME_INPUT'
@@ -16822,14 +17830,35 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             node_id,
         )
         if protected_profile:
+            if str(protected_profile.get("profile_state") or "").lower() != "verified":
+                await query.edit_message_text(
+                    "🛡 <b>Safe Node Move متوقف شد.</b> Stable Public Endpoint ابتدا باید verified باشد.\n\n"
+                    f"Public Endpoint: <code>{esc(protected_profile.get('public_address'))}</code>\n"
+                    f"Profile: <code>{esc(protected_profile.get('profile_state') or 'pending')}</code>",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🛠 Repair Public Endpoint", callback_data=f"mza_nrepair_{node_id}")],
+                        [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_node_{node_id}")],
+                    ]),
+                )
+                return
+            _mza_clear_node_move(
+                context,
+                cancel_session=True,
+                chat_id=query.message.chat_id,
+            )
+            context.user_data['state'] = 'MZA_NODE_MOVE_ADDRESS_INPUT'
+            context.user_data['mza_action_node'] = node_id
             await query.edit_message_text(
-                "🛡 <b>تغییر آدرس این Node در V123A عمداً قفل است.</b>\n\n"
-                f"Public Endpoint: <code>{esc(protected_profile.get('public_address'))}</code>\n\n"
-                "تغییر IP باید همراه با Verify دامنه عمومی و lifecycle امن انجام شود؛ "
-                "این مسیر در V123B اضافه می‌شود.",
+                "🌐 <b>V123B.3.2 · Safe Node Move / Change IP</b>\n"
+                "━━━━━━━━━━━━━━\n"
+                f"Public Endpoint  <code>{esc(protected_profile.get('public_address'))}</code>\n\n"
+                "IP یا hostname واقعی <b>سرور مقصد</b> را بفرستید.\n\n"
+                "NVL ابتدا مقصد را با SSH بررسی و Marzban-node + Certificate را آماده می‌کند. "
+                "در این مرحله Node ID، DNS و Public Hostها تغییر نمی‌کنند.",
                 parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("↩️ بازگشت", callback_data=f"mza_node_{node_id}")]
+                    [InlineKeyboardButton("❌ لغو", callback_data=f"mza_nmove_cancel_{node_id}")]
                 ]),
             )
             return

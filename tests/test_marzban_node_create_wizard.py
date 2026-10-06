@@ -268,10 +268,12 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
         uncertain_end = region.index("await query.edit_message_text(", uncertain_start + 50)
         self.assertNotIn("service.delete_node(", region[uncertain_start:uncertain_end])
 
-    def test_v123b31_unlocks_managed_rename_but_keeps_address_and_legacy_confirm_locked(self):
+    def test_v123b32_unlocks_managed_address_only_through_safe_move_and_keeps_legacy_confirm_locked(self):
         self.assertIn("V123B.3.1 · Rename Managed Node", self.source)
         self.assertIn("mza_nrename_confirm_", self.source)
-        self.assertIn("تغییر آدرس این Node در V123A عمداً قفل است", self.source)
+        self.assertIn("V123B.3.2 · Safe Node Move / Change IP", self.source)
+        self.assertIn("MZA_NODE_MOVE_ADDRESS_INPUT", self.source)
+        self.assertIn("mza_nmove_confirm_", self.source)
         confirm_region = self._region(
             "elif d.startswith('mza_nedit_confirm_'):",
             "elif d.startswith('mza_hedit_'):",

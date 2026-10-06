@@ -107,7 +107,7 @@ class DirectMarketPhase1SchemaTests(unittest.TestCase):
             self.conn.execute(
                 "SELECT value FROM settings WHERE key='direct_market_schema_version'"
             ).fetchone()[0],
-            "1",
+            str(market_commerce.DIRECT_MARKET_SCHEMA_VERSION),
         )
 
         tables = {

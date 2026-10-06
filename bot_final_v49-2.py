@@ -10386,6 +10386,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(
                     "🌐 <b>مرحله ۲ از ۵ · آدرس واقعی Node</b>\n\n"
                     "IP یا hostname <b>خود سرور Node</b> را بفرستید؛ همان سروری که Marzban-node روی آن اجرا می‌شود.\n"
+                    "دامنه یا IP پنل اصلی Marzban را وارد نکنید، مگر اینکه همان سرور Node باشد.\n"
                     "این مقدار برای ارتباط Marzban با Node است و داخل Subscription کاربران منتشر نمی‌شود.\n\n"
                     "بدون <code>http://</code> یا <code>https://</code>\n"
                     "مثال: <code>203.0.113.20</code>",

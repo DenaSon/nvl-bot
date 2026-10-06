@@ -195,19 +195,27 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
         post_pos = region.index("service.create_node(")
         self.assertLess(preflight_pos, post_pos)
 
-    def test_v123a_persists_profile_only_after_host_verify(self):
+    def test_v123a_persists_pending_ownership_before_host_write_then_promotes(self):
         region = self._region(
             "elif d.startswith('mza_ncreate_confirm_'):",
             "elif d == 'mza_nodes':",
         )
+        first_persist = region.index("_db_upsert_marzban_node_public_profile")
         reconcile_pos = region.index("service.reconcile_node_public_hosts(")
-        persist_pos = region.index("_db_upsert_marzban_node_public_profile")
-        self.assertLess(reconcile_pos, persist_pos)
+        second_persist = region.index(
+            "_db_upsert_marzban_node_public_profile",
+            first_persist + 1,
+        )
+        self.assertLess(first_persist, reconcile_pos)
+        self.assertLess(reconcile_pos, second_persist)
+        self.assertIn('"pending"', region)
+        self.assertIn('"verified"', region)
         self.assertIn("managed_remark", region)
         self.assertIn("Node را دوباره نسازید", region)
 
     def test_v123a_schema_and_fail_closed_delete_guard_are_present(self):
         self.assertIn("CREATE TABLE IF NOT EXISTS marzban_node_public_profiles", self.source)
+        self.assertIn("profile_state TEXT NOT NULL DEFAULT 'pending'", self.source)
         self.assertIn("_db_get_marzban_node_public_profile", self.source)
         delete_region = self._region(
             "elif d.startswith('mza_ndelete_confirm_'):",

@@ -22,6 +22,7 @@ AUTO_FAILOVER_REASON_DIFFERENTIAL_NOT_CONFIRMED = "DIFFERENTIAL_NOT_CONFIRMED"
 AUTO_FAILOVER_REASON_DIFFERENTIAL_STALE = "DIFFERENTIAL_STALE"
 AUTO_FAILOVER_REASON_FAILURE_STREAK_LOW = "FAILURE_STREAK_LOW"
 AUTO_FAILOVER_REASON_PROVIDER_NOT_OK = "PROVIDER_NOT_OK"
+AUTO_FAILOVER_REASON_WIDESPREAD_OUTAGE = "WIDESPREAD_NETWORK_OUTAGE"
 AUTO_FAILOVER_REASON_SWITCH_COOLDOWN = "SWITCH_COOLDOWN_ACTIVE"
 AUTO_FAILOVER_REASON_ATTEMPT_COOLDOWN = "ATTEMPT_COOLDOWN_ACTIVE"
 AUTO_FAILOVER_REASON_NO_STANDBY = "NO_SAFE_STANDBY"
@@ -52,6 +53,7 @@ def evaluate_auto_failover(
     seconds_since_last_attempt: int,
     attempt_cooldown_seconds: int,
     safe_standby_count: int,
+    external_context_blocks_auto_failover: bool = False,
 ) -> AutoFailoverDecision:
     """Fail-closed Phase 6H policy.
 
@@ -83,6 +85,8 @@ def evaluate_auto_failover(
         return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_FAILURE_STREAK_LOW)
     if str(provider_status or "").upper() != "OK":
         return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_PROVIDER_NOT_OK)
+    if bool(external_context_blocks_auto_failover):
+        return AutoFailoverDecision(False, AUTO_FAILOVER_REASON_WIDESPREAD_OUTAGE)
     try:
         switch_age = float(seconds_since_last_switch)
     except (TypeError, ValueError):

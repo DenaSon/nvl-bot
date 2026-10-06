@@ -356,7 +356,7 @@ from server_migration.telegram_wizard import (
 # (به‌جای حدس‌زدن از روی رفتار، همیشه با این دستور چک کنید:
 #   grep -n "BOT_VERSION_TAG" nvlbot.py
 # و بعد از استارت هم توی لاگ سرویس دیده می‌شود.)
-BOT_VERSION_TAG = "V123B32M-2026-10-06-safe-node-move"
+BOT_VERSION_TAG = "V123B33D-2026-10-06-safe-node-delete"
 
 # ==========================================
 # ⏳ ماژول مدیریت چرخهٔ عمر «On hold پنهان» (V88)
@@ -8141,7 +8141,7 @@ def _db_upsert_marzban_node_public_profile(
     profile_state = str(profile_state or "").strip().lower()
     if not managed_remark:
         raise ValueError("managed Public Host remark is required")
-    if profile_state not in {"pending", "verified"}:
+    if profile_state not in {"pending", "verified", "deleting"}:
         raise ValueError("invalid Marzban Public Endpoint profile state")
     with db_conn() as conn:
         conn.execute(
@@ -8161,6 +8161,33 @@ def _db_upsert_marzban_node_public_profile(
         "managed_remark": managed_remark,
         "profile_state": profile_state,
     }
+
+
+def _db_delete_marzban_node_public_profile(
+    node_id,
+    *,
+    expected_public_address=None,
+    expected_state=None,
+):
+    """Delete local Stable Endpoint ownership only after remote delete verification."""
+    node_id = marzban_admin.normalize_node_id(node_id)
+    clauses = ["node_id=?"]
+    params = [node_id]
+    if expected_public_address is not None:
+        public = marzban_admin.normalize_public_hostname(expected_public_address)
+        clauses.append("lower(rtrim(public_address, '.'))=?")
+        params.append(public.casefold())
+    if expected_state is not None:
+        state = str(expected_state or "").strip().lower()
+        clauses.append("profile_state=?")
+        params.append(state)
+    with db_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM marzban_node_public_profiles WHERE " + " AND ".join(clauses),
+            tuple(params),
+        )
+        deleted = int(cur.rowcount or 0)
+    return deleted == 1
 
 
 _MZA_NODE_ADOPT_TEXT_STATES = {
@@ -16533,6 +16560,127 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _show_marzban_node_detail(query, context, node_id)
         return
 
+    elif d.startswith('mza_ndelete_cleanup_'):
+        node_id = marzban_admin.normalize_node_id(d[len('mza_ndelete_cleanup_'):])
+        profile = await asyncio.to_thread(
+            _db_get_marzban_node_public_profile,
+            node_id,
+        )
+        if (
+            not profile
+            or str(profile.get("profile_state") or "").lower() != "deleting"
+        ):
+            await query.edit_message_text(
+                "ℹ️ Safe Delete recovery برای این Node لازم نیست یا mapping دیگر در حالت deleting نیست.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))]
+                ]),
+            )
+            return
+
+        service = await _get_marzban_admin_service()
+        ok_nodes, nodes = await service.get_nodes()
+        if not ok_nodes or not isinstance(nodes, list):
+            await query.edit_message_text(
+                "⚠️ وضعیت Nodeها قابل Verify نیست؛ هیچ cleanup جدیدی اجرا نشد. دوباره تلاش کنید.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Retry Recovery", callback_data=f"mza_ndelete_cleanup_{node_id}")],
+                    [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
+                ]),
+            )
+            return
+
+        node_present = False
+        for item in nodes:
+            if not isinstance(item, dict):
+                continue
+            try:
+                if marzban_admin.normalize_node_id(item.get("id")) == node_id:
+                    node_present = True
+                    break
+            except ValueError:
+                continue
+
+        if node_present:
+            # The destructive DELETE did not take effect. No managed Host cleanup
+            # can have started because B.3.3 verifies Node absence first.
+            try:
+                await asyncio.to_thread(
+                    _db_upsert_marzban_node_public_profile,
+                    node_id,
+                    profile.get("public_address"),
+                    profile.get("managed_remark"),
+                    "verified",
+                )
+            except Exception:
+                log.exception("B.3.3 recovery could not restore verified mapping for node %s", node_id)
+            await query.edit_message_text(
+                "↩️ <b>Node هنوز در Marzban وجود دارد.</b>\n\n"
+                "Host cleanup اجرا نشد و mapping به verified برگردانده شد. "
+                "برای Retry از صفحه Node دوباره Safe Delete را شروع کنید.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")],
+                    [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
+                ]),
+            )
+            return
+
+        ok_cleanup, cleanup = await service.cleanup_managed_public_hosts(
+            profile.get("public_address"),
+            profile.get("managed_remark"),
+            marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+        )
+        if not ok_cleanup:
+            await query.edit_message_text(
+                "⚠️ <b>Node حذف شده اما Managed Host cleanup هنوز کامل نیست.</b>\n\n"
+                f"<code>{esc(cleanup)}</code>\n\n"
+                "mapping عمداً deleting باقی ماند؛ Retry idempotent است و Node دوباره DELETE نمی‌شود.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Retry Host Cleanup", callback_data=f"mza_ndelete_cleanup_{node_id}")],
+                    [InlineKeyboardButton("🌐 Public Hosts", callback_data="mza_inbounds")],
+                ]),
+            )
+            return
+
+        try:
+            removed = await asyncio.to_thread(
+                _db_delete_marzban_node_public_profile,
+                node_id,
+                expected_public_address=profile.get("public_address"),
+                expected_state="deleting",
+            )
+        except Exception as exc:
+            removed = False
+            log.exception("B.3.3 recovery mapping cleanup failed for node %s", node_id)
+            cleanup = {**cleanup, "mapping_error": f"{type(exc).__name__}: {exc}"}
+        if not removed:
+            await query.edit_message_text(
+                "⚠️ Remote cleanup Verify شد، اما ownership mapping محلی پاک نشد. "
+                "هیچ DELETE دیگری روی Marzban اجرا نمی‌شود؛ Recovery را دوباره بزنید.\n"
+                f"<code>{esc(cleanup)}</code>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Retry Mapping Cleanup", callback_data=f"mza_ndelete_cleanup_{node_id}")]
+                ]),
+            )
+            return
+
+        await query.edit_message_text(
+            "✅ <b>V123B.3.3 · Safe Delete Recovery Verify شد</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"Node ID  <code>{node_id}</code> · absent\n"
+            f"Managed Hosts removed  <b>{esc(cleanup.get('deleted_count', 0))}</b>\n"
+            "Ownership mapping  <code>removed</code>\n\n"
+            "Node دوباره DELETE نشد؛ فقط cleanup باقی‌مانده idempotent تکمیل شد.",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 لیست نودها", callback_data=_mza_nodes_list_callback(context))]
+            ]),
+        )
+        return
+
     elif d.startswith('mza_ndelete_confirm_'):
         rest = d[len('mza_ndelete_confirm_'):]
         try:
@@ -16565,31 +16713,188 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        protected_profile = await asyncio.to_thread(
-            _db_get_marzban_node_public_profile,
-            node_id,
-        )
-        if protected_profile:
-            context.user_data.pop("mza_node_delete_pending", None)
-            context.user_data.pop("mza_node_delete_busy", None)
-            await query.edit_message_text(
-                "🛡 <b>حذف این Node در V123A عمداً قفل است.</b>\n\n"
-                f"Public Endpoint: <code>{esc(protected_profile.get('public_address'))}</code>\n\n"
-                "این Node از Stable Public Endpoint استفاده می‌کند. Cleanup امن Rename/Delete در V123B اضافه می‌شود؛ "
-                "برای جلوگیری از باقی‌ماندن Host یتیم، DELETE اجرا نشد.",
-                parse_mode='HTML',
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("↩️ بازگشت به Node", callback_data=f"mza_node_{node_id}")]
-                ]),
-            )
-            return
-
         if context.user_data.get("mza_node_delete_busy"):
             await query.message.reply_text("⏳ درخواست حذف قبلی هنوز در حال پردازش است.")
             return
 
-        context.user_data["mza_node_delete_busy"] = True
         service = await _get_marzban_admin_service()
+        if pending.get("managed"):
+            profile = await asyncio.to_thread(
+                _db_get_marzban_node_public_profile,
+                node_id,
+            )
+            profile_stale = (
+                not profile
+                or str(profile.get("profile_state") or "").lower() != "verified"
+                or str(profile.get("public_address") or "").rstrip(".").casefold()
+                    != str(pending.get("public_address") or "").rstrip(".").casefold()
+                or str(profile.get("managed_remark") or "")
+                    != str(pending.get("managed_remark") or "")
+            )
+            if profile_stale:
+                context.user_data.pop("mza_node_delete_pending", None)
+                await query.edit_message_text(
+                    "🛡 Safe Delete متوقف شد؛ ownership mapping از زمان Preview تغییر کرده است. "
+                    "هیچ DELETE اجرا نشد.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]
+                    ]),
+                )
+                return
+
+            ok_preview, preview = await service.preview_node_public_profile_delete(
+                node_id,
+                profile.get("public_address"),
+                profile.get("managed_remark"),
+                marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+            )
+            node = (
+                preview.get("node")
+                if ok_preview and isinstance(preview, dict) and isinstance(preview.get("node"), dict)
+                else {}
+            )
+            dns = (
+                await asyncio.to_thread(
+                    marzban_admin.preflight_public_endpoint_detached,
+                    node.get("address"),
+                    profile.get("public_address"),
+                )
+                if node
+                else {"ok": False, "error": "Node preview failed"}
+            )
+            stale = (
+                not ok_preview
+                or not isinstance(preview, dict)
+                or not preview.get("deletable")
+                or str(preview.get("fingerprint") or "")
+                    != str(pending.get("fingerprint") or "")
+                or not dns.get("ok")
+            )
+            if stale:
+                context.user_data.pop("mza_node_delete_pending", None)
+                context.user_data.pop("mza_node_delete_busy", None)
+                await query.edit_message_text(
+                    "⚠️ <b>Safe Delete متوقف شد؛ Node/Hosts/DNS از زمان Preview تغییر کرده‌اند.</b>\n\n"
+                    "هیچ DELETE اجرا نشد. Preview را دوباره بسازید.",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 Preview دوباره", callback_data=f"mza_ndelete_{node_id}")],
+                        [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")],
+                    ]),
+                )
+                return
+
+            try:
+                await asyncio.to_thread(
+                    _db_upsert_marzban_node_public_profile,
+                    node_id,
+                    profile.get("public_address"),
+                    profile.get("managed_remark"),
+                    "deleting",
+                )
+            except Exception as exc:
+                context.user_data.pop("mza_node_delete_pending", None)
+                await query.edit_message_text(
+                    "❌ ثبت ownership به حالت deleting شکست خورد؛ هیچ DELETE روی Marzban اجرا نشد.\n"
+                    f"<code>{esc(type(exc).__name__)}: {esc(exc)}</code>",
+                    parse_mode='HTML',
+                )
+                return
+
+            context.user_data["mza_node_delete_busy"] = True
+            ok_delete, result = await service.delete_node_public_profile(
+                node_id,
+                profile.get("public_address"),
+                profile.get("managed_remark"),
+                marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+                expected_fingerprint=pending.get("fingerprint"),
+            )
+            context.user_data.pop("mza_node_delete_busy", None)
+            context.user_data.pop("mza_node_delete_pending", None)
+
+            if not ok_delete:
+                deleted_remote = isinstance(result, dict) and bool(result.get("deleted"))
+                if not deleted_remote:
+                    with contextlib.suppress(Exception):
+                        await asyncio.to_thread(
+                            _db_upsert_marzban_node_public_profile,
+                            node_id,
+                            profile.get("public_address"),
+                            profile.get("managed_remark"),
+                            "verified",
+                        )
+                    await query.edit_message_text(
+                        "❌ <b>Safe Delete قبل از حذف قطعی Node متوقف شد.</b>\n\n"
+                        f"<code>{esc(result)}</code>\n\n"
+                        "mapping به verified برگردانده شد؛ DELETE کورکورانه Retry نمی‌شود.",
+                        parse_mode='HTML',
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]
+                        ]),
+                    )
+                    return
+
+                await query.edit_message_text(
+                    "⚠️ <b>Node DELETE شده یا وضعیت آن نیاز به recovery دارد.</b>\n\n"
+                    f"Stage  <code>{esc(result.get('stage') if isinstance(result, dict) else 'unknown')}</code>\n"
+                    f"Managed Hosts deleted  <b>{esc(result.get('hosts_deleted', 0) if isinstance(result, dict) else 0)}</b>\n\n"
+                    "mapping عمداً <code>deleting</code> باقی ماند. Recovery ابتدا وجود Node را Verify می‌کند و "
+                    "اگر Node absent باشد فقط Host cleanup را ادامه می‌دهد؛ DELETE دوباره اجرا نمی‌شود.",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🧹 Safe Delete Recovery", callback_data=f"mza_ndelete_cleanup_{node_id}")],
+                        [InlineKeyboardButton("🌐 Public Hosts", callback_data="mza_inbounds")],
+                    ]),
+                )
+                return
+
+            try:
+                mapping_removed = await asyncio.to_thread(
+                    _db_delete_marzban_node_public_profile,
+                    node_id,
+                    expected_public_address=profile.get("public_address"),
+                    expected_state="deleting",
+                )
+            except Exception as exc:
+                mapping_removed = False
+                log.exception("B.3.3 final mapping cleanup failed for node %s", node_id)
+                result = {**result, "mapping_error": f"{type(exc).__name__}: {exc}"}
+            if not mapping_removed:
+                await query.edit_message_text(
+                    "⚠️ Node و Managed Hostها Verify و حذف شدند، اما ownership mapping محلی پاک نشد.\n"
+                    "Remote DELETE تکرار نمی‌شود؛ فقط Mapping Cleanup را Retry کنید.\n"
+                    f"<code>{esc(result)}</code>",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🧹 Retry Mapping Cleanup", callback_data=f"mza_ndelete_cleanup_{node_id}")]
+                    ]),
+                )
+                return
+
+            deleted_node = result.get("node") if isinstance(result, dict) else {}
+            deleted_name = (
+                deleted_node.get("name")
+                if isinstance(deleted_node, dict)
+                else pending.get("name")
+            ) or f"Node {node_id}"
+            await query.edit_message_text(
+                "✅ <b>V123B.3.3 · Safe Delete Verify شد</b>\n"
+                "━━━━━━━━━━━━━━\n"
+                f"نام  <b>{esc(deleted_name)}</b>\n"
+                f"Node ID  <code>{node_id}</code> · absent\n"
+                f"Managed Hosts removed  <b>{esc(result.get('hosts_deleted', 0))}</b>\n"
+                f"Manual Hosts preserved  <b>{esc(pending.get('manual_hosts_preserved', 0))}</b>\n"
+                "Ownership mapping  <code>removed</code>\n\n"
+                "خود VPS حذف نشده است.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 لیست نودها", callback_data=_mza_nodes_list_callback(context))]
+                ]),
+            )
+            return
+
+        # Legacy / unmanaged Node path remains Phase 7.1 compatible.
+        context.user_data["mza_node_delete_busy"] = True
         ok_delete, result = await service.delete_node(node_id)
         context.user_data.pop("mza_node_delete_busy", None)
         context.user_data.pop("mza_node_delete_pending", None)
@@ -16606,7 +16911,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Node ID: <code>{node_id}</code>\n"
                     f"Hostهای حذف‌شده: <b>{esc(result.get('hosts_deleted', 0))}</b>\n"
                     f"جزئیات: <code>{esc(result.get('error'))}</code>\n\n"
-                    "Node دوباره DELETE نمی‌شود. Public Hostهای باقی‌مانده را از بخش Inbounds & Public Hosts بررسی کنید.",
+                    "Node دوباره DELETE نمی‌شود. Public Hostهای باقی‌مانده را بررسی کنید.",
                     parse_mode='HTML',
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🌐 بررسی Hostها", callback_data="mza_inbounds")],
@@ -16652,7 +16957,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"نام  <b>{esc(deleted_name)}</b>\n"
             f"Node ID  <code>{node_id}</code>\n"
             f"Public Host حذف‌شده  <b>{esc(result.get('hosts_deleted', 0) if isinstance(result, dict) else 0)}</b>\n\n"
-            "Node و Public Hostهای auto-generated مرتبط حذف و Verify شدند. خود VPS یا سرور فیزیکی حذف نشده است.",
+            "Node و Public Hostهای auto-generated مرتبط حذف و Verify شدند. خود VPS حذف نشده است.",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 لیست نودها", callback_data=_mza_nodes_list_callback(context))]
@@ -16663,6 +16968,134 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d.startswith('mza_ndelete_'):
         node_id = marzban_admin.normalize_node_id(d[len('mza_ndelete_'):])
         service = await _get_marzban_admin_service()
+        profile = await asyncio.to_thread(
+            _db_get_marzban_node_public_profile,
+            node_id,
+        )
+
+        if profile:
+            profile_state = str(profile.get("profile_state") or "pending").lower()
+            if profile_state == "deleting":
+                await query.edit_message_text(
+                    "🧹 <b>V123B.3.3 · Safe Delete Recovery</b>\n\n"
+                    "این Node یک حذف ناتمام persisted دارد. DELETE جدید اجرا نمی‌شود؛ "
+                    "Recovery ابتدا وجود Node را بررسی می‌کند.",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🧹 بررسی و Recovery", callback_data=f"mza_ndelete_cleanup_{node_id}")],
+                        [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))],
+                    ]),
+                )
+                return
+            if profile_state != "verified":
+                await query.edit_message_text(
+                    "🛡 <b>Safe Delete قفل است.</b> Stable Public Endpoint ابتدا باید verified باشد.\n\n"
+                    f"Public Endpoint  <code>{esc(profile.get('public_address'))}</code>\n"
+                    f"Profile  <code>{esc(profile_state)}</code>",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🛠 Repair Public Endpoint", callback_data=f"mza_nrepair_{node_id}")],
+                        [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")],
+                    ]),
+                )
+                return
+
+            ok_preview, preview = await service.preview_node_public_profile_delete(
+                node_id,
+                profile.get("public_address"),
+                profile.get("managed_remark"),
+                marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS,
+            )
+            if not ok_preview or not isinstance(preview, dict):
+                await query.edit_message_text(
+                    "❌ Safe Delete Preview خواندنی ناموفق بود؛ هیچ تغییری اعمال نشد.\n"
+                    f"<code>{esc(preview)}</code>",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")]
+                    ]),
+                )
+                return
+            node = preview.get("node") if isinstance(preview.get("node"), dict) else {}
+            dns = await asyncio.to_thread(
+                marzban_admin.preflight_public_endpoint_detached,
+                node.get("address"),
+                profile.get("public_address"),
+            )
+            if not dns.get("ok"):
+                matched = ", ".join(map(str, dns.get("matched_ips") or ()))
+                reason = (
+                    "DNS هنوز به همین Node اشاره می‌کند"
+                    if matched
+                    else str(dns.get("error") or "DNS detach قابل Verify نیست")
+                )
+                await query.edit_message_text(
+                    "⛔️ <b>Safe Delete مجاز نیست.</b>\n\n"
+                    f"Public Endpoint  <code>{esc(profile.get('public_address'))}</code>\n"
+                    f"Node Address  <code>{esc(node.get('address') or '—')}</code>\n"
+                    f"DNS Guard  <b>❌ {esc(reason)}</b>\n\n"
+                    "ابتدا ترافیک/DNS را از این Node خارج کنید. Preview فقط GET بود و هیچ DELETE اجرا نشد.",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 بررسی دوباره", callback_data=f"mza_ndelete_{node_id}")],
+                        [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")],
+                    ]),
+                )
+                return
+            if not preview.get("deletable"):
+                issues = " | ".join(map(str, preview.get("issues") or ())) or "managed profile is not canonical"
+                await query.edit_message_text(
+                    "⛔️ <b>Safe Delete Preview امن نیست.</b>\n\n"
+                    f"<code>{esc(issues)}</code>\n\n"
+                    "ابتدا Repair را اجرا کنید. هیچ DELETE انجام نشد.",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🛠 Repair Public Endpoint", callback_data=f"mza_nrepair_{node_id}")],
+                        [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")],
+                    ]),
+                )
+                return
+
+            nonce = secrets.token_hex(8)
+            context.user_data["mza_node_delete_pending"] = {
+                "managed": True,
+                "node_id": node_id,
+                "nonce": nonce,
+                "started_at": time.time(),
+                "name": str(node.get("name") or f"Node {node_id}"),
+                "address": str(node.get("address") or ""),
+                "public_address": str(profile.get("public_address") or ""),
+                "managed_remark": str(profile.get("managed_remark") or ""),
+                "fingerprint": str(preview.get("fingerprint") or ""),
+                "linked_hosts": int(preview.get("managed_host_count") or 0),
+                "manual_hosts_preserved": int(preview.get("manual_hosts_preserved") or 0),
+            }
+            context.user_data.pop("mza_node_delete_busy", None)
+            await query.edit_message_text(
+                "🗑 <b>V123B.3.3 · Safe Delete Preview</b>\n"
+                "━━━━━━━━━━━━━━\n"
+                f"Node  <b>{esc(node.get('name') or node_id)}</b>\n"
+                f"Node ID  <code>{node_id}</code>\n"
+                f"Real Address  <code>{esc(node.get('address') or '—')}</code>\n"
+                f"Public Endpoint  <code>{esc(profile.get('public_address'))}</code>\n"
+                "DNS Detached  <b>✅ verified</b>\n"
+                f"Managed Hosts to remove  <b>{esc(preview.get('managed_host_count', 0))}</b>\n"
+                f"Other/Manual Hosts preserved  <b>{esc(preview.get('manual_hosts_preserved', 0))}</b>\n\n"
+                "ترتیب Commit: mapping→deleting → DELETE Node → verify absent → حذف فقط Managed Hostهای canonical → "
+                "verify cleanup → حذف ownership mapping.\n\n"
+                "<b>خود VPS حذف نمی‌شود.</b>",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "⚠️ Confirm Safe Delete",
+                        callback_data=f"mza_ndelete_confirm_{node_id}_{nonce}",
+                    )],
+                    [InlineKeyboardButton("↩️ انصراف", callback_data=f"mza_node_{node_id}")],
+                ]),
+            )
+            return
+
+        # Legacy/unmanaged deletion keeps the Phase 7.1 behavior.
         (ok_node, node), (ok_hosts, hosts_payload) = await asyncio.gather(
             service.get_node(node_id),
             service.get_hosts(),
@@ -16672,21 +17105,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ دریافت Node از Marzban ناموفق بود.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔙 نودها", callback_data=_mza_nodes_list_callback(context))]
-                ]),
-            )
-            return
-        protected_profile = await asyncio.to_thread(
-            _db_get_marzban_node_public_profile,
-            node_id,
-        )
-        if protected_profile:
-            await query.edit_message_text(
-                "🛡 <b>حذف این Node در V123A عمداً قفل است.</b>\n\n"
-                f"Public Endpoint: <code>{esc(protected_profile.get('public_address'))}</code>\n\n"
-                "تا تکمیل V123B، Nodeهای دارای Stable Public Endpoint حذف نمی‌شوند تا Public Host یتیم ایجاد نشود.",
-                parse_mode='HTML',
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("↩️ Node", callback_data=f"mza_node_{node_id}")]
                 ]),
             )
             return
@@ -16703,6 +17121,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         linked_hosts = marzban_admin.find_node_generated_hosts(hosts_payload, node)
         nonce = secrets.token_hex(8)
         context.user_data["mza_node_delete_pending"] = {
+            "managed": False,
             "node_id": node_id,
             "nonce": nonce,
             "started_at": time.time(),

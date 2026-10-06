@@ -213,16 +213,21 @@ class MarzbanNodeCreateWizardTests(unittest.TestCase):
         self.assertIn("managed_remark", region)
         self.assertIn("Node را دوباره نسازید", region)
 
-    def test_v123a_schema_and_fail_closed_delete_guard_are_present(self):
+    def test_v123b33_schema_and_managed_safe_delete_are_present(self):
         self.assertIn("CREATE TABLE IF NOT EXISTS marzban_node_public_profiles", self.source)
         self.assertIn("profile_state TEXT NOT NULL DEFAULT 'pending'", self.source)
         self.assertIn("_db_get_marzban_node_public_profile", self.source)
+        self.assertIn('{"pending", "verified", "deleting"}', self.source)
+        self.assertIn("_db_delete_marzban_node_public_profile", self.source)
         delete_region = self._region(
             "elif d.startswith('mza_ndelete_confirm_'):",
             "elif d.startswith('mza_nreconnect_'):",
         )
-        self.assertIn("حذف این Node در V123A عمداً قفل است", delete_region)
-        self.assertIn("_db_get_marzban_node_public_profile", delete_region)
+        self.assertIn("preview_node_public_profile_delete", delete_region)
+        self.assertIn("preflight_public_endpoint_detached", delete_region)
+        self.assertIn("delete_node_public_profile", delete_region)
+        self.assertIn("cleanup_managed_public_hosts", self.source)
+        self.assertNotIn("حذف این Node در V123A عمداً قفل است", delete_region)
 
     def test_node_detail_exposes_permanent_delete_action(self):
         region = self._region(

@@ -382,7 +382,7 @@ class V123B2RepairUiTests(unittest.TestCase):
 
     def test_version_and_node_detail_expose_repair(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V123B32M-2026-10-06-safe-node-move"',
+            'BOT_VERSION_TAG = "V123B33D-2026-10-06-safe-node-delete"',
             self.source,
         )
         region = self._region(

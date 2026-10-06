@@ -112,7 +112,7 @@ class V119AFastDetectionStaticTests(unittest.TestCase):
 
     def test_release_marker(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V123B32M-2026-10-06-safe-node-move"',
+            'BOT_VERSION_TAG = "V123B33D-2026-10-06-safe-node-delete"',
             self.source,
         )
 

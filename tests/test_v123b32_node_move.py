@@ -246,7 +246,7 @@ class V123B32MoveUiTests(unittest.TestCase):
 
     def test_release_marker_and_managed_address_route_use_safe_move(self):
         self.assertIn(
-            'BOT_VERSION_TAG = "V123B32M-2026-10-06-safe-node-move"',
+            'BOT_VERSION_TAG = "V123B33D-2026-10-06-safe-node-delete"',
             self.source,
         )
         region = self._region(

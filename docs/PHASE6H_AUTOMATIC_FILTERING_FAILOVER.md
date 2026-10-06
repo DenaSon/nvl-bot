@@ -20,7 +20,14 @@ An automatic attempt is eligible only when all of the following are true:
 - the regional provider round completed successfully;
 - the global post-switch cooldown has expired;
 - the automatic-attempt cooldown has expired;
-- at least one active Standby has strict healthy persisted evidence.
+- at least one active Standby has strict healthy persisted evidence;
+- no fresh Cloudflare Radar `OUTAGE` is active inside the configured V4 context
+  freshness window.
+
+A fresh Radar `OUTAGE` is a negative-only safety gate: it can inhibit automatic
+failover, but Radar `NORMAL`/`DEGRADED` cannot create, strengthen or clear an
+Edge filtering verdict. Missing or stale Radar data does not block an otherwise
+valid automatic failover. Manual failover remains independent of this gate.
 
 The legacy traffic-anomaly signal based on global online-user percentage remains
 notification-only and cannot trigger failover.

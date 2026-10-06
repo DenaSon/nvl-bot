@@ -465,6 +465,41 @@ def load_latest_radar_snapshot(
     return data if isinstance(data, dict) else None
 
 
+def load_recent_radar_snapshots(
+    db_path: str,
+    *,
+    scope_type: str = "COUNTRY",
+    scope_value: str = "IR",
+    limit: int = 8,
+) -> tuple[dict, ...]:
+    ensure_radar_schema(db_path)
+    row_limit = min(50, max(1, int(limit)))
+    with _db_conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT detail_json FROM network_context_snapshots "
+            "WHERE provider=? AND scope_type=? AND scope_value=? "
+            "ORDER BY id DESC LIMIT ?",
+            (
+                RADAR_PROVIDER,
+                str(scope_type or "COUNTRY").upper(),
+                str(scope_value or "IR").upper(),
+                row_limit,
+            ),
+        ).fetchall()
+
+    result = []
+    for row in rows:
+        if not row or not row[0]:
+            continue
+        try:
+            item = json.loads(row[0])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(item, dict):
+            result.append(item)
+    return tuple(result)
+
+
 def get_radar_provider_runtime(db_path: str) -> dict:
     ensure_radar_schema(db_path)
     with _db_conn(db_path) as conn:

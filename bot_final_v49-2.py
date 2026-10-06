@@ -18268,6 +18268,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         draft["control_plane_ready"] = True
         draft["control_plane_at"] = time.time()
+        draft["old_ip"] = str(guard.get("old_ip") or "")
+        draft["new_ip"] = str(guard.get("new_ip") or "")
+        draft["cf_zone_id"] = str(guard.get("cf_zone_id") or "")
+        draft["cf_record_id"] = str(guard.get("cf_record_id") or "")
+        draft["cf_preview_fingerprint"] = str(guard.get("cf_fingerprint") or "")
         context.user_data["mza_node_move_draft"] = draft
 
         cf_after = cf_now
@@ -18488,6 +18493,85 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         service = await _get_marzban_admin_service()
         ok_node, node = await service.get_node(node_id)
+        try:
+            cf_client = _mza_cloudflare_dns_client()
+            new_ip = str(draft.get("new_ip") or "") or await asyncio.to_thread(
+                cloudflare_dns.resolve_single_ipv4,
+                draft.get("new_address"),
+            )
+            old_ip = str(draft.get("old_ip") or "") or await asyncio.to_thread(
+                cloudflare_dns.resolve_single_ipv4,
+                draft.get("old_address"),
+            )
+            cf_now = await asyncio.to_thread(
+                cf_client.inspect_a_record,
+                draft.get("public_address"),
+            )
+        except Exception as exc:
+            await query.edit_message_text(
+                "⚠️ <b>Finalize متوقف شد؛ Cloudflare قابل Verify نیست.</b>\n\n"
+                f"<code>{esc(type(exc).__name__)}: {esc(exc)}</code>\n\n"
+                "هیچ mapping نهایی ثبت نشد.",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 بررسی دوباره", callback_data=f"mza_nmove_finalize_{node_id}")],
+                    [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")],
+                ]),
+            )
+            return
+
+        cf_record = (
+            cf_now.get("record")
+            if isinstance(cf_now, dict) and isinstance(cf_now.get("record"), dict)
+            else {}
+        )
+        expected_record_id = str(draft.get("cf_record_id") or "")
+        record_identity_ok = (
+            bool(cf_now.get("exists"))
+            and (not expected_record_id or str(cf_record.get("id") or "") == expected_record_id)
+            and not bool(cf_record.get("proxied"))
+        )
+        provider_content = str(cf_record.get("content") or "")
+
+        # Safe retry: the move owns this exact record identity and the provider is
+        # still on the known old IP. Reuse the current provider fingerprint so an
+        # external mutation between inspect and PATCH fails closed.
+        if record_identity_ok and provider_content == old_ip:
+            try:
+                cf_change = await asyncio.to_thread(
+                    cf_client.switch_a_record,
+                    draft.get("public_address"),
+                    new_ip,
+                    expected_content=old_ip,
+                    expected_fingerprint=cf_now.get("fingerprint"),
+                    expected_record_id=cf_record.get("id"),
+                )
+                cf_now = cf_change.get("after") if isinstance(cf_change, dict) else cf_now
+                cf_record = (
+                    cf_now.get("record")
+                    if isinstance(cf_now, dict) and isinstance(cf_now.get("record"), dict)
+                    else {}
+                )
+                provider_content = str(cf_record.get("content") or "")
+                record_identity_ok = (
+                    bool(cf_now.get("exists"))
+                    and (not expected_record_id or str(cf_record.get("id") or "") == expected_record_id)
+                    and not bool(cf_record.get("proxied"))
+                )
+            except Exception as exc:
+                await query.edit_message_text(
+                    "⚠️ <b>Cloudflare Retry ناموفق بود.</b>\n\n"
+                    f"<code>{esc(type(exc).__name__)}: {esc(exc)}</code>\n\n"
+                    "Control Plane روی مقصد جدید است و mapping pending باقی ماند؛ Retry idempotent است.",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 Retry DNS & Finalize", callback_data=f"mza_nmove_finalize_{node_id}")],
+                        [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")],
+                    ]),
+                )
+                return
+
+        provider_ok = record_identity_ok and provider_content == new_ip
         dns = await asyncio.to_thread(
             marzban_admin.preflight_public_endpoint,
             draft.get("new_address"),
@@ -18511,18 +18595,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             and plan.get("repairable")
             and not plan.get("changed_tags")
         )
-        if not dns.get("ok") or not node_ok or not profile_ok:
+        if not provider_ok or not dns.get("ok") or not node_ok or not profile_ok:
             reason = []
-            if not dns.get("ok"):
-                reason.append("DNS هنوز به مقصد جدید Match نیست")
+            if not provider_ok:
+                reason.append(
+                    "Cloudflare A record روی مقصد جدید Verify نیست "
+                    f"(provider={provider_content or 'unknown'})"
+                )
+            if provider_ok and not dns.get("ok"):
+                reason.append("Cloudflare update شده اما resolver propagation هنوز کامل نیست")
             if not node_ok:
                 reason.append("Node روی مقصد جدید connected نیست")
             if not profile_ok:
                 reason.append("Managed Public Host profile canonical نیست")
             await query.edit_message_text(
-                "⏳ <b>Finalize هنوز قابل انجام نیست.</b>\n\n"
+                "⏳ <b>V123C Finalize هنوز قابل انجام نیست.</b>\n\n"
                 + "\n".join(f"• {esc(item)}" for item in reason)
-                + "\n\nهیچ mapping نهایی ثبت نشد.",
+                + "\n\nهیچ mapping نهایی ثبت نشد و DNS را نباید دستی تغییر دهید.",
                 parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔄 بررسی دوباره", callback_data=f"mza_nmove_finalize_{node_id}")],
@@ -18547,16 +18636,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         context.user_data.pop('mza_action_node', None)
         await query.edit_message_text(
-            "✅ <b>V123B.3.2 · Safe Node Move Verify شد</b>\n"
+            "✅ <b>V123C · Automated Safe Node Move Verify شد</b>\n"
             "━━━━━━━━━━━━━━\n"
             f"Node ID  <code>{node_id}</code> · unchanged\n"
             f"Real Address  <code>{esc(new_address)}</code>\n"
             f"Public Endpoint  <code>{esc(public_address)}</code>\n"
+            f"Cloudflare A  <code>{esc(old_ip)}</code> → <code>{esc(new_ip)}</code> ✅\n"
             "DNS Match  ✅\n"
             "Node Status  <b>🟢 connected</b>\n"
             f"Managed Hosts  <b>{len(marzban_admin.NVL_NODE_PUBLIC_HOST_TAGS)} · canonical</b>\n"
             "Profile  <code>verified</code>\n\n"
-            "Node جدید ساخته نشد؛ همان Node ID به Backend جدید منتقل شد و Public Endpoint کاربران ثابت ماند.",
+            "DNS به‌صورت خودکار مدیریت شد و Public Endpoint کاربران ثابت ماند.",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🖥 Node", callback_data=f"mza_node_{node_id}")],

@@ -164,6 +164,135 @@ REPLY="$(nsenter --net="/run/netns/$CORE" -- curl --noproxy '*' --fail --silent 
 }
 echo "$REPLY"
 
+echo "[D1-C3D] Prepare disposable protected UID with a real Core fallback route"
+command -v setpriv >/dev/null || { echo "Missing setpriv" >&2; exit 69; }
+command -v openssl >/dev/null || { echo "Missing openssl" >&2; exit 69; }
+useradd --uid 1659 --no-create-home --shell /usr/sbin/nologin nvlciuser
+TUID="$(id -u nvlciuser)"
+TGID="$(id -g nvlciuser)"
+[[ "$TUID" == 1659 ]] || exit 1
+unprotected="$(ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+  curl --noproxy '*' -4 -fsS --max-time 5 http://203.0.113.51:18080/)"
+[[ "$unprotected" == "observed_ipv4=209.200.246.198" ]] || {
+  echo "LAB_INVALID: direct Core fallback is not observable ($unprotected)" >&2; exit 1
+}
+echo "CONTROL_CORE_LEAK_PATH_EXISTS (expected negative control)"
+
+echo "[D1-C3D] Start fake IPv6 Internet endpoint and prove unguarded IPv6 works"
+cat > "$TMP/ipv6.py" <<'PY'
+import socket
+s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("2001:db8:abcd::2", 18081))
+s.listen(16)
+while True:
+    conn, _ = s.accept()
+    with conn:
+        conn.settimeout(3)
+        try: conn.recv(4096)
+        except OSError: pass
+        body=b"ipv6-control-available"
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: " +
+                     str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body)
+PY
+ip netns exec "$WAN" python3 "$TMP/ipv6.py" >/dev/null 2>&1 &
+V6_PID=$!
+sleep 0.4
+v6_positive="$(ip netns exec "$CORE" curl -g -6 --noproxy '*' -fsS --max-time 5 \
+  'http://[2001:db8:abcd::2]:18081/')"
+[[ "$v6_positive" == "ipv6-control-available" ]] || exit 1
+
+echo "[D1-C3D] Actually apply C3C boot guard (disposable Core namespace)"
+# Real kernel iptables/rules are modified only inside the disposable Core netns.
+# NSS is injected as known-safe in CI. Real VPS NSS remains a separate gate.
+ip netns exec "$CORE" env NVL_TEST_UID="$TUID" PYTHONPATH="$BASE" NVL_TEST_SPEC="$TMP/spec.json" \
+  python3 - <<'PY'
+import json, os
+from edge_egress_uid_boot import BootGuardManifest, BootGuardApplier
+spec=json.load(open(os.environ["NVL_TEST_SPEC"]))
+manifest=BootGuardManifest.parse({
+    "mode":"PROTECTED_BOOT_GUARD", "username":"nvlciuser",
+    "uid":int(os.environ["NVL_TEST_UID"]), "priority":1780,
+    "dns_port":10553, "spec":spec,
+})
+applier=BootGuardApplier(read_nss=lambda:"hosts: files dns\n")
+applier.apply(manifest)
+applier.apply(manifest)  # must not duplicate UID, blackhole or firewall rules
+applier.verify(manifest)
+print("REAL_KERNEL_BOOT_GUARD_IDEMPOTENT_OK")
+PY
+
+echo "[D1-C3D] Guard DENY state blocks Internet even though Core WAN is available"
+if ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+  curl --noproxy '*' -4 -fsS --connect-timeout 2 --max-time 3 \
+  http://203.0.113.51:18080/ >/dev/null 2>&1; then
+  echo "FAIL: protected UID escaped while blackhole only" >&2; exit 1
+fi
+if ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+  curl -g -6 --noproxy '*' -fsS --connect-timeout 2 --max-time 3 \
+  'http://[2001:db8:abcd::2]:18081/' >/dev/null 2>&1; then
+  echo "FAIL: IPv6 bypassed protected UID" >&2; exit 1
+fi
+echo "IPv4_DENY_BEFORE_EDGE_OK IPv6_UID_BYPASS_BLOCKED_OK"
+
+echo "[D1-C3D] Set up real TLS fake DoH endpoint inside fake Internet"
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -subj '/CN=cloudflare-dns.com' \
+  -addext 'subjectAltName=DNS:cloudflare-dns.com' \
+  -keyout "$TMP/doh.key" -out "$TMP/doh.crt" >/dev/null 2>&1
+chmod 0711 "$TMP"
+chmod 0644 "$TMP/doh.crt"
+: > "$TMP/doh-peers.log"
+ip netns exec "$WAN" python3 "$BASE/ops/labs/edge_egress_ci_fake_doh.py" \
+  --cert "$TMP/doh.crt" --key "$TMP/doh.key" \
+  --peer-log "$TMP/doh-peers.log" >/dev/null 2>&1 &
+DOH_PID=$!
+sleep 0.5
+kill -0 "$DOH_PID"
+
+echo "[D1-C3D] Start DNS relay AS protected UID under blackhole"
+ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+  env SSL_CERT_FILE="$TMP/doh.crt" PYTHONPATH="$BASE" \
+  python3 "$BASE/edge_egress_uid_dns.py" serve \
+  --username nvlciuser --uid "$TUID" --priority 1780 \
+  --table 1780 --port 10553 >/dev/null 2>"$TMP/dns-stderr.log" &
+DNS_PID=$!
+sleep 0.8
+kill -0 "$DNS_PID" || {
+  echo "DNS proxy failed during deny-only guard boot:" >&2
+  cat "$TMP/dns-stderr.log" >&2; exit 1
+}
+
+echo "[D1-C3D] Attach full-IPv4 protected UID to dedicated Edge"
+ip -n "$CORE" -4 route replace default via 10.78.101.2 dev vnh-fra1 \
+  src 10.78.101.1 table 1780 metric 100
+for target in 203.0.113.50 203.0.113.51; do
+  reply="$(ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+    curl --noproxy '*' -4 -fsS --connect-timeout 3 --max-time 7 \
+    "http://$target:18080/")"
+  [[ "$reply" == "observed_ipv4=172.86.94.174" ]] || {
+    echo "FAIL: selected UID leaked for $target: $reply" >&2; exit 1
+  }
+done
+# Core still has independent main WAN path for unprotected UIDs.
+root_reply="$(ip netns exec "$CORE" curl --noproxy '*' -4 -fsS --max-time 5 \
+  http://203.0.113.51:18080/)"
+[[ "$root_reply" == "observed_ipv4=209.200.246.198" ]] || exit 1
+echo "UID_TWO_DESTINATIONS_EDGE_OK UNPROTECTED_CORE_CONTROL_OK"
+
+echo "[D1-C3D] Transparent DNS over UDP + TCP, upstream actual TLS over WG/Edge"
+for protocol in udp tcp; do
+  ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+    python3 "$BASE/ops/labs/edge_egress_ci_dns_probe.py" --protocol "$protocol"
+done
+[[ "$(wc -l < "$TMP/doh-peers.log")" -ge 2 ]] || {
+  echo "FAIL: no real WAN DoH upstream traffic" >&2; exit 1
+}
+if grep -vFx "172.86.94.174" "$TMP/doh-peers.log"; then
+  echo "FAIL: DoH upstream IP leaked outside Edge" >&2; exit 1
+fi
+echo "DNS_UPSTREAM_TLS_EDGE_IP_CONFIRMED"
+
 echo "[lab] Inject Edge outage; Core may NOT reach the fake Internet"
 nsenter --net="/run/netns/$EDGE" -- bash "$TMP/edge/down.sh"
 ES=0

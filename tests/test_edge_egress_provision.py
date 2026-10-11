@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import stat
+import subprocess
 import tempfile
 import unittest
 from dataclasses import replace
@@ -124,6 +125,8 @@ class StagedArtifactTests(unittest.TestCase):
             self.assertNotIn("ip rule add", up)
             self.assertNotIn("systemctl ", up)
             self.assertNotIn("iptables -F", up)
+            for sh in ("up.sh", "down.sh"):
+                subprocess.run(["bash", "-n", str(dst / sh)], check=True)
             manifest = json.loads((dst / "manifest.json").read_text())
             self.assertFalse(manifest["user_routes_installed"])
             self.assertNotIn(VALID_KEY, (dst / "manifest.json").read_text())
@@ -145,6 +148,8 @@ class StagedArtifactTests(unittest.TestCase):
             self.assertNotIn("netfilter-persistent", up)
             self.assertNotIn("wg0", up)
             self.assertNotIn("systemctl ", up)
+            for sh in ("up.sh", "down.sh"):
+                subprocess.run(["bash", "-n", str(dst / sh)], check=True)
 
     def test_symlink_or_world_writable_parent_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

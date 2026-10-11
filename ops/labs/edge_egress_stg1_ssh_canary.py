@@ -81,7 +81,7 @@ def ssh_config() -> str:
         "PermitTTY no\n"
         "PermitTunnel no\n"
         "PermitUserEnvironment no\n"
-        "AllowUserRC no\n"
+        "PermitUserRC no\n"
         "PermitOpen none\n"
         "AllowStreamLocalForwarding no\n"
         "ForceCommand /var/lib/nvl-egress-stg1-sshd/egress-proof.sh\n"

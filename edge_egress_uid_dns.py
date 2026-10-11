@@ -187,15 +187,28 @@ def ensure_running_as_uid(uid: int, username: str) -> None:
 
 
 def ensure_terminal_policy(uid: int, priority: int, table: int):
-    """Read-only fail-before-bind check; caller must also ensure 6G lease."""
+    """Read-only fail-before-bind check; caller must also ensure 6G lease.
+
+    At daemon bootstrap the dedicated Edge next-hop is not attached yet.
+    Only the terminal IPv4 blackhole may exist. This proxy refuses to start
+    under a partial /32 UID rule or unknown route.
+    """
     result = subprocess.run(["ip", "-4", "rule", "show"],
                             capture_output=True, text=True, timeout=6)
+    expected = f"{priority}: from all uidrange {uid}-{uid} lookup {table}"
+    rules = [" ".join(x.strip().split()) for x in result.stdout.splitlines()]
+    if result.returncode or expected not in rules:
+        raise DNSError("PROTECTED_UID_RULE_MISSING")
+    result = subprocess.run(
+        ["ip", "-4", "route", "show", "table", str(table)],
+        capture_output=True, text=True, timeout=6,
+    )
     if result.returncode:
         raise DNSError("TERMINAL_BLACKHOLE_MISSING")
     routes = [s.strip() for s in result.stdout.splitlines() if s.strip()]
-    # DNS service is boot-strapped before the Edge attach. At this time only
-    # the terminal deny route is permitted; unknown routes must never forward.
-    if len(routes) != 1 or not re.fullmatch(r"blackhole default(?:\s+.*)?", routes[0]):
+    if len(routes) != 1 or not re.fullmatch(
+        r"blackhole default(?:\s+.*)?", routes[0]
+    ):
         raise DNSError("PROTECTED_ROUTE_TABLE_NOT_FROZEN")
 
 

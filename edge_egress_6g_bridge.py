@@ -52,6 +52,7 @@ class Existing6GPreparationAdapter:
     operation_id: Optional[int] = None
     source_host: Optional[str] = None
     target_host: Optional[str] = None
+    original_account_snapshot: Optional[tuple] = None
 
     async def acquire_existing_6g_lock(self, source, target):
         if self.operation_id is not None:
@@ -139,6 +140,21 @@ class Existing6GPreparationAdapter:
         ).fetchone()[0]
         if not account_count:
             raise PreparationUnsafe("EMPTY_SOURCE_ACCOUNT_SET")
+        # Capture every active source username+assigned-host+status; staging
+        # can take minutes, so concurrent account creation or removal must
+        # invalidate the stale reservation before it is marked STAGED.
+        rows = tuple(conn.execute(
+            "SELECT username,host,status FROM ssh_accounts "
+            "WHERE (host=? OR host IS NULL OR host='') AND service_type='ssh' "
+            "AND status LIKE '%فعال%' AND status NOT LIKE '%غیر%' "
+            "ORDER BY username", (source,),
+        ).fetchall())
+        if len(rows) != account_count:
+            raise PreparationUnsafe("ACCOUNT_SET_CHANGED")
+        if self.original_account_snapshot is None:
+            self.original_account_snapshot = rows
+        elif rows != self.original_account_snapshot:
+            raise PreparationUnsafe("SOURCE_ACCOUNT_SNAPSHOT_CHANGED")
 
     def _sync_revalidate(self, source, target):
         with self.db_conn() as conn:

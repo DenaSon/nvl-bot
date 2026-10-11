@@ -100,6 +100,7 @@ class AdminStatusCallbackTests(unittest.TestCase):
         )
         callback=get_function("callback_handler",{
             "is_auth": lambda context: True,
+            "_v2ray_management_target_from_callback": lambda d,ctx: None,
             "asyncio": asyncio,
             "classify_edge_callback":lambda _:None,
             "read_egress_status": lambda conn: status,

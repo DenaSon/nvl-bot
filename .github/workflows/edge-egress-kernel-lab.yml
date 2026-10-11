@@ -1,0 +1,29 @@
+name: Edge egress disposable kernel lab
+
+on:
+  pull_request:
+    paths:
+      - 'ops/edge_egress_provision.py'
+      - 'ops/examples/edge_egress_fra1.json'
+      - 'ops/labs/edge_egress_kernel_lab.sh'
+      - '.github/workflows/edge-egress-kernel-lab.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kernel-network-lab:
+    name: Ephemeral Core Edge WireGuard NAT exercise
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tooling for disposable kernel namespaces
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -qq -y iproute2 iptables wireguard-tools iputils-ping curl
+      - name: Verify lab script syntax
+        run: bash -n ops/labs/edge_egress_kernel_lab.sh
+      - name: Execute isolated kernel WireGuard and NAT test
+        run: sudo env GITHUB_ACTIONS=true NVL_CI_KERNEL_LAB=1 bash ops/labs/edge_egress_kernel_lab.sh

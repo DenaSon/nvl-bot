@@ -35,6 +35,12 @@ EGRESS_HOLD_PHASES = frozenset({
     "ARM_FAIL_CLOSED", "SELECT_TARGET_EGRESS", "VERIFY_CUSTOMER_EGRESS",
     "SOURCE_ACCOUNT_CAS", "EDGE_ONLY_DNS_CUTOVER", "VERIFY_FINAL",
     MANUAL_RECOVERY_PHASE,
+    # Staging also produces host-local secret files. If a remote stage step
+    # outlives the old 6G stale timeout, a second operation must not claim
+    # the same Edge resources. Operator reconciliation is required on crash.
+    "RECHECK_SOURCE", "READ_ONLY_PREFLIGHT", "HOST_LOCAL_PUBLIC_KEYS",
+    "RESERVE_RESOURCE_IDENTITY", "STAGE_EDGE", "STAGE_CORE",
+    "RECHECK_OWNERSHIP", "MARK_STAGED_NOT_READY",
     "EGRESS_PREPARE_RECOVERY_REQUIRED",
 })
 

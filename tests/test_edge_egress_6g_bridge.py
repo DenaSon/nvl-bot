@@ -186,6 +186,27 @@ class BridgeIntegrationTests(unittest.TestCase):
         self.assertFalse(r.ok)
         self.assertEqual(self.events,[])
 
+    def test_mid_stage_account_change_invalidates_snapshot(self):
+        normal_stage=self.core.stage_config_only
+        async def concurrent_account_added(conf, *, peer_public_key):
+            await normal_stage(conf,peer_public_key=peer_public_key)
+            with self.h.connection() as conn:
+                conn.execute(
+                    "INSERT INTO ssh_accounts VALUES (?,?,?,?)",
+                    ("nvl9999","172.86.94.174","ssh","🟢 فعال")
+                )
+        self.core.stage_config_only=concurrent_account_added
+        r=self.execute(self.adapter())
+        self.assertFalse(r.ok)
+        self.assertIn("SOURCE_ACCOUNT_SNAPSHOT_CHANGED",r.reason)
+        self.assertEqual(self.h.row(
+            "SELECT status FROM edge_egress_allocations WHERE edge_id='fra1'"
+        )[0],"RESERVED")
+        self.assertIn("edge:discard",self.events)
+        self.assertEqual(self.h.row(
+            "SELECT status FROM failover_operations WHERE id=?",r.operation_id
+        )[0],"FAILED")
+
     def test_stage_failure_cleanup_in_same_shared_lock(self):
         self.core.error_at="stage"
         r=self.execute(self.adapter())

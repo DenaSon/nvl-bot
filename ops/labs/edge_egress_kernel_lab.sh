@@ -137,9 +137,42 @@ REPLY="$(nsenter --net="/run/netns/$CORE" -- curl --noproxy '*' --fail --silent 
 }
 echo "$REPLY"
 
+echo "[lab] Inject Edge outage; Core may NOT reach the fake Internet"
+nsenter --net="/run/netns/$EDGE" -- bash "$TMP/edge/down.sh"
+ES=0
+if nsenter --net="/run/netns/$CORE" -- curl --noproxy '*' --fail --silent     --connect-timeout 2 --max-time 2 http://203.0.113.50:18080/ >/dev/null 2>&1; then
+  echo "FAIL: unexpected egress while Edge is down" >&2; exit 1
+fi
+
+echo "[lab] Restart Edge and prove source-IP recovery"
+nsenter --net="/run/netns/$EDGE" -- bash "$TMP/edge/up.sh"
+ES=1
+REPLY=""
+for attempt in 1 2 3 4 5; do
+  if REPLY="$(nsenter --net="/run/netns/$CORE" -- curl --noproxy '*' --fail --silent       --connect-timeout 2 --max-time 4 http://203.0.113.50:18080/)"; then
+    break
+  fi
+  sleep 1
+done
+[[ "$REPLY" == "observed_ipv4=172.86.94.174" ]] || {
+  echo "FAIL: Edge did not recover correct source IP: $REPLY" >&2; exit 1
+}
+
+echo "[lab] Restart Core tunnel and prove namespace/veth recovery"
+nsenter --net="/run/netns/$CORE" -- bash "$TMP/core/down.sh"
+CS=0
+nsenter --net="/run/netns/$CORE" -- bash "$TMP/core/up.sh"
+CS=1
+ip -n "$CORE" route add 203.0.113.50/32 via 10.78.101.2 dev vnh-fra1 src 10.78.101.1
+ip netns exec "$INNER" ping -c 3 -W 2 10.78.100.1 >/dev/null
+REPLY="$(nsenter --net="/run/netns/$CORE" -- curl --noproxy '*' --fail --silent   --connect-timeout 3 --max-time 8 http://203.0.113.50:18080/)"
+[[ "$REPLY" == "observed_ipv4=172.86.94.174" ]] || {
+  echo "FAIL: Core restart changed external IP: $REPLY" >&2; exit 1
+}
+
 echo "[lab] Clean down and verify no resources leak"
 nsenter --net="/run/netns/$CORE" -- bash "$TMP/core/down.sh"; CS=0
 nsenter --net="/run/netns/$EDGE" -- bash "$TMP/edge/down.sh"; ES=0
 if ip netns list | grep -Eq "^$INNER( |$)"; then echo "Namespace leaked" >&2; exit 1; fi
 if ip -n "$EDGE" link show wg-nvl-fra1 >/dev/null 2>&1; then echo "Edge link leaked" >&2; exit 1; fi
-echo "KERNEL_LAB_PASS: real WG handshake + Core-veth NAT + Edge public source + cleanup"
+echo "KERNEL_LAB_PASS: real WG + NAT + Edge outage/recovery + Core restart + cleanup"

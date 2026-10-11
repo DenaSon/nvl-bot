@@ -151,3 +151,37 @@ def parse_evidence_json(raw: bytes) -> dict:
     if not isinstance(document,dict):
         raise ReleaseEvidenceUnsafe("EVIDENCE_ROOT_INVALID")
     return document
+
+def main(argv=None) -> int:
+    """Validate operator-collected evidence; NEVER mutate or attest Ready."""
+    import argparse
+    from pathlib import Path
+    p=argparse.ArgumentParser(description="F4 E2E evidence review — no deployment")
+    p.add_argument("--evidence",required=True,type=Path)
+    p.add_argument("--edge-id",required=True)
+    p.add_argument("--username",required=True)
+    p.add_argument("--uid",required=True,type=int)
+    p.add_argument("--core-ip",required=True)
+    p.add_argument("--edge-ip",required=True)
+    args=p.parse_args(argv)
+    try:
+        if not args.evidence.is_file() or args.evidence.is_symlink():
+            raise ReleaseEvidenceUnsafe("UNSAFE_EVIDENCE_PATH")
+        payload=parse_evidence_json(args.evidence.read_bytes())
+        verdict=check_release_evidence(
+            payload,expected_edge_id=args.edge_id,
+            expected_username=args.username,expected_uid=args.uid,
+            expected_core_ipv4=args.core_ip,expected_edge_ipv4=args.edge_ip,
+        )
+    except (OSError,ReleaseEvidenceUnsafe):
+        print("BLOCKED EVIDENCE_UNAVAILABLE")
+        return 2
+    if not verdict.accepted:
+        print("BLOCKED",verdict.code,",".join(verdict.failures))
+        return 1
+    print("CANDIDATE_FOR_INDEPENDENT_REVIEW — NOT READY / NO HOST CHANGES")
+    return 0
+
+
+if __name__=="__main__":
+    raise SystemExit(main())

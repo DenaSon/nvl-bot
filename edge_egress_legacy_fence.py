@@ -15,6 +15,17 @@ def has_protected_bindings(conn: sqlite3.Connection) -> bool:
         "SELECT 1 FROM sqlite_master WHERE type='table' "
         "AND name='edge_egress_uid_bindings'"
     ).fetchone()
+    # A blocked pre-commit intent is as security-critical as a completed
+    # mapping: old 6G/6H must never race while UID guard installation is
+    # incomplete, or when a crash leaves an unresolved HOLD.
+    runtime = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='edge_egress_uid_runtime'"
+    ).fetchone()
+    if runtime and conn.execute(
+        "SELECT 1 FROM edge_egress_uid_runtime LIMIT 1"
+    ).fetchone():
+        return True
     if not exists:
         return False
     # Never interpret an unknown/partially migrated table as absent: a

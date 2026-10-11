@@ -8,6 +8,8 @@ on:
       - 'ops/backup_nvl_host.sh'
       - 'tests/test_edge_egress_policy.py'
       - 'tests/test_edge_egress_provision.py'
+      - 'tests/test_edge_egress_activation_sim.py'
+      - 'tests/support/fake_egress_command.py'
       - '.github/workflows/edge-egress-staging.yml'
   workflow_dispatch:
 
@@ -28,8 +30,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Python syntax
-        run: python -m compileall -q ops/edge_egress_provision.py edge_egress_policy.py tests/test_edge_egress_policy.py tests/test_edge_egress_provision.py
-      - name: Stage-only and policy tests
+        run: python -m compileall -q ops/edge_egress_provision.py edge_egress_policy.py tests/test_edge_egress_policy.py tests/test_edge_egress_provision.py tests/test_edge_egress_activation_sim.py tests/support/fake_egress_command.py
+      - name: Stage-only, failure injection and safety tests
         run: python -m unittest discover -s tests -p 'test_edge_egress_*.py' -v
       - name: Backup script shell syntax
         run: bash -n ops/backup_nvl_host.sh

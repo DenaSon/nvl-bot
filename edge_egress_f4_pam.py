@@ -28,15 +28,16 @@ class PAMInspection:
 
 
 def render_pam_change_review() -> str:
-    """Proposed exact addition; a human installs it only after recovery proof."""
-    return (
-        "# REVIEW ONLY — do NOT paste on a live Core without F4 disposable reboot\n"
-        "# Place as the FIRST account rule in /etc/pam.d/sshd:\n"
-        REQUIRED_ACCOUNT_LINE+"\n"
-        + "# Confirm UsePAM yes via sshd -T -C user=nvl0557,...\n"
-        "# Test emergency console/root AND non-root admins after installation.\n"
-        "# No automated edits or ssh.service restart are permitted here.\n"
-    )
+    """Proposed exact addition; human-reviewed only, never installed here."""
+    return "\\n".join((
+        "# REVIEW ONLY — no live PAM edits without disposable VPS rehearsal",
+        "# Place as FIRST account rule in /etc/pam.d/sshd:",
+        REQUIRED_ACCOUNT_LINE,
+        "# Verify UsePAM yes for customer identity via sshd -T",
+        "# Test independent root console and non-root admin recovery",
+        "# No automatic restart of ssh.service or network modifications",
+        "",
+    ))
 
 
 def inspect_pam_sshd(pam_contents: str, sshd_effective: str, *,

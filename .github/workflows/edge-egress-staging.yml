@@ -8,6 +8,8 @@ on:
       - 'edge_egress_handoff.py'
       - 'edge_egress_failover_guard.py'
       - 'edge_egress_protected_6g6h.py'
+      - 'edge_egress_protected_mapping.py'
+      - 'tests/test_edge_egress_protected_mapping.py'
       - 'tests/test_edge_egress_protected_6g6h.py'
       - 'edge_egress_entrypoints.py'
       - 'edge_egress_inventory.py'

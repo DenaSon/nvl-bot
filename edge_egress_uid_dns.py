@@ -203,6 +203,18 @@ def ensure_terminal_policy(uid: int, priority: int, table: int, *,
     rules = [" ".join(x.strip().split()) for x in result.stdout.splitlines()]
     if result.returncode or rules.count(expected) != 1:
         raise DNSError("PROTECTED_UID_RULE_MISSING")
+    # A second uidrange selector (including a broader overlapping range)
+    # can precede the owned route and send the DoH daemon to Core/main.
+    # Fail closed before opening any DNS proxy socket.
+    for line in rules:
+        if "uidrange" not in line:
+            continue
+        match = re.search(r"\buidrange\s+(\d+)-(\d+)\b", line)
+        if not match:
+            raise DNSError("UNRECOGNIZED_UID_ROUTING_RULE")
+        low, high = map(int, match.groups())
+        if low <= uid <= high and line != expected:
+            raise DNSError("PROTECTED_UID_ALREADY_ROUTED_ELSEWHERE")
     if any(x is not None for x in (edge_next_hop, edge_veth, edge_src)) and not all(
         x is not None for x in (edge_next_hop, edge_veth, edge_src)
     ):

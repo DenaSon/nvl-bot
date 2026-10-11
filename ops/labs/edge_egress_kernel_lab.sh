@@ -7,7 +7,7 @@ if [[ "${GITHUB_ACTIONS:-}" != "true" || "${NVL_CI_KERNEL_LAB:-}" != "1" || "$EU
   echo "REFUSED: GitHub Actions ephemeral root lab only" >&2
   exit 69
 fi
-for tool in ip wg iptables sysctl curl python3 ping; do
+for tool in ip wg iptables sysctl curl python3 ping nsenter; do
   command -v "$tool" >/dev/null || { echo "Missing: $tool" >&2; exit 69; }
 done
 BASE="$(pwd)"
@@ -29,8 +29,8 @@ cleanup() {
   trap - EXIT
   set +e
   if [[ -n "$SERVER_PID" ]]; then kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true; fi
-  if [[ "$CS" == "1" ]]; then ip netns exec "$CORE" bash "$TMP/core/down.sh" >/dev/null 2>&1 || true; fi
-  if [[ "$ES" == "1" ]]; then ip netns exec "$EDGE" bash "$TMP/edge/down.sh" >/dev/null 2>&1 || true; fi
+  if [[ "$CS" == "1" ]]; then nsenter --net="/run/netns/$CORE" -- bash "$TMP/core/down.sh" >/dev/null 2>&1 || true; fi
+  if [[ "$ES" == "1" ]]; then nsenter --net="/run/netns/$EDGE" -- bash "$TMP/edge/down.sh" >/dev/null 2>&1 || true; fi
   ip netns del "$INNER" >/dev/null 2>&1 || true
   ip netns del "$CORE" >/dev/null 2>&1 || true
   ip netns del "$EDGE" >/dev/null 2>&1 || true
@@ -101,9 +101,9 @@ python3 "$BASE/ops/edge_egress_provision.py" stage --role core \
   --private-key-file "$TMP/core.key" --peer-public-key "$(cat "$TMP/edge.pub")"
 
 echo "[lab] Activate dedicated Edge and Core tunnel only in netns"
-ip netns exec "$EDGE" bash "$TMP/edge/up.sh"
+nsenter --net="/run/netns/$EDGE" -- bash "$TMP/edge/up.sh"
 ES=1
-ip netns exec "$CORE" bash "$TMP/core/up.sh"
+nsenter --net="/run/netns/$CORE" -- bash "$TMP/core/up.sh"
 CS=1
 
 ip netns exec "$INNER" ping -c 3 -W 2 10.78.100.1 >/dev/null
@@ -130,7 +130,7 @@ PY
 ip netns exec "$WAN" python3 "$TMP/echo.py" >/dev/null 2>&1 &
 SERVER_PID=$!
 sleep 0.5
-REPLY="$(ip netns exec "$CORE" curl --noproxy '*' --fail --silent --show-error \
+REPLY="$(nsenter --net="/run/netns/$CORE" -- curl --noproxy '*' --fail --silent --show-error \
   --max-time 8 --retry 3 --retry-delay 1 http://203.0.113.50:18080/)"
 [[ "$REPLY" == "observed_ipv4=172.86.94.174" ]] || {
   echo "Wrong external source: $REPLY" >&2; exit 1;
@@ -138,8 +138,8 @@ REPLY="$(ip netns exec "$CORE" curl --noproxy '*' --fail --silent --show-error \
 echo "$REPLY"
 
 echo "[lab] Clean down and verify no resources leak"
-ip netns exec "$CORE" bash "$TMP/core/down.sh"; CS=0
-ip netns exec "$EDGE" bash "$TMP/edge/down.sh"; ES=0
+nsenter --net="/run/netns/$CORE" -- bash "$TMP/core/down.sh"; CS=0
+nsenter --net="/run/netns/$EDGE" -- bash "$TMP/edge/down.sh"; ES=0
 if ip netns list | grep -Eq "^$INNER( |$)"; then echo "Namespace leaked" >&2; exit 1; fi
 if ip -n "$EDGE" link show wg-nvl-fra1 >/dev/null 2>&1; then echo "Edge link leaked" >&2; exit 1; fi
 echo "KERNEL_LAB_PASS: real WG handshake + Core-veth NAT + Edge public source + cleanup"

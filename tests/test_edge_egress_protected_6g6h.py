@@ -229,6 +229,32 @@ class GuardedWorkflowTests(unittest.TestCase):
         })))
         self.assertEqual(p.legacy_methods_called,[])
 
+    def test_crash_during_candidate_stage_holds_shared_6g_and_6h_lock(self):
+        for trigger,incident in [("manual_6g",None),
+                                 ("automatic_6h","INC-20261011-000001")]:
+            with self.subTest(trigger=trigger):
+                p=FakeGuarded6GPorts(fail_at="stage_target_shadow")
+                r=go(p,trigger=trigger,incident=incident)
+                self.assertFalse(r.ok)
+                self.assertTrue(r.needs_manual_recovery)
+                self.assertTrue(p.locked)
+                self.assertFalse(p.frozen)  # Old source route was never switched.
+                self.assertNotIn("arm_fail_closed",p.actions)
+                self.assertEqual(p.journal[-1][1],"EGRESS_RECOVERY_REQUIRED")
+                self.assertTrue(is_egress_recovery_hold(json.dumps({
+                    "phase":p.journal[-1][1]
+                })))
+
+    def test_guarded_staging_phase_itself_is_stale_lock_protected(self):
+        for phase in ("EGRESS_GUARDED_CANDIDATE_STAGE",
+                      "EGRESS_GUARDED_DEDICATED_PEER_REKEY",
+                      "EGRESS_GUARDED_EXTERNAL_EGRESS_PROOF",
+                      "EGRESS_GUARDED_REVALIDATE_OWNERSHIP_AND_ALLOCATION"):
+            with self.subTest(phase=phase):
+                self.assertTrue(is_egress_recovery_hold(
+                    json.dumps({"phase":phase,"kind":"PROTECTED_EGRESS_SWITCH"})
+                ))
+
     def test_shared_lock_busy_denies_both_6g_and_6h(self):
         for trigger,incident in [("manual_6g",None),
                                  ("automatic_6h","INC-20261011-000001")]:

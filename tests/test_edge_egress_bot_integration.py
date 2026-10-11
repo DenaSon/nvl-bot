@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import pathlib
+import sys
 import types
 import unittest
 
@@ -67,6 +68,7 @@ class PureLifecycleCompatibilityTests(unittest.TestCase):
                 self.assertFalse(legacy_new_edge_gate(value).allowed)
 
 
+@unittest.skipIf(sys.version_info < (3, 12), 'NVL bot baseline uses Python 3.12 f-string syntax')
 class BotPreflightIntegrationTests(unittest.TestCase):
     def test_protected_manual_and_auto_preflights_return_before_any_network(self):
         calls = []
@@ -167,6 +169,7 @@ class BotPreflightIntegrationTests(unittest.TestCase):
         self.assertLess(preflight, rebuild)
 
 
+@unittest.skipIf(sys.version_info < (3, 12), 'NVL bot baseline uses Python 3.12 f-string syntax')
 class OnboardingAndDnsIntegrationTests(unittest.TestCase):
     def test_protected_onboarding_does_not_launch_remote_installer(self):
         sent = []

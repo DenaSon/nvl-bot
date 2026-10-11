@@ -93,7 +93,7 @@ class Existing6GPreparationAdapter:
         }
         await asyncio.to_thread(
             self.update_fn, operation_id, status=status, detail=detail,
-            finished=(status != "RUNNING"),
+            finished=(status != "RUNNING"), require_running=True,
         )
 
     def _assert_source_and_target_in_db(self, conn, source, target):

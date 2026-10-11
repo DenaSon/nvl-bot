@@ -41,6 +41,8 @@ on:
       - 'tests/test_edge_egress_uid_shadow.py'
       - 'bot_final_v49-2.py'
       - 'ops/edge_egress_provision.py'
+      - 'ops/examples/edge_egress_stg1.json'
+      - 'tests/test_edge_egress_stg1_profile.py'
       - 'ops/backup_nvl_host.sh'
       - 'tests/test_edge_egress_policy.py'
       - 'tests/test_edge_egress_bot_integration.py'

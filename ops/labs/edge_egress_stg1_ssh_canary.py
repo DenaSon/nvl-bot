@@ -200,6 +200,49 @@ def prepare() -> None:
     print("NO_NETWORK_OR_SSH_SERVICE_CHANGES")
 
 
+def repair_config() -> None:
+    """One-shot repair of the exact failed prepare sshd config; nothing else.
+
+    This action is narrowly limited to the observed AllowUserRC typo. It
+    cannot create user accounts, start sshd, or mutate kernel networking.
+    """
+    if os.geteuid() != 0:
+        raise Unsafe("ROOT_REQUIRED")
+    if not is_root_owned(DIR, 0o755) or not is_root_owned(CONFIG, 0o600):
+        raise Unsafe("CANARY_DIR_OR_CONFIG_UNSAFE")
+    for p, mode in ((PROOF, 0o755), (AUTHORIZED, 0o644),
+                    (HOST_KEY, 0o600), (CLIENT_KEY, 0o600),
+                    (CLIENT_KNOWN, 0o600)):
+        if not is_root_owned(p, mode):
+            raise Unsafe("CANARY_ASSET_UNSAFE:" + p.name)
+    if PID.exists() or PID.is_symlink():
+        raise Unsafe("CANARY_PROCESS_MAY_BE_RUNNING")
+    account = pwd.getpwnam(USERNAME)
+    if account.pw_uid == 0 or account.pw_dir != "/nonexistent" or account.pw_shell != "/bin/sh":
+        raise Unsafe("CANARY_IDENTITY_MISMATCH")
+    expected_old = ssh_config().replace("PermitUserRC no\n", "AllowUserRC no\n")
+    if CONFIG.read_text(encoding="utf-8") != expected_old:
+        raise Unsafe("CONFIG_NOT_EXACT_UNSUPPORTED_DIRECTIVE")
+    result = preflight()
+    if result["issues"]:
+        raise Unsafe("REPAIR_PREFLIGHT_BLOCKED:" + ",".join(result["issues"]))
+    patch_path = DIR / "sshd_config.stg1-repair"
+    if patch_path.exists() or patch_path.is_symlink():
+        raise Unsafe("REPAIR_TEMP_PATH_OCCUPIED")
+    _create_file(patch_path, ssh_config(), 0o600)
+    os.replace(patch_path, CONFIG)
+    dir_fd = os.open(DIR, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+    cmd("/usr/sbin/sshd", "-t", "-f", str(CONFIG))
+    print("CANARY_SSHD_CONFIG_REPAIRED")
+    print("SSHD_CONFIG_VALID=PASS")
+    print("CANARY_USER_UNCHANGED")
+    print("NO_SSHD_OR_NETWORK_STARTED")
+
+
 def assert_prepared() -> None:
     for file, mode in ((CONFIG, 0o600), (HOST_KEY, 0o600),
                        (PROOF, 0o755), (AUTHORIZED, 0o644),
@@ -301,7 +344,7 @@ def stop() -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("preflight", "prepare", "start", "probe", "stop"))
+    parser.add_argument("action", choices=("preflight", "prepare", "repair", "start", "probe", "stop"))
     args = parser.parse_args()
     try:
         if args.action == "preflight":
@@ -310,6 +353,8 @@ def main() -> int:
             return 0 if not result["issues"] else 3
         if args.action == "prepare":
             prepare()
+        elif args.action == "repair":
+            repair_config()
         elif args.action == "start":
             start()
         elif args.action == "stop":

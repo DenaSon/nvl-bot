@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from edge_egress_uid_dns import plan_transparent_dns, validate_nss_hosts
 import json
 import os
 from pathlib import Path
@@ -34,11 +35,12 @@ class BootGuardError(ValueError):
 class BootGuardManifest:
     request: UIDPolicyRequest
     mode: str
+    dns_port: int | None = None
 
     @classmethod
     def parse(cls, data: dict) -> "BootGuardManifest":
-        if not isinstance(data, dict) or set(data) != {"mode", "username", "uid",
-                                                        "priority", "spec"}:
+        if not isinstance(data, dict) or (not {"mode", "username", "uid", "priority", "spec"} <= set(data)
+            or set(data) - {"mode", "username", "uid", "priority", "spec", "dns_port"}):
             raise BootGuardError("INVALID_MANIFEST_FIELDS")
         if data["mode"] != "PROTECTED_BOOT_GUARD":
             raise BootGuardError("PROTECTED_MODE_EXPLICITLY_REQUIRED")
@@ -49,7 +51,10 @@ class BootGuardManifest:
             req.validate()
         except (ValueError, TypeError, KeyError) as exc:
             raise BootGuardError("INVALID_UID_POLICY") from exc
-        return cls(req, data["mode"])
+        port = data.get("dns_port")
+        if port is not None and (type(port) is not int or not 1024 <= port <= 65535):
+            raise BootGuardError("INVALID_DNS_PORT")
+        return cls(req, data["mode"], port)
 
 
 def read_root_only_manifest(path: Path) -> BootGuardManifest:
@@ -77,8 +82,9 @@ class BootGuardApplier:
     """
     def __init__(self, run: Callable = _local_run,
                  get_uid: Callable = lambda username: pwd.getpwnam(username).pw_uid,
-                 geteuid: Callable = os.geteuid):
-        self.run, self.get_uid, self.geteuid = run, get_uid, geteuid
+                 geteuid: Callable = os.geteuid,
+                 read_nss: Callable = lambda: Path("/etc/nsswitch.conf").read_text()):
+        self.run, self.get_uid, self.geteuid, self.read_nss = run, get_uid, geteuid, read_nss
 
     def call(self, *argv: str, checked: bool = True) -> str:
         p = self.run(*argv)
@@ -124,6 +130,17 @@ class BootGuardApplier:
             ) and not line.strip().startswith(prefix):
                 raise BootGuardError("UID_ALREADY_ROUTED_ELSEWHERE")
 
+        if manifest.dns_port is not None:
+            try:
+                validate_nss_hosts(self.read_nss())
+            except (ValueError, OSError) as exc:
+                raise BootGuardError("UNSAFE_NSS_CONFIGURATION") from exc
+            all_nat = self.call("iptables", "-w", "-t", "nat", "-S", "OUTPUT")
+            for line in all_nat.splitlines():
+                if (re.search(r"--uid-owner\s+" + re.escape(str(request.uid)) + r"\b", line)
+                    and "--dport 53" in line
+                    and f"--to-ports {manifest.dns_port}" not in line):
+                    raise BootGuardError("FOREIGN_DNS_REDIRECT")
         routes = self.call("ip", "-4", "route", "show", "table", str(plan.table))
         if any(not re.fullmatch(r"blackhole default(?:\s+.*)?",
                                 line.strip()) for line in routes.splitlines() if line.strip()):
@@ -140,6 +157,11 @@ class BootGuardApplier:
             probe = self.run(*self.check_argv(guard.argv))
             if probe.returncode != 0:
                 self.call(*guard.argv)
+        if manifest.dns_port is not None:
+            dns = plan_transparent_dns(manifest.request, manifest.dns_port)
+            for add, verify in ((dns.udp, dns.udp_check), (dns.tcp, dns.tcp_check)):
+                if self.run(*verify.argv).returncode != 0:
+                    self.call(*add.argv)
         self.call(*plan.guard[3].argv)
         if not present:
             self.call(*plan.guard[4].argv)
@@ -155,6 +177,11 @@ class BootGuardApplier:
         for guard in plan.guard[:3]:
             if self.run(*self.check_argv(guard.argv)).returncode != 0:
                 raise BootGuardError("IPV6_OR_LOCAL_DNS_GUARD_MISSING")
+        if manifest.dns_port is not None:
+            dns = plan_transparent_dns(manifest.request, manifest.dns_port)
+            for command in (dns.udp_check, dns.tcp_check):
+                if self.run(*command.argv).returncode != 0:
+                    raise BootGuardError("DNS_REDIRECT_NOT_INSTALLED")
 
 
 def render_ssh_required_unit(manifest: BootGuardManifest,

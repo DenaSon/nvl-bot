@@ -58,6 +58,7 @@ class _GuardedPorts:
     trigger: str
     incident_ref: Optional[str]
     operation_id: Optional[int] = None
+    now: datetime | None = None
 
     async def acquire_6g_lock(self, source, target):
         operation_id, busy = await self.real.acquire_6g_lock(source, target)
@@ -84,7 +85,7 @@ class _GuardedPorts:
         )
         assert_protected_failover_proof(
             snapshot, proof, operation_id=self.operation_id,
-            trigger=self.trigger, selected_edge_ip=selected,
+            trigger=self.trigger, selected_edge_ip=selected, now=self.now,
         )
 
     async def snapshot_under_lock(self, source, target):
@@ -176,5 +177,5 @@ async def run_guarded_6g6h_handoff(
         return HandoffResult(False, "UNEXPECTED_MANUAL_INCIDENT", None)
     if not explicitly_approved_for_isolated_lab:
         return HandoffResult(False, "PROTECTED_HANDOFF_RELEASE_NOT_APPROVED", None)
-    adapter = _GuardedPorts(ports, trigger, incident_ref)
+    adapter = _GuardedPorts(ports, trigger, incident_ref, now=now)
     return await run_protected_handoff(adapter, source_host, target_host, now=now)

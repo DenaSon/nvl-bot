@@ -99,6 +99,13 @@ class Existing6GUIDRuntimeBridge:
             dns_port=dns_port,
         )
 
+    async def assert_frozen_binding(self, op, req, source, dns_port):
+        self._identity(req, source)
+        await asyncio.to_thread(
+            self.store.assert_frozen_binding, op, req,
+            source=source, dns_port=dns_port,
+        )
+
     async def check_no_existing_sessions(self, req):
         self._identity(req, self.source)
         if not await asyncio.to_thread(self.existing_sessions_probe, req):

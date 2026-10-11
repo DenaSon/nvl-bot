@@ -3066,6 +3066,7 @@ def _db_update_failover_operation(
     error=None,
     detail=None,
     finished=False,
+    require_running=False,
 ):
     fields = ["updated_at=?"]
     values = [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
@@ -3086,12 +3087,19 @@ def _db_update_failover_operation(
     if finished:
         fields.append("finished_at=?")
         values.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    # D1-C2B2: a protected stage write must be fenced to its live 6G
+    # operation, so an expired/stolen lock cannot be marked SUCCEEDED.
     values.append(operation_id)
+    if require_running:
+        values.append(FAILOVER_STATUS_RUNNING)
     with db_conn() as conn:
-        conn.execute(
-            f"UPDATE failover_operations SET {', '.join(fields)} WHERE id=?",
+        cur = conn.execute(
+            f"UPDATE failover_operations SET {', '.join(fields)} WHERE id=?"
+            + (" AND status=?" if require_running else ""),
             values,
         )
+        if require_running and cur.rowcount != 1:
+            raise RuntimeError("SHARED_6G_LOCK_NO_LONGER_RUNNING")
 
 
 def _db_get_latest_failover_operation():

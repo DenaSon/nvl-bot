@@ -267,17 +267,17 @@ class Existing6GUIDRuntimeStore:
         return self._tx(operation_id, source, req.spec.edge_public_ipv4, work)
 
     def assert_frozen_binding(self, operation_id: int, req: UIDPolicyRequest,
-                              *, source: str) -> RuntimeBinding:
+                              *, source: str, dns_port: int) -> RuntimeBinding:
         """Only an already FROZEN binding may resume under a fresh 6G lock."""
         def work(conn):
             self._owner(conn, req, source)
             row = read_binding(conn, req.username)
             if not row or (
                 row.uid, row.edge_id, row.edge_ipv4, row.route_table,
-                row.priority, row.state
+                row.priority, row.dns_port, row.state
             ) != (
                 req.uid, req.spec.edge_id, req.spec.edge_public_ipv4,
-                req.spec.route_table, req.priority, "FROZEN"
+                req.spec.route_table, req.priority, dns_port, "FROZEN"
             ):
                 raise RuntimeStoreUnsafe("FROZEN_BINDING_NOT_VERIFIED")
             mapping = conn.execute(

@@ -14,7 +14,8 @@ import ipaddress
 import os
 from pathlib import Path
 import pwd
-import shlex
+import signal
+import time
 import shutil
 import stat
 import subprocess
@@ -253,9 +254,54 @@ def probe() -> None:
     print("SSH_CANARY_PROOF=PASS_NOT_UID_POLICY")
 
 
+def stop() -> None:
+    """Stop ONLY the uniquely identified stg1 sshd within the existing netns.
+
+    Do not stop system sshd, kill-by-name, or delete NSS/users/other resources.
+    If exact identity cannot be established, hold for operator reconciliation.
+    """
+    assert_prepared()
+    if PID.is_symlink():
+        raise Unsafe("UNSAFE_CANARY_PID_SYMLINK")
+    if not PID.exists():
+        print("SSH_CANARY_ALREADY_STOPPED")
+        return
+    s = PID.stat()
+    if not PID.is_file() or s.st_uid != 0 or s.st_mode & 0o022:
+        raise Unsafe("UNSAFE_CANARY_PID_OWNERSHIP")
+    raw = PID.read_text().strip()
+    if not raw.isdecimal() or not (2 <= int(raw) < 1_000_000_000):
+        raise Unsafe("INVALID_CANARY_PID")
+    pid = int(raw)
+    process = Path("/proc") / str(pid)
+    if not process.exists():
+        raise Unsafe("STALE_CANARY_PID_REQUIRES_REVIEW")
+    try:
+        argv = (process / "cmdline").read_bytes().replace(b"\x00", b" ").decode(
+            "utf-8", "replace"
+        )
+        netns_inode = (process / "ns/net").stat().st_ino
+        expected_inode = (Path("/run/netns") / NS).stat().st_ino
+    except OSError as exc:
+        raise Unsafe("CANARY_PROCESS_IDENTITY_UNAVAILABLE") from exc
+    if "sshd" not in argv or str(CONFIG) not in argv or netns_inode != expected_inode:
+        raise Unsafe("CANARY_PROCESS_IDENTITY_MISMATCH")
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(30):
+        if not process.exists():
+            break
+        time.sleep(0.1)
+    else:
+        raise Unsafe("CANARY_STOP_UNCERTAIN")
+    if PID.exists() and not PID.is_symlink():
+        PID.unlink()
+    print("SSH_CANARY_STOPPED_SCOPE_ONLY")
+    print("PRODUCTION_SSH_SERVICE_UNTOUCHED")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("preflight", "prepare", "start", "probe"))
+    parser.add_argument("action", choices=("preflight", "prepare", "start", "probe", "stop"))
     args = parser.parse_args()
     try:
         if args.action == "preflight":
@@ -266,6 +312,8 @@ def main() -> int:
             prepare()
         elif args.action == "start":
             start()
+        elif args.action == "stop":
+            stop()
         else:
             probe()
     except (Unsafe, OSError, ValueError, subprocess.TimeoutExpired) as exc:

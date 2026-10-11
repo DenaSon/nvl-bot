@@ -170,6 +170,19 @@ class Existing6GUIDRuntimeStore:
             self._owner(conn, req, source)
             if read_binding(conn, req.username) is not None:
                 raise RuntimeStoreUnsafe("UID_BINDING_ALREADY_EXISTS")
+            # F4 first-canary isolation: BootGuard freezes the per-Edge
+            # shared route table while arming a new UID. Never cause an
+            # outage for another protected customer by enrolling a second
+            # account on that same Edge before independent multi-UID E2E.
+            other = conn.execute(
+                "SELECT 1 FROM edge_egress_uid_runtime "
+                "WHERE edge_id=? AND username<>? AND "
+                "state IN ('ROUTED_UNVERIFIED','PROTECTED','FROZEN','HOLD') "
+                "LIMIT 1",
+                (req.spec.edge_id, req.username),
+            ).fetchone()
+            if other:
+                raise RuntimeStoreUnsafe("SHARED_EDGE_CANARY_ISOLATION_REQUIRED")
             if conn.execute(
                 "SELECT 1 FROM edge_egress_uid_bindings WHERE "
                 "username=? OR uid=? LIMIT 1", (req.username, req.uid),

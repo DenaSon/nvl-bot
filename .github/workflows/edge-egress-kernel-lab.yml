@@ -6,6 +6,11 @@ on:
       - 'ops/edge_egress_provision.py'
       - 'ops/examples/edge_egress_fra1.json'
       - 'ops/labs/edge_egress_kernel_lab.sh'
+      - 'ops/labs/edge_egress_ci_fake_doh.py'
+      - 'ops/labs/edge_egress_ci_dns_probe.py'
+      - 'edge_egress_uid_boot.py'
+      - 'edge_egress_uid_dns.py'
+      - 'edge_egress_uid_policy.py'
       - '.github/workflows/edge-egress-kernel-lab.yml'
   workflow_dispatch:
 
@@ -14,16 +19,16 @@ permissions:
 
 jobs:
   kernel-network-lab:
-    name: Ephemeral Core Edge WireGuard NAT exercise
+    name: D1-C3D real-kernel Core Edge UID DNS IPv6 fail-closed
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 18
     steps:
       - uses: actions/checkout@v4
       - name: Tooling for disposable kernel namespaces
         run: |
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -qq -y iproute2 iptables wireguard-tools iputils-ping curl
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -qq -y iproute2 iptables wireguard-tools iputils-ping curl openssl util-linux
       - name: Verify lab script syntax
         run: bash -n ops/labs/edge_egress_kernel_lab.sh
-      - name: Execute isolated kernel WireGuard and NAT test
+      - name: Execute isolated UID edge-egress fail-closed tests
         run: sudo env GITHUB_ACTIONS=true NVL_CI_KERNEL_LAB=1 bash ops/labs/edge_egress_kernel_lab.sh

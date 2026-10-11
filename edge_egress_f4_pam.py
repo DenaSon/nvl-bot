@@ -29,7 +29,7 @@ class PAMInspection:
 
 def render_pam_change_review() -> str:
     """Proposed exact addition; human-reviewed only, never installed here."""
-    return "\\n".join((
+    return "\n".join((
         "# REVIEW ONLY — no live PAM edits without disposable VPS rehearsal",
         "# Place as FIRST account rule in /etc/pam.d/sshd:",
         REQUIRED_ACCOUNT_LINE,

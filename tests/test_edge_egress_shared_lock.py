@@ -217,6 +217,7 @@ class ProtectedLegacyDbMutationTests(unittest.TestCase):
             "PROTECTED_SETTING_KEY": PROTECTED_SETTING_KEY,
             "PROTECTED_SETTING_DEFAULT": PROTECTED_SETTING_DEFAULT,
             "legacy_failover_gate": legacy_failover_gate,
+            "assert_legacy_mutation_safe": __import__("edge_egress_legacy_fence").assert_legacy_mutation_safe,
         })
 
         env = {
@@ -255,6 +256,20 @@ class ProtectedLegacyDbMutationTests(unittest.TestCase):
         )
         self.assertEqual(
             self.conn.execute("SELECT host FROM ssh_accounts WHERE username='nvl0557'").fetchone()[0],
+            "172.86.94.174",
+        )
+
+    def test_mapping_blocks_legacy_write_while_global_flag_stays_off(self):
+        self.conn.execute(
+            "CREATE TABLE edge_egress_uid_bindings "
+            "(username TEXT, status TEXT)")
+        self.conn.execute(
+            "INSERT INTO edge_egress_uid_bindings VALUES ('nvl0557','PROTECTED')")
+        self.conn.commit()
+        with self.assertRaisesRegex(RuntimeError, "EGRESS_PROTECTED_BINDINGS"):
+            self.default("216.126.229.12")
+        self.assertEqual(
+            self.conn.execute("SELECT host FROM host_pool WHERE is_default=1").fetchone()[0],
             "172.86.94.174",
         )
 

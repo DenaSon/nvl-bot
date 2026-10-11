@@ -14,6 +14,7 @@ from typing import Callable
 from edge_egress_uid_boot import BootGuardManifest, BootGuardApplier
 from edge_egress_uid_dns import DNSError, validate_nss_hosts, plan_transparent_dns
 from edge_egress_uid_policy import build_policy_plan
+from edge_egress_uid_route_state import inspect_owned_routes, ProtectedRouteError
 
 
 class RecoveryState(str, Enum):
@@ -34,7 +35,8 @@ class RecoveryEvidence:
     edge_route_present: bool
     crash_marker_present: bool
     phase6g_hold: bool
-    ssh_required_dependency: bool
+    uid_session_gate_verified: bool
+    shared_ssh_coupling: bool = False
 
 
 @dataclass(frozen=True)
@@ -46,9 +48,12 @@ class RecoveryDecision:
 
 def assess_recovery(observation: RecoveryEvidence) -> RecoveryDecision:
     """Never claim READY. Missing/reordered firewall or guard is unsafe."""
-    if not observation.ssh_required_dependency:
+    if observation.shared_ssh_coupling:
         return RecoveryDecision(RecoveryState.UNSAFE_GUARD_ABSENT,
-                                "SSH_BOOT_DEPENDENCY_NOT_PROVEN")
+                                "GLOBAL_SSH_DEPENDENCY_FORBIDDEN")
+    if not observation.uid_session_gate_verified:
+        return RecoveryDecision(RecoveryState.UNSAFE_GUARD_ABSENT,
+                                "PER_UID_SESSION_GATE_NOT_VERIFIED")
     if not observation.uid_route_rule or not observation.terminal_blackhole:
         return RecoveryDecision(RecoveryState.UNSAFE_GUARD_ABSENT,
                                 "TERMINAL_UID_GUARD_NOT_PROVEN")
@@ -88,8 +93,8 @@ def inspect_recovery(manifest: BootGuardManifest, *,
                      sixg_rows=()) -> RecoveryDecision:
     """Read-only live inspection, no shell, no auto-healing.
 
-    Must run from an authorized Core operator session. A missing required
-    ssh.service edge or an ambiguous state always blocks readiness.
+    Must run from an authorized Core operator session. F1 does not install
+    or attest an independent per-UID login gate, so readiness is blocked.
     """
     request = manifest.request
     plan = build_policy_plan(request)
@@ -113,22 +118,16 @@ def inspect_recovery(manifest: BootGuardManifest, *,
     gate = BootGuardApplier.check_argv
     firewall = [ok(*gate(command.argv)) for command in plan.guard[:3]]
     table = output("ip", "-4", "route", "show", "table", str(plan.table))
-    routes = [x.strip() for x in table.splitlines() if x.strip()]
-    expected_edge = (
-        "default via " + request.spec.ns_veth_ip +
-        " dev " + request.spec.veth_root +
-        " src " + request.spec.root_veth_ip +
-        " metric 100"
-    )
-    edge_route = expected_edge in routes
-    only_known_routes = all(
-        x.startswith("blackhole default ") or x == expected_edge
-        for x in routes
-    )
-    blackhole = (
-        only_known_routes and
-        sum(x.startswith("blackhole default ") for x in routes) == 1
-    )
+    try:
+        routing = inspect_owned_routes(
+            table, next_hop=request.spec.ns_veth_ip,
+            device=request.spec.veth_root, source=request.spec.root_veth_ip,
+        )
+        edge_route = routing.edge_attached
+        blackhole = routing.terminal_blackhole
+    except ProtectedRouteError:
+        edge_route = False
+        blackhole = False
 
     rule_output = output("ip", "-4", "rule", "show")
     # Explicitly reject a single-destination experimental UID rule:
@@ -153,10 +152,10 @@ def inspect_recovery(manifest: BootGuardManifest, *,
 
     dependency = output("systemctl", "show", "ssh.service", "-p", "Requires",
                         "--value").split()
-    # systemd requires list may be space-delimited and reordered.
-    required = ssh_unit_name in dependency
+    # Shared SSH dependencies are dangerous; they are not a valid per-UID gate.
+    shared = ssh_unit_name in dependency
     if manifest.dns_port is not None:
-        required = required and ("nvl-egress-dns-" + request.username + ".service") in dependency
+        shared = shared or ("nvl-egress-dns-" + request.username + ".service") in dependency
     marker = marker_dir / (request.username + "-" + request.spec.edge_id + ".json")
 
     evidence = RecoveryEvidence(
@@ -169,6 +168,7 @@ def inspect_recovery(manifest: BootGuardManifest, *,
         edge_route_present=edge_route,
         crash_marker_present=marker.exists() or marker.is_symlink(),
         phase6g_hold=has_6g_recovery_hold(sixg_rows),
-        ssh_required_dependency=required,
+        uid_session_gate_verified=False,
+        shared_ssh_coupling=shared,
     )
     return assess_recovery(evidence)

@@ -4169,6 +4169,9 @@ def _db_set_subscription_name(un, value):
 def _db_set_account_host(un, host):
     with db_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        # F1: same committed 6G/protected fence as the bulk/account-default
+        # paths. Automatic balancing also uses this single-account setter.
+        _db_assert_legacy_host_mutation_allowed(conn)
         _db_assert_account_write_allowed(conn)
         conn.execute("UPDATE ssh_accounts SET host=? WHERE username=?", (host, un))
 

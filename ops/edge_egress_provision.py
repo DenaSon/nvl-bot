@@ -72,7 +72,7 @@ class EgressSpec:
             raise ProvisionError("edge_listen_port must be a non-privileged UDP port")
         if type(self.route_table) is not int or not (1000 <= self.route_table <= 32765):
             raise ProvisionError("route_table out of allowed range")
-        if self.route_table in {1780 - 1603, 7700}:  # tables reserved by existing infrastructure
+        if self.route_table in {7700}:  # intentionally avoid future policy collisions
             raise ProvisionError("reserved route_table")
         for attr in ("edge_public_ipv4", "core_public_ipv4"):
             try:
@@ -187,7 +187,7 @@ def _run_read_only(*cmd):
 def preflight(spec: EgressSpec, role: str) -> dict:
     """Read-only conflict screen; not sufficient to approve activation."""
     conflicts = []
-    needed = ("ip", "wg", "iptables", "sysctl")
+    needed = ("ip", "wg", "iptables", "sysctl", "ss")
     for name in needed:
         if shutil.which(name) is None:
             conflicts.append("MISSING_TOOL:" + name)
@@ -217,8 +217,9 @@ def preflight(spec: EgressSpec, role: str) -> dict:
                 continue
             if existing_net.overlaps(spec.tunnel) or existing_net.overlaps(spec.veth):
                 conflicts.append(f"ROUTE_SUBNET_COLLISION:{dst}")
-        table_routes = _run_read_only("ip", "-4", "route", "show", "table", str(spec.route_table))
-        if table_routes.strip():
+        # Use the already retrieved all-tables dump: querying a nonexistent
+        # table directly often returns a nonzero error on modern iproute2.
+        if any(str(r.get("table", "main")) == str(spec.route_table) for r in routes):
             conflicts.append("ROUTE_TABLE_OCCUPIED")
     else:
         if _run_read_only("sysctl", "-n", "net.ipv4.ip_forward").strip() != "1":

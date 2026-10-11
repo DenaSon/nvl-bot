@@ -296,6 +296,30 @@ echo "DNS_UPSTREAM_TLS_EDGE_IP_CONFIRMED"
 echo "[lab] Inject Edge outage; Core may NOT reach the fake Internet"
 nsenter --net="/run/netns/$EDGE" -- bash "$TMP/edge/down.sh"
 ES=0
+echo "[D1-C3D] Edge unavailable: protected IPv4/DNS MUST fail even with live Core WAN"
+if ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+  curl --noproxy '*' -4 -fsS --connect-timeout 2 --max-time 3 \
+  http://203.0.113.51:18080/ >/dev/null 2>&1; then
+  echo "FAIL: protected UID escaped via Core with Edge down" >&2; exit 1
+fi
+root_reply="$(ip netns exec "$CORE" curl --noproxy '*' -4 -fsS --max-time 5 \
+  http://203.0.113.51:18080/)"
+[[ "$root_reply" == "observed_ipv4=209.200.246.198" ]] || {
+  echo "LAB_INVALID: Core fallback unexpectedly offline" >&2; exit 1
+}
+ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+  python3 "$BASE/ops/labs/edge_egress_ci_dns_probe.py" --protocol udp --must-fail
+echo "EDGE_OUTAGE_FAIL_CLOSED_WITH_CORE_AVAILABLE_OK"
+
+echo "[D1-C3D] Edge route removed: terminal blackhole MUST remain"
+ip -n "$CORE" -4 route del default via 10.78.101.2 dev vnh-fra1 table 1780 metric 100
+ip -n "$CORE" -4 route show table 1780 | grep -q '^blackhole default'
+if ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+  curl --noproxy '*' -4 -fsS --connect-timeout 2 --max-time 3 \
+  http://203.0.113.51:18080/ >/dev/null 2>&1; then
+  echo "FAIL: blackhole did not protect UID after detach" >&2; exit 1
+fi
+echo "DETACH_BLACKHOLE_WITH_CORE_AVAILABLE_OK"
 if nsenter --net="/run/netns/$CORE" -- curl --noproxy '*' --fail --silent     --connect-timeout 2 --max-time 2 http://203.0.113.50:18080/ >/dev/null 2>&1; then
   echo "FAIL: unexpected egress while Edge is down" >&2; exit 1
 fi
@@ -324,6 +348,18 @@ done
   echo "FAIL: Edge did not recover correct source IP: $REPLY" >&2; exit 1
 }
 
+echo "[D1-C3D] Reattach selected UID after Edge peer restart and rekey"
+ip -n "$CORE" -4 route replace default via 10.78.101.2 dev vnh-fra1 \
+  src 10.78.101.1 table 1780 metric 100
+uid_reply="$(ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+  curl --noproxy '*' -4 -fsS --max-time 8 http://203.0.113.51:18080/)"
+[[ "$uid_reply" == "observed_ipv4=172.86.94.174" ]] || {
+  echo "FAIL: protected UID did not recover through Edge" >&2; exit 1
+}
+ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+  python3 "$BASE/ops/labs/edge_egress_ci_dns_probe.py" --protocol tcp
+echo "EDGE_REKEY_UID_DNS_RECOVERY_OK"
+
 echo "[lab] Restart Core tunnel and prove namespace/veth recovery"
 nsenter --net="/run/netns/$CORE" -- bash "$TMP/core/down.sh"
 CS=0
@@ -335,10 +371,25 @@ REPLY="$(nsenter --net="/run/netns/$CORE" -- curl --noproxy '*' --fail --silent 
 [[ "$REPLY" == "observed_ipv4=172.86.94.174" ]] || {
   echo "FAIL: Core restart changed external IP: $REPLY" >&2; exit 1
 }
+echo "[D1-C3D] Core tunnel restart must not cause UID fallback while veth is absent"
+if ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+  curl --noproxy '*' -4 -fsS --connect-timeout 2 --max-time 3 \
+  http://203.0.113.51:18080/ >/dev/null 2>&1; then
+  echo "FAIL: Core tunnel restart exposed Core IP to protected UID" >&2; exit 1
+fi
+ip -n "$CORE" -4 route show table 1780 | grep -q '^blackhole default'
+ip -n "$CORE" -4 route replace default via 10.78.101.2 dev vnh-fra1 \
+  src 10.78.101.1 table 1780 metric 100
+uid_reply="$(ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+  curl --noproxy '*' -4 -fsS --max-time 8 http://203.0.113.51:18080/)"
+[[ "$uid_reply" == "observed_ipv4=172.86.94.174" ]] || {
+  echo "FAIL: protected UID not restored to Edge after Core restart" >&2; exit 1
+}
+echo "CORE_TUNNEL_RESTART_FAIL_CLOSED_AND_RECOVERY_OK"
 
 echo "[lab] Clean down and verify no resources leak"
 nsenter --net="/run/netns/$CORE" -- bash "$TMP/core/down.sh"; CS=0
 nsenter --net="/run/netns/$EDGE" -- bash "$TMP/edge/down.sh"; ES=0
 if ip netns list | grep -Eq "^$INNER( |$)"; then echo "Namespace leaked" >&2; exit 1; fi
 if ip -n "$EDGE" link show wg-nvl-fra1 >/dev/null 2>&1; then echo "Edge link leaked" >&2; exit 1; fi
-echo "KERNEL_LAB_PASS: real WG + NAT + Edge outage/recovery + Core restart + cleanup"
+echo "KERNEL_LAB_PASS: WireGuard + UID full IPv4 + IPv6 guard + DNS UDP/TCP over TLS to simulated WAN + outage/blackhole/rekey/Core tunnel restart + cleanup"

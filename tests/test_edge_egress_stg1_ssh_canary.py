@@ -28,12 +28,14 @@ class SSHCanaryContractTests(unittest.TestCase):
             "AuthenticationMethods publickey",
             "DisableForwarding yes",
             "PermitTTY no",
+            "PermitUserRC no",
             "ForceCommand /var/lib/nvl-egress-stg1-sshd/egress-proof.sh",
         ):
             self.assertIn(line, s)
         for forbidden in ("Include /etc/ssh", "ListenAddress 0.0.0.0",
                           "Port 22\n", "AuthorizedKeysFile .ssh/authorized_keys",
-                          "PasswordAuthentication yes", "PermitRootLogin yes"):
+                          "PasswordAuthentication yes", "PermitRootLogin yes",
+                          "AllowUserRC"):
             self.assertNotIn(forbidden,s)
         self.assertTrue(str(canary.CONFIG).startswith("/var/lib/nvl-egress-stg1-sshd/"))
         self.assertNotIn("ssh.service",s)

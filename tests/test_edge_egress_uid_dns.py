@@ -218,6 +218,46 @@ class DNSPolicyTests(unittest.TestCase):
                                                edge_veth=request.spec.veth_root,
                                                edge_src=request.spec.root_veth_ip)
 
+    def test_dns_rejects_competing_uidrule_before_core_leak(self):
+        request = req()
+        good = "1780: from all uidrange 1644-1644 lookup 1780\n"
+        for rival in (
+            "100: from all uidrange 1644-1644 lookup main\n",
+            "101: from all uidrange 1600-1700 lookup main\n",
+            "1781: from all uidrange 1644-1644 lookup main\n",
+        ):
+            with self.subTest(rival=rival):
+                def command(argv, **kwargs):
+                    if argv == ["ip", "-4", "rule", "show"]:
+                        return SimpleNamespace(returncode=0, stdout=rival + good)
+                    return SimpleNamespace(
+                        returncode=0, stdout="blackhole default metric 4096\n"
+                    )
+                with patch("edge_egress_uid_dns.subprocess.run", side_effect=command):
+                    with self.assertRaisesRegex(
+                        DNSError, "PROTECTED_UID_ALREADY_ROUTED_ELSEWHERE"
+                    ):
+                        ensure_terminal_policy(
+                            1644,1780,1780,
+                            edge_next_hop=request.spec.ns_veth_ip,
+                            edge_veth=request.spec.veth_root,
+                            edge_src=request.spec.root_veth_ip,
+                        )
+
+    def test_other_uidrule_does_not_block_owned_dns(self):
+        def command(argv, **kwargs):
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "100: from all uidrange 1658-1658 lookup 77\n"
+                    "1780: from all uidrange 1644-1644 lookup 1780\n"
+                    if argv == ["ip","-4","rule","show"] else
+                    "blackhole default metric 4096\n"
+                ),
+            )
+        with patch("edge_egress_uid_dns.subprocess.run", side_effect=command):
+            ensure_terminal_policy(1644,1780,1780)
+
     def test_dns_is_isolated_from_global_ssh(self):
         unit = render_dns_required_unit(req(), 10553)
         self.assertNotIn("ssh.service", unit)

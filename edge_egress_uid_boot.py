@@ -144,7 +144,27 @@ class BootGuardApplier:
                     and "--dport 53" in line
                     and f"--to-ports {manifest.dns_port}" not in line):
                     raise BootGuardError("FOREIGN_DNS_REDIRECT")
-        routes = self.call("ip", "-4", "route", "show", "table", str(plan.table))
+        routes_result = self.run("ip", "-4", "route", "show", "table", str(plan.table))
+        if routes_result.returncode:
+            # On real iproute2 an unused numeric table can return:
+            # "Error: ipv4: FIB table does not exist." rather than empty stdout.
+            # Confirm absence from ALL tables instead of treating any command
+            # failure as an empty, available table.
+            all_routes = self.run("ip", "-j", "-4", "route", "show", "table", "all")
+            if all_routes.returncode:
+                raise BootGuardError("ROUTE_INVENTORY_UNAVAILABLE")
+            try:
+                inventory = json.loads(all_routes.stdout)
+                if not isinstance(inventory, list):
+                    raise ValueError("INVALID_ROUTE_INVENTORY")
+            except ValueError as exc:
+                raise BootGuardError("INVALID_ROUTE_INVENTORY") from exc
+            if any(str(route.get("table", "main")) == str(plan.table)
+                   for route in inventory if isinstance(route, dict)):
+                raise BootGuardError("ROUTE_TABLE_INVENTORY_CONFLICT")
+            routes = ""
+        else:
+            routes = routes_result.stdout
         if any(not re.fullmatch(r"blackhole default(?:\s+.*)?",
                                 line.strip()) for line in routes.splitlines() if line.strip()):
             raise BootGuardError("FOREIGN_ROUTE_IN_PROTECTED_TABLE")

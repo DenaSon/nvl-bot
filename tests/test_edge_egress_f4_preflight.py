@@ -40,6 +40,7 @@ class F4CorePreflightTests(unittest.TestCase):
             edge_id="fra1",expected_edge_ip="216.126.229.12",
             pam_text=REQUIRED_ACCOUNT_LINE+"\n",
             sshd_effective="usepam yes\n",ssh_active=True,bot_active=True,
+            gate_digest_verified=True,
         )
         params.update(kwargs)
         return examine_core(**params)
@@ -48,6 +49,12 @@ class F4CorePreflightTests(unittest.TestCase):
         p=self.check()
         self.assertTrue(p.safe_to_consider)
         self.assertFalse(p.customer_ready)
+
+    def test_reviewed_root_owned_pam_hook_digest_is_required(self):
+        decision=self.check(gate_digest_verified=False)
+        self.assertFalse(decision.safe_to_consider)
+        self.assertIn("PAM_GATE_SHA256_OR_ROOT_OWNERSHIP_UNVERIFIED",
+                      decision.blockers)
 
     def test_missing_pam_or_wrong_uid_or_down_service_blocks(self):
         for kw in ({"pam_text":""},{"uid":1645},{"ssh_active":False},

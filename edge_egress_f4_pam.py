@@ -33,7 +33,7 @@ def render_pam_change_review() -> str:
         "# REVIEW ONLY — do NOT paste on a live Core without F4 disposable reboot\n"
         "# Place as the FIRST account rule in /etc/pam.d/sshd:\n"
         REQUIRED_ACCOUNT_LINE+"\n"
-        "# Confirm UsePAM yes via sshd -T -C user=nvl0557,...\n"
+        + "# Confirm UsePAM yes via sshd -T -C user=nvl0557,...\n"
         "# Test emergency console/root AND non-root admins after installation.\n"
         "# No automated edits or ssh.service restart are permitted here.\n"
     )

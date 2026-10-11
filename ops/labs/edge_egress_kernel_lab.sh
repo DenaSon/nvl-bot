@@ -171,7 +171,7 @@ useradd --uid 1659 --no-create-home --shell /usr/sbin/nologin nvlciuser
 TUID="$(id -u nvlciuser)"
 TGID="$(id -g nvlciuser)"
 [[ "$TUID" == 1659 ]] || exit 1
-unprotected="$(ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+unprotected="$(ip netns exec "$CORE" setpriv --reuid "$TUID" --regid "$TGID" --clear-groups -- \
   curl --noproxy '*' -4 -fsS --max-time 5 http://203.0.113.51:18080/)"
 [[ "$unprotected" == "observed_ipv4=209.200.246.198" ]] || {
   echo "LAB_INVALID: direct Core fallback is not observable ($unprotected)" >&2; exit 1
@@ -223,12 +223,12 @@ print("REAL_KERNEL_BOOT_GUARD_IDEMPOTENT_OK")
 PY
 
 echo "[D1-C3D] Guard DENY state blocks Internet even though Core WAN is available"
-if ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+if ip netns exec "$CORE" setpriv --reuid "$TUID" --regid "$TGID" --clear-groups -- \
   curl --noproxy '*' -4 -fsS --connect-timeout 2 --max-time 3 \
   http://203.0.113.51:18080/ >/dev/null 2>&1; then
   echo "FAIL: protected UID escaped while blackhole only" >&2; exit 1
 fi
-if ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+if ip netns exec "$CORE" setpriv --reuid "$TUID" --regid "$TGID" --clear-groups -- \
   curl -g -6 --noproxy '*' -fsS --connect-timeout 2 --max-time 3 \
   'http://[2001:db8:abcd::2]:18081/' >/dev/null 2>&1; then
   echo "FAIL: IPv6 bypassed protected UID" >&2; exit 1
@@ -251,7 +251,7 @@ sleep 0.5
 kill -0 "$DOH_PID"
 
 echo "[D1-C3D] Start DNS relay AS protected UID under blackhole"
-ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+ip netns exec "$CORE" setpriv --reuid "$TUID" --regid "$TGID" --clear-groups -- \
   env SSL_CERT_FILE="$TMP/doh.crt" PYTHONPATH="$BASE" \
   python3 "$BASE/edge_egress_uid_dns.py" serve \
   --username nvlciuser --uid "$TUID" --priority 1780 \
@@ -267,7 +267,7 @@ echo "[D1-C3D] Attach full-IPv4 protected UID to dedicated Edge"
 ip -n "$CORE" -4 route replace default via 10.78.101.2 dev vnh-fra1 \
   src 10.78.101.1 table 1780 metric 100
 for target in 203.0.113.50 203.0.113.51; do
-  reply="$(ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+  reply="$(ip netns exec "$CORE" setpriv --reuid "$TUID" --regid "$TGID" --clear-groups -- \
     curl --noproxy '*' -4 -fsS --connect-timeout 3 --max-time 7 \
     "http://$target:18080/")"
   [[ "$reply" == "observed_ipv4=172.86.94.174" ]] || {
@@ -282,7 +282,7 @@ echo "UID_TWO_DESTINATIONS_EDGE_OK UNPROTECTED_CORE_CONTROL_OK"
 
 echo "[D1-C3D] Transparent DNS over UDP + TCP, upstream actual TLS over WG/Edge"
 for protocol in udp tcp; do
-  ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+  ip netns exec "$CORE" setpriv --reuid "$TUID" --regid "$TGID" --clear-groups -- \
     python3 "$BASE/ops/labs/edge_egress_ci_dns_probe.py" --protocol "$protocol"
 done
 [[ "$(wc -l < "$TMP/doh-peers.log")" -ge 2 ]] || {
@@ -297,7 +297,7 @@ echo "[lab] Inject Edge outage; Core may NOT reach the fake Internet"
 nsenter --net="/run/netns/$EDGE" -- bash "$TMP/edge/down.sh"
 ES=0
 echo "[D1-C3D] Edge unavailable: protected IPv4/DNS MUST fail even with live Core WAN"
-if ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+if ip netns exec "$CORE" setpriv --reuid "$TUID" --regid "$TGID" --clear-groups -- \
   curl --noproxy '*' -4 -fsS --connect-timeout 2 --max-time 3 \
   http://203.0.113.51:18080/ >/dev/null 2>&1; then
   echo "FAIL: protected UID escaped via Core with Edge down" >&2; exit 1
@@ -307,14 +307,14 @@ root_reply="$(ip netns exec "$CORE" curl --noproxy '*' -4 -fsS --max-time 5 \
 [[ "$root_reply" == "observed_ipv4=209.200.246.198" ]] || {
   echo "LAB_INVALID: Core fallback unexpectedly offline" >&2; exit 1
 }
-ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+ip netns exec "$CORE" setpriv --reuid "$TUID" --regid "$TGID" --clear-groups -- \
   python3 "$BASE/ops/labs/edge_egress_ci_dns_probe.py" --protocol udp --must-fail
 echo "EDGE_OUTAGE_FAIL_CLOSED_WITH_CORE_AVAILABLE_OK"
 
 echo "[D1-C3D] Edge route removed: terminal blackhole MUST remain"
 ip -n "$CORE" -4 route del default via 10.78.101.2 dev vnh-fra1 table 1780 metric 100
 ip -n "$CORE" -4 route show table 1780 | grep -q '^blackhole default'
-if ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+if ip netns exec "$CORE" setpriv --reuid "$TUID" --regid "$TGID" --clear-groups -- \
   curl --noproxy '*' -4 -fsS --connect-timeout 2 --max-time 3 \
   http://203.0.113.51:18080/ >/dev/null 2>&1; then
   echo "FAIL: blackhole did not protect UID after detach" >&2; exit 1
@@ -351,12 +351,12 @@ done
 echo "[D1-C3D] Reattach selected UID after Edge peer restart and rekey"
 ip -n "$CORE" -4 route replace default via 10.78.101.2 dev vnh-fra1 \
   src 10.78.101.1 table 1780 metric 100
-uid_reply="$(ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+uid_reply="$(ip netns exec "$CORE" setpriv --reuid "$TUID" --regid "$TGID" --clear-groups -- \
   curl --noproxy '*' -4 -fsS --max-time 8 http://203.0.113.51:18080/)"
 [[ "$uid_reply" == "observed_ipv4=172.86.94.174" ]] || {
   echo "FAIL: protected UID did not recover through Edge" >&2; exit 1
 }
-ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+ip netns exec "$CORE" setpriv --reuid "$TUID" --regid "$TGID" --clear-groups -- \
   python3 "$BASE/ops/labs/edge_egress_ci_dns_probe.py" --protocol tcp
 echo "EDGE_REKEY_UID_DNS_RECOVERY_OK"
 
@@ -372,7 +372,7 @@ REPLY="$(nsenter --net="/run/netns/$CORE" -- curl --noproxy '*' --fail --silent 
   echo "FAIL: Core restart changed external IP: $REPLY" >&2; exit 1
 }
 echo "[D1-C3D] Core tunnel restart must not cause UID fallback while veth is absent"
-if ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+if ip netns exec "$CORE" setpriv --reuid "$TUID" --regid "$TGID" --clear-groups -- \
   curl --noproxy '*' -4 -fsS --connect-timeout 2 --max-time 3 \
   http://203.0.113.51:18080/ >/dev/null 2>&1; then
   echo "FAIL: Core tunnel restart exposed Core IP to protected UID" >&2; exit 1
@@ -380,7 +380,7 @@ fi
 ip -n "$CORE" -4 route show table 1780 | grep -q '^blackhole default'
 ip -n "$CORE" -4 route replace default via 10.78.101.2 dev vnh-fra1 \
   src 10.78.101.1 table 1780 metric 100
-uid_reply="$(ip netns exec "$CORE" setpriv -u "$TUID" -g "$TGID" -- \
+uid_reply="$(ip netns exec "$CORE" setpriv --reuid "$TUID" --regid "$TGID" --clear-groups -- \
   curl --noproxy '*' -4 -fsS --max-time 8 http://203.0.113.51:18080/)"
 [[ "$uid_reply" == "observed_ipv4=172.86.94.174" ]] || {
   echo "FAIL: protected UID not restored to Edge after Core restart" >&2; exit 1

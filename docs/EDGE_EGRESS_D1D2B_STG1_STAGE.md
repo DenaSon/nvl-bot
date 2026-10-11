@@ -70,3 +70,12 @@ Evidence below is **operator-supplied terminal output**, not automated remote at
 Operator ran a read-only audit in the live Core isolated `nvl-egress-stg1` namespace, after independently confirming eventual Standby tunnel recovery. `/etc/resolv.conf` returned nameservers `8.8.8.8` and `8.8.4.4`. IPv4 route lookups inside the namespace for **both** nameservers selected `wg-nvl-stg1`, source `10.78.110.2`. `getent ahostsv4 example.com` returned success (`DNS_RESOLUTION=PASS`). `ip -6 route show default` returned no route, and `curl -6 --noproxy '*' https://api64.ipify.org` did not connect (`IPV6_PUBLIC_EGRESS=NO_CONNECTION`).
 
 **Scope:** successful resolution and namespace route lookups are not packet captures or complete DNS leak proofs. They do not prove all DNS types/transports including DoH, TCP/UDP 53 or full SSH/BadVPN user flows are confined to the Edge; they do not verify production UID ownership, boot guard, recovery time, or production 6G/6H cutover. No protected production activation is authorized.
+
+### SSH protocol / production baseline read-only observation — 2026-10-11
+
+Operator tested TCP connectivity from inside the isolated Core namespace to the public SSH service on `ssh.github.com:443`. The test read a valid `SSH-2.0-*` protocol banner, printed `SSH_PROTOCOL_BANNER=PASS` and exited 0. This proves an outbound SSH protocol connection from that namespace, **not** an authenticated NVL SSH account session, OS UID-based egress route assignment, BadVPN operation, or account lifecycle.
+
+The same terminal output showed `systemctl is-active nvlbot` = `active`, `systemctl is-active ssh` = `active`, root namespace `wg show interfaces` = `wg0`, and host route to `1.1.1.1` via `eth0` with source `209.200.246.198`. These are point-in-time production service/route observations, not a full incident-free user audit.
+
+**D1-D2C RESULT:** Real isolated Core→Standby IPv4 HTTPS egress, controlled outage nonfallback for one connection, eventual recovery, namespace DNS route/resolution, absent public IPv6 connectivity, outbound SSH banner and production service status all observed. **Staging network test PASSED. Production deployment NOT authorized:** protected UID/SSH/BadVPN behavior, boot guard on disposable VPS, full DNS/IPv6 leak capture, live 6G/6H wiring and cleanup evidence remain unverified. Dedicated live staging Core/Standby interfaces and temporary SSH authorized_keys entry are still active/present until separately scoped teardown is completed.
+

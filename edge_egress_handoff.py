@@ -28,6 +28,28 @@ from edge_egress_policy import EgressReadiness, evaluate_protected_handoff
 MAX_EVIDENCE_AGE = timedelta(seconds=30)
 MANUAL_RECOVERY_PHASE = "EGRESS_RECOVERY_REQUIRED"
 
+# Phases written BEFORE the first customer-route mutation or any later
+# uncertain DB/DNS change. Existing Phase 6G stale lock recovery MUST NOT
+# treat these as ordinary expired operations.
+EGRESS_HOLD_PHASES = frozenset({
+    "ARM_FAIL_CLOSED", "SELECT_TARGET_EGRESS", "VERIFY_CUSTOMER_EGRESS",
+    "SOURCE_ACCOUNT_CAS", "EDGE_ONLY_DNS_CUTOVER", "VERIFY_FINAL",
+    MANUAL_RECOVERY_PHASE,
+})
+
+
+def is_egress_recovery_hold(detail_json) -> bool:
+    """Recognize an unresolved protected handoff in Phase 6G's shared lock."""
+    import json
+
+    if not isinstance(detail_json, str) or not detail_json.strip():
+        return False
+    try:
+        data = json.loads(detail_json)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(data, dict) and data.get("phase") in EGRESS_HOLD_PHASES
+
 
 class HandoffUnsafe(ValueError):
     pass

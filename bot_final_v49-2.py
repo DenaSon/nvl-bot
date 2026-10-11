@@ -314,6 +314,7 @@ from edge_egress_entrypoints import (
     evaluate_manual_edge_gate,
     edge_guard_message,
 )
+from edge_egress_status import read_egress_status, render_egress_status_html
 from incident_observability import (
     INCIDENT_STATE_EVIDENCE_DEGRADED,
     INCIDENT_STATE_FAILOVER_BLOCKED,
@@ -13528,6 +13529,7 @@ async def _render_host_pool_panel(query, page=0):
     kb.append([InlineKeyboardButton("🚀 افزودن Edge جدید (VPS از قبل‌خریداری‌شده)", callback_data="hp_addedge")])
     kb.append([InlineKeyboardButton("🌍 دامنهٔ ثابت + Cloudflare", callback_data="hp_cf_settings")])
     kb.append([InlineKeyboardButton("🛡 فیلترینگ و دسترسی", callback_data="hp_filtering")])
+    kb.append([InlineKeyboardButton("🔐 وضعیت Egress (فقط مشاهده)", callback_data="hpeg_status")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="ipsvc_menu")])
     cf_cfg = await asyncio.to_thread(_cf_get_config)
     if _cf_configured(cf_cfg):
@@ -23313,6 +23315,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d == "hp_filtering" and role == 'admin':
         await _render_filtering_monitor_panel(query)
+
+    elif d == "hpeg_status":
+        # D1-C2B2: a strictly read-only status screen, NOT an enable button.
+        if role != 'admin':
+            await query.message.reply_text("⛔️ دسترسی فقط برای مدیر مجاز است.")
+            return
+        egress_status = await asyncio.to_thread(read_egress_status, db_conn)
+        await query.edit_message_text(
+            render_egress_status_html(egress_status),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 سرویس IP", callback_data="hp_menu")]
+            ]),
+        )
+        return
 
     elif d == "flt_radar" and role == 'admin':
         await _render_radar_monitor_panel(query)

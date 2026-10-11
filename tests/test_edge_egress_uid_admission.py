@@ -1,9 +1,10 @@
 """F2: per-account admission defaults to denial on uncertain evidence."""
 import sqlite3
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
-from edge_egress_uid_admission import AdmissionResult, decide_account
+from edge_egress_uid_admission import AdmissionResult, decide_account, main
 from edge_egress_uid_runtime_store import install_runtime_schema
 from edge_egress_protected_mapping import install_protected_mapping_schema
 
@@ -79,6 +80,15 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(self.decide().result, AdmissionResult.DENY)
         self.c.execute("DROP TABLE edge_egress_uid_bindings")
         self.assertEqual(self.decide().result, AdmissionResult.DENY)
+
+    def test_root_break_glass_never_needs_core_sqlite(self):
+        with patch("edge_egress_uid_admission.os.geteuid", return_value=0), \
+             patch.dict("os.environ", {"PAM_TYPE":"account","PAM_USER":"root"}), \
+             patch("edge_egress_uid_admission.pwd.getpwnam",
+                   return_value=SimpleNamespace(pw_uid=0)), \
+             patch("edge_egress_uid_admission.sqlite3.connect",
+                   side_effect=AssertionError("root must not need DB")):
+            self.assertEqual(main(),0)
 
     def test_broken_kernel_probe_cannot_allow_protected_user(self):
         self.protect()

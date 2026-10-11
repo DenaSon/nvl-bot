@@ -46,6 +46,9 @@ class Ports:
         self.step("reserve")
         assert source==SOURCE and dns_port==10553
         self.state="BLOCKED"
+    async def assert_frozen_binding(self,op,req,source,dns_port):
+        self.step("assert_frozen")
+        assert self.state=="FROZEN" and dns_port==10553
     async def check_no_existing_sessions(self,req): self.step("idle")
     async def arm_boot_guard(self,req,dns_port):
         assert self.state=="BLOCKED"
@@ -135,6 +138,26 @@ class RuntimeTests(unittest.TestCase):
         result=self.run_attach(p)
         self.assertTrue(result.recovery_required)
         self.assertIn("journal:"+HOLD_PHASE+":RUNNING",p.calls)
+
+    def test_explicit_frozen_resume_reuses_mapping_without_reservation(self):
+        p=Ports()
+        p.state="FROZEN"
+        result=asyncio.run(attach_protected(
+            p,request(),source=SOURCE,dns_port=10553,
+            authorized=True,resume_frozen=True))
+        self.assertTrue(result.ok)
+        self.assertEqual(p.state,"PROTECTED")
+        self.assertIn("assert_frozen",p.calls)
+        self.assertNotIn("reserve",p.calls)
+
+    def test_frozen_resume_failure_never_falls_back_to_core(self):
+        p=Ports(ip="209.200.246.198")
+        p.state="FROZEN"
+        result=asyncio.run(attach_protected(
+            p,request(),source=SOURCE,dns_port=10553,
+            authorized=True,resume_frozen=True))
+        self.assertTrue(result.recovery_required)
+        self.assertEqual(p.state,"HOLD")
 
     def test_freeze_does_not_remove_protected_intent(self):
         p=Ports()

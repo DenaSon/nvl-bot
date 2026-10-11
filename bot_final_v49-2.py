@@ -237,6 +237,7 @@ from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKe
 from telegram.error import BadRequest
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, PicklePersistence, PersistenceInput
 
+import egress_manager
 from edge_observability import (
     DIAG_CORE_LOCAL,
     DIAG_FILTER_SUSPECTED,
@@ -9980,6 +9981,8 @@ async def _show_user_detail(update_or_query, username, context):
         [InlineKeyboardButton("🔴 غیرفعال" if st == "🟢 فعال" else "🟢 فعال", callback_data=f"uact_tg_{username}"), InlineKeyboardButton("🗑 حذف اکانت", callback_data=f"uact_dl_{username}")],
         [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="uact_back")]
     ]
+    if role == "admin" and os.environ.get("NVL_EGRESS_INTENTS_UI") == "1":
+        kb.insert(-1, [InlineKeyboardButton("🌐 درخواست Egress (آزمایشی)", callback_data=f"egx_user_{username}")])
     mode_label = {"tls": "🔐 TLS (اتصال مستقیم با گواهی معتبر)"}.get(acc_conn_mode, "🔌 مستقیم")
     hold_active, _hd, hold_days = await asyncio.to_thread(_db_get_hold_info, username)
     hold_line = ""
@@ -15304,10 +15307,127 @@ async def _show_v2_renew_confirm(target, context, un, days):
     else:
         await target.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
+
+async def _render_egress_intent_panel(query, username, notice=""):
+    """Admin-only view; planned intents are NOT applied routes."""
+    if not egress_manager._USERNAME.fullmatch(username):
+        await query.edit_message_text("❌ شناسه کاربر نامعتبر است.")
+        return
+    def _read():
+        with db_conn() as conn:
+            egress_manager.ensure_schema(conn)
+            account = conn.execute(
+                "SELECT service_type,status FROM ssh_accounts WHERE username=?", (username,)
+            ).fetchone()
+            targets = egress_manager.list_targets(conn)
+            pending = egress_manager.pending_intent_for_user(conn, username)
+            return account, targets, pending
+
+    account, targets, pending = await asyncio.to_thread(_read)
+    if account is None or account[0] != "ssh":
+        await query.edit_message_text("❌ حساب SSH یافت نشد.")
+        return
+
+    lines = [
+        "🌐 <b>برنامه‌ریزی Egress — فقط آزمایشی</b>",
+        f"کاربر: <code>{esc(username)}</code>",
+        f"وضعیت حساب: {esc(account[1])}",
+        "",
+        "⚠️ هیچ انتقال یا تغییر IP واقعی از این منو انجام نمی‌شود.",
+        "انتخاب Edge فقط یک درخواست بررسی ثبت می‌کند.",
+    ]
+    buttons = []
+    if notice:
+        lines.extend(("", esc(notice)))
+    if pending:
+        lines.extend(("", f"درخواست باز: <code>{esc(pending['operation_id'])}</code>",
+                      f"Edge پیشنهادی: <code>{esc(pending['target_id'])}</code>",
+                      "وضعیت: PLANNED (بدون تغییر شبکه)"))
+        buttons.append([InlineKeyboardButton("✖️ لغو درخواست", callback_data=f"egx_cancel_{pending['operation_id']}")])
+    elif account[1] != "🟢 فعال":
+        lines.extend(("", "حساب فعال نیست؛ ثبت درخواست جدید مجاز نیست."))
+    elif not targets:
+        lines.extend(("", "هیچ Edge آزمایشی ثبت نشده است."))
+    else:
+        lines.append("")
+        for target in targets[:12]:
+            lines.append(
+                f"• <code>{esc(target['target_id'])}</code> → "
+                f"<code>{esc(target['edge_public_ip'])}</code> "
+                f"(Local port {target['local_port']}, DRAFT)"
+            )
+            buttons.append([InlineKeyboardButton(
+                f"🧪 ثبت درخواست {target['target_id']}",
+                callback_data=f"egx_plan_{username}_{target['target_id']}",
+            )])
+    buttons.append([InlineKeyboardButton("↩️ فهرست کاربران", callback_data="uact_back")])
+    await query.edit_message_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML",
+    )
+
+
+async def _handle_egress_intent_callback(query, context, data):
+    """Admin and feature-flag checks are mandatory in the parent callback handler."""
+    if data.startswith("egx_user_"):
+        username = data[len("egx_user_"):]
+        return await _render_egress_intent_panel(query, username)
+    if data.startswith("egx_plan_"):
+        raw = data[len("egx_plan_"):]
+        if "_" not in raw:
+            await query.edit_message_text("❌ درخواست نامعتبر است.")
+            return
+        username, target_id = raw.rsplit("_", 1)
+        def _plan():
+            with db_conn() as conn:
+                return egress_manager.plan_switch(
+                    conn, username=username, target_id=target_id,
+                    actor_telegram_id=query.from_user.id, role="admin",
+                )
+        result = await asyncio.to_thread(_plan)
+        return await _render_egress_intent_panel(
+            query, username,
+            f"درخواست {result['operation_id']} ثبت شد؛ مسیر خروجی تغییر نکرد.",
+        )
+    if data.startswith("egx_cancel_"):
+        operation_id = data[len("egx_cancel_"):]
+        def _cancel():
+            with db_conn() as conn:
+                op = egress_manager.get_intent(conn, operation_id)
+                if op is None:
+                    raise egress_manager.EgressIntentError("PLAN_NOT_FOUND")
+                egress_manager.cancel_plan(
+                    conn, operation_id=operation_id,
+                    actor_telegram_id=query.from_user.id, role="admin",
+                )
+                return op["username"]
+        username = await asyncio.to_thread(_cancel)
+        return await _render_egress_intent_panel(
+            query, username, "درخواست لغو شد؛ هیچ مسیری تغییر نکرد.",
+        )
+    await query.edit_message_text("❌ عملیات شناخته‌شده نیست.")
+
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_auth(context): return
     query = update.callback_query; await query.answer(); d = query.data
     role, ag_id = context.user_data.get('role'), context.user_data.get('agent_id', 0)
+
+    # Stage 3C: opt-in, admin-only, PLAN_ONLY; no per-user routing change here.
+    if d.startswith('egx_'):
+        if role != 'admin':
+            await query.message.reply_text("⛔️ فقط مدیر مجاز به برنامه‌ریزی Egress است.")
+            return
+        if os.environ.get("NVL_EGRESS_INTENTS_UI") != "1":
+            await query.message.reply_text("این قابلیت هنوز فعال نشده است.")
+            return
+        try:
+            return await _handle_egress_intent_callback(query, context, d)
+        except egress_manager.EgressIntentError as exc:
+            await query.message.reply_text(f"❌ درخواست قابل ثبت نیست: {esc(str(exc))}")
+            return
+
 
     # 🚨 گارد اجباری بودن برند نماینده در کالبک‌ها (بررسی مستقیم از دیتابیس)
     if role == 'agent':

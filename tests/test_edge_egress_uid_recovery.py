@@ -79,6 +79,28 @@ class RecoveryTests(unittest.TestCase):
             ("FAILED", "{}"),
         ]))
 
+    def test_selective_destination_uid_rule_is_never_protected(self):
+        def run(*args):
+            if args == ("ip", "-4", "rule", "show"):
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout="1780: from all to 1.1.1.1 uidrange 1644-1644 lookup 1780\n")
+            if args == ("ip", "-4", "route", "show", "table", "1780"):
+                return SimpleNamespace(returncode=0,
+                                       stdout="blackhole default metric 4096\n")
+            if args == ("systemctl", "show", "ssh.service", "-p", "Requires",
+                        "--value"):
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout="nvl-egress-guard-nvl0557.service nvl-egress-dns-nvl0557.service")
+            return SimpleNamespace(returncode=0, stdout="")
+        with tempfile.TemporaryDirectory() as root:
+            outcome = inspect_recovery(
+                manifest(), ssh_unit_name="nvl-egress-guard-nvl0557.service",
+                marker_dir=Path(root), run=run, read_nss=lambda: "hosts: files dns\n")
+        self.assertEqual(outcome.state, RecoveryState.UNSAFE_GUARD_ABSENT)
+        self.assertFalse(outcome.customer_ready)
+
     def test_actual_audit_read_only_offline(self):
         calls = []
         def run(*args):

@@ -165,6 +165,21 @@ class PrepareCoordinatorTests(unittest.TestCase):
         self.assertNotIn("6g:reserve",ports.events)
         self.assertFalse(ports.locked)
 
+    def test_existing_stage_is_not_overwritten_or_deleted(self):
+        ports=FakePorts()
+        original=ports.reserve_under_6g_lock
+        async def reserved_stage(conf, **kwargs):
+            record=await original(conf, **kwargs)
+            from dataclasses import replace
+            return replace(record,status="STAGED")
+        ports.reserve_under_6g_lock=reserved_stage
+        result=self.run_prepare(ports)
+        self.assertFalse(result.ok)
+        self.assertIn("ALREADY_STAGED",result.reason)
+        self.assertNotIn("edge:stage",ports.events)
+        self.assertNotIn("core:discard",ports.events)
+        self.assertFalse(ports.locked)
+
     def test_partial_staging_failure_cleans_only_stage_files(self):
         ports=FakePorts(error_at="stage",role_error="core")
         result=self.run_prepare(ports)

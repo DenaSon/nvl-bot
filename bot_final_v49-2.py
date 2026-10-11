@@ -321,6 +321,7 @@ from edge_egress_entrypoints import (
 )
 from edge_egress_status import read_egress_status, render_egress_status_html
 from edge_egress_f3_admin import render_assignment_preview
+from edge_egress_f3_readiness import record_ingress_candidate
 from incident_observability import (
     INCIDENT_STATE_EVIDENCE_DEGRADED,
     INCIDENT_STATE_FAILOVER_BLOCKED,
@@ -3805,6 +3806,15 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
         cur_hosts.append(edge_ip)
         await asyncio.to_thread(_db_update_setting, 'hosts', ",".join(cur_hosts))
     await asyncio.to_thread(_db_set_host_active, edge_ip, True)
+    # F3: legacy ingress onboarding records only an INGRESS_ONLY candidate.
+    # Egress staging requires a separately pinned, explicitly authorized
+    # 6G operation; never reuse this installer password for Egress SSH.
+    try:
+        await asyncio.to_thread(record_ingress_candidate, db_conn, edge_ip)
+    except Exception:
+        log.exception("F3 ingress candidate audit failed for host (redacted)")
+        # Ingress succeeded regardless; never pretend the Egress tunnel was
+        # automatically provisioned.
 
     status = "✅ پینگ داخل تونل جواب داد." if result["tunnel_ok"] else "⚠️ تونل بالا آمد ولی پینگ داخلی جواب نداد — دستی با «wg show» چک کنید."
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("⭐ این IP را پیش‌فرض کل سیستم کن", callback_data=f"hpdef_{edge_ip}")],
@@ -3816,7 +3826,8 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
         f"🔒 IP داخلی تونل: <code>{result['edge_wg_ip']}</code>\n"
         f"🔑 کلید عمومی Edge: <code>{esc(result['edge_pubkey'])}</code>\n"
         f"{status}\n\n"
-        f"این IP هم‌اکنون به «🌐 سرویس IP» اضافه و فعال شد.",
+        f"این IP هم‌اکنون به «🌐 سرویس IP» اضافه و فعال شد.\\n"
+        f"🛡 Egress خروجی: هنوز تأیید نشده؛ ثبت ورودی به‌معنای خروج کاربران از Edge نیست.",
         parse_mode="HTML", reply_markup=kb
     )
     return True, edge_ip, result

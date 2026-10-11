@@ -20,6 +20,7 @@ import subprocess
 from typing import Callable
 
 from edge_egress_uid_runtime_store import RuntimeBinding, read_binding
+from edge_egress_f3_readiness import read_readiness, admission_eligible
 from edge_egress_uid_boot import BootGuardApplier, BootGuardManifest
 from edge_egress_uid_route_state import inspect_owned_routes
 from ops.edge_egress_provision import EgressSpec
@@ -123,6 +124,9 @@ def probe_local_guards(conn: sqlite3.Connection, row: RuntimeBinding) -> bool:
     if not allocation or allocation[0] != row.edge_ipv4 or (
         allocation[4] != row.route_table or allocation[7] != "STAGED"
     ):
+        return False
+    # An Edge proven in a disposable lab is NOT a customer-admissible Edge.
+    if not admission_eligible(read_readiness(conn, row.edge_id)):
         return False
     spec = EgressSpec(
         edge_id=row.edge_id, edge_public_ipv4=allocation[0],

@@ -43,7 +43,9 @@ def get_function(name, extra=None):
           "legacy_failover_gate": legacy_failover_gate,
           "legacy_new_edge_gate": legacy_new_edge_gate,
           "any_protected_bindings": lambda _db: False,
-          "db_conn": lambda: None}
+          "db_conn": lambda: None,
+          "LEGACY_PROTECTED_BINDINGS_BLOCKED":
+              "EGRESS_PROTECTED_BINDINGS_LEGACY_MUTATION_UNSAFE"}
     ns.update(extra or {})
     module = ast.Module(body=[matches[0]], type_ignores=[])
     ast.fix_missing_locations(module)

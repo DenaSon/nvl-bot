@@ -308,6 +308,11 @@ from edge_egress_lifecycle import (
     legacy_new_edge_gate,
 )
 from edge_egress_handoff import is_egress_recovery_hold
+from edge_egress_legacy_fence import (
+    LEGACY_PROTECTED_BINDINGS_BLOCKED,
+    assert_legacy_mutation_safe,
+    any_protected_bindings,
+)
 from edge_egress_entrypoints import (
     classify_edge_callback,
     classify_edge_text,
@@ -1660,6 +1665,9 @@ def _db_assert_legacy_host_mutation_allowed(conn):
     gate = legacy_failover_gate(setting)
     if not gate.allowed:
         raise RuntimeError(gate.reason)
+    # In mixed legacy/protected deployments, the global flag may still be OFF.
+    # Deny legacy host, DNS and account moves if any protected UID mapping exists.
+    assert_legacy_mutation_safe(conn)
 
 def _hosts_fallback_with_warning(context_hint=""):
     """
@@ -3762,6 +3770,12 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
         )
         return False, None, None
 
+    if await asyncio.to_thread(any_protected_bindings, db_conn):
+        await app.bot.send_message(
+            chat_id,
+            "⛔️ Edge جدید در حضور کاربران Egress محافظت‌شده از مسیر Legacy قابل نصب نیست.",
+        )
+        return False, None, None
     _provision_timeout = 300 + max(0, connect_retries - 1) * 15
     try:
         ok, err, result = await asyncio.wait_for(
@@ -3948,6 +3962,8 @@ def _cf_update_dns_record_sync(new_ip: str):
     ))
     if not egress_gate.allowed:
         return False, egress_gate.reason
+    if any_protected_bindings(db_conn):
+        return False, LEGACY_PROTECTED_BINDINGS_BLOCKED
     cfg = _cf_get_config()
     if not cfg["token"] or not cfg["zone"]:
         return False, "تنظیمات Cloudflare (توکن/Zone) در دیتابیس کامل نیست."
@@ -4159,6 +4175,7 @@ def _db_set_account_host(un, host):
 def _db_set_hosts_bulk(usernames, host):
     with db_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        _db_assert_legacy_host_mutation_allowed(conn)
         _db_assert_account_write_allowed(conn)
         conn.executemany(
             "UPDATE ssh_accounts SET host=? WHERE username=?",
@@ -13612,6 +13629,7 @@ def _failover_preflight_error_label_fa(error):
         "EGRESS_PROTECTED_LEGACY_CORE_FALLBACK_UNSAFE": "مسیر انتقال فعلی دامنه را به Core می‌فرستد؛ برای Egress محافظت‌شده مجاز نیست",
         "EGRESS_PROTECTED_EDGE_ACTIVATION_NOT_READY": "Edge جدید هنوز خروجی محافظت‌شدهٔ تأییدشده ندارد",
         "EGRESS_PROTECTED_MODE_INVALID": "تنظیم حالت Egress نامعتبر است و عملیات برای ایمنی متوقف شده",
+        "EGRESS_PROTECTED_BINDINGS_LEGACY_MUTATION_UNSAFE": "با وجود کاربر Egress محافظت‌شده، انتقال Legacy مجاز نیست",
     }
     return labels.get(raw, "یکی از شرایط ایمنی تأیید نشد")
 
@@ -25331,6 +25349,10 @@ async def _safe_manual_failover_preflight(
     if not egress_gate.allowed:
         return {"ok": False, "errors": [egress_gate.reason],
                 "egress_protected": True, "egress_gate": egress_gate.reason}
+    if await asyncio.to_thread(any_protected_bindings, db_conn):
+        return {"ok": False, "errors": [LEGACY_PROTECTED_BINDINGS_BLOCKED],
+                "egress_protected": True,
+                "egress_gate": LEGACY_PROTECTED_BINDINGS_BLOCKED}
 
     if source_host == target_host:
         errors.append("SOURCE_EQUALS_TARGET")

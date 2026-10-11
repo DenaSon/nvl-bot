@@ -150,6 +150,11 @@ def main() -> int:
         return 1
     try:
         actual = pwd.getpwnam(username).pw_uid
+        # Keep the primary root break-glass route independent from bot DB,
+        # WireGuard and per-account DNS. No other UID gets this exception.
+        # F4 must test out-of-band console and non-root admins separately.
+        if username == "root" and actual == 0:
+            return 0
         # Open the exact expected Core DB read-only. The path is not provided
         # by PAM/user input, preventing a user selecting a forged SQLite file.
         conn = sqlite3.connect("file:" + FIXED_DB + "?mode=ro", uri=True, timeout=2)

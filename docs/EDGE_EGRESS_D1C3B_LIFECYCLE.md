@@ -14,9 +14,10 @@ This proves one destination/UID and a temporary kernel path. It does **not** pro
 - edge_egress_uid_lifecycle.py: explicit short-lived canary saga, acquires existing persisted Phase 6G lock, records each phase before mutation, revalidates source+UID under lock, arms guard first, starts shadow, attaches Edge route, proves exact Edge IP, verifies the installed IPv6/DNS guard, freezes first and stops shadow, then restores an **explicitly unprotected** canary. Only a fully restored canary marks the shared journal SUCCEEDED.
 - If a mutation might have started and anything fails (including restoration), the saga requests a scoped freeze, attempts stopping shadow, and keeps the shared 6G operation RUNNING under EGRESS_UID_RECOVERY_REQUIRED. The result is not READY.
 - edge_egress_uid_6g_bridge.py: opt-in adapter reusing Existing6GPreparationAdapter's real Phase 6G lock, SQLite source/target/default/DNS and active account snapshot invariants. Checks the named SSH account, stored assigned host, live OS username-to-UID binding and that the global protected setting is OFF. Journals through the existing update callback's require_running CAS. No new independent lock or schema.
+- edge_egress_uid_shadow.py: opt-in pinned Standby SSH + Core-local shadow adapter. Starts only the dedicated staged tunnel (Edge first, Core second), and attempts both scoped stops if one side fails.
 - edge_egress_uid_kernel.py: opt-in Core-local Linux command port, with exact argv (never shell), preflight ownership/collision checks, root-only crash-recovery marker fsync'd *before* kernel changes, UID-specific IPv6/DNS guard + terminal table blackhole before UID selector, veth next-hop, independent HTTPS IP check, scoped freeze and guarded reversal only after shadow resources are stopped.
 - edge_egress_handoff.py: registration of all D1-C3B mutating phases in the existing 6G stale-lock recovery-hold predicate so an expired RUNNING lock is not silently released.
-- Tests: test_edge_egress_uid_lifecycle.py, test_edge_egress_uid_6g_bridge.py and test_edge_egress_uid_kernel.py. These test callback ordering, real-shaped SQLite state, UID binding, default deny, simulated errors and hold behavior.
+- Tests: test_edge_egress_uid_lifecycle.py, test_edge_egress_uid_6g_bridge.py and test_edge_egress_uid_kernel.py and test_edge_egress_uid_shadow.py. These test callback ordering, real-shaped SQLite state, UID binding, default deny, simulated errors and hold behavior.
 
 ## Non-negotiable limitations
 
@@ -24,7 +25,7 @@ This proves one destination/UID and a temporary kernel path. It does **not** pro
 2. **DNS leak proof remains outstanding.** Current check confirms the direct-local-port-53 guard exists, not that NSS, systemd-resolved D-Bus, local proxies or app-level DNS remain on Edge. Normal hostnames may not resolve when localhost stub is blocked.
 3. **IPv6 requires an independent packet-level test.** Current check confirms ip6tables rule presence, not that every customer process and transport is protected.
 4. **Failure means recovery hold, not rollback to Core.** Even a stopped or partially stopped shadow can leave the UID selector/blackhole and a stale marker. Never delete recovery markers, run global route flush or release the 6G lock by timeout. Manually inspect journal, kernel state, exact UID ownership and peer stage first.
-5. **No live shadow port is installed by default.** CanaryShadowPort must be separately supplied; the existing pinned SSH transport is not silently activated. No Telegram handler, Failover automation, DNS, accounts, or production bot functionality has been changed.
+5. **No live shadow port is registered by default.** An explicit pinned SSH ShadowPort now exists but must be deliberately instantiated alongside the kernel port and the real Phase 6G adapter. No Telegram handler, Failover automation, DNS, accounts, or production bot functionality has been changed.
 6. **The canary restores unprotected mode intentionally.** It is forbidden to invoke against an already protected account. The production path must NEVER remove a protected UID guard upon Edge failure.
 
 ## Next: D1-C3C / release gating

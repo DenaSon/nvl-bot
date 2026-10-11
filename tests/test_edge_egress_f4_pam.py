@@ -3,6 +3,7 @@ import unittest
 
 from edge_egress_f4_pam import (
     REQUIRED_ACCOUNT_LINE, inspect_deployment_root,
+    verify_installed_gate_digest,
     inspect_pam_sshd, render_pam_change_review,
 )
 
@@ -40,6 +41,14 @@ class F4PAMAuditTests(unittest.TestCase):
             with self.subTest(s=s):
                 verdict=inspect_pam_sshd(REQUIRED_ACCOUNT_LINE,s)
                 self.assertFalse(verdict.valid)
+
+    def test_missing_unreviewed_or_untrusted_pam_module_fails_closed(self):
+        for digest in ("", "foo", "A"*64, "0"*64):
+            with self.subTest(digest=digest):
+                self.assertFalse(verify_installed_gate_digest(digest))
+        self.assertFalse(verify_installed_gate_digest(
+            "a"*64,module_path="/tmp/unreviewed.py",
+        ))
 
     def test_module_path_and_ownership_are_checked(self):
         self.assertTrue(inspect_deployment_root(

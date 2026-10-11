@@ -29,6 +29,12 @@ class F4PAMAuditTests(unittest.TestCase):
             with self.subTest(s=s):
                 self.assertFalse(inspect_pam_sshd(s,"usepam yes").valid)
 
+    def test_prior_pam_account_include_is_not_mistaken_for_safe_order(self):
+        pam="@include common-account\\n"+REQUIRED_ACCOUNT_LINE+"\\n"
+        result=inspect_pam_sshd(pam,"usepam yes\\n")
+        self.assertFalse(result.valid)
+        self.assertIn("PAM_INCLUDED_ACCOUNT_BEFORE_GUARD",result.issues)
+
     def test_usepam_disabled_or_unproven(self):
         for s in ("usepam no","", "usepam yes\nusepam no"):
             with self.subTest(s=s):

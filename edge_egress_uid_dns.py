@@ -87,7 +87,7 @@ class PinnedIPDoH:
                     response.begin()
                     if response.status != 200:
                         raise DNSError("DOH_UPSTREAM_NOT_SUCCESSFUL")
-                    mime = response.getheader("Content-Type", "")
+                    mime = response.getheader("Content-Type", "") or ""
                     if mime.split(";", 1)[0].strip().lower() != "application/dns-message":
                         raise DNSError("DOH_CONTENT_TYPE_INVALID")
                     answer = response.read(MAX_WIRE + 1)
@@ -190,19 +190,13 @@ def ensure_terminal_policy(uid: int, priority: int, table: int):
     """Read-only fail-before-bind check; caller must also ensure 6G lease."""
     result = subprocess.run(["ip", "-4", "rule", "show"],
                             capture_output=True, text=True, timeout=6)
-    if result.returncode or not re.search(
-        rf"(?m)^\s*{priority}:\s+.*\buidrange {uid}-{uid}\b.*\blookup {table}\b",
-        result.stdout,
-    ):
-        raise DNSError("PROTECTED_UID_RULE_MISSING")
-    result = subprocess.run(
-        ["ip", "-4", "route", "show", "table", str(table)],
-        capture_output=True, text=True, timeout=6
-    )
-    if result.returncode or not re.search(
-        r"(?m)^blackhole default\b", result.stdout
-    ):
+    if result.returncode:
         raise DNSError("TERMINAL_BLACKHOLE_MISSING")
+    routes = [s.strip() for s in result.stdout.splitlines() if s.strip()]
+    # DNS service is boot-strapped before the Edge attach. At this time only
+    # the terminal deny route is permitted; unknown routes must never forward.
+    if len(routes) != 1 or not re.fullmatch(r"blackhole default(?:\s+.*)?", routes[0]):
+        raise DNSError("PROTECTED_ROUTE_TABLE_NOT_FROZEN")
 
 
 class _UDP(socketserver.ThreadingUDPServer):

@@ -83,7 +83,49 @@ for socket in ssh.socket sshd.socket; do
     systemctl mask --force "$socket" >/dev/null
   fi
 done
+# Boot diagnostics are independent of SSH and safe only inside this VM.
+# Print the actual systemd failure reason to the serial console even if
+# ssh.service does not start after a guarded reboot.
+mkdir -p /usr/local/libexec
+cat > /usr/local/libexec/nvl-c3e-boot-diagnostics.sh <<'DIAG'
+#!/usr/bin/env bash
+set +e
+sleep 30
+echo "=== C3E_GUEST_BOOT_DIAGNOSTICS_BEGIN ==="
+for unit in nvl-egress-guard-nvlciuser.service nvl-egress-dns-nvlciuser.service ssh.service ssh.socket; do
+  echo "--- C3E_UNIT: $unit ---"
+  systemctl show "$unit" -p LoadState -p ActiveState -p SubState \
+    -p Result -p ExecMainStatus -p ExecMainCode -p After -p Requires \
+    --no-pager
+  systemctl status "$unit" --no-pager -l | tail -n 24
+  journalctl -b -u "$unit" --no-pager -n 35
+done
+echo "=== C3E_GUEST_BOOT_DIAGNOSTICS_END ==="
+DIAG
+chmod 0755 /usr/local/libexec/nvl-c3e-boot-diagnostics.sh
+cat > /etc/systemd/system/nvl-c3e-boot-diagnostics.service <<'UNIT'
+[Unit]
+Description=Disposable NVL C3E serial-only boot diagnostics
+DefaultDependencies=no
+After=local-fs.target
+Before=shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/nvl-c3e-boot-diagnostics.sh
+StandardOutput=tty
+StandardError=inherit
+TTYPath=/dev/ttyS0
+TTYReset=no
+TTYVHangup=no
+TTYVTDisallocate=no
+
+[Install]
+WantedBy=multi-user.target
+UNIT
 systemctl daemon-reload
+systemctl enable nvl-c3e-boot-diagnostics.service >/dev/null
 systemctl enable ssh.service >/dev/null
 
 # Check the actual state without depending on a grep pipeline or silently

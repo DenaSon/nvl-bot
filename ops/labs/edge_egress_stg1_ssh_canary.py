@@ -174,6 +174,9 @@ def prepare() -> None:
     cmd("useradd", "--system", "--user-group", "--no-create-home",
         "--home-dir", "/nonexistent", "--shell", "/bin/sh", "-p", "*", USERNAME)
     DIR.mkdir(mode=0o755)
+    # Explicit chmod: the root shell uses umask 077, which masks mkdir 0755
+    # down to 0700, preventing sshd from reading the dedicated user key.
+    DIR.chmod(0o755)
     _create_file(CONFIG, ssh_config(), 0o600)
     _create_file(PROOF, proof_script(), 0o755)
     cmd("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(HOST_KEY))

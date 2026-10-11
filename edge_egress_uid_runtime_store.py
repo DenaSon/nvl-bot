@@ -112,6 +112,16 @@ class Existing6GUIDRuntimeStore:
             raise RuntimeStoreUnsafe("SSH_ACCOUNT_SOURCE_NOT_VERIFIED")
         if self.os_uid_for_username(req.username) != req.uid:
             raise RuntimeStoreUnsafe("UID_OS_IDENTITY_CHANGED")
+        source_row = conn.execute(
+            "SELECT active,is_default FROM host_pool WHERE host=?", (source,)
+        ).fetchone()
+        if source_row != (1, 1):
+            raise RuntimeStoreUnsafe("SOURCE_NOT_ACTIVE_DEFAULT_EDGE")
+        dns_row = conn.execute(
+            "SELECT value FROM settings WHERE key='dns_current_ip'"
+        ).fetchone()
+        if dns_row != (source,):
+            raise RuntimeStoreUnsafe("INGRESS_DNS_NOT_AT_SOURCE_EDGE")
         edge = conn.execute(
             "SELECT edge_public_ipv4,core_public_ipv4,route_table,status,"
             "tunnel_network,veth_network FROM edge_egress_allocations "
@@ -254,4 +264,29 @@ class Existing6GUIDRuntimeStore:
             if changed != 1:
                 raise RuntimeStoreUnsafe("BINDING_CAS_LOST")
             return read_binding(conn, req.username)
+        return self._tx(operation_id, source, req.spec.edge_public_ipv4, work)
+
+    def assert_frozen_binding(self, operation_id: int, req: UIDPolicyRequest,
+                              *, source: str) -> RuntimeBinding:
+        """Only an already FROZEN binding may resume under a fresh 6G lock."""
+        def work(conn):
+            self._owner(conn, req, source)
+            row = read_binding(conn, req.username)
+            if not row or (
+                row.uid, row.edge_id, row.edge_ipv4, row.route_table,
+                row.priority, row.state
+            ) != (
+                req.uid, req.spec.edge_id, req.spec.edge_public_ipv4,
+                req.spec.route_table, req.priority, "FROZEN"
+            ):
+                raise RuntimeStoreUnsafe("FROZEN_BINDING_NOT_VERIFIED")
+            mapping = conn.execute(
+                "SELECT uid,edge_id,edge_ipv4,status "
+                "FROM edge_egress_uid_bindings WHERE username=?",
+                (req.username,),
+            ).fetchone()
+            if mapping != (req.uid, req.spec.edge_id,
+                           req.spec.edge_public_ipv4, "PROTECTED"):
+                raise RuntimeStoreUnsafe("FROZEN_PROTECTED_MAPPING_MISSING")
+            return row
         return self._tx(operation_id, source, req.spec.edge_public_ipv4, work)

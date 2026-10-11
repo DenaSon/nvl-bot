@@ -57,17 +57,58 @@ Path("/etc/systemd/system/ssh.service.d/90-nvl-egress.conf").write_text(
     bundle.ssh_dropin)
 PY
 
-# Deliberately retain current administrator SSH session during preparation.
+# Confined to the disposable VM: no live NVL systems are ever touched.
+# SSH socket activation can bypass our RequiredBy ssh.service guard.
+# Earlier CI swallowed a failed mask and then died at is-enabled without
+# reporting which assertion failed. Fail with actionable diagnostics instead.
+on_setup_error() {
+  code=$?
+  echo "C3E_GUEST_SETUP_FAILED code=$code line=$BASH_LINENO command=$BASH_COMMAND" >&2
+  echo "=== SSH socket states ===" >&2
+  for name in ssh.socket sshd.socket ssh.service; do
+    printf '%s: ' "$name" >&2
+    systemctl is-enabled "$name" 2>&1 || true
+  done
+  echo "=== SSH unit dependencies ===" >&2
+  systemctl show ssh.service -p Requires -p BindsTo -p After --no-pager >&2 || true
+  echo "=== Unit verification ===" >&2
+  systemd-analyze verify /etc/systemd/system/nvl-egress-guard-nvlciuser.service \
+    /etc/systemd/system/nvl-egress-dns-nvlciuser.service >&2 || true
+  exit "$code"
+}
+trap on_setup_error ERR
 for socket in ssh.socket sshd.socket; do
-  systemctl disable --now "$socket" >/dev/null 2>&1 || true
-  systemctl mask "$socket" >/dev/null 2>&1 || true
+  if systemctl list-unit-files "$socket" --no-legend --no-pager | grep -q "$socket"; then
+    systemctl disable --now "$socket" >/dev/null 2>&1 || true
+    systemctl mask --force "$socket" >/dev/null
+  fi
 done
 systemctl daemon-reload
 systemctl enable ssh.service >/dev/null
-systemctl is-enabled ssh.socket | grep -Eq 'masked|disabled|not-found'
-systemctl show ssh.service -p Requires -p BindsTo -p After --no-pager \
-  | grep -q 'nvl-egress-guard-nvlciuser.service'
+
+# Check the actual state without depending on a grep pipeline or silently
+# treating a failed mask as successful.
+for socket in ssh.socket sshd.socket; do
+  state="$(systemctl is-enabled "$socket" 2>&1 || true)"
+  echo "C3E_SOCKET_STATE $socket=$state"
+  case "$state" in
+    masked|disabled|not-found) ;;
+    *) echo "UNSAFE_SOCKET_ACTIVATION_STATE $socket=$state" >&2; exit 42 ;;
+  esac
+done
+requires="$(systemctl show ssh.service -p Requires --value --no-pager)"
+bindsto="$(systemctl show ssh.service -p BindsTo --value --no-pager)"
+after="$(systemctl show ssh.service -p After --value --no-pager)"
+for dependency in nvl-egress-guard-nvlciuser.service nvl-egress-dns-nvlciuser.service; do
+  for field in "$requires" "$bindsto" "$after"; do
+    if [[ " $field " != *" $dependency "* ]]; then
+      echo "MISSING_SSH_SYSTEMD_DEPENDENCY $dependency" >&2
+      exit 43
+    fi
+  done
+done
 systemd-analyze verify \
   /etc/systemd/system/nvl-egress-guard-nvlciuser.service \
   /etc/systemd/system/nvl-egress-dns-nvlciuser.service
+trap - ERR
 echo "C3E_GUEST_UNITS_INSTALLED_FOR_NEXT_REBOOT"

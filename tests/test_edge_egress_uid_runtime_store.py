@@ -1,10 +1,12 @@
 """F2: durable UID runtime persistence under existing 6G lock."""
 from contextlib import contextmanager
 import sqlite3
+import time
 import tempfile
 import unittest
 from pathlib import Path
 
+from edge_egress_f3_readiness import install_readiness_schema
 from edge_egress_inventory import ensure_schema
 from edge_egress_legacy_fence import has_protected_bindings
 from edge_egress_protected_mapping import install_protected_mapping_schema
@@ -59,6 +61,7 @@ class StoreTests(unittest.TestCase):
             ensure_schema(c)
             install_protected_mapping_schema(c)
             install_runtime_schema(c)
+            install_readiness_schema(c)
             c.execute("""
                 INSERT INTO edge_egress_allocations (
                     edge_id, edge_public_ipv4,core_public_ipv4,
@@ -69,6 +72,15 @@ class StoreTests(unittest.TestCase):
             """, ("fra1", TARGET, CORE, "10.78.100.0/30",
                   "10.78.101.0/30",1780,51832,"eth0",
                   "unused-public-core-key","unused-public-edge-key","STAGED"))
+            now=int(time.time())
+            # Fixture represents hypothetical F4 acceptance. F3 never writes
+            # this witness in real installations.
+            c.execute(
+                "INSERT INTO edge_egress_readiness "
+                "(edge_id,edge_ipv4,state,observed_ipv4,witness,probed_at,"
+                "expires_at,last_operation_id) "
+                "VALUES(?,?,'READY',?,'F4_PRODUCTION_ACCEPTANCE',?,?,42)",
+                ("fra1",TARGET,TARGET,now-5,now+3600))
         self.store = Existing6GUIDRuntimeStore(
             self.conn, lambda name: {"nvl0557":1644,"nvl0558":1645}[name]
         )
@@ -194,6 +206,15 @@ class StoreTests(unittest.TestCase):
             c.execute("DELETE FROM edge_egress_uid_bindings")
         with self.assertRaisesRegex(RuntimeStoreUnsafe,"FROZEN_PROTECTED"):
             self.store.assert_frozen_binding(42,req(),source=SOURCE,dns_port=10553)
+
+    def test_lab_only_proof_cannot_reserve_user_for_protected_runtime(self):
+        with self.conn() as c:
+            c.execute("UPDATE edge_egress_readiness "
+                      "SET state='VERIFIED_LAB', witness='PINNED_SHADOW_NAMESPACE'")
+        with self.assertRaisesRegex(RuntimeStoreUnsafe,"F4_PRODUCTION_READINESS"):
+            self.store.reserve_blocked(42,req(),source=SOURCE,dns_port=10553)
+        with self.conn() as c:
+            self.assertIsNone(read_binding(c, "nvl0557"))
 
     def test_foreign_edge_allocation_cannot_be_bound(self):
         with self.conn() as c:

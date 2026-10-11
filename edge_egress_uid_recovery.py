@@ -114,17 +114,32 @@ def inspect_recovery(manifest: BootGuardManifest, *,
     firewall = [ok(*gate(command.argv)) for command in plan.guard[:3]]
     table = output("ip", "-4", "route", "show", "table", str(plan.table))
     routes = [x.strip() for x in table.splitlines() if x.strip()]
-    blackhole = any(x.startswith("blackhole default") for x in routes)
-    edge_route = any(x.startswith("default via ") and
-                     ("dev " + request.spec.veth_root) in x for x in routes)
+    expected_edge = (
+        "default via " + request.spec.ns_veth_ip +
+        " dev " + request.spec.veth_root +
+        " src " + request.spec.root_veth_ip +
+        " metric 100"
+    )
+    edge_route = expected_edge in routes
+    only_known_routes = all(
+        x.startswith("blackhole default ") or x == expected_edge
+        for x in routes
+    )
+    blackhole = (
+        only_known_routes and
+        sum(x.startswith("blackhole default ") for x in routes) == 1
+    )
 
     rule_output = output("ip", "-4", "rule", "show")
-    rule = any(
-        line.strip().startswith(str(request.priority) + ":")
-        and "uidrange " + request.uidrange in line
-        and "lookup " + str(plan.table) in line
-        for line in rule_output.splitlines()
+    # Explicitly reject a single-destination experimental UID rule:
+    # that test did not provide fail-closed protection for other IPv4.
+    expected_uid_rule = (
+        f"{request.priority}: from all uidrange "
+        f"{request.uidrange} lookup {plan.table}"
     )
+    rule = expected_uid_rule in [
+        " ".join(line.strip().split()) for line in rule_output.splitlines()
+    ]
     nat = False
     nss = False
     if manifest.dns_port is not None:

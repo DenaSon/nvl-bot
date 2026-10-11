@@ -281,6 +281,37 @@ async def activate_and_prove_lab_shadow(spec: EgressSpec, *,
 
 
 @dataclass(frozen=True)
+class ShadowReconciliation:
+    """Read-only crash diagnostic. Never releases Phase 6G lock automatically."""
+    core_state: str
+    edge_state: str
+    operator_attention: bool
+    reason: str
+
+
+async def inspect_lab_shadow_after_restart(spec: EgressSpec, *,
+                                           core: ShadowHost, edge: ShadowHost) -> ShadowReconciliation:
+    """Re-observe host-local stage after operator/control-process restart.
+
+    A stale RUNNING 6G operation still requires operator-owned journal
+    reconciliation. This function does not infer READY from filesystem state.
+    """
+    spec.validate()
+    states = []
+    for label, host in (("core", core), ("edge", edge)):
+        try:
+            data = await host.inspect_shadow(spec)
+            status = data.get("state")
+            states.append(status if status in ("STAGED", "ABSENT") else "UNKNOWN")
+        except Exception:
+            states.append("UNKNOWN")
+    attention = any(s != "STAGED" for s in states)
+    return ShadowReconciliation(states[0], states[1], attention,
+                                "RECONCILIATION_REQUIRED" if attention
+                                else "BOTH_STAGES_PRESENT_NOT_READY")
+
+
+@dataclass(frozen=True)
 class EgressLabHostFactory:
     """Explicit opt-in identity map for Existing6GPreparationAdapter(host_factory=).
 

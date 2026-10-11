@@ -178,6 +178,37 @@ class Existing6GReadinessStore:
         return self._tx(operation_id, source, edge_id, target, save)
 
 
+
+def stage_in_existing_6g_transaction(conn, operation_id: int, *,
+                                     source: str, edge_id: str,
+                                     target: str) -> None:
+    """Use INSIDE Existing6GPreparationAdapter's STAGED allocation write.
+
+    The caller already owns BEGIN IMMEDIATE; never open another connection or
+    acquire a second lock. If F3 migration was not installed, staging keeps
+    its old stage-only behavior and cannot become verified/customer ready.
+    """
+    _shared_lock(conn, operation_id, source, target)
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='edge_egress_readiness'"
+    ).fetchone():
+        return
+    existing = read_readiness(conn, edge_id)
+    if existing is not None:
+        raise ReadinessUnsafe("EXISTING_READINESS_REQUIRES_RECONCILIATION")
+    allocation = conn.execute(
+        "SELECT edge_public_ipv4,status FROM edge_egress_allocations "
+        "WHERE edge_id=?", (edge_id,),
+    ).fetchone()
+    if allocation != (target, "STAGED"):
+        raise ReadinessUnsafe("EXACT_STAGED_ALLOCATION_REQUIRED")
+    conn.execute(
+        "INSERT INTO edge_egress_readiness "
+        "(edge_id,edge_ipv4,state,last_operation_id) "
+        "VALUES(?,?,'STAGED',?)", (edge_id, target, operation_id),
+    )
+
 def admission_eligible(row: EdgeReadiness | None, *, now: int | None = None) -> bool:
     """F4 ONLY: READY + fresh production attestation; LAB never admits."""
     clock = int(time.time()) if now is None else now

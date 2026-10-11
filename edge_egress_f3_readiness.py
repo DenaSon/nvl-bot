@@ -36,6 +36,12 @@ CREATE TABLE IF NOT EXISTS edge_egress_readiness (
 );
 CREATE INDEX IF NOT EXISTS idx_edge_egress_readiness_state
   ON edge_egress_readiness(state, expires_at);
+CREATE TABLE IF NOT EXISTS edge_egress_f3_ingress_candidates (
+  edge_ipv4 TEXT PRIMARY KEY,
+  state TEXT NOT NULL DEFAULT 'INGRESS_ONLY'
+     CHECK(state = 'INGRESS_ONLY'),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -208,6 +214,38 @@ def stage_in_existing_6g_transaction(conn, operation_id: int, *,
         "(edge_id,edge_ipv4,state,last_operation_id) "
         "VALUES(?,?,'STAGED',?)", (edge_id, target, operation_id),
     )
+
+
+def record_ingress_candidate(db_conn, edge_ipv4: str) -> bool:
+    """After successful legacy ingress onboarding: record intent only.
+
+    Never reserve Egress resources, change Edge or claim WireGuard data-plane
+    readiness. Missing F3 migration retains existing legacy onboarding.
+    """
+    try:
+        canonical = str(IPv4Address(edge_ipv4))
+        if canonical != edge_ipv4 or not IPv4Address(canonical).is_global:
+            raise ReadinessUnsafe("INVALID_INGRESS_IP")
+    except ValueError as exc:
+        raise ReadinessUnsafe("INVALID_INGRESS_IP") from exc
+    with db_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='edge_egress_f3_ingress_candidates'"
+        ).fetchone()
+        if not exists:
+            return False
+        host = conn.execute(
+            "SELECT active FROM host_pool WHERE host=?", (edge_ipv4,)
+        ).fetchone()
+        if host is None or host[0] != 1:
+            raise ReadinessUnsafe("INGRESS_HOST_NOT_ACTIVE")
+        conn.execute(
+            "INSERT OR IGNORE INTO edge_egress_f3_ingress_candidates "
+            "(edge_ipv4,state) VALUES(?,'INGRESS_ONLY')", (edge_ipv4,),
+        )
+        return True
 
 def admission_eligible(row: EdgeReadiness | None, *, now: int | None = None) -> bool:
     """F4 ONLY: READY + fresh production attestation; LAB never admits."""

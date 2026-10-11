@@ -1,15 +1,9 @@
 name: D1-C3E disposable Ubuntu VM reboot gate
 
+# D1-C3E VM reboot is a deferred, manual-only, non-blocking diagnostic.
+# Never run this costly QEMU/TCG workflow automatically on PR updates.
+# Prior CI VM runs failed at SSH-after-reboot timeout; root cause unproven.
 on:
-  pull_request:
-    paths:
-      - 'edge_egress_uid_boot.py'
-      - 'edge_egress_uid_dns.py'
-      - 'edge_egress_uid_policy.py'
-      - 'edge_egress_uid_systemd.py'
-      - 'ops/labs/edge_egress_vm_guest_setup.sh'
-      - 'ops/labs/edge_egress_vm_boot_lab.sh'
-      - '.github/workflows/edge-egress-vm-boot.yml'
   workflow_dispatch:
 
 permissions:

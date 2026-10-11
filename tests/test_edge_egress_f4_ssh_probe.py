@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 from edge_egress_f4_ssh_probe import (
-    parse_trace_public_ip, probe_external_ssh_socks, SSHProbeUnsafe,
+    parse_trace_public_ip, probe_external_ssh_socks, SSHProbeUnsafe, SSHProbe,
 )
 
 
@@ -21,6 +21,9 @@ class SSHProxyProbeTests(unittest.TestCase):
         result=probe_external_ssh_socks(
             port=31884,expected_edge="216.126.229.12",
             core_ipv4="209.200.246.198",expect_outage=outage,run=runner,
+            baseline=SSHProbe(True,"EXTERNAL_SOCKS_EDGE_IPV4_CONFIRMED",
+                              "216.126.229.12") if outage else None,
+            listener_check=lambda _port: True,
         )
         self.assertEqual(len(calls),1)
         args,opts=calls[0]
@@ -48,6 +51,42 @@ class SSHProxyProbeTests(unittest.TestCase):
         self.assertTrue(self.invoke("",rc=7,outage=True).passed)
         self.assertFalse(self.invoke("ip=216.126.229.12\n",outage=True).passed)
         self.assertFalse(self.invoke("ip=209.200.246.198\n",outage=True).passed)
+
+    def test_outage_without_healthy_baseline_is_not_positive_proof(self):
+        result=probe_external_ssh_socks(
+            port=31884,expected_edge="216.126.229.12",
+            core_ipv4="209.200.246.198",expect_outage=True,
+            run=lambda *_args,**_kw: self.fail("probe should not start"),
+        )
+        self.assertFalse(result.passed)
+        self.assertEqual(result.code,"HEALTHY_BASELINE_REQUIRED")
+
+    def test_outage_client_or_dead_ssh_listener_is_not_fail_closed(self):
+        baseline=SSHProbe(True,"EXTERNAL_SOCKS_EDGE_IPV4_CONFIRMED",
+                          "216.126.229.12")
+        for rc,alive in ((6,True),(22,True),(35,True),(7,False)):
+            with self.subTest(rc=rc,alive=alive):
+                result=probe_external_ssh_socks(
+                    port=31884,expected_edge="216.126.229.12",
+                    core_ipv4="209.200.246.198",expect_outage=True,
+                    baseline=baseline,listener_check=lambda _:alive,
+                    run=lambda *_args,**_kw:proc("",rc),
+                )
+                self.assertFalse(result.passed)
+
+    def test_outage_process_missing_never_proves_closed(self):
+        baseline=SSHProbe(True,"EXTERNAL_SOCKS_EDGE_IPV4_CONFIRMED",
+                          "216.126.229.12")
+        def missing(*_args,**_kwargs):
+            raise FileNotFoundError("curl")
+        result=probe_external_ssh_socks(
+            port=31884,expected_edge="216.126.229.12",
+            core_ipv4="209.200.246.198",expect_outage=True,
+            baseline=baseline,listener_check=lambda _:True,
+            run=missing,
+        )
+        self.assertFalse(result.passed)
+        self.assertEqual(result.code,"CURL_OR_PROBE_NOT_EXECUTED")
 
     def test_bad_traces_never_succeed(self):
         for value in ("", "ip=bad\n", "ip=127.0.0.1\n",

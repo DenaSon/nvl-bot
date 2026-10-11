@@ -60,6 +60,15 @@ class AdmissionTests(unittest.TestCase):
             self.assertEqual(self.decide(uid=uid).result, AdmissionResult.DENY)
         self.assertEqual(self.decide(verified=False).result, AdmissionResult.DENY)
 
+    def test_renamed_uid_cannot_bypass_as_legacy_user(self):
+        self.protect()
+        self.assertEqual(
+            self.decide(username="newuser",uid=1644).result,
+            AdmissionResult.DENY)
+        self.assertEqual(
+            self.decide(username="newuser",uid=1645).result,
+            AdmissionResult.ALLOW_LEGACY)
+
     def test_running_6g_lock_denies_new_protected_sessions(self):
         self.protect()
         self.c.execute("UPDATE failover_operations SET status='RUNNING'")

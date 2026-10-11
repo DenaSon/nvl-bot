@@ -93,6 +93,7 @@ async def attach_protected(
     phase = "EGRESS_UID_RUNTIME_LOCKED"
     reserved = False
     mutation_possible = False
+    protection_committed = False
 
     async def record(status, details=None):
         await ports.journal(operation_id, status, phase, details or {})
@@ -142,6 +143,7 @@ async def attach_protected(
         phase = "EGRESS_UID_RUNTIME_COMMIT_PROTECTED"
         await record("RUNNING")
         await ports.commit_protected(operation_id, request, source)
+        protection_committed = True
 
         phase = "EGRESS_UID_RUNTIME_PROTECTED"
         await record("SUCCEEDED", {"observed_edge_ipv4": observed})
@@ -164,11 +166,12 @@ async def attach_protected(
                 if reserved:
                     # FROZEN/HOLD intent remains; never delete protected
                     # mapping nor allow a normal Core fallback.
-                    prior = ("ROUTED_UNVERIFIED"
-                             if phase in {"EGRESS_UID_RUNTIME_PROVE",
-                                          "EGRESS_UID_RUNTIME_COMMIT_PROTECTED",
-                                          "EGRESS_UID_RUNTIME_PROTECTED"}
-                             else "BLOCKED")
+                    prior = ("PROTECTED" if protection_committed else
+                             "ROUTED_UNVERIFIED" if phase in {
+                                 "EGRESS_UID_RUNTIME_PROVE",
+                                 "EGRESS_UID_RUNTIME_COMMIT_PROTECTED",
+                                 "EGRESS_UID_RUNTIME_PROTECTED",
+                             } else "BLOCKED")
                     try:
                         await ports.transition(operation_id, request, source,
                                                prior, "HOLD")

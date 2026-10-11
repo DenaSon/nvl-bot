@@ -32,10 +32,12 @@ This step **does not alter** existing wg0, bot, sysctl, production SSH service, 
 The \`prepare\` and \`start\` actions are one-shot, fail on existing paths and do not automatically retry or overwrite partial state. If any action fails after account creation, **stop and inspect**, do not rerun the same action or wipe other accounts/paths.
 
 After a successful test the operator must:
-1. Stop the exact standalone sshd PID after checking it belongs to this stg1 config; never restart/stop system sshd.
+1. Invoke the reviewed `stop` action, which checks the exact standalone sshd PID, its startup config and network namespace inode before sending SIGTERM; never restart/stop system sshd.
 2. Verify no active SSH sessions, then remove exactly \`nvlstg1\` only if the UID, shell, home and known canary ownership match.
 3. Remove only the owned canary credentials and known_hosts entries and verify the test port closed; do not touch production /root/.ssh or other authorized_keys.
 4. Once the larger Staging experiment ends, separately stop the dedicated Core namespace + Standby stg1 shadow peer and remove only explicitly owned Staging resources, including the temporary Core→Standby transfer authorization.
 5. Recheck production bot/ssh/wg0/default route and shared failover lock.
 
 **Release gate remains blocked:** authenticated namespace SSH is *not* a live root-namespace UID policy test, a BadVPN session, or reboot/systemd guard proof. Disposable VPS reboot proof and protected 6G/6H runtime still required.
+
+**Standalone service cleanup:** the scripted `stop` action is separate from `prepare/start/probe`. If the PID is stale or identity cannot be proven, it refuses a kill; inspect rather than using `pkill sshd`. The local `nvlstg1` NSS identity and keys require a separate verified teardown after testing; no automatic account deletion is performed.

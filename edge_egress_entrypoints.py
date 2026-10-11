@@ -91,8 +91,10 @@ def classify_edge_callback(data: Optional[str]) -> Optional[EdgeOperation]:
     if data in _EXACT_CALLBACKS:
         return _EXACT_CALLBACKS[data]
     for prefix, kind in _PREFIX_CALLBACKS:
-        if data.startswith(prefix) and data[len(prefix):]:
-            return kind
+        if data.startswith(prefix):
+            # Do not reinterpret a missing host suffix as a less-specific
+            # command (e.g. hpdef_migrate_ must not become hpdef_).
+            return kind if data[len(prefix):] else None
     return None
 
 

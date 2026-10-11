@@ -59,6 +59,15 @@ def inspect_pam_sshd(pam_contents: str, sshd_effective: str, *,
         issues.append("EXACT_PAM_ACCOUNT_HOOK_MISSING_OR_DUPLICATED")
     if matching and rules and rules[0]!=REQUIRED_ACCOUNT_LINE:
         issues.append("PAM_HOOK_NOT_FIRST_ACCOUNT_RULE")
+    # A prior PAM include can inject account rules (and pam_permit)
+    # even if no literal "account" line appears in this file.
+    if matching:
+        prior=active[:active.index(REQUIRED_ACCOUNT_LINE)]
+        if any(line.startswith(("@include ","-@include ")) and (
+            any(word in line for word in
+                ("common-account","system-auth","password-auth"))
+        ) for line in prior):
+            issues.append("PAM_INCLUDED_ACCOUNT_BEFORE_GUARD")
     # Unknown PAM account lines using another local script must be reviewed.
     for rule in rules:
         if "pam_exec.so" in rule and rule!=REQUIRED_ACCOUNT_LINE:

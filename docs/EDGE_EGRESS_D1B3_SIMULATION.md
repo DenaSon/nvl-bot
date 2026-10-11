@@ -1,6 +1,6 @@
 # D1-B3 — Isolated lifecycle + failure-injection review
 
-**Status:** mock-kernel/network-simulator tests completed; real Linux kernel WireGuard/network-namespace smoke tests, systemd restart/reboot, and Core↔Edge public-IP proof are **NOT** completed. **Do not execute staged scripts on NVL Production.**
+**Status:** 32 simulated/unit tests passed plus a **real Linux kernel** Core→WireGuard→Edge→fake-WAN egress lab passed on a disposable GitHub runner, including Edge outage, explicit peer rekey, Core restart and cleanup. Real production Core↔Edge connectivity, actual public Internet, installed systemd units/reboot, and customer fail-closed policy are **NOT** tested. **Do not execute staged scripts on NVL Production.**
 
 ## Scope
 
@@ -39,9 +39,29 @@ The operator requested no disruption of the current SSH customer population, ing
 - Proof that 6G's current DNS fallback to Core is safe for protected customers — **it is not**. Do not bypass the 6G global-domain guard or change its rollout controls.
 - Endpoint replacement across multiple Edges in `host_pool` and the bot's operation lock. That is D1-C, not this phase.
 
+
+## Actual kernel WireGuard/NAT lab — verified
+
+GitHub Actions: [successful disposable kernel lab](https://github.com/DenaSon/nvl-bot/actions/runs/38135093152).
+
+The separate `ops/labs/edge_egress_kernel_lab.sh` workflow provisions **three temporary network namespaces on GitHub's ephemeral Ubuntu runner**:
+
+1. Simulated Core and Edge have dedicated underlay veths; a third isolated namespace simulates the Internet HTTP endpoint.
+2. The staged `up.sh` scripts create **real** WireGuard interfaces, move Core WireGuard into `nvl-egress-fra1`, install per-namespace iptables-nft NAT and set up veth forwarding.
+3. A real WireGuard handshake is confirmed. A TCP request from the Core's veth traverses Core namespace SNAT + WireGuard + Edge MASQUERADE. The HTTP endpoint observes `172.86.94.174` as its source IP **inside the test network**. No packets traverse the real public Internet.
+4. Shutting down the test Edge makes the dedicated egress path unavailable (there is no alternate global default in this lab). Restarting Edge **does not immediately restore** the existing Core WireGuard session by itself: Core still shows the old handshake; new Edge has handshake `0`. After targeted removal/reinstallation of the old Core peer on the **dedicated lab interface**, handshake and TCP egress recover.
+5. Stopping and restarting the Core-side shadow tunnel recreates its namespace/veth. Egress still reports the Edge IP after the test-only host-veth destination route is restored.
+6. Graceful cleanup deletes dedicated interfaces and the inner namespace. All network mutations were isolated to ephemeral CI namespaces, not to NVL Core/Edge or the GitHub runner main route/firewall.
+
+### New lifecycle requirement from the outage experiment
+
+**A restarted/replaced Edge with the same static WG identity can have stale live transport sessions on Core.** Bot-managed Edge lifecycle must coordinate *dedicated Peer rekey/reconciliation* with an active external egress probe, not infer recovery from `systemctl active` or interface existence. The Peer reset demonstrated in CI is only a **lab recovery mechanism**, not a production bot implementation. Failure to rekey can cause a prolonged blackhole until normal WG session rekey. This must be addressed in D1-C and tested with actual Edge replacement.
+
+**Not yet proven:** automatic systemd process health recovery, full VM reboot, public Cloudflare DNS failover, protected SSH UID fail-closed and IPv6/BadVPN cases. The mock tests separately cover scripted stop/start and injected partial-setup failures.
+
 ## Next gate: D1-B4 dedicated Linux lab
 
-Use two **disposable, non-production** Linux VMs with their own public or reachable private network and proper lab IPs. Review the generated shell scripts against the actual kernels and nft-backed iptables, then:
+The disposable GitHub kernel-namespace lab above verifies the basic dataplane, but does not replace **two disposable, non-production VMs** with real systemd, separate OS/kernel instances, and provider-level firewall. Review the generated shell scripts against those environments, then:
 
 1. Confirm unique Egress tunnel and veth allocations; port `51832/udp` free in candidate lab Edge, and no conflicting interface/subnet/routing table.
 2. Stage new secrets with restrictive permissions. Never put private keys or generated `wg.conf` in GitHub.

@@ -72,6 +72,18 @@ def decide_account(conn: sqlite3.Connection, username: str, actual_uid: int,
         if row is None:
             if protected:
                 return denied("MAPPING_WITHOUT_RUNTIME")
+            # A renamed/reused Unix identity must not become an unprotected
+            # "legacy" login while another username owns the numeric UID.
+            if conn.execute(
+                "SELECT 1 FROM edge_egress_uid_runtime "
+                "WHERE uid=? LIMIT 1", (actual_uid,),
+            ).fetchone():
+                return denied("UID_OWNED_BY_DIFFERENT_PROTECTED_USER")
+            if conn.execute(
+                "SELECT 1 FROM edge_egress_uid_bindings "
+                "WHERE uid=? LIMIT 1", (actual_uid,),
+            ).fetchone():
+                return denied("UID_OWNED_BY_DIFFERENT_PROTECTED_MAPPING")
             setting = conn.execute(
                 "SELECT value FROM settings WHERE key='edge_egress_protected_mode'"
             ).fetchone()

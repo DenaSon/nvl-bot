@@ -47,6 +47,11 @@ EGRESS_HOLD_PHASES = frozenset({
     "EGRESS_UID_ATTACH_ROUTE", "EGRESS_UID_PROVE_IPV4",
     "EGRESS_UID_PROVE_IPV6_DNS", "EGRESS_UID_STOP_SHADOW",
     "EGRESS_UID_RESTORE_CANARY", "EGRESS_UID_RECOVERY_REQUIRED",
+    # Guarded 6G/6H candidate staging may mutate dedicated Edge resources.
+    "EGRESS_GUARDED_CANDIDATE_STAGE",
+    "EGRESS_GUARDED_DEDICATED_PEER_REKEY",
+    "EGRESS_GUARDED_EXTERNAL_EGRESS_PROOF",
+    "EGRESS_GUARDED_REVALIDATE_OWNERSHIP_AND_ALLOCATION",
 })
 
 
@@ -192,6 +197,7 @@ async def run_protected_handoff(
     target_host: str,
     *,
     now: Optional[datetime] = None,
+    guarded_failover: bool = False,
 ) -> HandoffResult:
     """A conservative saga plan using 6G shared lock/journal.
 
@@ -206,6 +212,7 @@ async def run_protected_handoff(
 
     snapshot = None
     safety_touched = False
+    candidate_touched = False
     phase = "LOCKED"
     try:
         await _record(ports, operation_id, "RUNNING", phase,
@@ -216,6 +223,8 @@ async def run_protected_handoff(
             raise HandoffUnsafe("SNAPSHOT_REQUEST_MISMATCH")
 
         phase = "CANDIDATE_STAGE"
+        if guarded_failover:
+            candidate_touched = True
         await _record(ports, operation_id, "RUNNING", phase, {})
         await ports.stage_target_shadow(snapshot)
 
@@ -297,6 +306,22 @@ async def run_protected_handoff(
                 # Last resort: do not unlock the shared lock.
                 pass
             return HandoffResult(False, reason, operation_id, needs_manual_recovery=True)
+
+        if guarded_failover and candidate_touched:
+            # Candidate WireGuard/staging/rekey can have partially changed
+            # even though the customer UID route remains on its source Edge.
+            # The protected shared 6G lock stays HELD until an operator
+            # reconciles dedicated candidate resources and account state.
+            try:
+                await _record(ports, operation_id, "RUNNING", MANUAL_RECOVERY_PHASE,
+                              {"failed_phase": phase,
+                               "candidate_reconcile_required": True,
+                               "customer_routing_touched": False,
+                               "reason": reason})
+            except Exception:
+                pass
+            return HandoffResult(False, reason, operation_id,
+                                 needs_manual_recovery=True)
 
         # No customer routing, account ownership or public DNS touched.
         # Shadow resources may remain, so cleanup is deferred to the manager.

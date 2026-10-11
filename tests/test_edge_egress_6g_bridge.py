@@ -71,14 +71,15 @@ class DatabaseHarness:
             )
             return cur.lastrowid,None
 
-    def update(self,operation_id,*,status,detail,finished):
+    def update(self,operation_id,*,status,detail,finished,require_running=False):
         with self.connection() as conn:
             cur=conn.execute(
-                "UPDATE failover_operations SET status=?,detail_json=? WHERE id=?",
+                "UPDATE failover_operations SET status=?,detail_json=? WHERE id=?"
+                + (" AND status='RUNNING'" if require_running else ""),
                 (status,json.dumps(detail),operation_id),
             )
             if cur.rowcount!=1:
-                raise ValueError("unknown 6g lock")
+                raise RuntimeError("SHARED_6G_LOCK_NO_LONGER_RUNNING")
 
     def row(self,query,*params):
         with self.connection() as c:
@@ -206,6 +207,25 @@ class BridgeIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(operation[0],"RUNNING")
         self.assertTrue(is_egress_recovery_hold(operation[1]))
+
+    def test_stage_journal_cannot_commit_after_lock_lost(self):
+        bridge=self.adapter()
+        op,busy=asyncio.run(bridge.acquire_existing_6g_lock(
+            "172.86.94.174","216.126.229.12"
+        ))
+        self.assertIsNone(busy)
+        with self.h.connection() as conn:
+            conn.execute(
+                "UPDATE failover_operations SET status='ABORTED_STALE' WHERE id=?",(op,)
+            )
+        with self.assertRaisesRegex(RuntimeError,"SHARED_6G_LOCK_NO_LONGER_RUNNING"):
+            asyncio.run(bridge.journal_existing_6g(
+                op,"SUCCEEDED","STAGED_ONLY",{"customers_moved":0}
+            ))
+        self.assertEqual(self.h.row(
+            "SELECT status FROM failover_operations WHERE id=?",
+            op
+        )[0],"ABORTED_STALE")
 
     def test_standalone_registry_never_replaces_current_host_pool(self):
         r=self.execute(self.adapter())

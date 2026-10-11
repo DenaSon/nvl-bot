@@ -1,6 +1,20 @@
 # D1-C3E — disposable VM reboot and SSH systemd dependency gate
 
-**Status:** Draft PR #80. Automated QEMU VM reboot checks and unit regressions; no production changes or deployment authorization.
+## Decision 2026-10-11: VM gate DEFERRED, not PASS
+
+The disposable QEMU reboot workflow was switched to **workflow_dispatch only**: it MUST NOT run on every pull request update. Prior QEMU/TCG runs were expensive and inconclusive; user-directed development continues without repeating the VM test. Its absence is NOT successful boot validation and MUST NOT be used to satisfy a protected-production release gate.
+
+Evidence from GitHub Actions:
+- 38152342737 and 38152438081: setup completed but VM guest preparation aborted before the first reboot. Guest script collision/socket state validation was made explicit afterward.
+- 38153097377: guest setup successfully installed services and masked ssh.socket; the first VM reboot then reached VM_SSH_START_TIMEOUT with no authenticated SSH access.
+- 38154330213: the same: C3E_GUEST_UNITS_INSTALLED_FOR_NEXT_REBOOT, then VM_SSH_START_TIMEOUT. Added serial diagnostics did not establish whether the guest rebooted completely, guard failed, DNS failed, or QEMU/TCG was delayed. **Root cause remains unknown.**
+- For the last failed commit (b7e59f1), Python, stage-only and disposable real-kernel network checks passed. Those results do not validate systemd boot.
+
+The next boot acceptance is a **separate disposable VPS/VM**, not the NVL production Core. Record boot IDs before/after, console logs and journalctl -b for nvl-egress-guard-UID, nvl-egress-dns-UID, ssh.service and SSH sockets. Keep out-of-band console access, a snapshot, independent administrator login, and rollback controls. Do not use the global ssh.service BindsTo drop-in on a shared production host: a DNS service failure could lock out all SSH administrators.
+
+**Gate:** D1-C3E_BOOT_PROOF = DEFERRED / NOT_VERIFIED. PR #80 stays DRAFT. No protected UID production cutover or deploy approval.
+
+**Status:** Draft PR #80. QEMU reboot workflow is manual-only/deferred; offline unit regressions remain. No production changes or deployment authorization.
 
 ## Changes
 

@@ -52,7 +52,7 @@ class PureHoldClassifierTests(unittest.TestCase):
         for phase in (
             "ARM_FAIL_CLOSED", "SELECT_TARGET_EGRESS", "VERIFY_CUSTOMER_EGRESS",
             "SOURCE_ACCOUNT_CAS", "EDGE_ONLY_DNS_CUTOVER", "VERIFY_FINAL",
-            "EGRESS_RECOVERY_REQUIRED",
+            "EGRESS_RECOVERY_REQUIRED", "EGRESS_PREPARE_RECOVERY_REQUIRED",
         ):
             with self.subTest(phase=phase):
                 self.assertTrue(is_egress_recovery_hold(json.dumps({"phase": phase})))
@@ -111,7 +111,7 @@ class Phase6GSharedLockTests(unittest.TestCase):
 
     def test_old_protected_lock_remains_busy_after_timeout(self):
         for phase in ("ARM_FAIL_CLOSED", "EDGE_ONLY_DNS_CUTOVER",
-                      "EGRESS_RECOVERY_REQUIRED"):
+                      "EGRESS_RECOVERY_REQUIRED", "EGRESS_PREPARE_RECOVERY_REQUIRED"):
             with self.subTest(phase=phase):
                 self.conn.execute("DELETE FROM failover_operations")
                 self.conn.commit()
@@ -149,6 +149,51 @@ class Phase6GSharedLockTests(unittest.TestCase):
         self.assertIsNone(op_id)
         self.assertEqual(busy, old_id)
 
+
+@unittest.skipIf(sys.version_info < (3, 12), "Main NVL bot requires Python 3.12+")
+class Phase6GJournalCASRegressionTests(unittest.TestCase):
+    def setUp(self):
+        self.conn=memory_database()
+        @contextmanager
+        def db_conn():
+            try:
+                yield self.conn
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+        self.update=get_function("_db_update_failover_operation", {
+            "db_conn":db_conn, "datetime":datetime, "json":json,
+            "FAILOVER_STATUS_RUNNING":FAILOVER_STATUS_RUNNING
+        })
+        self.conn.execute(
+            "INSERT INTO failover_operations(id,mode,source_host,target_host,status) "
+            "VALUES (42,'MANUAL','172.86.94.174','216.126.229.12','RUNNING')"
+        )
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_cas_fenced_success_only_while_same_lock_is_running(self):
+        self.update(42,status="SUCCEEDED",detail={"phase":"STAGED_ONLY"},
+                    finished=True,require_running=True)
+        self.assertEqual(self.conn.execute(
+            "SELECT status FROM failover_operations WHERE id=42"
+        ).fetchone()[0],"SUCCEEDED")
+        with self.assertRaisesRegex(RuntimeError,"SHARED_6G_LOCK_NO_LONGER_RUNNING"):
+            self.update(42,status="SUCCEEDED",detail={"phase":"SUCCEEDED"},
+                        require_running=True)
+
+    def test_stale_aborted_lock_cannot_be_resurrected_by_stage(self):
+        self.conn.execute("UPDATE failover_operations SET status='ABORTED_STALE' WHERE id=42")
+        self.conn.commit()
+        with self.assertRaisesRegex(RuntimeError,"SHARED_6G_LOCK_NO_LONGER_RUNNING"):
+            self.update(42,status="SUCCEEDED",detail={"phase":"STAGED_ONLY"},
+                        require_running=True)
+        self.assertEqual(self.conn.execute(
+            "SELECT status FROM failover_operations WHERE id=42"
+        ).fetchone()[0],"ABORTED_STALE")
 
 @unittest.skipIf(sys.version_info < (3, 12), "Main NVL bot requires Python 3.12+")
 class ProtectedLegacyDbMutationTests(unittest.TestCase):

@@ -207,6 +207,23 @@ class StoreTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeStoreUnsafe,"FROZEN_PROTECTED"):
             self.store.assert_frozen_binding(42,req(),source=SOURCE,dns_port=10553)
 
+    def test_expired_readiness_still_allows_deny_only_freeze_or_hold(self):
+        self.store.reserve_blocked(42,req(),source=SOURCE,dns_port=10553)
+        self.store.transition(42,req(),source=SOURCE,expected="BLOCKED",
+                              target="ROUTED_UNVERIFIED")
+        self.store.commit_protected(42,req(),source=SOURCE)
+        with self.conn() as c:
+            c.execute("UPDATE edge_egress_readiness "
+                      "SET state='VERIFIED_LAB',witness='PINNED_SHADOW_NAMESPACE'")
+        row=self.store.transition(42,req(),source=SOURCE,
+                                  expected="PROTECTED",target="FROZEN")
+        self.assertEqual(row.state,"FROZEN")
+        with self.assertRaisesRegex(RuntimeStoreUnsafe,"F4_PRODUCTION_READINESS"):
+            self.store.transition(42,req(),source=SOURCE,
+                                  expected="FROZEN",target="ROUTED_UNVERIFIED")
+        self.assertEqual(self.store.transition(
+            42,req(),source=SOURCE,expected="FROZEN",target="HOLD").state,"HOLD")
+
     def test_lab_only_proof_cannot_reserve_user_for_protected_runtime(self):
         with self.conn() as c:
             c.execute("UPDATE edge_egress_readiness "

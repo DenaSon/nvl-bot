@@ -139,7 +139,11 @@ async def prepare_edge_stage_only(ports: PreparationPorts, *,
         )
         if reservation.edge_id != spec.edge_id or reservation.edge_ip != target_host:
             raise PreparationUnsafe("RESERVATION_IDENTITY_MISMATCH")
-        if reservation.status not in ("RESERVED", "STAGED"):
+        if reservation.status == "STAGED":
+            # A STAGED reservation may already have secret host-local files.
+            # Never overwrite it or roll back an older valid staging directory.
+            raise PreparationUnsafe("ALREADY_STAGED_REQUIRES_RECONCILIATION")
+        if reservation.status != "RESERVED":
             raise PreparationUnsafe("RESERVATION_NOT_STAGING_SAFE")
 
         phase = "STAGE_EDGE"

@@ -113,6 +113,38 @@ class BootTests(unittest.TestCase):
         self.assertEqual(sum(1 for x in added if x[:5] ==
                              ("ip", "-4", "rule", "add", "priority")), 1)
 
+    def test_real_linux_unused_fib_table_is_not_a_false_collision(self):
+        kernel = FakeKernel()
+        def run(*args):
+            if args == ("ip", "-4", "route", "show", "table", "1780"):
+                return SimpleNamespace(returncode=2, stdout="",
+                                       stderr="Error: ipv4: FIB table does not exist")
+            if args == ("ip", "-j", "-4", "route", "show", "table", "all"):
+                return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+            return kernel(*args)
+        manager = BootGuardApplier(
+            run=run, get_uid=lambda username: 1644,
+            geteuid=lambda: 0, read_nss=lambda: "hosts: files dns\n",
+        )
+        result, present = manager.preflight(manifest())
+        self.assertEqual(result.table, 1780)
+        self.assertFalse(present)
+
+    def test_failed_fib_inventory_cannot_claim_table_is_empty(self):
+        kernel = FakeKernel()
+        def run(*args):
+            if args == ("ip", "-4", "route", "show", "table", "1780"):
+                return SimpleNamespace(returncode=2, stdout="")
+            if args == ("ip", "-j", "-4", "route", "show", "table", "all"):
+                return SimpleNamespace(returncode=1, stdout="")
+            return kernel(*args)
+        manager = BootGuardApplier(
+            run=run, get_uid=lambda username: 1644,
+            geteuid=lambda: 0, read_nss=lambda: "hosts: files dns\n",
+        )
+        with self.assertRaisesRegex(BootGuardError, "INVENTORY_UNAVAILABLE"):
+            manager.preflight(manifest())
+
     def test_wrong_uid_or_priority_collision_never_mutates(self):
         x = manifest()
         for case in ("uid", "priority", "selective", "nss"):

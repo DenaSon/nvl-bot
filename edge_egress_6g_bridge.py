@@ -20,6 +20,7 @@ from edge_egress_inventory import (
     EdgeReservation, ensure_schema, reserve_allocation, mark_stage_only,
 )
 from edge_egress_prepare import LocalHostPort, PreparationUnsafe
+from edge_egress_f3_readiness import stage_in_existing_6g_transaction
 from ops.edge_egress_provision import EgressSpec
 
 
@@ -194,6 +195,11 @@ class Existing6GPreparationAdapter:
                 conn, self.source_host, self.target_host,
             )
             mark_stage_only(conn, edge_id)
+            # Same BEGIN IMMEDIATE and 6G lease as the allocation write.
+            stage_in_existing_6g_transaction(
+                conn, self.operation_id, source=self.source_host,
+                edge_id=edge_id, target=self.target_host,
+            )
 
     async def stage_reservation_under_6g_lock(self, edge_id):
         await asyncio.to_thread(self._sync_mark_staged, edge_id)

@@ -32,8 +32,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Python syntax
-        run: python -m compileall -q ops/edge_egress_provision.py edge_egress_policy.py edge_egress_lifecycle.py bot_final_v49-2.py tests/test_edge_egress_bot_integration.py tests/test_edge_egress_policy.py tests/test_edge_egress_provision.py tests/test_edge_egress_activation_sim.py tests/support/fake_egress_command.py
+      - name: Independent Egress module syntax
+        run: python -m compileall -q ops/edge_egress_provision.py edge_egress_policy.py edge_egress_lifecycle.py tests/test_edge_egress_bot_integration.py tests/test_edge_egress_policy.py tests/test_edge_egress_provision.py tests/test_edge_egress_activation_sim.py tests/support/fake_egress_command.py
+      - name: Main bot syntax (baseline requires Python 3.12+)
+        if: matrix.python-version == '3.12'
+        run: python -m py_compile bot_final_v49-2.py
       - name: Stage-only, failure injection and safety tests
         run: python -m unittest discover -s tests -p 'test_edge_egress_*.py' -v
       - name: Backup script shell syntax

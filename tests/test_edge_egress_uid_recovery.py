@@ -71,6 +71,9 @@ class RecoveryTests(unittest.TestCase):
             ("SUCCEEDED", json.dumps({"phase": "EGRESS_UID_RECOVERY_REQUIRED"})),
             ("RUNNING", json.dumps({"phase": "EGRESS_UID_ARM_GUARD"})),
         ]))
+        self.assertTrue(has_6g_recovery_hold([
+            ("RUNNING", json.dumps({"phase": "UNRECOGNIZED_OPERATION"})),
+        ]))
         self.assertFalse(has_6g_recovery_hold([
             ("SUCCEEDED", json.dumps({"phase": "EGRESS_UID_ARM_GUARD"})),
             ("FAILED", "{}"),
@@ -88,7 +91,7 @@ class RecoveryTests(unittest.TestCase):
             if args == ("systemctl", "show", "ssh.service", "-p", "Requires",
                         "--value"):
                 return SimpleNamespace(returncode=0,
-                                       stdout="basic.target nvl-egress-guard-nvl0557.service\n")
+                                       stdout="basic.target nvl-egress-guard-nvl0557.service nvl-egress-dns-nvl0557.service\n")
             return SimpleNamespace(returncode=0, stdout="")
         with tempfile.TemporaryDirectory() as tmp:
             result = inspect_recovery(

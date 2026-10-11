@@ -351,7 +351,9 @@ ip netns exec "$NS" ip link set lo up
 ip netns exec "$NS" sysctl -q -w net.ipv4.ip_forward=1 >/dev/null
 ip netns exec "$NS" iptables -w -A FORWARD -i "$VN" -o "$IFACE" -j ACCEPT
 ip netns exec "$NS" iptables -w -A FORWARD -i "$IFACE" -o "$VN" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-ip netns exec "$NS" iptables -w -t nat -A POSTROUTING -s "{spec.ns_veth_ip}/32" -o "$IFACE" -j MASQUERADE
+# Packets from the Core-side veth use the HOST's 10.x address as source.
+# Match that source, not the namespace-side veth IP.
+ip netns exec "$NS" iptables -w -t nat -A POSTROUTING -s "{spec.root_veth_ip}/32" -o "$IFACE" -j MASQUERADE
 trap - ERR
 echo "CORE SHADOW EGRESS UP (no UID rule, no host default route)"
 """
@@ -381,6 +383,8 @@ def service_unit(spec: EgressSpec, role: str, stage: Path) -> str:
 
 
 def stage_files(spec: EgressSpec, role: str, dst: Path, private: str, peer: str) -> None:
+    if role not in ("core", "edge"):
+        raise ProvisionError("invalid role")
     if not dst.is_absolute() or ".." in dst.parts:
         raise ProvisionError("stage directory must be canonical absolute path")
     if dst.exists() or dst.is_symlink():

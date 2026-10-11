@@ -173,17 +173,60 @@ class DNSPolicyTests(unittest.TestCase):
                 stdout="blackhole default metric 4096\n"
                        "default via 192.0.2.1 dev eth0\n")
         with patch("edge_egress_uid_dns.subprocess.run", side_effect=cmd):
-            with self.assertRaisesRegex(DNSError, "NOT_FROZEN"):
+            with self.assertRaisesRegex(DNSError, "NOT_OWNED"):
                 ensure_terminal_policy(1644, 1780, 1780)
 
-    def test_ssh_depends_on_guard_and_dns(self):
+    def test_dns_restart_accepts_exact_attached_edge_and_terminal_blackhole(self):
+        request = req()
+        table = ("default via " + request.spec.ns_veth_ip +
+                 " dev " + request.spec.veth_root +
+                 " src " + request.spec.root_veth_ip + " metric 100\n" +
+                 "blackhole default metric 4096\n")
+        def command(argv, **kwargs):
+            return SimpleNamespace(returncode=0, stdout=(
+                "1780: from all uidrange 1644-1644 lookup 1780\n"
+                if argv == ["ip", "-4", "rule", "show"] else table
+            ))
+        with patch("edge_egress_uid_dns.subprocess.run", side_effect=command):
+            ensure_terminal_policy(1644, 1780, 1780,
+                                   edge_next_hop=request.spec.ns_veth_ip,
+                                   edge_veth=request.spec.veth_root,
+                                   edge_src=request.spec.root_veth_ip)
+            with self.assertRaises(DNSError):
+                ensure_terminal_policy(1644, 1780, 1780)
+
+    def test_dns_restart_rejects_foreign_edge_or_missing_blackhole(self):
+        request = req()
+        owned = ("default via " + request.spec.ns_veth_ip +
+                 " dev " + request.spec.veth_root +
+                 " src " + request.spec.root_veth_ip + " metric 100\n")
+        for routes in (
+            owned,
+            "blackhole default metric 4096\ndefault via 209.200.246.198 dev eth0\n",
+            owned + "blackhole default metric 4096\nblackhole default metric 4096\n",
+        ):
+            with self.subTest(routes=routes):
+                def command(argv, **kwargs):
+                    return SimpleNamespace(returncode=0, stdout=(
+                        "1780: from all uidrange 1644-1644 lookup 1780\n"
+                        if argv == ["ip", "-4", "rule", "show"] else routes
+                    ))
+                with patch("edge_egress_uid_dns.subprocess.run", side_effect=command):
+                    with self.assertRaisesRegex(DNSError, "NOT_OWNED"):
+                        ensure_terminal_policy(1644, 1780, 1780,
+                                               edge_next_hop=request.spec.ns_veth_ip,
+                                               edge_veth=request.spec.veth_root,
+                                               edge_src=request.spec.root_veth_ip)
+
+    def test_dns_is_isolated_from_global_ssh(self):
         unit = render_dns_required_unit(req(), 10553)
-        self.assertIn("RequiredBy=ssh.service", unit)
+        self.assertNotIn("ssh.service", unit)
         self.assertIn("Requires=nvl-egress-guard-nvl0557.service", unit)
         self.assertIn("After=nvl-egress-guard-nvl0557.service", unit)
-        self.assertIn("Before=ssh.service", unit)
         self.assertIn("User=nvl0557", unit)
         self.assertIn("--port 10553", unit)
+        self.assertIn("--edge-next-hop " + req().spec.ns_veth_ip, unit)
+        self.assertIn("--edge-veth " + req().spec.veth_root, unit)
         self.assertNotIn("PrivateNetwork=yes", unit)
 
     def test_udp_local_loopback_transport_with_mock_upstream(self):

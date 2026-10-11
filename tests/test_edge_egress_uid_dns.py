@@ -134,6 +134,34 @@ class DNSPolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(DNSError, "PROTECTED_UID"):
                 ensure_running_as_uid(1644, "nvl0557")
 
+    def test_dns_proxy_starts_only_with_full_uid_guard_and_frozen_table(self):
+        def command(argv, **kwargs):
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "1780: from all uidrange 1644-1644 lookup 1780\n"
+                    if argv == ["ip", "-4", "rule", "show"]
+                    else "blackhole default metric 4096\n"
+                ),
+            )
+        with patch("edge_egress_uid_dns.subprocess.run", side_effect=command) as run:
+            ensure_terminal_policy(1644, 1780, 1780)
+        self.assertEqual(run.call_count, 2)
+
+    def test_dns_proxy_rejects_single_destination_uid_rule(self):
+        def command(argv, **kwargs):
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "1780: from all to 1.1.1.1 uidrange 1644-1644 lookup 1780\n"
+                    if argv == ["ip", "-4", "rule", "show"]
+                    else "blackhole default metric 4096\n"
+                ),
+            )
+        with patch("edge_egress_uid_dns.subprocess.run", side_effect=command):
+            with self.assertRaisesRegex(DNSError, "UID_RULE_MISSING"):
+                ensure_terminal_policy(1644, 1780, 1780)
+
     def test_dns_service_fails_closed_on_unknown_route(self):
         def cmd(argv, **kwargs):
             if argv == ["ip", "-4", "rule", "show"]:

@@ -53,6 +53,9 @@ class PureHoldClassifierTests(unittest.TestCase):
             "ARM_FAIL_CLOSED", "SELECT_TARGET_EGRESS", "VERIFY_CUSTOMER_EGRESS",
             "SOURCE_ACCOUNT_CAS", "EDGE_ONLY_DNS_CUTOVER", "VERIFY_FINAL",
             "EGRESS_RECOVERY_REQUIRED", "EGRESS_PREPARE_RECOVERY_REQUIRED",
+            "RECHECK_SOURCE", "READ_ONLY_PREFLIGHT", "HOST_LOCAL_PUBLIC_KEYS",
+            "RESERVE_RESOURCE_IDENTITY", "STAGE_EDGE", "STAGE_CORE",
+            "RECHECK_OWNERSHIP", "MARK_STAGED_NOT_READY",
         ):
             with self.subTest(phase=phase):
                 self.assertTrue(is_egress_recovery_hold(json.dumps({"phase": phase})))
@@ -111,7 +114,8 @@ class Phase6GSharedLockTests(unittest.TestCase):
 
     def test_old_protected_lock_remains_busy_after_timeout(self):
         for phase in ("ARM_FAIL_CLOSED", "EDGE_ONLY_DNS_CUTOVER",
-                      "EGRESS_RECOVERY_REQUIRED", "EGRESS_PREPARE_RECOVERY_REQUIRED"):
+                      "EGRESS_RECOVERY_REQUIRED", "EGRESS_PREPARE_RECOVERY_REQUIRED",
+                      "STAGE_CORE", "HOST_LOCAL_PUBLIC_KEYS"):
             with self.subTest(phase=phase):
                 self.conn.execute("DELETE FROM failover_operations")
                 self.conn.commit()

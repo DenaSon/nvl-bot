@@ -1,0 +1,144 @@
+"""F4 SSH/PAM installation REVIEWER and offline renderer (read-only).
+
+Does not modify /etc/pam.d/sshd, sshd_config, systemd or a host network.
+An external operator must keep console recovery and rehearse both PAM auth
+and direct-tcpip/SOCKS in a disposable full-system clone. An offline review
+passing DOES NOT prove that forwarding actually enters PAM account phase.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
+import os
+from pathlib import Path
+import re
+import stat
+
+
+REQUIRED_ACCOUNT_LINE=(
+    "account requisite pam_exec.so quiet "
+    "/usr/bin/python3 /opt/nvl-egress/edge_egress_uid_admission.py"
+)
+PAM_PATH="/etc/pam.d/sshd"
+MODULE_PATH="/opt/nvl-egress/edge_egress_uid_admission.py"
+
+
+@dataclass(frozen=True)
+class PAMInspection:
+    valid: bool
+    issues: tuple[str, ...]
+    installed: bool = False
+    customer_ready: bool = False
+
+
+def render_pam_change_review() -> str:
+    """Proposed exact addition; human-reviewed only, never installed here."""
+    return "\n".join((
+        "# REVIEW ONLY — no live PAM edits without disposable VPS rehearsal",
+        "# Place as FIRST account rule in /etc/pam.d/sshd:",
+        REQUIRED_ACCOUNT_LINE,
+        "# Verify UsePAM yes for customer identity via sshd -T",
+        "# Test independent root console and non-root admin recovery",
+        "# No automatic restart of ssh.service or network modifications",
+        "",
+    ))
+
+
+def inspect_pam_sshd(pam_contents: str, sshd_effective: str, *,
+                     protected_username: str = "nvl0557") -> PAMInspection:
+    issues=[]
+    if not isinstance(pam_contents,str) or not isinstance(sshd_effective,str):
+        return PAMInspection(False,("INPUT_UNAVAILABLE",))
+    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}",protected_username):
+        return PAMInspection(False,("INVALID_USERNAME",))
+    active=[
+        " ".join(line.split())
+        for line in pam_contents.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    rules=[line for line in active if line.startswith("account ")]
+    matching=[line for line in rules if line==REQUIRED_ACCOUNT_LINE]
+    installed=len(matching)==1
+    if not installed:
+        issues.append("EXACT_PAM_ACCOUNT_HOOK_MISSING_OR_DUPLICATED")
+    if matching and rules and rules[0]!=REQUIRED_ACCOUNT_LINE:
+        issues.append("PAM_HOOK_NOT_FIRST_ACCOUNT_RULE")
+    # A prior PAM include can inject account rules (and pam_permit)
+    # even if no literal "account" line appears in this file.
+    if matching:
+        prior=active[:active.index(REQUIRED_ACCOUNT_LINE)]
+        if any(line.startswith(("@include ","-@include ")) and (
+            any(word in line for word in
+                ("common-account","system-auth","password-auth"))
+        ) for line in prior):
+            issues.append("PAM_INCLUDED_ACCOUNT_BEFORE_GUARD")
+    # Unknown PAM account lines using another local script must be reviewed.
+    for rule in rules:
+        if "pam_exec.so" in rule and rule!=REQUIRED_ACCOUNT_LINE:
+            issues.append("UNREVIEWED_PAM_EXEC_ACCOUNT")
+            break
+    effective=[
+        " ".join(line.strip().split()).lower()
+        for line in sshd_effective.splitlines() if line.strip()
+    ]
+    pam=[value.split()[-1] for value in effective if value.startswith("usepam ")]
+    if pam!=["yes"]:
+        issues.append("SSHD_USEPAM_NOT_ATTESTED_FOR_SELECTED_USER")
+    # A PAM account hook may still be skipped for special auth/forwarding
+    # paths: only F4 real SSH E2E can prove enforcement.
+    return PAMInspection(not issues,tuple(issues),installed=installed)
+
+
+def inspect_deployment_root(path: str, *, root_owner_uid: int, mode: int,
+                            is_symlink: bool) -> bool:
+    """Validate root-owned fixed module/manifest directories in preflight."""
+    return bool(
+        isinstance(path,str) and path.startswith("/opt/nvl-egress/")
+        and ".." not in path.split("/")
+        and root_owner_uid==0
+        and mode & 0o022 == 0
+        and is_symlink is False
+    )
+
+
+def verify_installed_gate_digest(expected_sha256: str, *,
+                                 module_path: str = MODULE_PATH) -> bool:
+    """Read-only attest reviewed bytes AND root-controlled pathname.
+
+    This does not prove the active sshd/PAM stack executes the installed
+    file. Caller must combine it with an actual disposable SSH test.
+    """
+    if not isinstance(expected_sha256, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", expected_sha256
+    ):
+        return False
+    if module_path != MODULE_PATH:
+        return False
+    try:
+        # Reject symlinked parents before following any path.
+        for directory in ("/opt", "/opt/nvl-egress"):
+            info = os.lstat(directory)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or (
+                info.st_mode & 0o022
+            ):
+                return False
+        info = os.lstat(module_path)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or (
+            info.st_mode & 0o022
+        ) or info.st_size > 131072:
+            return False
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(module_path, flags)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or (
+                info.st_mode & 0o022
+            ) or info.st_size > 131072:
+                return False
+            with os.fdopen(os.dup(fd), "rb") as stream:
+                digest = hashlib.sha256(stream.read(131073)).hexdigest()
+            return digest == expected_sha256
+        finally:
+            os.close(fd)
+    except (OSError, ValueError):
+        return False

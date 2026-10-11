@@ -124,11 +124,17 @@ class BootGuardApplier:
         # "to 1.1.1.1/32" rule must NEVER be treated as a protected guard.
         if match and match[0] != expected_rule:
             raise BootGuardError("FOREIGN_PRIORITY")
-        # UID must not have a different existing routing decision.
+        # UID must not have ANY overlapping selector, even a broad
+        # 1600-1700 range that includes this protected UID. Such a rule can
+        # beat the owned route and leak traffic through Core/main.
         for line in rules.splitlines():
-            if "uidrange" in line and re.search(
-                r"\buidrange\s+" + re.escape(request.uidrange) + r"\b", line
-            ) and not line.strip().startswith(prefix):
+            if "uidrange" not in line:
+                continue
+            selector = re.search(r"\buidrange\s+(\d+)-(\d+)\b", line)
+            if not selector:
+                raise BootGuardError("UNRECOGNIZED_UID_ROUTING_RULE")
+            first, last = map(int, selector.groups())
+            if first <= request.uid <= last and " ".join(line.split()) != expected_rule:
                 raise BootGuardError("UID_ALREADY_ROUTED_ELSEWHERE")
 
         if manifest.dns_port is not None:

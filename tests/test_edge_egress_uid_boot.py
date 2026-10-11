@@ -206,6 +206,26 @@ class BootTests(unittest.TestCase):
                 self.assertFalse(kernel.blackhole)
                 self.assertFalse(kernel.guards)
 
+    def test_overlapping_broad_uid_rule_never_arms_boot_guard(self):
+        kernel = FakeKernel()
+        def run(*args):
+            if args == ("ip","-4","rule","show"):
+                return SimpleNamespace(returncode=0,stdout=(
+                    "150: from all uidrange 1600-1700 lookup main\\n"
+                    "1780: from all uidrange 1644-1644 lookup 1780\\n"
+                ))
+            return kernel(*args)
+        manager = BootGuardApplier(
+            run=run,get_uid=lambda _:1644,geteuid=lambda:0,
+            read_nss=lambda:"hosts: files dns\\n",
+        )
+        with self.assertRaisesRegex(
+            BootGuardError,"UID_ALREADY_ROUTED_ELSEWHERE"
+        ):
+            manager.apply(manifest())
+        self.assertFalse(kernel.guards)
+        self.assertFalse(kernel.blackhole)
+
     def test_zero_live_operations_during_manifest_parse(self):
         x = manifest(dns=None)
         self.assertEqual(x.request.uid, 1644)

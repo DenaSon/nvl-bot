@@ -141,6 +141,21 @@ class StoreTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeStoreUnsafe, "ALREADY_EXISTS"):
             self.store.reserve_blocked(42, req(), source=SOURCE, dns_port=10555)
 
+    def test_second_canary_cannot_freeze_first_protected_edge_user(self):
+        first=req()
+        second=req("nvl0558",1645,1781)
+        self.store.reserve_blocked(42,first,source=SOURCE,dns_port=10553)
+        self.store.transition(42,first,source=SOURCE,expected="BLOCKED",
+                              target="ROUTED_UNVERIFIED")
+        self.store.commit_protected(42,first,source=SOURCE)
+        with self.assertRaisesRegex(
+            RuntimeStoreUnsafe,"SHARED_EDGE_CANARY_ISOLATION_REQUIRED"
+        ):
+            self.store.reserve_blocked(42,second,source=SOURCE,dns_port=10554)
+        with self.conn() as c:
+            self.assertIsNone(read_binding(c,"nvl0558"))
+            self.assertEqual(read_binding(c,"nvl0557").state,"PROTECTED")
+
     def test_resource_collision_is_denied_transactionally(self):
         self.store.reserve_blocked(42, req(), source=SOURCE, dns_port=10553)
         with self.assertRaisesRegex(RuntimeStoreUnsafe, "COLLISION"):

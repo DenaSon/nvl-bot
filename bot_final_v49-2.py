@@ -23373,9 +23373,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         context.user_data['state'] = 'EGRESS_F3_PLAN_INPUT'
         await query.edit_message_text(
-            "🛡️ <b>پیش‌نمایش تخصیص Egress</b>\\n\\n"
-            "نام کاربر و شناسه Edge را با فاصله ارسال کنید.\\n"
-            "مثال: <code>nvl0557 fra1</code>\\n\\n"
+            "🛡️ <b>پیش‌نمایش تخصیص Egress</b>\n\n"
+            "نام کاربر و شناسه Edge را با فاصله ارسال کنید.\n"
+            "مثال: <code>nvl0557 fra1</code>\n\n"
             "این بررسی فقط خواندنی است و هنوز کاربری منتقل نمی‌شود.",
             parse_mode="HTML",
         )

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from edge_egress_uid_policy import UIDPolicyRequest
+from edge_egress_f3_readiness import read_readiness, admission_eligible
 
 
 class RuntimeStoreUnsafe(ValueError):
@@ -100,7 +101,8 @@ class Existing6GUIDRuntimeStore:
             ).fetchone():
                 raise RuntimeStoreUnsafe("EXPLICIT_MIGRATION_REQUIRED:" + name)
 
-    def _owner(self, conn, req: UIDPolicyRequest, source: str) -> None:
+    def _owner(self, conn, req: UIDPolicyRequest, source: str, *,
+               require_ready: bool = True) -> None:
         req.validate()
         row = conn.execute(
             "SELECT host,service_type,status FROM ssh_accounts WHERE username=?",
@@ -133,6 +135,18 @@ class Existing6GUIDRuntimeStore:
             req.spec.veth_network,
         ):
             raise RuntimeStoreUnsafe("STAGED_EDGE_ALLOCATION_MISMATCH")
+        # F3 removes the old ability to commit a protected customer from a
+        # mere STAGED allocation or a disposable namespace IP probe.
+        # READY is NOT produced by F3; the separate F4 acceptance is required.
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='edge_egress_readiness'"
+        ).fetchone():
+            raise RuntimeStoreUnsafe("F3_READINESS_MIGRATION_REQUIRED")
+        if require_ready and not admission_eligible(
+            read_readiness(conn, req.spec.edge_id)
+        ):
+            raise RuntimeStoreUnsafe("F4_PRODUCTION_READINESS_REQUIRED")
 
     def _tx(self, operation_id, source, target, task):
         with self.db_conn() as conn:
@@ -192,7 +206,12 @@ class Existing6GUIDRuntimeStore:
         }:
             raise RuntimeStoreUnsafe("UNSAFE_STATE_TRANSITION")
         def work(conn):
-            self._owner(conn, req, source)
+            # Deny-only FROZEN/HOLD must remain possible if a previously
+            # verified Edge loses readiness or its acceptance has expired.
+            self._owner(
+                conn, req, source,
+                require_ready=target not in ("FROZEN", "HOLD"),
+            )
             previous = read_binding(conn, req.username)
             if not previous or (
                 previous.uid, previous.edge_id, previous.edge_ipv4,

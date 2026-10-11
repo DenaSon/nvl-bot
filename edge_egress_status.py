@@ -15,6 +15,9 @@ class EgressRow:
     edge_id: str
     edge_ipv4: str
     state: str
+    witness: str = ""
+    observed_ipv4: str = ""
+    expires_at: int | None = None
 
 
 @dataclass(frozen=True)
@@ -38,10 +41,36 @@ def read_egress_status(db_conn) -> EgressStatus:
         ).fetchone()
         if not present:
             return EgressStatus(mode, False, (), 0)
-        rows = conn.execute(
-            "SELECT edge_id,edge_public_ipv4,status "
-            "FROM edge_egress_allocations ORDER BY created_at DESC,edge_id LIMIT 8"
-        ).fetchall()
+        readiness = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='edge_egress_readiness'"
+        ).fetchone()
+        if readiness:
+            # LEFT JOIN prevents any lab evidence from overwriting canonical
+            # stage-only allocation status or implying customer readiness.
+            rows = conn.execute(
+                "SELECT a.edge_id,a.edge_public_ipv4,a.status,"
+                "COALESCE(r.witness,''),COALESCE(r.observed_ipv4,''),"
+                "r.expires_at "
+                "FROM edge_egress_allocations a LEFT JOIN "
+                "edge_egress_readiness r ON r.edge_id=a.edge_id "
+                "ORDER BY a.created_at DESC,a.edge_id LIMIT 8"
+            ).fetchall()
+            states = conn.execute(
+                "SELECT edge_id,state FROM edge_egress_readiness"
+            ).fetchall()
+            by_edge = dict(states)
+            rows = [
+                (edge_id, ip, stage + " / " + by_edge.get(edge_id, "NO_EVIDENCE"),
+                 witness, observed, expires)
+                for edge_id, ip, stage, witness, observed, expires in rows
+            ]
+        else:
+            rows = conn.execute(
+                "SELECT edge_id,edge_public_ipv4,status "
+                "FROM edge_egress_allocations "
+                "ORDER BY created_at DESC,edge_id LIMIT 8"
+            ).fetchall()
         count = conn.execute("SELECT COUNT(*) FROM edge_egress_allocations").fetchone()[0]
         return EgressStatus(mode, True, tuple(EgressRow(*x) for x in rows), count)
 
@@ -69,9 +98,15 @@ def render_egress_status_html(status: EgressStatus) -> str:
             edge_ip = escape(row.edge_ipv4[:64])
             state = escape(row.state[:24])
             lines.append(f"• <code>{edge_id}</code> · <code>{edge_ip}</code> · {state}")
+            if row.witness:
+                observed = escape(row.observed_ipv4[:64])
+                lines.append(
+                    f"  شاهد: {escape(row.witness[:40])} · IP: <code>{observed}</code>"
+                )
     lines.extend((
         "",
-        "⚠️ RESERVED و STAGED به‌معنای سالم‌بودن WireGuard یا آماده‌بودن IP خروجی نیستند.",
+        "⚠️ VERIFIED_LAB فقط شاهد IP تونل آزمایشی است؛ به‌معنای مجوز تخصیص کاربر نیست.",
+        "برای تخصیص Production باید تأیید Reboot، PAM و بدون Leak در F4 ثبت شود.",
         "تغییر دستی Edge و Failover محافظت‌شده تا تکمیل تست‌های عملیاتی غیرفعال می‌مانند.",
     ))
     return "\n".join(lines)

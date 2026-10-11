@@ -8,7 +8,11 @@ passing DOES NOT prove that forwarding actually enters PAM account phase.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import os
+from pathlib import Path
 import re
+import stat
 
 
 REQUIRED_ACCOUNT_LINE=(
@@ -95,3 +99,46 @@ def inspect_deployment_root(path: str, *, root_owner_uid: int, mode: int,
         and mode & 0o022 == 0
         and is_symlink is False
     )
+
+
+def verify_installed_gate_digest(expected_sha256: str, *,
+                                 module_path: str = MODULE_PATH) -> bool:
+    """Read-only attest reviewed bytes AND root-controlled pathname.
+
+    This does not prove the active sshd/PAM stack executes the installed
+    file. Caller must combine it with an actual disposable SSH test.
+    """
+    if not isinstance(expected_sha256, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", expected_sha256
+    ):
+        return False
+    if module_path != MODULE_PATH:
+        return False
+    try:
+        # Reject symlinked parents before following any path.
+        for directory in ("/opt", "/opt/nvl-egress"):
+            info = os.lstat(directory)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or (
+                info.st_mode & 0o022
+            ):
+                return False
+        info = os.lstat(module_path)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or (
+            info.st_mode & 0o022
+        ) or info.st_size > 131072:
+            return False
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(module_path, flags)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or (
+                info.st_mode & 0o022
+            ) or info.st_size > 131072:
+                return False
+            with os.fdopen(os.dup(fd), "rb") as stream:
+                digest = hashlib.sha256(stream.read(131073)).hexdigest()
+            return digest == expected_sha256
+        finally:
+            os.close(fd)
+    except (OSError, ValueError):
+        return False

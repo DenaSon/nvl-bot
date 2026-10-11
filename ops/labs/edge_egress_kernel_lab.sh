@@ -144,9 +144,19 @@ if nsenter --net="/run/netns/$CORE" -- curl --noproxy '*' --fail --silent     --
   echo "FAIL: unexpected egress while Edge is down" >&2; exit 1
 fi
 
-echo "[lab] Restart Edge and prove source-IP recovery"
+echo "[lab] Restart Edge and force immediate rekey of stale Core session"
 nsenter --net="/run/netns/$EDGE" -- bash "$TMP/edge/up.sh"
 ES=1
+echo "[lab] Core handshake before rekey (may be stale)"
+ip netns exec "$INNER" wg show wg-nvl-fra1 latest-handshakes
+echo "[lab] New Edge handshake before rekey"
+nsenter --net="/run/netns/$EDGE" -- wg show wg-nvl-fra1 latest-handshakes
+# Edge's new instance cannot decrypt packets from Core's previous transport
+# session. The existing session may otherwise blackhole traffic until rekey.
+# This targeted peer reconfiguration affects only the disposable CI tunnel.
+ip netns exec "$INNER" wg set wg-nvl-fra1 peer "$(cat "$TMP/edge.pub")" remove
+ip netns exec "$INNER" wg setconf wg-nvl-fra1 "$TMP/core/wg.conf"
+ip netns exec "$INNER" ping -c 4 -W 2 10.78.100.1 >/dev/null
 REPLY=""
 for attempt in 1 2 3 4 5; do
   if REPLY="$(nsenter --net="/run/netns/$CORE" -- curl --noproxy '*' --fail --silent       --connect-timeout 2 --max-time 4 http://203.0.113.50:18080/)"; then

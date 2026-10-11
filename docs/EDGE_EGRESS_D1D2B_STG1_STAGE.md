@@ -64,3 +64,9 @@ Evidence below is **operator-supplied terminal output**, not automated remote at
 - This Core namespace test does not exercise an operational SSH session owned by a protected real UID, global boot/systemd guard ordering, or protected 6G/6H live adapters. The separate disposable VPS boot gate from D1-C3E remains **DEFERRED**.
 - No production Egress UID policy or protected 6G/6H cutover is approved. Keep PR Draft and protected mode OFF.
 
+
+### DNS/IPv6 read-only test observation — 2026-10-11
+
+Operator ran a read-only audit in the live Core isolated `nvl-egress-stg1` namespace, after independently confirming eventual Standby tunnel recovery. `/etc/resolv.conf` returned nameservers `8.8.8.8` and `8.8.4.4`. IPv4 route lookups inside the namespace for **both** nameservers selected `wg-nvl-stg1`, source `10.78.110.2`. `getent ahostsv4 example.com` returned success (`DNS_RESOLUTION=PASS`). `ip -6 route show default` returned no route, and `curl -6 --noproxy '*' https://api64.ipify.org` did not connect (`IPV6_PUBLIC_EGRESS=NO_CONNECTION`).
+
+**Scope:** successful resolution and namespace route lookups are not packet captures or complete DNS leak proofs. They do not prove all DNS types/transports including DoH, TCP/UDP 53 or full SSH/BadVPN user flows are confined to the Edge; they do not verify production UID ownership, boot guard, recovery time, or production 6G/6H cutover. No protected production activation is authorized.

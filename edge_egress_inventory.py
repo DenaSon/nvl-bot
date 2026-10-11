@@ -94,6 +94,8 @@ def reserve_allocation(
     if current:
         if tuple(current[:9]) != fields:
             raise AllocationConflict("EDGE_ID_IMMUTABLE_RESERVATION")
+        if current[9] == "RETIRED":
+            raise AllocationConflict("RETIRED_EDGE_ID_MUST_NOT_BE_REUSED")
         return EdgeReservation(
             spec.edge_id, spec.edge_public_ipv4, spec.tunnel_network,
             spec.veth_network, spec.route_table, current[9], False,

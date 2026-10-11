@@ -68,6 +68,14 @@ class _GuardedPorts:
     async def update_6g_journal(self, operation_id, *, status, phase, details):
         if self.operation_id != operation_id:
             raise GuardedFailoverUnsafe("6G_OPERATION_ID_CHANGED")
+        # Tag mutating candidate phases so legacy 6G stale-lock recovery
+        # cannot silently abort an operation while the dedicated Edge is
+        # partially staged or rekeyed.
+        if status == "RUNNING" and phase in {
+            "CANDIDATE_STAGE", "DEDICATED_PEER_REKEY",
+            "EXTERNAL_EGRESS_PROOF", "REVALIDATE_OWNERSHIP_AND_ALLOCATION",
+        }:
+            phase = "EGRESS_GUARDED_" + phase
         details = dict(details)
         details.update(kind="PROTECTED_EGRESS_SWITCH", trigger=self.trigger)
         if self.incident_ref is not None:
@@ -178,4 +186,6 @@ async def run_guarded_6g6h_handoff(
     if not explicitly_approved_for_isolated_lab:
         return HandoffResult(False, "PROTECTED_HANDOFF_RELEASE_NOT_APPROVED", None)
     adapter = _GuardedPorts(ports, trigger, incident_ref, now=now)
-    return await run_protected_handoff(adapter, source_host, target_host, now=now)
+    return await run_protected_handoff(
+        adapter, source_host, target_host, now=now, guarded_failover=True
+    )

@@ -142,7 +142,9 @@ def render_dns_required_unit(request: UIDPolicyRequest, port: int) -> str:
         "Requires=nvl-egress-guard-" + name + ".service\n"
         "Before=ssh.service\n"
         "\n[Service]\n"
-        "Type=simple\n"
+        "Type=notify\n"
+        "NotifyAccess=main\n"
+        "TimeoutStartSec=20\n"
         f"User={name}\n"
         "NoNewPrivileges=yes\n"
         "PrivateTmp=yes\n"
@@ -255,6 +257,25 @@ class TCPHandler(socketserver.BaseRequestHandler):
             pass
 
 
+def sd_notify_ready() -> None:
+    """Signal systemd readiness only after both listening sockets exist.
+
+    Pure startup notification, not a claim that Edge is online. A missing
+    NOTIFY_SOCKET is allowed for explicitly invoked disposable lab runs.
+    """
+    addr = os.environ.get("NOTIFY_SOCKET", "")
+    if not addr:
+        return
+    if not (addr.startswith("/") or addr.startswith("@")):
+        raise DNSError("INVALID_NOTIFY_SOCKET")
+    target = ("\0" + addr[1:]) if addr.startswith("@") else addr
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
+        try:
+            client.sendto(b"READY=1", target)
+        except OSError as exc:
+            raise DNSError("SYSTEMD_READY_NOTIFY_FAILED") from exc
+
+
 def serve(uid: int, username: str, priority: int, table: int,
           port: int, *, upstream=None):
     ensure_running_as_uid(uid, username)
@@ -270,6 +291,10 @@ def serve(uid: int, username: str, priority: int, table: int,
             import threading
             thread = threading.Thread(target=udp.serve_forever, daemon=True)
             thread.start()
+            # Type=notify: SSH may only start once the DNS listeners are
+            # actually bound and the UDP serving thread has been started.
+            # No network/DNS-bootstrap operation happens in this signal.
+            sd_notify_ready()
             try:
                 tcp.serve_forever()
             finally:

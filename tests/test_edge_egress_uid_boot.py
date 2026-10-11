@@ -33,6 +33,7 @@ class FakeKernel:
         self.redirects = set()
         self.log = []
         self.foreign_rule = False
+        self.selective_rule = False
 
     def __call__(self, *args):
         self.log.append(args)
@@ -40,6 +41,8 @@ class FakeKernel:
             content = "0: from all lookup local\n"
             if self.foreign_rule:
                 content += "1780: from all uidrange 1644-1644 lookup 9\n"
+            elif self.selective_rule:
+                content += "1780: from all to 1.1.1.1 uidrange 1644-1644 lookup 1780\n"
             elif self.priority:
                 content += "1780: from all uidrange 1644-1644 lookup 1780\n"
             return SimpleNamespace(returncode=0, stdout=content)
@@ -112,11 +115,13 @@ class BootTests(unittest.TestCase):
 
     def test_wrong_uid_or_priority_collision_never_mutates(self):
         x = manifest()
-        for case in ("uid", "priority", "nss"):
+        for case in ("uid", "priority", "selective", "nss"):
             with self.subTest(case=case):
                 kernel = FakeKernel()
                 if case == "priority":
                     kernel.foreign_rule = True
+                if case == "selective":
+                    kernel.selective_rule = True
                 manager = BootGuardApplier(
                     run=kernel,
                     get_uid=lambda _: 1645 if case == "uid" else 1644,

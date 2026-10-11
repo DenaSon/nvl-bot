@@ -10,6 +10,8 @@ on:
       - 'edge_egress_protected_6g6h.py'
       - 'edge_egress_protected_mapping.py'
       - 'ops/labs/edge_egress_core_staging_preflight.py'
+      - 'ops/labs/edge_egress_stg1_ssh_canary.py'
+      - 'tests/test_edge_egress_stg1_ssh_canary.py'
       - 'tests/test_edge_egress_core_staging_preflight.py'
       - 'tests/test_edge_egress_protected_mapping.py'
       - 'tests/test_edge_egress_protected_6g6h.py'
@@ -76,7 +78,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Independent Egress module syntax
-        run: python -m compileall -q edge_egress_*.py ops/edge_egress_provision.py ops/edge_egress_host_worker.py ops/labs/edge_egress_core_staging_preflight.py tests/test_edge_egress_*.py tests/support/fake_egress_command.py
+        run: python -m compileall -q edge_egress_*.py ops/edge_egress_provision.py ops/edge_egress_host_worker.py ops/labs/edge_egress_core_staging_preflight.py ops/labs/edge_egress_stg1_ssh_canary.py tests/test_edge_egress_*.py tests/support/fake_egress_command.py
       - name: Main bot syntax (baseline requires Python 3.12+)
         if: matrix.python-version == '3.12'
         run: python -m py_compile bot_final_v49-2.py

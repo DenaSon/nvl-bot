@@ -16,7 +16,7 @@ import pwd
 import sqlite3
 import subprocess
 
-from edge_egress_f4_pam import inspect_pam_sshd
+from edge_egress_f4_pam import inspect_pam_sshd, verify_installed_gate_digest
 
 
 @dataclass(frozen=True)
@@ -30,7 +30,8 @@ def examine_core(conn: sqlite3.Connection, *, username: str,
                  uid: int, source_ip: str, edge_id: str,
                  expected_edge_ip: str, pam_text: str,
                  sshd_effective: str, ssh_active: bool,
-                 bot_active: bool, os_uid: int) -> CorePreflight:
+                 bot_active: bool, os_uid: int,
+                 gate_digest_verified: bool = False) -> CorePreflight:
     errors=[]
     if username != "nvl0557" and not username.startswith("nvl"):
         errors.append("UNREVIEWED_USERNAME")
@@ -40,6 +41,8 @@ def examine_core(conn: sqlite3.Connection, *, username: str,
         errors.append("PRODUCTION_SSH_OR_BOT_UNHEALTHY")
     pam=inspect_pam_sshd(pam_text,sshd_effective,protected_username=username)
     errors.extend(pam.issues)
+    if not gate_digest_verified:
+        errors.append("PAM_GATE_SHA256_OR_ROOT_OWNERSHIP_UNVERIFIED")
     try:
         required=("ssh_accounts","host_pool","settings",
                   "failover_operations","edge_egress_allocations",
@@ -112,6 +115,8 @@ def main(argv=None):
     parser.add_argument("--source-ip",required=True)
     parser.add_argument("--edge-id",required=True)
     parser.add_argument("--edge-ip",required=True)
+    parser.add_argument("--reviewed-gate-sha256",required=True,
+                        help="SHA256 of the independently reviewed PAM hook file")
     args=parser.parse_args(argv)
     blockers=[]
     try:
@@ -144,6 +149,9 @@ def main(argv=None):
                 sshd_effective=effective.stdout,
                 ssh_active=active("ssh"),bot_active=active("nvlbot"),
                 os_uid=os_uid,
+                gate_digest_verified=verify_installed_gate_digest(
+                    args.reviewed_gate_sha256
+                ),
             )
         finally:
             conn.close()

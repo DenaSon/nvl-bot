@@ -182,18 +182,18 @@ class StoreTests(unittest.TestCase):
     def test_only_valid_frozen_protected_binding_can_resume(self):
         self.store.reserve_blocked(42,req(),source=SOURCE,dns_port=10553)
         with self.assertRaisesRegex(RuntimeStoreUnsafe, "FROZEN_BINDING"):
-            self.store.assert_frozen_binding(42,req(),source=SOURCE)
+            self.store.assert_frozen_binding(42,req(),source=SOURCE,dns_port=10553)
         self.store.transition(42,req(),source=SOURCE,expected="BLOCKED",
                               target="ROUTED_UNVERIFIED")
         self.store.commit_protected(42,req(),source=SOURCE)
         self.store.transition(42,req(),source=SOURCE,expected="PROTECTED",
                               target="FROZEN")
         self.assertEqual(self.store.assert_frozen_binding(
-            42,req(),source=SOURCE).state,"FROZEN")
+            42,req(),source=SOURCE,dns_port=10553).state,"FROZEN")
         with self.conn() as c:
             c.execute("DELETE FROM edge_egress_uid_bindings")
         with self.assertRaisesRegex(RuntimeStoreUnsafe,"FROZEN_PROTECTED"):
-            self.store.assert_frozen_binding(42,req(),source=SOURCE)
+            self.store.assert_frozen_binding(42,req(),source=SOURCE,dns_port=10553)
 
     def test_foreign_edge_allocation_cannot_be_bound(self):
         with self.conn() as c:

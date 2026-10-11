@@ -12,8 +12,16 @@ on:
       - 'edge_egress_6g_bridge.py'
       - 'edge_egress_status.py'
       - 'edge_egress_ssh_transport.py'
+      - 'edge_egress_uid_policy.py'
+      - 'edge_egress_uid_lifecycle.py'
+      - 'edge_egress_uid_6g_bridge.py'
+      - 'edge_egress_uid_kernel.py'
       - 'ops/edge_egress_host_worker.py'
       - 'tests/test_edge_egress_ssh_transport.py'
+      - 'tests/test_edge_egress_uid_policy.py'
+      - 'tests/test_edge_egress_uid_lifecycle.py'
+      - 'tests/test_edge_egress_uid_6g_bridge.py'
+      - 'tests/test_edge_egress_uid_kernel.py'
       - 'bot_final_v49-2.py'
       - 'ops/edge_egress_provision.py'
       - 'ops/backup_nvl_host.sh'
@@ -49,7 +57,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Independent Egress module syntax
-        run: python -m compileall -q ops/edge_egress_provision.py edge_egress_policy.py edge_egress_lifecycle.py edge_egress_handoff.py edge_egress_entrypoints.py edge_egress_inventory.py edge_egress_prepare.py edge_egress_6g_bridge.py edge_egress_status.py edge_egress_ssh_transport.py ops/edge_egress_host_worker.py tests/test_edge_egress_ssh_transport.py tests/test_edge_egress_bot_integration.py tests/test_edge_egress_handoff.py tests/test_edge_egress_shared_lock.py tests/test_edge_egress_manual_entrypoints.py tests/test_edge_egress_inventory.py tests/test_edge_egress_prepare.py tests/test_edge_egress_6g_bridge.py tests/test_edge_egress_status.py tests/test_edge_egress_policy.py tests/test_edge_egress_provision.py tests/test_edge_egress_activation_sim.py tests/support/fake_egress_command.py
+        run: python -m compileall -q edge_egress_*.py ops/edge_egress_provision.py ops/edge_egress_host_worker.py tests/test_edge_egress_*.py tests/support/fake_egress_command.py
       - name: Main bot syntax (baseline requires Python 3.12+)
         if: matrix.python-version == '3.12'
         run: python -m py_compile bot_final_v49-2.py

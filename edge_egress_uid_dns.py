@@ -126,6 +126,38 @@ def plan_transparent_dns(request: UIDPolicyRequest, port: int) -> DNSRedirectPla
     )
 
 
+def render_dns_required_unit(request: UIDPolicyRequest, port: int) -> str:
+    """Only a draft artifact; REQUIRED SSH dependency must be installed.
+
+    Guard and DNS services are both required by ssh.service; DNS starts
+    AFTER guard. If DNS fails on boot, SSH service must not start.
+    This does not protect arbitrary other processes with this UID.
+    """
+    plan_transparent_dns(request, port)
+    name = request.username
+    return (
+        "[Unit]\n"
+        f"Description=NVL UID Edge DoH local stub for {name}\n"
+        "After=nvl-egress-guard-" + name + ".service\n"
+        "Requires=nvl-egress-guard-" + name + ".service\n"
+        "Before=ssh.service\n"
+        "\n[Service]\n"
+        "Type=simple\n"
+        f"User={name}\n"
+        "NoNewPrivileges=yes\n"
+        "PrivateTmp=yes\n"
+        "ProtectSystem=strict\n"
+        "ProtectHome=yes\n"
+        "Restart=on-failure\n"
+        "RestartSec=2\n"
+        "ExecStart=/usr/bin/python3 /opt/nvl-egress/edge_egress_uid_dns.py "
+        f"serve --username {name} --uid {request.uid} "
+        f"--priority {request.priority} --table {request.spec.route_table} "
+        f"--port {port}\n"
+        "\n[Install]\nRequiredBy=ssh.service\n"
+    )
+
+
 def validate_nss_hosts(contents: str) -> None:
     """Deny 'NSS resolve' delegated outside protected UID.
 

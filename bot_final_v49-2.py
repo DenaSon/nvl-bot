@@ -301,6 +301,20 @@ from automatic_failover import (
     evaluate_auto_failover,
     rank_safe_standbys,
 )
+from edge_egress_lifecycle import (
+    PROTECTED_SETTING_KEY,
+    PROTECTED_SETTING_DEFAULT,
+    legacy_failover_gate,
+    legacy_new_edge_gate,
+)
+from edge_egress_handoff import is_egress_recovery_hold
+from edge_egress_entrypoints import (
+    classify_edge_callback,
+    classify_edge_text,
+    evaluate_manual_edge_gate,
+    edge_guard_message,
+)
+from edge_egress_status import read_egress_status, render_egress_status_html
 from incident_observability import (
     INCIDENT_STATE_EVIDENCE_DEGRADED,
     INCIDENT_STATE_FAILOVER_BLOCKED,
@@ -1008,7 +1022,10 @@ def init_db():
                         ('auto_failover_mode', '0'),
                         # Phase 6H has a separate explicit opt-in. Never inherit the legacy
                         # V89 auto-failover bit into the new regional-evidence policy.
-                        ('phase6h_auto_failover_enabled', '0')])
+                        ('phase6h_auto_failover_enabled', '0'),
+                         # D1-C1 is strictly default-OFF. Never enable until bot-managed
+                         # relay-to-relay handoff replaces the legacy DNS->Core fallback.
+                         ('edge_egress_protected_mode', '0')])
         c.execute('''CREATE TABLE IF NOT EXISTS ssh_accounts (
                         username TEXT PRIMARY KEY, password TEXT, expire_date TEXT, creation_date TEXT,
                         users_limit INTEGER, status TEXT DEFAULT '🟢 فعال', agent_id INTEGER DEFAULT 0)''')
@@ -1633,6 +1650,17 @@ def _db_get_setting(k, d):
         row = conn.execute("SELECT value FROM settings WHERE key=?", (k,)).fetchone()
         return row[0] if row else d
 
+
+def _db_assert_legacy_host_mutation_allowed(conn):
+    """Reject unjournaled host/account writes in protected mode, in same DB TX."""
+    row = conn.execute(
+        "SELECT value FROM settings WHERE key=?", (PROTECTED_SETTING_KEY,)
+    ).fetchone()
+    setting = row[0] if row else PROTECTED_SETTING_DEFAULT
+    gate = legacy_failover_gate(setting)
+    if not gate.allowed:
+        raise RuntimeError(gate.reason)
+
 def _hosts_fallback_with_warning(context_hint=""):
     """
     فقط وقتی صدا زده می‌شود که تنظیم 'hosts' واقعاً خالی از هر IP معتبر باشد (نه حالت عادی).
@@ -1644,7 +1672,10 @@ def _hosts_fallback_with_warning(context_hint=""):
                 f" ({context_hint})" if context_hint else "")
     return LAST_RESORT_HOST_IP
 def _db_update_setting(k, v):
-    with db_conn() as conn: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, v))
+    with db_conn() as conn:
+        if k in {"hosts", "dns_current_ip", "tls_passthrough"}:
+            _db_assert_legacy_host_mutation_allowed(conn)
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, v))
 
 
 def _build_server_settings_kb():
@@ -2706,6 +2737,7 @@ def _db_record_admin_host_check(host, ok, reason=None):
 def _db_set_host_active(host, active: bool, reason=None):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with db_conn() as conn:
+        _db_assert_legacy_host_mutation_allowed(conn)
         if active:
             conn.execute("UPDATE host_pool SET active=1, consecutive_fails=0, disabled_reason=NULL, disabled_at=NULL, last_status='🟢 سالم', last_check=? WHERE host=?", (now, host))
         else:
@@ -2713,6 +2745,7 @@ def _db_set_host_active(host, active: bool, reason=None):
 def _db_add_host_pool(host):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with db_conn() as conn:
+        _db_assert_legacy_host_mutation_allowed(conn)
         row = conn.execute("SELECT value FROM settings WHERE key='port'").fetchone()
         service_port = _normalize_ssh_port(row[0] if row else 22, 22)
         conn.execute(
@@ -2734,6 +2767,7 @@ def _db_remove_host_pool(host):
 def _db_set_host_standby(host, is_standby: bool):
     """🆕 علامت‌گذاریِ یک Edge به‌عنوانِ Standby (بدونِ مشتریِ فعال، آمادهٔ Failover)."""
     with db_conn() as conn:
+        _db_assert_legacy_host_mutation_allowed(conn)
         conn.execute("UPDATE host_pool SET is_standby=? WHERE host=?", (1 if is_standby else 0, host))
 
 def _db_get_standby_hosts():
@@ -2989,12 +3023,16 @@ def _db_acquire_failover_lock(source_host, target_host, *, mode=FAILOVER_MODE_MA
     with db_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT id, updated_at FROM failover_operations "
+            "SELECT id, updated_at, detail_json FROM failover_operations "
             "WHERE status=? ORDER BY id DESC LIMIT 1",
             (FAILOVER_STATUS_RUNNING,),
         ).fetchone()
         if row:
-            lock_id, updated_at = row
+            lock_id, updated_at, detail_json = row
+            # An interrupted protected Egress cutover must not have its 6G
+            # shared lock auto-recovered while routes/DB/DNS may be uncertain.
+            if is_egress_recovery_hold(detail_json):
+                return None, lock_id
             try:
                 age = (now_dt - _parse_flexible_datetime(updated_at)).total_seconds()
             except Exception:
@@ -3028,6 +3066,7 @@ def _db_update_failover_operation(
     error=None,
     detail=None,
     finished=False,
+    require_running=False,
 ):
     fields = ["updated_at=?"]
     values = [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
@@ -3048,12 +3087,19 @@ def _db_update_failover_operation(
     if finished:
         fields.append("finished_at=?")
         values.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    # D1-C2B2: a protected stage write must be fenced to its live 6G
+    # operation, so an expired/stolen lock cannot be marked SUCCEEDED.
     values.append(operation_id)
+    if require_running:
+        values.append(FAILOVER_STATUS_RUNNING)
     with db_conn() as conn:
-        conn.execute(
-            f"UPDATE failover_operations SET {', '.join(fields)} WHERE id=?",
+        cur = conn.execute(
+            f"UPDATE failover_operations SET {', '.join(fields)} WHERE id=?"
+            + (" AND status=?" if require_running else ""),
             values,
         )
+        if require_running and cur.rowcount != 1:
+            raise RuntimeError("SHARED_6G_LOCK_NO_LONGER_RUNNING")
 
 
 def _db_get_latest_failover_operation():
@@ -3380,6 +3426,7 @@ def _db_get_host_provider_meta(host):
 # 🆕 «پیش‌فرض کل سیستم» — فقط یک IP در هر لحظه می‌تواند این باشد
 def _db_set_default_host(host):
     with db_conn() as conn:
+        _db_assert_legacy_host_mutation_allowed(conn)
         conn.execute("UPDATE host_pool SET is_default=0")
         conn.execute("UPDATE host_pool SET is_default=1 WHERE host=?", (host,))
 def _db_get_default_host():
@@ -3700,6 +3747,21 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
     # 🐛🔧 سقفِ زمانیِ بیرونی: حتی اگه thread (به هر دلیلِ پیش‌بینی‌نشده‌ای) گیر کنه، ربات بعد از
     # این مهلت خودش کنترل رو پس می‌گیره به‌جای اینکه برای همیشه بی‌پاسخ بمونه.
     # connect_retries می‌تونه چند بار با فاصلهٔ ۱۰ ثانیه تلاش کنه، پس سقف باید فضای کافی بده.
+    # D1-C1: legacy installer builds ingress-only Relay and immediately activates
+    # it in host_pool. Protected mode must deny that before remote side effects.
+    egress_gate = legacy_new_edge_gate(await asyncio.to_thread(
+        _db_get_setting, PROTECTED_SETTING_KEY, PROTECTED_SETTING_DEFAULT
+    ))
+    if not egress_gate.allowed:
+        await app.bot.send_message(
+            chat_id,
+            "⛔️ <b>افزودن Edge در حالت Egress محافظت‌شده متوقف شد.</b>\n"
+            f"علت: <code>{esc(egress_gate.reason)}</code>\n"
+            "ابتدا Provisioning خروجی و بررسی IP واقعی Edge باید در چرخهٔ ربات تکمیل شوند.",
+            parse_mode="HTML",
+        )
+        return False, None, None
+
     _provision_timeout = 300 + max(0, connect_retries - 1) * 15
     try:
         ok, err, result = await asyncio.wait_for(
@@ -3825,6 +3887,7 @@ def _db_resync_host_pool_from_full_list(hosts_list):
     host_pool را با همان لیست هماهنگ می‌کند: مواردی که در لیست جدید هستند فعال می‌شوند، مواردی
     که حذف شده‌اند غیرفعال می‌شوند (نه پاک) تا تاریخچه/آمار پایش از بین نرود."""
     with db_conn() as conn:
+        _db_assert_legacy_host_mutation_allowed(conn)
         existing = {r[0] for r in conn.execute("SELECT host FROM host_pool").fetchall()}
         wanted = set(hosts_list)
         for h in hosts_list:
@@ -3877,6 +3940,14 @@ def _cf_configured(cfg=None):
     return all([cfg["public_domain"], cfg["token"], cfg["zone"]])
 
 def _cf_update_dns_record_sync(new_ip: str):
+    # All known legacy Cloudflare callers ultimately reach this function.
+    # Refuse any DNS mutation in protected mode until D1-C2 supplies the
+    # transaction-safe Edge handoff and an explicit authenticated capability.
+    egress_gate = legacy_failover_gate(_db_get_setting(
+        PROTECTED_SETTING_KEY, PROTECTED_SETTING_DEFAULT
+    ))
+    if not egress_gate.allowed:
+        return False, egress_gate.reason
     cfg = _cf_get_config()
     if not cfg["token"] or not cfg["zone"]:
         return False, "تنظیمات Cloudflare (توکن/Zone) در دیتابیس کامل نیست."
@@ -4097,6 +4168,7 @@ def _db_set_hosts_bulk(usernames, host):
 def _db_set_all_accounts_host(host):
     with db_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        _db_assert_legacy_host_mutation_allowed(conn)
         _db_assert_account_write_allowed(conn)
         conn.execute("UPDATE ssh_accounts SET host=? WHERE status != '⏳ درحال ساخت'", (host,))
 def _db_get_recent_active_accounts(days=7):
@@ -10505,6 +10577,28 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     role = context.user_data.get('role')
     chat_id = update.effective_chat.id
 
+    # D1-C2B: a protected-mode legacy Edge text wizard must be vetoed BEFORE
+    # collecting root credentials, changing host_pool or starting remote SSH.
+    # All protected Edge changes will eventually route through the same
+    # Phase 6G-locked Egress Manager; none of these legacy paths do so yet.
+    edge_action = classify_edge_text(state, text)
+    if edge_action is not None:
+        edge_mode = await asyncio.to_thread(
+            _db_get_setting, PROTECTED_SETTING_KEY, PROTECTED_SETTING_DEFAULT
+        )
+        edge_gate = evaluate_manual_edge_gate(edge_action, edge_mode, role=role)
+        if not edge_gate.allowed:
+            # If a wizard is interrupted between prompts and policy changes,
+            # do not leave its root password or in-memory secret hanging around.
+            if state in ('EDGE_NEW_ROOTPASS', 'SRV_PROMOTE_PASS_INPUT'):
+                with contextlib.suppress(Exception):
+                    await update.message.delete()
+            _EDGE_PROVISION_SECRETS.pop(chat_id, None)
+            if state is not None:
+                context.user_data.pop('state', None)
+            await update.message.reply_text(edge_guard_message(edge_gate.reason))
+            return
+
     # 🚚 Change Server wizard input. Secrets stay only in the module-level
     # in-memory session store; user_data persists only the non-secret step name.
     if state in _MIGRATION_INPUT_STATES:
@@ -13443,6 +13537,7 @@ async def _render_host_pool_panel(query, page=0):
     kb.append([InlineKeyboardButton("🚀 افزودن Edge جدید (VPS از قبل‌خریداری‌شده)", callback_data="hp_addedge")])
     kb.append([InlineKeyboardButton("🌍 دامنهٔ ثابت + Cloudflare", callback_data="hp_cf_settings")])
     kb.append([InlineKeyboardButton("🛡 فیلترینگ و دسترسی", callback_data="hp_filtering")])
+    kb.append([InlineKeyboardButton("🔐 وضعیت Egress (فقط مشاهده)", callback_data="hpeg_status")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="ipsvc_menu")])
     cf_cfg = await asyncio.to_thread(_cf_get_config)
     if _cf_configured(cf_cfg):
@@ -13514,6 +13609,9 @@ def _failover_preflight_error_label_fa(error):
         "DNS_CURRENT_IP_UNKNOWN": "مقصد فعلی دامنه مشخص نیست",
         "DNS_NOT_POINTING_TO_SOURCE_OR_CORE": "دامنه اکنون به مبدأ یا سرور هسته اشاره نمی‌کند",
         "UNKNOWN_PREFLIGHT_ERROR": "یک شرط ایمنی ناشناخته تأیید نشد",
+        "EGRESS_PROTECTED_LEGACY_CORE_FALLBACK_UNSAFE": "مسیر انتقال فعلی دامنه را به Core می‌فرستد؛ برای Egress محافظت‌شده مجاز نیست",
+        "EGRESS_PROTECTED_EDGE_ACTIVATION_NOT_READY": "Edge جدید هنوز خروجی محافظت‌شدهٔ تأییدشده ندارد",
+        "EGRESS_PROTECTED_MODE_INVALID": "تنظیم حالت Egress نامعتبر است و عملیات برای ایمنی متوقف شده",
     }
     return labels.get(raw, "یکی از شرایط ایمنی تأیید نشد")
 
@@ -15308,6 +15406,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_auth(context): return
     query = update.callback_query; await query.answer(); d = query.data
     role, ag_id = context.user_data.get('role'), context.user_data.get('agent_id', 0)
+
+    # D1-C2B: one early check for manual Edge-management callbacks, including
+    # activation, bulk account moves and removal of operational wg0 peers.
+    # In protected mode these legacy commands MUST stop before DB/DNS/SSH.
+    edge_action = classify_edge_callback(d)
+    if edge_action is not None:
+        edge_mode = await asyncio.to_thread(
+            _db_get_setting, PROTECTED_SETTING_KEY, PROTECTED_SETTING_DEFAULT
+        )
+        edge_gate = evaluate_manual_edge_gate(edge_action, edge_mode, role=role)
+        if not edge_gate.allowed:
+            await query.message.reply_text(edge_guard_message(edge_gate.reason))
+            return
 
     # 🚨 گارد اجباری بودن برند نماینده در کالبک‌ها (بررسی مستقیم از دیتابیس)
     if role == 'agent':
@@ -23213,6 +23324,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d == "hp_filtering" and role == 'admin':
         await _render_filtering_monitor_panel(query)
 
+    elif d == "hpeg_status":
+        # D1-C2B2: a strictly read-only status screen, NOT an enable button.
+        if role != 'admin':
+            await query.message.reply_text("⛔️ دسترسی فقط برای مدیر مجاز است.")
+            return
+        egress_status = await asyncio.to_thread(read_egress_status, db_conn)
+        await query.edit_message_text(
+            render_egress_status_html(egress_status),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 سرویس IP", callback_data="hp_menu")]
+            ]),
+        )
+        return
+
     elif d == "flt_radar" and role == 'admin':
         await _render_radar_monitor_panel(query)
 
@@ -25195,6 +25321,16 @@ async def _safe_manual_failover_preflight(
     evidence for the target. Manual failover keeps the existing operator-driven policy.
     """
     errors = []
+
+    # D1-C1: both admin previews and the lock-protected 6G/6H execution use this
+    # same preflight. The old path unconditionally sends public DNS to Core and
+    # rebuilds users on Standby, neither of which is a protected Relay handoff.
+    egress_gate = legacy_failover_gate(await asyncio.to_thread(
+        _db_get_setting, PROTECTED_SETTING_KEY, PROTECTED_SETTING_DEFAULT
+    ))
+    if not egress_gate.allowed:
+        return {"ok": False, "errors": [egress_gate.reason],
+                "egress_protected": True, "egress_gate": egress_gate.reason}
 
     if source_host == target_host:
         errors.append("SOURCE_EQUALS_TARGET")

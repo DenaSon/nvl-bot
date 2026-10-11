@@ -1,0 +1,29 @@
+name: D1-C3E disposable Ubuntu VM reboot gate
+
+# D1-C3E VM reboot is a deferred, manual-only, non-blocking diagnostic.
+# Never run this costly QEMU/TCG workflow automatically on PR updates.
+# Prior CI VM runs failed at SSH-after-reboot timeout; root cause unproven.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  vm-real-reboot:
+    name: Disposable QEMU Ubuntu full-guest reboot / SSH guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU, cloud-init seed tools and SSH client
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -qq -y \
+            qemu-system-x86 qemu-utils cloud-image-utils openssh-client curl
+      - name: Ensure host and guest shell scripts parse
+        run: |
+          bash -n ops/labs/edge_egress_vm_boot_lab.sh
+          bash -n ops/labs/edge_egress_vm_guest_setup.sh
+      - name: Run two real reboots of an entirely disposable VM
+        run: sudo env GITHUB_ACTIONS=true NVL_CI_VM_LAB=1 bash ops/labs/edge_egress_vm_boot_lab.sh

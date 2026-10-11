@@ -1,0 +1,11 @@
+{
+  "edge_id": "stg1",
+  "edge_public_ipv4": "216.126.229.12",
+  "core_public_ipv4": "209.200.246.198",
+  "tunnel_network": "10.78.110.0/30",
+  "veth_network": "10.78.111.0/30",
+  "edge_uplink": "eth0",
+  "edge_listen_port": 51842,
+  "route_table": 1790,
+  "mode": "relay"
+}

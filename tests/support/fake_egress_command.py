@@ -119,7 +119,7 @@ def main() -> int:
         elif _is(args, "link", "set"):
             # ip link set IFACE netns NS; other link-set operations are no-op
             if "netns" in args:
-                iface = args[3]
+                iface = args[2]
                 name = args[args.index("netns") + 1]
                 if name not in state["namespaces"] or iface not in state["links"]:
                     code = 1

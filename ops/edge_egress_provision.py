@@ -382,7 +382,7 @@ def service_unit(spec: EgressSpec, role: str, stage: Path) -> str:
     )
 
 
-def stage_files(spec: EgressSpec, role: str, dst: Path, private: str, peer: str) -> None:
+def stage_files(spec: EgressSpec, role: str, dst: Path, private: str, peer: str, *, owner_token: str | None = None) -> None:
     if role not in ("core", "edge"):
         raise ProvisionError("invalid role")
     if not dst.is_absolute() or ".." in dst.parts:
@@ -404,7 +404,7 @@ def stage_files(spec: EgressSpec, role: str, dst: Path, private: str, peer: str)
             f"nvl-egress-{spec.edge_id}.service": (service_unit(spec, role, dst), 0o600),
             "manifest.json": (json.dumps({
                 "config": asdict(spec), "role": role,
-                "stage_only": True, "user_routes_installed": False,
+                "stage_only": True, "user_routes_installed": False,\n                "owner_token": owner_token,
                 "core_public_ipv4": spec.core_public_ipv4,
                 "edge_public_ipv4": spec.edge_public_ipv4,
             }, indent=2) + "\n", 0o600),

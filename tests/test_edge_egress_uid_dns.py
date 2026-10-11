@@ -10,6 +10,7 @@ from edge_egress_uid_dns import (
     UDPHandler, TCPHandler, _UDP, _TCP, ensure_running_as_uid,
     plan_transparent_dns, render_dns_required_unit,
     validate_nss_hosts, validate_wire_answer, validate_wire_query,
+    ensure_terminal_policy,
 )
 from edge_egress_uid_policy import UIDPolicyRequest
 from ops.edge_egress_provision import EgressSpec
@@ -132,6 +133,20 @@ class DNSPolicyTests(unittest.TestCase):
              patch("edge_egress_uid_dns.os.geteuid", return_value=0):
             with self.assertRaisesRegex(DNSError, "PROTECTED_UID"):
                 ensure_running_as_uid(1644, "nvl0557")
+
+    def test_dns_service_fails_closed_on_unknown_route(self):
+        def cmd(argv, **kwargs):
+            if argv == ["ip", "-4", "rule", "show"]:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout="1780: from all uidrange 1644-1644 lookup 1780\n")
+            return SimpleNamespace(
+                returncode=0,
+                stdout="blackhole default metric 4096\n"
+                       "default via 192.0.2.1 dev eth0\n")
+        with patch("edge_egress_uid_dns.subprocess.run", side_effect=cmd):
+            with self.assertRaisesRegex(DNSError, "NOT_FROZEN"):
+                ensure_terminal_policy(1644, 1780, 1780)
 
     def test_ssh_depends_on_guard_and_dns(self):
         unit = render_dns_required_unit(req(), 10553)

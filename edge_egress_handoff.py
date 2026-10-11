@@ -34,6 +34,7 @@ MANUAL_RECOVERY_PHASE = "EGRESS_RECOVERY_REQUIRED"
 EGRESS_HOLD_PHASES = frozenset({
     "ARM_FAIL_CLOSED", "SELECT_TARGET_EGRESS", "VERIFY_CUSTOMER_EGRESS",
     "SOURCE_ACCOUNT_CAS", "EDGE_ONLY_DNS_CUTOVER", "VERIFY_FINAL",
+    "PROTECTED_EGRESS_MAPPING_CAS", "VERIFY_PUBLIC_INGRESS_DNS_UNCHANGED",
     MANUAL_RECOVERY_PHASE,
     # Staging also produces host-local secret files. If a remote stage step
     # outlives the old 6G stale timeout, a second operation must not claim
@@ -269,11 +270,13 @@ async def run_protected_handoff(
 
         # DB CAS + public DNS are not one transaction. They are journaled as
         # separately recoverable steps; never invent an atomic guarantee.
-        phase = "SOURCE_ACCOUNT_CAS"
+        phase = ("PROTECTED_EGRESS_MAPPING_CAS" if guarded_failover
+                 else "SOURCE_ACCOUNT_CAS")
         await _record(ports, operation_id, "RUNNING", phase, {})
         await ports.commit_source_accounts_cas(snapshot)
 
-        phase = "EDGE_ONLY_DNS_CUTOVER"
+        phase = ("VERIFY_PUBLIC_INGRESS_DNS_UNCHANGED" if guarded_failover
+                 else "EDGE_ONLY_DNS_CUTOVER")
         await _record(ports, operation_id, "RUNNING", phase, {})
         await ports.switch_dns_direct_to_target(snapshot)
 

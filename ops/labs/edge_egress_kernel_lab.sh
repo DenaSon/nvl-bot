@@ -248,6 +248,7 @@ chmod 0644 "$TMP/doh.crt"
 mkdir -p "$TMP/lib/ops"
 cp "$BASE/edge_egress_uid_dns.py" "$TMP/lib/edge_egress_uid_dns.py"
 cp "$BASE/edge_egress_uid_policy.py" "$TMP/lib/edge_egress_uid_policy.py"
+cp "$BASE/edge_egress_uid_route_state.py" "$TMP/lib/edge_egress_uid_route_state.py"
 cp "$BASE/ops/edge_egress_provision.py" "$TMP/lib/ops/edge_egress_provision.py"
 cp "$BASE/ops/labs/edge_egress_ci_dns_probe.py" "$TMP/lib/edge_egress_ci_dns_probe.py"
 chmod -R a+rX "$TMP/lib"
@@ -264,7 +265,9 @@ ip netns exec "$CORE" setpriv --reuid "$TUID" --regid "$TGID" --clear-groups -- 
   env SSL_CERT_FILE="$TMP/doh.crt" PYTHONPATH="$TMP/lib" \
   python3 "$TMP/lib/edge_egress_uid_dns.py" serve \
   --username nvlciuser --uid "$TUID" --priority 1780 \
-  --table 1780 --port 10553 >/dev/null 2>"$TMP/dns-stderr.log" &
+  --table 1780 --edge-next-hop 10.78.101.2 \
+  --edge-veth vnh-fra1 --edge-src 10.78.101.1 \
+  --port 10553 >/dev/null 2>"$TMP/dns-stderr.log" &
 DNS_PID=$!
 sleep 0.8
 kill -0 "$DNS_PID" || {

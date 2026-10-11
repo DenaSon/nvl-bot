@@ -118,10 +118,13 @@ class BootGuardApplier:
                  if x.strip().startswith(prefix)]
         if len(match) > 1:
             raise BootGuardError("DUPLICATE_PRIORITY")
-        if match and not (re.search(r"\buidrange\s+" +
-                                   re.escape(request.uidrange) + r"\b", match[0])
-                          and re.search(r"\blookup\s+" +
-                                        re.escape(str(plan.table)) + r"\b", match[0])):
+        expected_rule = (
+            f"{request.priority}: from all uidrange "
+            f"{request.uidrange} lookup {plan.table}"
+        )
+        # Exact full-destination UID selection; a stale experimental
+        # "to 1.1.1.1/32" rule must NEVER be treated as a protected guard.
+        if match and match[0] != expected_rule:
             raise BootGuardError("FOREIGN_PRIORITY")
         # UID must not have a different existing routing decision.
         for line in rules.splitlines():

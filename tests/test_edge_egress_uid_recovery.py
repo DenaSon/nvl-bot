@@ -18,7 +18,8 @@ def evidence(**overrides):
         direct_dns_guard=True, udp_tcp_dns_redirect=True,
         nss_hosts_suitable=True, edge_route_present=False,
         crash_marker_present=False, phase6g_hold=False,
-        ssh_required_dependency=True,
+        uid_session_gate_verified=True,
+        shared_ssh_coupling=False,
     )
     data.update(overrides)
     return RecoveryEvidence(**data)
@@ -45,7 +46,7 @@ class RecoveryTests(unittest.TestCase):
         for field in ("uid_route_rule", "terminal_blackhole",
                       "ipv6_guard", "direct_dns_guard",
                       "udp_tcp_dns_redirect", "nss_hosts_suitable",
-                      "ssh_required_dependency"):
+                      "uid_session_gate_verified"):
             with self.subTest(field=field):
                 result = assess_recovery(evidence(**{field: False}))
                 self.assertEqual(result.state, RecoveryState.UNSAFE_GUARD_ABSENT)
@@ -65,6 +66,16 @@ class RecoveryTests(unittest.TestCase):
                                               **{field: True}))
             self.assertEqual(result.state, RecoveryState.HOLD_FOR_OPERATOR)
             self.assertFalse(result.customer_ready)
+
+    def test_global_ssh_dependency_is_never_valid_per_uid_safety(self):
+        outcome = assess_recovery(evidence(shared_ssh_coupling=True))
+        self.assertEqual(outcome.state, RecoveryState.UNSAFE_GUARD_ABSENT)
+        self.assertEqual(outcome.reason, "GLOBAL_SSH_DEPENDENCY_FORBIDDEN")
+
+    def test_f1_recovery_cannot_infer_uid_session_gate(self):
+        outcome = assess_recovery(evidence(uid_session_gate_verified=False))
+        self.assertEqual(outcome.state, RecoveryState.UNSAFE_GUARD_ABSENT)
+        self.assertEqual(outcome.reason, "PER_UID_SESSION_GATE_NOT_VERIFIED")
 
     def test_shared_6g_phase_detection(self):
         self.assertTrue(has_6g_recovery_hold([
@@ -121,7 +132,8 @@ class RecoveryTests(unittest.TestCase):
                 marker_dir=Path(tmp), run=run,
                 read_nss=lambda: "hosts: files dns\n",
             )
-        self.assertEqual(result.state, RecoveryState.GUARDED_OFFLINE)
+        self.assertEqual(result.state, RecoveryState.UNSAFE_GUARD_ABSENT)
+        self.assertEqual(result.reason, "GLOBAL_SSH_DEPENDENCY_FORBIDDEN")
         self.assertFalse(result.customer_ready)
         self.assertFalse(any("-A" in args or "-I" in args or "add" in args or
                              "del" in args or "replace" in args

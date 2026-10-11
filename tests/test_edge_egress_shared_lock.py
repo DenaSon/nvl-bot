@@ -228,6 +228,7 @@ class ProtectedLegacyDbMutationTests(unittest.TestCase):
         }
         self.default = get_function("_db_set_default_host", env)
         self.bulk = get_function("_db_set_all_accounts_host", env)
+        self.single = get_function("_db_set_account_host", env)
         self.set_active = get_function("_db_set_host_active", env)
         self.set_setting = get_function("_db_update_setting", env)
 
@@ -271,6 +272,34 @@ class ProtectedLegacyDbMutationTests(unittest.TestCase):
         self.assertEqual(
             self.conn.execute("SELECT host FROM host_pool WHERE is_default=1").fetchone()[0],
             "172.86.94.174",
+        )
+
+    def test_protected_mapping_fences_single_account_auto_balancer(self):
+        self.conn.execute(
+            "CREATE TABLE edge_egress_uid_bindings "
+            "(username TEXT, status TEXT)"
+        )
+        self.conn.execute(
+            "INSERT INTO edge_egress_uid_bindings "
+            "VALUES ('nvl0557','PROTECTED')"
+        )
+        self.conn.commit()
+        with self.assertRaisesRegex(RuntimeError, "EGRESS_PROTECTED_BINDINGS"):
+            self.single("nvl0557", "216.126.229.12")
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT host FROM ssh_accounts WHERE username='nvl0557'"
+            ).fetchone()[0],
+            "172.86.94.174",
+        )
+
+    def test_unprotected_single_account_mutation_still_works(self):
+        self.single("nvl0557", "216.126.229.12")
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT host FROM ssh_accounts WHERE username='nvl0557'"
+            ).fetchone()[0],
+            "216.126.229.12",
         )
 
     def test_default_zero_keeps_existing_default_host_behavior(self):

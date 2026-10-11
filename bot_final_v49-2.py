@@ -301,6 +301,12 @@ from automatic_failover import (
     evaluate_auto_failover,
     rank_safe_standbys,
 )
+from edge_egress_lifecycle import (
+    PROTECTED_SETTING_KEY,
+    PROTECTED_SETTING_DEFAULT,
+    legacy_failover_gate,
+    legacy_new_edge_gate,
+)
 from incident_observability import (
     INCIDENT_STATE_EVIDENCE_DEGRADED,
     INCIDENT_STATE_FAILOVER_BLOCKED,
@@ -1008,7 +1014,10 @@ def init_db():
                         ('auto_failover_mode', '0'),
                         # Phase 6H has a separate explicit opt-in. Never inherit the legacy
                         # V89 auto-failover bit into the new regional-evidence policy.
-                        ('phase6h_auto_failover_enabled', '0')])
+                        ('phase6h_auto_failover_enabled', '0'),
+                         # D1-C1 is strictly default-OFF. Never enable until bot-managed
+                         # relay-to-relay handoff replaces the legacy DNS->Core fallback.
+                         ('edge_egress_protected_mode', '0')])
         c.execute('''CREATE TABLE IF NOT EXISTS ssh_accounts (
                         username TEXT PRIMARY KEY, password TEXT, expire_date TEXT, creation_date TEXT,
                         users_limit INTEGER, status TEXT DEFAULT '🟢 فعال', agent_id INTEGER DEFAULT 0)''')
@@ -3700,6 +3709,21 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
     # 🐛🔧 سقفِ زمانیِ بیرونی: حتی اگه thread (به هر دلیلِ پیش‌بینی‌نشده‌ای) گیر کنه، ربات بعد از
     # این مهلت خودش کنترل رو پس می‌گیره به‌جای اینکه برای همیشه بی‌پاسخ بمونه.
     # connect_retries می‌تونه چند بار با فاصلهٔ ۱۰ ثانیه تلاش کنه، پس سقف باید فضای کافی بده.
+    # D1-C1: legacy installer builds ingress-only Relay and immediately activates
+    # it in host_pool. Protected mode must deny that before remote side effects.
+    egress_gate = legacy_new_edge_gate(await asyncio.to_thread(
+        _db_get_setting, PROTECTED_SETTING_KEY, PROTECTED_SETTING_DEFAULT
+    ))
+    if not egress_gate.allowed:
+        await app.bot.send_message(
+            chat_id,
+            "⛔️ <b>افزودن Edge در حالت Egress محافظت‌شده متوقف شد.</b>\n"
+            f"علت: <code>{esc(egress_gate.reason)}</code>\n"
+            "ابتدا Provisioning خروجی و بررسی IP واقعی Edge باید در چرخهٔ ربات تکمیل شوند.",
+            parse_mode="HTML",
+        )
+        return False, None, None
+
     _provision_timeout = 300 + max(0, connect_retries - 1) * 15
     try:
         ok, err, result = await asyncio.wait_for(
@@ -3877,6 +3901,14 @@ def _cf_configured(cfg=None):
     return all([cfg["public_domain"], cfg["token"], cfg["zone"]])
 
 def _cf_update_dns_record_sync(new_ip: str):
+    # All known legacy Cloudflare callers ultimately reach this function.
+    # Refuse any DNS mutation in protected mode until D1-C2 supplies the
+    # transaction-safe Edge handoff and an explicit authenticated capability.
+    egress_gate = legacy_failover_gate(_db_get_setting(
+        PROTECTED_SETTING_KEY, PROTECTED_SETTING_DEFAULT
+    ))
+    if not egress_gate.allowed:
+        return False, egress_gate.reason
     cfg = _cf_get_config()
     if not cfg["token"] or not cfg["zone"]:
         return False, "تنظیمات Cloudflare (توکن/Zone) در دیتابیس کامل نیست."
@@ -13514,6 +13546,9 @@ def _failover_preflight_error_label_fa(error):
         "DNS_CURRENT_IP_UNKNOWN": "مقصد فعلی دامنه مشخص نیست",
         "DNS_NOT_POINTING_TO_SOURCE_OR_CORE": "دامنه اکنون به مبدأ یا سرور هسته اشاره نمی‌کند",
         "UNKNOWN_PREFLIGHT_ERROR": "یک شرط ایمنی ناشناخته تأیید نشد",
+        "EGRESS_PROTECTED_LEGACY_CORE_FALLBACK_UNSAFE": "مسیر انتقال فعلی دامنه را به Core می‌فرستد؛ برای Egress محافظت‌شده مجاز نیست",
+        "EGRESS_PROTECTED_EDGE_ACTIVATION_NOT_READY": "Edge جدید هنوز خروجی محافظت‌شدهٔ تأییدشده ندارد",
+        "EGRESS_PROTECTED_MODE_INVALID": "تنظیم حالت Egress نامعتبر است و عملیات برای ایمنی متوقف شده",
     }
     return labels.get(raw, "یکی از شرایط ایمنی تأیید نشد")
 
@@ -25195,6 +25230,16 @@ async def _safe_manual_failover_preflight(
     evidence for the target. Manual failover keeps the existing operator-driven policy.
     """
     errors = []
+
+    # D1-C1: both admin previews and the lock-protected 6G/6H execution use this
+    # same preflight. The old path unconditionally sends public DNS to Core and
+    # rebuilds users on Standby, neither of which is a protected Relay handoff.
+    egress_gate = legacy_failover_gate(await asyncio.to_thread(
+        _db_get_setting, PROTECTED_SETTING_KEY, PROTECTED_SETTING_DEFAULT
+    ))
+    if not egress_gate.allowed:
+        return {"ok": False, "errors": [egress_gate.reason],
+                "egress_protected": True, "egress_gate": egress_gate.reason}
 
     if source_host == target_host:
         errors.append("SOURCE_EQUALS_TARGET")

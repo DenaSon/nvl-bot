@@ -91,6 +91,17 @@ class EgressInventoryTests(unittest.TestCase):
             self.reserve(spec(edge_id="fra1",ip="216.126.229.12"))
         self.db.rollback()
 
+    def test_retired_edge_identity_cannot_be_reused(self):
+        self.first(); self.db.commit()
+        self.db.execute(
+            "UPDATE edge_egress_allocations SET status='RETIRED' WHERE edge_id='fra1'"
+        )
+        self.db.commit()
+        self.db.execute("BEGIN IMMEDIATE")
+        with self.assertRaisesRegex(AllocationConflict, "RETIRED_EDGE_ID_MUST_NOT_BE_REUSED"):
+            self.reserve()
+        self.db.rollback()
+
     def test_subnet_collision_even_across_tunnel_and_veth(self):
         self.first();self.db.commit()
         for changed in (

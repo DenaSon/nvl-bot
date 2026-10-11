@@ -3826,7 +3826,7 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
         f"🔒 IP داخلی تونل: <code>{result['edge_wg_ip']}</code>\n"
         f"🔑 کلید عمومی Edge: <code>{esc(result['edge_pubkey'])}</code>\n"
         f"{status}\n\n"
-        f"این IP هم‌اکنون به «🌐 سرویس IP» اضافه و فعال شد.\\n"
+        f"این IP هم‌اکنون به «🌐 سرویس IP» اضافه و فعال شد.\n"
         f"🛡 Egress خروجی: هنوز تأیید نشده؛ ثبت ورودی به‌معنای خروج کاربران از Edge نیست.",
         parse_mode="HTML", reply_markup=kb
     )

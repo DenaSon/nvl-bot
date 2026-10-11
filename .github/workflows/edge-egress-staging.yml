@@ -20,6 +20,8 @@ on:
       - 'edge_egress_uid_boot.py'
       - 'edge_egress_uid_dns.py'
       - 'edge_egress_uid_recovery.py'
+      - 'edge_egress_uid_systemd.py'
+      - 'tests/test_edge_egress_uid_systemd.py'
       - 'tests/test_edge_egress_uid_boot.py'
       - 'tests/test_edge_egress_uid_dns.py'
       - 'tests/test_edge_egress_uid_recovery.py'

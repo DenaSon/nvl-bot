@@ -225,7 +225,7 @@ def preflight(spec: EgressSpec, role: str) -> dict:
         if _run_read_only("sysctl", "-n", "net.ipv4.ip_forward").strip() != "1":
             conflicts.append("EDGE_IP_FORWARD_DISABLED")
         sockets = _run_read_only("ss", "-H", "-lun")
-        if re.search(rf"(?<![0-9]):{spec.edge_listen_port}(?![0-9])", sockets):
+        if re.search(rf":{spec.edge_listen_port}(?=\s|$)", sockets):
             conflicts.append("UDP_PORT_BUSY")
         route = _run_read_only("ip", "-o", "-4", "route", "get", "1.1.1.1")
         if not re.search(r"\bdev " + re.escape(spec.edge_uplink) + r"\b", route):

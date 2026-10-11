@@ -308,6 +308,12 @@ from edge_egress_lifecycle import (
     legacy_new_edge_gate,
 )
 from edge_egress_handoff import is_egress_recovery_hold
+from edge_egress_entrypoints import (
+    classify_edge_callback,
+    classify_edge_text,
+    evaluate_manual_edge_gate,
+    edge_guard_message,
+)
 from incident_observability import (
     INCIDENT_STATE_EVIDENCE_DEGRADED,
     INCIDENT_STATE_FAILOVER_BLOCKED,
@@ -10562,6 +10568,28 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     role = context.user_data.get('role')
     chat_id = update.effective_chat.id
 
+    # D1-C2B: a protected-mode legacy Edge text wizard must be vetoed BEFORE
+    # collecting root credentials, changing host_pool or starting remote SSH.
+    # All protected Edge changes will eventually route through the same
+    # Phase 6G-locked Egress Manager; none of these legacy paths do so yet.
+    edge_action = classify_edge_text(state, text)
+    if edge_action is not None:
+        edge_mode = await asyncio.to_thread(
+            _db_get_setting, PROTECTED_SETTING_KEY, PROTECTED_SETTING_DEFAULT
+        )
+        edge_gate = evaluate_manual_edge_gate(edge_action, edge_mode, role=role)
+        if not edge_gate.allowed:
+            # If a wizard is interrupted between prompts and policy changes,
+            # do not leave its root password or in-memory secret hanging around.
+            if state in ('EDGE_NEW_ROOTPASS', 'SRV_PROMOTE_PASS_INPUT'):
+                with contextlib.suppress(Exception):
+                    await update.message.delete()
+            _EDGE_PROVISION_SECRETS.pop(chat_id, None)
+            if state is not None:
+                context.user_data.pop('state', None)
+            await update.message.reply_text(edge_guard_message(edge_gate.reason))
+            return
+
     # 🚚 Change Server wizard input. Secrets stay only in the module-level
     # in-memory session store; user_data persists only the non-secret step name.
     if state in _MIGRATION_INPUT_STATES:
@@ -15368,6 +15396,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_auth(context): return
     query = update.callback_query; await query.answer(); d = query.data
     role, ag_id = context.user_data.get('role'), context.user_data.get('agent_id', 0)
+
+    # D1-C2B: one early check for manual Edge-management callbacks, including
+    # activation, bulk account moves and removal of operational wg0 peers.
+    # In protected mode these legacy commands MUST stop before DB/DNS/SSH.
+    edge_action = classify_edge_callback(d)
+    if edge_action is not None:
+        edge_mode = await asyncio.to_thread(
+            _db_get_setting, PROTECTED_SETTING_KEY, PROTECTED_SETTING_DEFAULT
+        )
+        edge_gate = evaluate_manual_edge_gate(edge_action, edge_mode, role=role)
+        if not edge_gate.allowed:
+            await query.message.reply_text(edge_guard_message(edge_gate.reason))
+            return
 
     # 🚨 گارد اجباری بودن برند نماینده در کالبک‌ها (بررسی مستقیم از دیتابیس)
     if role == 'agent':

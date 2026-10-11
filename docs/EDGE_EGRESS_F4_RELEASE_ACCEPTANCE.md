@@ -56,7 +56,17 @@ Values are historical audit observations, **not current-time attestations**.
    in this file are not cryptographically or independently verified.
 5. `edge_egress_uid_boot.py` — rejects wider competing UID range selectors,
    which could otherwise route protected traffic via Core/main.
-6. New tests for all of the above run in the normal Python CI.
+6. `edge_egress_f4_pam.verify_installed_gate_digest()` and Core preflight
+   require root-controlled `/opt/nvl-egress`, a non-symlink PAM file and
+   SHA-256 matching an independently reviewed artifact. The operator must
+   provide the reviewed hash. This attests bytes/ownership, NOT the
+   execution of PAM on every SSH forwarding path.
+7. `edge_egress_uid_runtime_store.py` rejects enrolling another protected
+   UID into an Edge already carrying `ROUTED_UNVERIFIED`, `PROTECTED`,
+   `FROZEN` or `HOLD`. This explicitly prevents the first live canary from
+   unintentionally freezing a second user's shared Edge routing table.
+8. New Python regression tests are included, subject to CI infrastructure
+   and independent disposable VPS acceptance.
 
 ## Safe, read-only Core inventory
 
@@ -67,7 +77,8 @@ protected mode (this emits no credentials):
 python3 edge_egress_f4_preflight.py \
   --username nvl0557 --uid 1644 \
   --source-ip 172.86.94.174 \
-  --edge-id fra1 --edge-ip 216.126.229.12
+  --edge-id fra1 --edge-ip 216.126.229.12 \
+  --reviewed-gate-sha256 <SHA256_OF_INDEPENDENTLY_REVIEWED_PAM_FILE>
 ```
 
 Expect blockers at this stage: F1–F3 did not install PAM, F3 readiness
@@ -104,11 +115,25 @@ permission to install anything.
    Observe exact Edge IP. Simultaneously capture packets on Core uplink,
    the dedicated Edge WireGuard and DNS/NSS paths. Verify local UID traffic
    separately; SOCKS success does not prove UID-local or BadVPN traffic.
-5. In the **disposable clone only**, fail the dedicated Egress peer while
-   leaving `wg0`, global SSH and bot untouched. Repeat the same probe with
-   `--expect-outage`. Network success at either Core OR Edge IP while
-   deliberately disconnected is failure. Test both UDP/TCP DNS and IPv6
-   negative leak probes and BadVPN as its own separately documented path.
+5. On an **independent external workstation** attached only to a disposable
+   test Core/Edge pair, initiate the *paired* test BEFORE shutting down the
+   dedicated Egress peer:
+
+   ```bash
+   python3 edge_egress_f4_ssh_probe.py \
+     --socks-port 31884 --edge-ip 216.126.229.12 \
+     --core-ip 209.200.246.198 \
+     --expect-outage --disposable-vps
+   ```
+
+   The tool first verifies the Edge IPv4 through the existing SSH SOCKS
+   connection. Only after that succeeds will it ask the operator to induce
+   failure on the **disposable Edge only**, without touching operational
+   `wg0` or production servers. Type `EDGE DOWN` to run the second probe.
+   A missing SOCKS listener, missing `curl`, TLS failure, or unrelated HTTP
+   error MUST NOT count as proof of safe failure. Observe simultaneous Core
+   uplink/UID/DNS packet captures. Network success at any public IP is
+   a release failure; repeat separate DNS UDP/TCP, NSS, IPv6 and BadVPN tests.
 6. Reboot the disposable Core. Before the dedicated Edge is restored, verify
    the protected UID is DENIED and `ssh.service` is healthy for unprotected
    users/admins. Restore Edge; verify protected recovery under the shared
@@ -163,3 +188,16 @@ approve a separately implemented guarded production promotion.
 CI passes validate code invariants in disposable runners, not production
 readiness. `edge_egress_protected_mode` must remain OFF. Do not install the
 PAM snippet or run the F1 guard `--enforce` on live Core from this PR.
+
+
+## GitHub Actions runner infrastructure is currently a separate blocker
+
+On 2026-10-11, multiple F4 PR CI runs failed before any step executed.
+GitHub API reported `runner_id=0`, empty `runner_name` and zero job steps
+for Python, stage-only and kernel workflows. No Python traceback or kernel
+lab log was available for those runs. This is NOT evidence that the code
+tests passed, nor sufficient evidence that they failed after execution.
+Check GitHub Actions account billing/usage, repository runner eligibility,
+service availability and PR permissions; re-run all checks on the exact
+current head and insist on completed, logged jobs before marking #87 ready.
+The prior success of an older commit does not validate later commits.

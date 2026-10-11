@@ -11,6 +11,9 @@ for tool in ip wg iptables sysctl curl python3 ping nsenter; do
   command -v "$tool" >/dev/null || { echo "Missing: $tool" >&2; exit 69; }
 done
 BASE="$(pwd)"
+# CI checkout parents are not traversable to an unprivileged test UID.
+# Use a disposable readable copy of only required code outside that tree.
+cd /
 TMP="$(mktemp -d /tmp/nvl-ci-egress-XXXXXX)"
 CORE="nvlci-core-$$"
 EDGE="nvlci-edge-$$"
@@ -242,6 +245,12 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -keyout "$TMP/doh.key" -out "$TMP/doh.crt" >/dev/null 2>&1
 chmod 0711 "$TMP"
 chmod 0644 "$TMP/doh.crt"
+mkdir -p "$TMP/lib/ops"
+cp "$BASE/edge_egress_uid_dns.py" "$TMP/lib/edge_egress_uid_dns.py"
+cp "$BASE/edge_egress_uid_policy.py" "$TMP/lib/edge_egress_uid_policy.py"
+cp "$BASE/ops/edge_egress_provision.py" "$TMP/lib/ops/edge_egress_provision.py"
+cp "$BASE/ops/labs/edge_egress_ci_dns_probe.py" "$TMP/lib/edge_egress_ci_dns_probe.py"
+chmod -R a+rX "$TMP/lib"
 : > "$TMP/doh-peers.log"
 ip netns exec "$WAN" python3 "$BASE/ops/labs/edge_egress_ci_fake_doh.py" \
   --cert "$TMP/doh.crt" --key "$TMP/doh.key" \
@@ -252,8 +261,8 @@ kill -0 "$DOH_PID"
 
 echo "[D1-C3D] Start DNS relay AS protected UID under blackhole"
 ip netns exec "$CORE" setpriv --reuid "$TUID" --regid "$TGID" --clear-groups -- \
-  env SSL_CERT_FILE="$TMP/doh.crt" PYTHONPATH="$BASE" \
-  python3 "$BASE/edge_egress_uid_dns.py" serve \
+  env SSL_CERT_FILE="$TMP/doh.crt" PYTHONPATH="$TMP/lib" \
+  python3 "$TMP/lib/edge_egress_uid_dns.py" serve \
   --username nvlciuser --uid "$TUID" --priority 1780 \
   --table 1780 --port 10553 >/dev/null 2>"$TMP/dns-stderr.log" &
 DNS_PID=$!
@@ -283,7 +292,7 @@ echo "UID_TWO_DESTINATIONS_EDGE_OK UNPROTECTED_CORE_CONTROL_OK"
 echo "[D1-C3D] Transparent DNS over UDP + TCP, upstream actual TLS over WG/Edge"
 for protocol in udp tcp; do
   ip netns exec "$CORE" setpriv --reuid "$TUID" --regid "$TGID" --clear-groups -- \
-    python3 "$BASE/ops/labs/edge_egress_ci_dns_probe.py" --protocol "$protocol"
+    python3 "$TMP/lib/edge_egress_ci_dns_probe.py" --protocol "$protocol"
 done
 [[ "$(wc -l < "$TMP/doh-peers.log")" -ge 2 ]] || {
   echo "FAIL: no real WAN DoH upstream traffic" >&2; exit 1
@@ -308,7 +317,7 @@ root_reply="$(ip netns exec "$CORE" curl --noproxy '*' -4 -fsS --max-time 5 \
   echo "LAB_INVALID: Core fallback unexpectedly offline" >&2; exit 1
 }
 ip netns exec "$CORE" setpriv --reuid "$TUID" --regid "$TGID" --clear-groups -- \
-  python3 "$BASE/ops/labs/edge_egress_ci_dns_probe.py" --protocol udp --must-fail
+  python3 "$TMP/lib/edge_egress_ci_dns_probe.py" --protocol udp --must-fail
 echo "EDGE_OUTAGE_FAIL_CLOSED_WITH_CORE_AVAILABLE_OK"
 
 echo "[D1-C3D] Edge route removed: terminal blackhole MUST remain"
@@ -357,7 +366,7 @@ uid_reply="$(ip netns exec "$CORE" setpriv --reuid "$TUID" --regid "$TGID" --cle
   echo "FAIL: protected UID did not recover through Edge" >&2; exit 1
 }
 ip netns exec "$CORE" setpriv --reuid "$TUID" --regid "$TGID" --clear-groups -- \
-  python3 "$BASE/ops/labs/edge_egress_ci_dns_probe.py" --protocol tcp
+  python3 "$TMP/lib/edge_egress_ci_dns_probe.py" --protocol tcp
 echo "EDGE_REKEY_UID_DNS_RECOVERY_OK"
 
 echo "[lab] Restart Core tunnel and prove namespace/veth recovery"

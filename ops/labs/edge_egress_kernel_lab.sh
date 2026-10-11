@@ -19,8 +19,13 @@ INNER="nvl-egress-fra1"
 CEND="nvc$$"
 EEND="nve$$"
 UEND="nvu$$"
-WEND="nvw$$"
+WEND="nvw$"
+C2WAN="nvy$"
+WAN2C="nvz$"
 SERVER_PID=""
+DOH_PID=""
+DNS_PID=""
+V6_PID=""
 CS=0
 ES=0
 
@@ -28,7 +33,9 @@ cleanup() {
   code=$?
   trap - EXIT
   set +e
-  if [[ -n "$SERVER_PID" ]]; then kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true; fi
+  for pid in "${DNS_PID:-}" "${DOH_PID:-}" "${V6_PID:-}" "${SERVER_PID:-}"; do
+    if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
+  done
   if [[ "$CS" == "1" ]]; then nsenter --net="/run/netns/$CORE" -- bash "$TMP/core/down.sh" >/dev/null 2>&1 || true; fi
   if [[ "$ES" == "1" ]]; then nsenter --net="/run/netns/$EDGE" -- bash "$TMP/edge/down.sh" >/dev/null 2>&1 || true; fi
   ip netns del "$INNER" >/dev/null 2>&1 || true
@@ -37,6 +44,7 @@ cleanup() {
   ip netns del "$WAN" >/dev/null 2>&1 || true
   ip link del "$CEND" >/dev/null 2>&1 || true
   ip link del "$UEND" >/dev/null 2>&1 || true
+  ip link del "$C2WAN" >/dev/null 2>&1 || true
   rm -rf -- "$TMP"
   exit "$code"
 }
@@ -63,6 +71,14 @@ ip link set "$WEND" netns "$WAN"
 ip -n "$EDGE" link set "$UEND" name eth0
 ip -n "$WAN" link set "$WEND" name w0
 
+# A separate simulated Core-public path means a missing UID guard is a
+# measurable LEAK, not a false pass caused by lack of a default gateway.
+ip link add "$C2WAN" type veth peer name "$WAN2C"
+ip link set "$C2WAN" netns "$CORE"
+ip link set "$WAN2C" netns "$WAN"
+ip -n "$CORE" link set "$C2WAN" name cw0
+ip -n "$WAN" link set "$WAN2C" name wc0
+
 for ns in "$CORE" "$EDGE" "$WAN"; do
   ip -n "$ns" link set lo up
   ip netns exec "$ns" sysctl -q -w net.ipv4.conf.all.rp_filter=0 >/dev/null
@@ -72,6 +88,11 @@ done
 ip -n "$CORE" addr add 10.200.0.1/30 dev c0
 ip -n "$CORE" addr add 209.200.246.198/32 dev c0
 ip -n "$CORE" link set c0 up
+ip -n "$CORE" addr add 10.201.0.1/30 dev cw0
+ip -n "$CORE" link set cw0 up
+ip -n "$CORE" route add default via 10.201.0.2 dev cw0 src 209.200.246.198
+# The direct Core->WAN IPv6 path is an explicit bypass temptation.
+ip -n "$CORE" -6 addr add 2001:db8:abcd::1/64 dev cw0
 
 ip -n "$EDGE" addr add 10.200.0.2/30 dev e0
 ip -n "$EDGE" addr add 172.86.94.174/32 dev eth0
@@ -83,6 +104,12 @@ ip -n "$EDGE" route add 209.200.246.198/32 via 10.200.0.1 dev e0
 ip -n "$EDGE" route add default dev eth0 src 172.86.94.174
 
 ip -n "$WAN" addr add 203.0.113.50/32 dev w0
+ip -n "$WAN" addr add 203.0.113.51/32 dev w0
+ip -n "$WAN" addr add 1.1.1.1/32 dev w0
+ip -n "$WAN" addr add 10.201.0.2/30 dev wc0
+ip -n "$WAN" -6 addr add 2001:db8:abcd::2/64 dev wc0
+ip -n "$WAN" link set wc0 up
+ip -n "$WAN" route add 209.200.246.198/32 via 10.201.0.1 dev wc0
 ip -n "$WAN" link set w0 up
 ip -n "$WAN" route add 172.86.94.174/32 dev w0
 
@@ -116,7 +143,7 @@ cat > "$TMP/echo.py" <<'PY'
 import socket
 s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(("203.0.113.50", 18080))
+s.bind(("0.0.0.0", 18080))
 s.listen(5)
 while True:
     conn, peer = s.accept()

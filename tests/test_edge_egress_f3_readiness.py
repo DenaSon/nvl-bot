@@ -9,7 +9,7 @@ from pathlib import Path
 from edge_egress_f3_readiness import (
     Existing6GReadinessStore, ReadinessUnsafe, admission_eligible,
     assignment_preview, install_readiness_schema, read_readiness,
-    stage_in_existing_6g_transaction,
+    stage_in_existing_6g_transaction, record_ingress_candidate,
 )
 
 SOURCE="172.86.94.174"
@@ -56,6 +56,25 @@ class F3ReadinessTests(unittest.TestCase):
 
     def stage(self):
         return self.store.mark_staged(42,source=SOURCE,edge_id="fra1",target=EDGE)
+
+    def test_auto_registered_ingress_is_never_egress_ready(self):
+        with self.conn() as c:
+            c.execute(
+                "CREATE TABLE host_pool(host TEXT PRIMARY KEY, active INTEGER)"
+            )
+            c.execute("INSERT INTO host_pool VALUES (?,1)",(EDGE,))
+        self.assertTrue(record_ingress_candidate(self.conn, EDGE))
+        self.assertTrue(record_ingress_candidate(self.conn, EDGE))
+        with self.conn() as c:
+            self.assertEqual(c.execute(
+                "SELECT edge_ipv4,state FROM edge_egress_f3_ingress_candidates"
+            ).fetchall(), [(EDGE,"INGRESS_ONLY")])
+            self.assertIsNone(read_readiness(c,"fra1"))
+
+    def test_candidate_missing_schema_is_backward_compatible(self):
+        with self.conn() as c:
+            c.execute("DROP TABLE edge_egress_f3_ingress_candidates")
+        self.assertFalse(record_ingress_candidate(self.conn, EDGE))
 
     def test_stage_is_not_customer_ready(self):
         row=self.stage()

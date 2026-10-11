@@ -86,6 +86,26 @@ migration may not exist in production, and no production Egress is enabled.
 **Do not bypass or fake blockers.** This command must not be interpreted as
 permission to install anything.
 
+## Root-only post-boot UID inspection (read-only)
+
+After the root-owned F1 manifest has been installed **in a disposable VPS**
+and the SSH admission/BootGuard controls have been tested, an operator can
+inspect actual UID routing facts without changing a route:
+
+```bash
+python3 edge_egress_f4_kernel_audit.py \
+  --manifest /etc/nvl-egress/protected/nvl0557.json \
+  --expected-state FROZEN
+```
+
+The command rejects competing UID selectors, missing IPv6/DNS safeguards,
+foreign IPv4 routes, missing blackhole, and a still-attached Edge default
+while the account should be FROZEN/HOLD. In PROTECTED mode, it separately
+checks the dedicated Edge veth and per-user DNS service. Even a locally
+consistent result returns `customer_ready=false`. It does NOT check a
+real remote public IP, packet capture, effective PAM forwarding, or reboot
+and must never be treated as an activation signal.
+
 ## Mandatory disposable full-VPS procedure — not CI namespace-only
 
 1. Create a **fresh, disposable Core/Edge pair** from tested backups.

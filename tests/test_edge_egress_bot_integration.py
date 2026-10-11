@@ -163,7 +163,9 @@ class BotPreflightIntegrationTests(unittest.TestCase):
         preflight = min(i for i, name in all_calls if name == "_safe_manual_failover_preflight")
         dns = min(i for i, name in all_calls if name == "_cf_switch_public_domain")
         rebuild = min(i for i, name in all_calls if name == "_run_phase6g_rebuild_helper")
-        lock = min(i for i, name in all_calls if name == "_db_acquire_failover_lock")
+        # The lock function is passed to asyncio.to_thread, not called directly.
+        lock = min(node.lineno for node in ast.walk(fn)
+                   if isinstance(node, ast.Name) and node.id == "_db_acquire_failover_lock")
         self.assertLess(lock, preflight)
         self.assertLess(preflight, dns)
         self.assertLess(preflight, rebuild)

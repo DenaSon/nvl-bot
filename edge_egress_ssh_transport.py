@@ -280,8 +280,34 @@ async def activate_and_prove_lab_shadow(spec: EgressSpec, *,
         return ShadowProof(False, reason, cleanup_uncertain=uncertain)
 
 
+@dataclass(frozen=True)
+class EgressLabHostFactory:
+    """Explicit opt-in identity map for Existing6GPreparationAdapter(host_factory=).
+
+    This factory is NEVER registered in bot_final_v49-2.py or Production.
+    Set activation=True only for a disposable two-VM experiment.
+    """
+    core_identity: EgressSSHIdentity
+    edge_identity: EgressSSHIdentity
+    activation: bool = False
+
+    def __call__(self, role: str, expected_ip: str) -> PinnedEgressHostPort:
+        if role not in ("core", "edge"):
+            raise EgressSSHError("INVALID_ROLE")
+        identity = self.core_identity if role == "core" else self.edge_identity
+        if identity.role != role or identity.expected_public_ip != expected_ip:
+            raise EgressSSHError("HOST_FACTORY_IDENTITY_MISMATCH")
+        return PinnedEgressHostPort(identity, lab_activation=self.activation)
+
+
 async def stop_lab_shadow(spec: EgressSpec, *,
                           core: ShadowHost, edge: ShadowHost) -> None:
-    """Explicit shutdown, Core first, then Edge; does not touch operational wg0."""
-    await core.stop_shadow(spec)
-    await edge.stop_shadow(spec)
+    """Stop BOTH shadows even if the first remote stop fails."""
+    failures = []
+    for role, host in (("core", core), ("edge", edge)):
+        try:
+            await host.stop_shadow(spec)
+        except Exception:
+            failures.append(role)
+    if failures:
+        raise EgressSSHError("SHADOW_STOP_UNCERTAIN:" + ",".join(failures))

@@ -1,13 +1,10 @@
 """D1-C3C: optional, boot-time *blocking* guard for a protected SSH UID.
 
-This host-local tool never starts Edge, changes DNS, creates protected
-accounts or automatically enables a systemd unit. A reviewed deployment may
-install an immutable, root-only manifest and opt in to the generated unit
-via RequiredBy=ssh.service. If the guard cannot be applied, ssh.service
-MUST fail to start rather than expose the account via Core's public route.
-
-NB: systemd ordering covers new ssh.service sessions, not arbitrary
-pre-existing/logind/background jobs. Full protected mode remains NOT READY.
+This host-local tool neither activates users nor installs systemd units.
+The independent per-UID session gate belongs to F2, so this standalone
+guard must never be used as permission for a production account cutover.
+Explicit apply freezes only its precisely owned Edge route and retains
+the terminal blackhole. Full protected mode remains NOT READY.
 """
 from __future__ import annotations
 
@@ -24,6 +21,7 @@ import sys
 from typing import Callable
 
 from edge_egress_uid_policy import UIDPolicyRequest, build_policy_plan
+from edge_egress_uid_route_state import inspect_owned_routes, ProtectedRouteError
 from ops.edge_egress_provision import EgressSpec
 
 
@@ -165,11 +163,16 @@ class BootGuardApplier:
             routes = ""
         else:
             routes = routes_result.stdout
-        if any(not re.fullmatch(r"blackhole default(?:\s+.*)?",
-                                line.strip()) for line in routes.splitlines() if line.strip()):
-            raise BootGuardError("FOREIGN_ROUTE_IN_PROTECTED_TABLE")
-        if sum(1 for line in routes.splitlines() if line.strip()) > 1:
-            raise BootGuardError("MULTIPLE_PROTECTED_ROUTES")
+        try:
+            state = inspect_owned_routes(
+                routes, next_hop=request.spec.ns_veth_ip,
+                device=request.spec.veth_root, source=request.spec.root_veth_ip,
+                allow_empty=True,
+            )
+        except ProtectedRouteError as exc:
+            raise BootGuardError("FOREIGN_ROUTE_IN_PROTECTED_TABLE") from exc
+        if match and not state.terminal_blackhole:
+            raise BootGuardError("UID_RULE_WITHOUT_BLACKHOLE")
         return plan, bool(match)
 
     def apply(self, manifest: BootGuardManifest):
@@ -186,6 +189,19 @@ class BootGuardApplier:
                 if self.run(*verify.argv).returncode != 0:
                     self.call(*add.argv)
         self.call(*plan.guard[3].argv)
+        # Boot recovery always returns an owned Edge route to DENY-only.
+        # Never delete wg0 or an unknown/default route.
+        state = inspect_owned_routes(
+            self.call("ip", "-4", "route", "show", "table", str(plan.table)),
+            next_hop=manifest.request.spec.ns_veth_ip,
+            device=manifest.request.spec.veth_root,
+            source=manifest.request.spec.root_veth_ip,
+        )
+        if state.edge_attached:
+            self.call("ip", "-4", "route", "del", "default", "via",
+                      manifest.request.spec.ns_veth_ip, "dev",
+                      manifest.request.spec.veth_root, "table",
+                      str(plan.table), "metric", "100")
         if not present:
             self.call(*plan.guard[4].argv)
         self.verify(manifest)
@@ -210,10 +226,9 @@ class BootGuardApplier:
 def render_ssh_required_unit(manifest: BootGuardManifest,
                              *, module_root: str = "/opt/nvl-egress",
                              config_root: str = "/etc/nvl-egress/protected") -> str:
-    """Artifact only; installer is intentionally absent from this PR.
+    """Standalone DENY-only guard artifact, not an SSH unit dependency.
 
-    An administrator must additionally verify SSH has this unit as a
-    REQUIRED dependency; WantedBy alone is unsafe.
+    No protected user may log in until the F2 per-UID session gate is proven.
     """
     req = manifest.request
     name = req.username
@@ -222,15 +237,12 @@ def render_ssh_required_unit(manifest: BootGuardManifest,
     return (
         "[Unit]\n"
         f"Description=NVL fail-closed boot guard for {name} (UID {req.uid})\n"
-        "DefaultDependencies=no\n"
         "After=local-fs.target\n"
-        "Before=ssh.service\n"
         "\n[Service]\n"
         "Type=oneshot\nRemainAfterExit=yes\n"
         f"ExecStart=/usr/bin/python3 {module_root}/edge_egress_uid_boot.py "
         f"apply --manifest {config_root}/{name}.json --enforce\n"
         "TimeoutStartSec=25\n"
-        "\n[Install]\nRequiredBy=ssh.service\n"
     )
 
 

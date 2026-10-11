@@ -26,36 +26,45 @@ def manifest():
 
 
 class SystemdBootTests(unittest.TestCase):
-    def test_exact_ssh_dependencies_and_notified_dns_ready(self):
+    def test_isolated_uid_services_do_not_bind_shared_ssh(self):
         bundle = render_ssh_systemd_bundle(manifest())
-        self.assertIn("BindsTo="+bundle.guard_name+" "+bundle.dns_name,
-                      bundle.ssh_dropin)
-        self.assertIn("After="+bundle.guard_name+" "+bundle.dns_name,
-                      bundle.ssh_dropin)
-        self.assertIn("Requires="+bundle.guard_name+" "+bundle.dns_name,
-                      bundle.ssh_dropin)
+        self.assertEqual(bundle.ssh_dropin, "")
+        self.assertNotIn("ssh.service", bundle.guard_unit + bundle.dns_unit)
         self.assertIn("Type=notify", bundle.dns_unit)
         self.assertIn("NotifyAccess=main", bundle.dns_unit)
-        self.assertIn("Before=ssh.service", bundle.guard_unit)
+        self.assertIn("Requires=" + bundle.guard_name, bundle.dns_unit)
         verify_bundle(bundle)
 
-    def test_reject_dns_not_ready_before_ssh(self):
+    def test_reject_legacy_global_ssh_dropin(self):
+        good = render_ssh_systemd_bundle(manifest())
+        for dropin in (
+            "[Unit]\\nRequires=" + good.guard_name,
+            "[Unit]\\nBindsTo=" + good.dns_name,
+        ):
+            bad = SSHSystemdBundle(
+                good.guard_name, good.dns_name, good.guard_unit,
+                good.dns_unit, dropin,
+            )
+            with self.assertRaisesRegex(SystemdBootError, "GLOBAL_SSH"):
+                verify_bundle(bad)
+
+    def test_reject_dns_that_binds_global_ssh(self):
         good = render_ssh_systemd_bundle(manifest())
         bad = SSHSystemdBundle(
-            good.guard_name,good.dns_name,good.guard_unit,
-            good.dns_unit.replace("Type=notify","Type=simple"),
-            good.ssh_dropin,
+            good.guard_name, good.dns_name, good.guard_unit,
+            good.dns_unit + "\\nBefore=ssh.service\\n", "",
         )
-        with self.assertRaisesRegex(SystemdBootError,"DNS_NOT_BOOT_BLOCKING"):
+        with self.assertRaisesRegex(SystemdBootError, "GLOBAL_SSH"):
             verify_bundle(bad)
 
-    def test_reject_wanted_only_ssh_dependency(self):
+    def test_reject_missing_isolated_guard_order(self):
         good = render_ssh_systemd_bundle(manifest())
         bad = SSHSystemdBundle(
-            good.guard_name,good.dns_name,good.guard_unit,good.dns_unit,
-            good.ssh_dropin.replace("BindsTo=","Wants="),
+            good.guard_name, good.dns_name, good.guard_unit,
+            good.dns_unit.replace("After=" + good.guard_name, "After=network.target"),
+            "",
         )
-        with self.assertRaisesRegex(SystemdBootError,"SSH_MISSING"):
+        with self.assertRaisesRegex(SystemdBootError, "ISOLATED_DNS"):
             verify_bundle(bad)
 
     def test_socket_activated_ssh_is_not_approved(self):

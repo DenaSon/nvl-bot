@@ -26,6 +26,7 @@ import subprocess
 import sys
 
 from edge_egress_uid_policy import UIDPolicyRequest, _cmd, Command
+from edge_egress_uid_route_state import inspect_owned_routes, ProtectedRouteError
 
 DOH_IP = "1.1.1.1"
 DOH_HOST = "cloudflare-dns.com"
@@ -127,11 +128,9 @@ def plan_transparent_dns(request: UIDPolicyRequest, port: int) -> DNSRedirectPla
 
 
 def render_dns_required_unit(request: UIDPolicyRequest, port: int) -> str:
-    """Only a draft artifact; REQUIRED SSH dependency must be installed.
+    """Isolated per-UID DNS unit, not a shared ssh.service dependency.
 
-    Guard and DNS services are both required by ssh.service; DNS starts
-    AFTER guard. If DNS fails on boot, SSH service must not start.
-    This does not protect arbitrary other processes with this UID.
+    The F2 session gate must still prevent unguarded protected account logins.
     """
     plan_transparent_dns(request, port)
     name = request.username
@@ -140,7 +139,6 @@ def render_dns_required_unit(request: UIDPolicyRequest, port: int) -> str:
         f"Description=NVL UID Edge DoH local stub for {name}\n"
         "After=nvl-egress-guard-" + name + ".service\n"
         "Requires=nvl-egress-guard-" + name + ".service\n"
-        "Before=ssh.service\n"
         "\n[Service]\n"
         "Type=notify\n"
         "NotifyAccess=main\n"
@@ -155,8 +153,10 @@ def render_dns_required_unit(request: UIDPolicyRequest, port: int) -> str:
         "ExecStart=/usr/bin/python3 /opt/nvl-egress/edge_egress_uid_dns.py "
         f"serve --username {name} --uid {request.uid} "
         f"--priority {request.priority} --table {request.spec.route_table} "
+        f"--edge-next-hop {request.spec.ns_veth_ip} "
+        f"--edge-veth {request.spec.veth_root} "
+        f"--edge-src {request.spec.root_veth_ip} "
         f"--port {port}\n"
-        "\n[Install]\nRequiredBy=ssh.service\n"
     )
 
 
@@ -188,30 +188,51 @@ def ensure_running_as_uid(uid: int, username: str) -> None:
         raise DNSError("USER_NOT_FOUND") from exc
 
 
-def ensure_terminal_policy(uid: int, priority: int, table: int):
-    """Read-only fail-before-bind check; caller must also ensure 6G lease.
+def ensure_terminal_policy(uid: int, priority: int, table: int, *,
+                           edge_next_hop: str | None = None,
+                           edge_veth: str | None = None,
+                           edge_src: str | None = None):
+    """Check complete UID selector and only exact owned Edge+blackhole routes.
 
-    At daemon bootstrap the dedicated Edge next-hop is not attached yet.
-    Only the terminal IPv4 blackhole may exist. This proxy refuses to start
-    under a partial /32 UID rule or unknown route.
+    Missing Edge identity is accepted for the blackhole-only lab state. A
+    production-generated DNS unit always supplies the immutable Edge identity.
     """
     result = subprocess.run(["ip", "-4", "rule", "show"],
                             capture_output=True, text=True, timeout=6)
     expected = f"{priority}: from all uidrange {uid}-{uid} lookup {table}"
     rules = [" ".join(x.strip().split()) for x in result.stdout.splitlines()]
-    if result.returncode or expected not in rules:
+    if result.returncode or rules.count(expected) != 1:
         raise DNSError("PROTECTED_UID_RULE_MISSING")
-    result = subprocess.run(
-        ["ip", "-4", "route", "show", "table", str(table)],
-        capture_output=True, text=True, timeout=6,
-    )
+    # A second uidrange selector (including a broader overlapping range)
+    # can precede the owned route and send the DoH daemon to Core/main.
+    # Fail closed before opening any DNS proxy socket.
+    for line in rules:
+        if "uidrange" not in line:
+            continue
+        match = re.search(r"\buidrange\s+(\d+)-(\d+)\b", line)
+        if not match:
+            raise DNSError("UNRECOGNIZED_UID_ROUTING_RULE")
+        low, high = map(int, match.groups())
+        if low <= uid <= high and line != expected:
+            raise DNSError("PROTECTED_UID_ALREADY_ROUTED_ELSEWHERE")
+    if any(x is not None for x in (edge_next_hop, edge_veth, edge_src)) and not all(
+        x is not None for x in (edge_next_hop, edge_veth, edge_src)
+    ):
+        raise DNSError("INCOMPLETE_EDGE_IDENTITY")
+    result = subprocess.run(["ip", "-4", "route", "show", "table", str(table)],
+                            capture_output=True, text=True, timeout=6)
     if result.returncode:
         raise DNSError("TERMINAL_BLACKHOLE_MISSING")
-    routes = [s.strip() for s in result.stdout.splitlines() if s.strip()]
-    if len(routes) != 1 or not re.fullmatch(
-        r"blackhole default(?:\s+.*)?", routes[0]
-    ):
-        raise DNSError("PROTECTED_ROUTE_TABLE_NOT_FROZEN")
+    try:
+        state = inspect_owned_routes(
+            result.stdout, next_hop=edge_next_hop or "0.0.0.0",
+            device=edge_veth or "_not_an_edge_",
+            source=edge_src or "0.0.0.0",
+        )
+    except ProtectedRouteError as exc:
+        raise DNSError("PROTECTED_ROUTE_TABLE_NOT_OWNED") from exc
+    if state.edge_attached and edge_next_hop is None:
+        raise DNSError("EDGE_IDENTITY_REQUIRED")
 
 
 class _UDP(socketserver.ThreadingUDPServer):
@@ -277,11 +298,13 @@ def sd_notify_ready() -> None:
 
 
 def serve(uid: int, username: str, priority: int, table: int,
-          port: int, *, upstream=None):
+          port: int, *, upstream=None, edge_next_hop=None,
+          edge_veth=None, edge_src=None):
     ensure_running_as_uid(uid, username)
     if not 1024 <= port <= 65535:
         raise DNSError("INVALID_PORT")
-    ensure_terminal_policy(uid, priority, table)
+    ensure_terminal_policy(uid, priority, table, edge_next_hop=edge_next_hop,
+                           edge_veth=edge_veth, edge_src=edge_src)
     upstream = upstream if upstream is not None else PinnedIPDoH()
     with _UDP(("127.0.0.1", port), UDPHandler) as udp:
         with _TCP(("127.0.0.1", port), TCPHandler) as tcp:
@@ -310,11 +333,16 @@ def main(argv=None) -> int:
     parser.add_argument("--priority", required=True, type=int)
     parser.add_argument("--table", required=True, type=int)
     parser.add_argument("--port", required=True, type=int)
+    parser.add_argument("--edge-next-hop", required=True)
+    parser.add_argument("--edge-veth", required=True)
+    parser.add_argument("--edge-src", required=True)
     args = parser.parse_args(argv)
     try:
         if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", args.username):
             raise DNSError("INVALID_USERNAME")
-        serve(args.uid, args.username, args.priority, args.table, args.port)
+        serve(args.uid, args.username, args.priority, args.table, args.port,
+              edge_next_hop=args.edge_next_hop, edge_veth=args.edge_veth,
+              edge_src=args.edge_src)
     except (DNSError, OSError, subprocess.TimeoutExpired):
         print("DNS_PROXY_UNAVAILABLE", file=sys.stderr)
         return 2

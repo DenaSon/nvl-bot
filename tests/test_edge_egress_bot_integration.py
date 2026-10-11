@@ -41,7 +41,11 @@ def get_function(name, extra=None):
     ns = {"asyncio": asyncio, "PROTECTED_SETTING_KEY": PROTECTED_SETTING_KEY,
           "PROTECTED_SETTING_DEFAULT": "0",
           "legacy_failover_gate": legacy_failover_gate,
-          "legacy_new_edge_gate": legacy_new_edge_gate}
+          "legacy_new_edge_gate": legacy_new_edge_gate,
+          "any_protected_bindings": lambda _db: False,
+          "db_conn": lambda: None,
+          "LEGACY_PROTECTED_BINDINGS_BLOCKED":
+              "EGRESS_PROTECTED_BINDINGS_LEGACY_MUTATION_UNSAFE"}
     ns.update(extra or {})
     module = ast.Module(body=[matches[0]], type_ignores=[])
     ast.fix_missing_locations(module)
@@ -149,6 +153,15 @@ class BotPreflightIntegrationTests(unittest.TestCase):
         self.assertEqual(result["accounts"], ["nvl0557"])
         self.assertEqual(call_count, [PROTECTED_SETTING_KEY])
 
+    def test_existing_protected_mapping_blocks_6g_even_with_global_mode_off(self):
+        fn = get_function("_safe_manual_failover_preflight", {
+            "_db_get_setting": lambda *args: "0",
+            "any_protected_bindings": lambda _db: True,
+            "_is_current_core_host": lambda _: self.fail("unsafe host lookup"),
+        })
+        result = asyncio.run(fn("172.86.94.174", "216.126.229.12"))
+        self.assertEqual(result["errors"], ["EGRESS_PROTECTED_BINDINGS_LEGACY_MUTATION_UNSAFE"])
+
     def test_6g_engine_keeps_lock_preflight_before_dns_and_accounts(self):
         tree = source_tree()
         fn = next(x for x in tree.body if isinstance(x, ast.AsyncFunctionDef)
@@ -209,6 +222,32 @@ class OnboardingAndDnsIntegrationTests(unittest.TestCase):
         ok, reason = fn("172.86.94.174")
         self.assertFalse(ok)
         self.assertIn("Cloudflare", reason)
+
+    def test_protected_mapping_blocks_legacy_dns_without_global_mode(self):
+        fn = get_function("_cf_update_dns_record_sync", {
+            "_db_get_setting": lambda *args: "0",
+            "any_protected_bindings": lambda _db: True,
+            "LEGACY_PROTECTED_BINDINGS_BLOCKED":
+                "EGRESS_PROTECTED_BINDINGS_LEGACY_MUTATION_UNSAFE",
+            "_cf_get_config": lambda: self.fail("CF consulted after protected fence"),
+        })
+        self.assertEqual(fn("209.200.246.198"),
+                         (False, "EGRESS_PROTECTED_BINDINGS_LEGACY_MUTATION_UNSAFE"))
+
+    def test_protected_mapping_blocks_edge_remote_provision(self):
+        sent = []
+        async def send_message(chat_id, text, **kwargs):
+            sent.append((chat_id, text))
+        app = types.SimpleNamespace(bot=types.SimpleNamespace(send_message=send_message))
+        fn = get_function("_provision_new_edge", {
+            "_db_get_setting": lambda *args: "0",
+            "any_protected_bindings": lambda _db: True,
+            "_provision_new_edge_sync": lambda *args: self.fail("remote installer started"),
+        })
+        self.assertEqual(asyncio.run(fn("172.86.94.174", "SECRET",
+                                        2252, "test", 123, app)),
+                         (False, None, None))
+        self.assertEqual(len(sent), 1)
 
     def test_setting_defaults_to_off_and_no_protected_mode_ui_toggle(self):
         src = BOT_FILE.read_text(encoding="utf-8")

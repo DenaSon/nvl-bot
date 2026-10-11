@@ -29,6 +29,7 @@ class FakeKernel:
     def __init__(self):
         self.priority = False
         self.blackhole = False
+        self.edge_attached = False
         self.guards = set()
         self.redirects = set()
         self.log = []
@@ -47,8 +48,12 @@ class FakeKernel:
                 content += "1780: from all uidrange 1644-1644 lookup 1780\n"
             return SimpleNamespace(returncode=0, stdout=content)
         if args == ("ip", "-4", "route", "show", "table", "1780"):
-            return SimpleNamespace(
-                returncode=0, stdout="blackhole default metric 4096\n" if self.blackhole else "")
+            edge = ("default via " + manifest().request.spec.ns_veth_ip +
+                    " dev " + manifest().request.spec.veth_root +
+                    " src " + manifest().request.spec.root_veth_ip +
+                    " metric 100\n") if self.edge_attached else ""
+            blackhole = "blackhole default metric 4096\n" if self.blackhole else ""
+            return SimpleNamespace(returncode=0, stdout=edge + blackhole)
         if args == ("iptables", "-w", "-t", "nat", "-S", "OUTPUT"):
             return SimpleNamespace(returncode=0, stdout="")
         if args[0] in ("iptables", "ip6tables"):
@@ -67,6 +72,8 @@ class FakeKernel:
                 return SimpleNamespace(returncode=0, stdout="")
         if args[:5] == ("ip", "-4", "route", "replace", "blackhole"):
             self.blackhole = True
+        if args[:5] == ("ip", "-4", "route", "del", "default"):
+            self.edge_attached = False
         if args[:5] == ("ip", "-4", "rule", "add", "priority"):
             self.priority = True
         return SimpleNamespace(returncode=0, stdout="")
@@ -84,14 +91,13 @@ class BootTests(unittest.TestCase):
         with self.assertRaisesRegex(BootGuardError, "INVALID_DNS_PORT"):
             BootGuardManifest.parse(raw)
 
-    def test_unit_requires_guard_before_ssh(self):
+    def test_guard_unit_does_not_kill_shared_ssh(self):
         unit = render_ssh_required_unit(manifest())
-        self.assertIn("RequiredBy=ssh.service", unit)
-        self.assertIn("Before=ssh.service", unit)
-        self.assertIn("DefaultDependencies=no", unit)
+        self.assertNotIn("ssh.service", unit)
         self.assertIn("--enforce", unit)
         self.assertNotIn("ExecStop", unit)
-        self.assertNotIn("WantedBy=ssh.service", unit)
+        self.assertNotIn("WantedBy=", unit)
+        self.assertNotIn("RequiredBy=", unit)
 
     def test_boot_guard_installs_ipv6_dns_nat_and_blackhole_before_uid(self):
         kernel = FakeKernel()
@@ -112,6 +118,38 @@ class BootTests(unittest.TestCase):
         self.assertIn("blackhole", added[first_uid - 1])
         self.assertEqual(sum(1 for x in added if x[:5] ==
                              ("ip", "-4", "rule", "add", "priority")), 1)
+
+    def test_boot_apply_freezes_exact_owned_edge_route_before_returning(self):
+        kernel = FakeKernel()
+        kernel.blackhole = True
+        kernel.priority = True
+        kernel.edge_attached = True
+        manager = BootGuardApplier(
+            run=kernel, get_uid=lambda _: 1644, geteuid=lambda: 0,
+            read_nss=lambda: "hosts: files dns\n",
+        )
+        manager.apply(manifest())
+        self.assertFalse(kernel.edge_attached)
+        self.assertTrue(kernel.blackhole)
+        self.assertTrue(kernel.priority)
+        self.assertEqual(sum(args[:5] == ("ip", "-4", "route", "del", "default")
+                             for args in kernel.log), 1)
+        self.assertFalse(any("wg0" in args or "flush" in args for args in kernel.log))
+
+    def test_boot_preflight_rejects_foreign_table_route(self):
+        kernel = FakeKernel()
+        def run(*args):
+            if args == ("ip", "-4", "route", "show", "table", "1780"):
+                return SimpleNamespace(returncode=0, stdout=(
+                    "blackhole default metric 4096\n"
+                    "default via 209.200.246.198 dev eth0\n"))
+            return kernel(*args)
+        manager = BootGuardApplier(run=run, get_uid=lambda _: 1644,
+                                   geteuid=lambda: 0,
+                                   read_nss=lambda: "hosts: files dns\n")
+        with self.assertRaisesRegex(BootGuardError, "FOREIGN_ROUTE"):
+            manager.apply(manifest())
+        self.assertFalse(kernel.priority)
 
     def test_real_linux_unused_fib_table_is_not_a_false_collision(self):
         kernel = FakeKernel()

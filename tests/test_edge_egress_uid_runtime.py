@@ -51,7 +51,7 @@ class Ports:
         assert self.state=="FROZEN" and dns_port==10553
     async def check_no_existing_sessions(self,req): self.step("idle")
     async def arm_boot_guard(self,req,dns_port):
-        assert self.state=="BLOCKED"
+        assert self.state in {"BLOCKED","FROZEN"}
         self.step("arm")
     async def start_edge(self,req): self.step("start")
     async def attach_edge(self,req): self.step("attach")

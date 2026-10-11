@@ -61,6 +61,8 @@ class RuntimePorts(Protocol):
     async def check_session_gate(self, request: UIDPolicyRequest): ...
     async def reserve_blocked(self, operation_id: int, request: UIDPolicyRequest,
                               source: str, dns_port: int): ...
+    async def assert_frozen_binding(self, operation_id: int, request: UIDPolicyRequest,
+                                    source: str): ...
     async def check_no_existing_sessions(self, request: UIDPolicyRequest): ...
     async def arm_boot_guard(self, request: UIDPolicyRequest, dns_port: int): ...
     async def start_edge(self, request: UIDPolicyRequest): ...
@@ -77,7 +79,7 @@ class RuntimePorts(Protocol):
 
 async def attach_protected(
     ports: RuntimePorts, request: UIDPolicyRequest, *, source: str,
-    dns_port: int, authorized: bool = False,
+    dns_port: int, authorized: bool = False, resume_frozen: bool = False,
 ) -> RuntimeOutcome:
     """Atomic-intent/journaled attach. No Core fallback or canary restore."""
     request.validate()
@@ -94,6 +96,7 @@ async def attach_protected(
     reserved = False
     mutation_possible = False
     protection_committed = False
+    binding_state = "FROZEN" if resume_frozen else "BLOCKED"
 
     async def record(status, details=None):
         await ports.journal(operation_id, status, phase, details or {})
@@ -110,7 +113,10 @@ async def attach_protected(
 
         phase = "EGRESS_UID_RUNTIME_BLOCK_INTENT"
         await record("RUNNING")
-        await ports.reserve_blocked(operation_id, request, source, dns_port)
+        if resume_frozen:
+            await ports.assert_frozen_binding(operation_id, request, source)
+        else:
+            await ports.reserve_blocked(operation_id, request, source, dns_port)
         reserved = True
 
         # Check AFTER persistent blocked intent, so fresh SSH auth is denied.
@@ -131,7 +137,8 @@ async def attach_protected(
         await record("RUNNING")
         await ports.attach_edge(request)
         await ports.transition(operation_id, request, source,
-                               "BLOCKED", "ROUTED_UNVERIFIED")
+                               binding_state, "ROUTED_UNVERIFIED")
+        binding_state = "ROUTED_UNVERIFIED"
 
         phase = "EGRESS_UID_RUNTIME_PROVE"
         await record("RUNNING")
@@ -143,6 +150,7 @@ async def attach_protected(
         phase = "EGRESS_UID_RUNTIME_COMMIT_PROTECTED"
         await record("RUNNING")
         await ports.commit_protected(operation_id, request, source)
+        binding_state = "PROTECTED"
         protection_committed = True
 
         phase = "EGRESS_UID_RUNTIME_PROTECTED"
@@ -166,12 +174,7 @@ async def attach_protected(
                 if reserved:
                     # FROZEN/HOLD intent remains; never delete protected
                     # mapping nor allow a normal Core fallback.
-                    prior = ("PROTECTED" if protection_committed else
-                             "ROUTED_UNVERIFIED" if phase in {
-                                 "EGRESS_UID_RUNTIME_PROVE",
-                                 "EGRESS_UID_RUNTIME_COMMIT_PROTECTED",
-                                 "EGRESS_UID_RUNTIME_PROTECTED",
-                             } else "BLOCKED")
+                    prior = binding_state
                     try:
                         await ports.transition(operation_id, request, source,
                                                prior, "HOLD")

@@ -307,6 +307,7 @@ from edge_egress_lifecycle import (
     legacy_failover_gate,
     legacy_new_edge_gate,
 )
+from edge_egress_handoff import is_egress_recovery_hold
 from incident_observability import (
     INCIDENT_STATE_EVIDENCE_DEGRADED,
     INCIDENT_STATE_FAILOVER_BLOCKED,
@@ -1642,6 +1643,17 @@ def _db_get_setting(k, d):
         row = conn.execute("SELECT value FROM settings WHERE key=?", (k,)).fetchone()
         return row[0] if row else d
 
+
+def _db_assert_legacy_host_mutation_allowed(conn):
+    """Reject unjournaled host/account writes in protected mode, in same DB TX."""
+    row = conn.execute(
+        "SELECT value FROM settings WHERE key=?", (PROTECTED_SETTING_KEY,)
+    ).fetchone()
+    setting = row[0] if row else PROTECTED_SETTING_DEFAULT
+    gate = legacy_failover_gate(setting)
+    if not gate.allowed:
+        raise RuntimeError(gate.reason)
+
 def _hosts_fallback_with_warning(context_hint=""):
     """
     فقط وقتی صدا زده می‌شود که تنظیم 'hosts' واقعاً خالی از هر IP معتبر باشد (نه حالت عادی).
@@ -1653,7 +1665,10 @@ def _hosts_fallback_with_warning(context_hint=""):
                 f" ({context_hint})" if context_hint else "")
     return LAST_RESORT_HOST_IP
 def _db_update_setting(k, v):
-    with db_conn() as conn: conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, v))
+    with db_conn() as conn:
+        if k in {"hosts", "dns_current_ip", "tls_passthrough"}:
+            _db_assert_legacy_host_mutation_allowed(conn)
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, v))
 
 
 def _build_server_settings_kb():
@@ -2715,6 +2730,7 @@ def _db_record_admin_host_check(host, ok, reason=None):
 def _db_set_host_active(host, active: bool, reason=None):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with db_conn() as conn:
+        _db_assert_legacy_host_mutation_allowed(conn)
         if active:
             conn.execute("UPDATE host_pool SET active=1, consecutive_fails=0, disabled_reason=NULL, disabled_at=NULL, last_status='🟢 سالم', last_check=? WHERE host=?", (now, host))
         else:
@@ -2722,6 +2738,7 @@ def _db_set_host_active(host, active: bool, reason=None):
 def _db_add_host_pool(host):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with db_conn() as conn:
+        _db_assert_legacy_host_mutation_allowed(conn)
         row = conn.execute("SELECT value FROM settings WHERE key='port'").fetchone()
         service_port = _normalize_ssh_port(row[0] if row else 22, 22)
         conn.execute(
@@ -2743,6 +2760,7 @@ def _db_remove_host_pool(host):
 def _db_set_host_standby(host, is_standby: bool):
     """🆕 علامت‌گذاریِ یک Edge به‌عنوانِ Standby (بدونِ مشتریِ فعال، آمادهٔ Failover)."""
     with db_conn() as conn:
+        _db_assert_legacy_host_mutation_allowed(conn)
         conn.execute("UPDATE host_pool SET is_standby=? WHERE host=?", (1 if is_standby else 0, host))
 
 def _db_get_standby_hosts():
@@ -2998,12 +3016,16 @@ def _db_acquire_failover_lock(source_host, target_host, *, mode=FAILOVER_MODE_MA
     with db_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT id, updated_at FROM failover_operations "
+            "SELECT id, updated_at, detail_json FROM failover_operations "
             "WHERE status=? ORDER BY id DESC LIMIT 1",
             (FAILOVER_STATUS_RUNNING,),
         ).fetchone()
         if row:
-            lock_id, updated_at = row
+            lock_id, updated_at, detail_json = row
+            # An interrupted protected Egress cutover must not have its 6G
+            # shared lock auto-recovered while routes/DB/DNS may be uncertain.
+            if is_egress_recovery_hold(detail_json):
+                return None, lock_id
             try:
                 age = (now_dt - _parse_flexible_datetime(updated_at)).total_seconds()
             except Exception:
@@ -3389,6 +3411,7 @@ def _db_get_host_provider_meta(host):
 # 🆕 «پیش‌فرض کل سیستم» — فقط یک IP در هر لحظه می‌تواند این باشد
 def _db_set_default_host(host):
     with db_conn() as conn:
+        _db_assert_legacy_host_mutation_allowed(conn)
         conn.execute("UPDATE host_pool SET is_default=0")
         conn.execute("UPDATE host_pool SET is_default=1 WHERE host=?", (host,))
 def _db_get_default_host():
@@ -3849,6 +3872,7 @@ def _db_resync_host_pool_from_full_list(hosts_list):
     host_pool را با همان لیست هماهنگ می‌کند: مواردی که در لیست جدید هستند فعال می‌شوند، مواردی
     که حذف شده‌اند غیرفعال می‌شوند (نه پاک) تا تاریخچه/آمار پایش از بین نرود."""
     with db_conn() as conn:
+        _db_assert_legacy_host_mutation_allowed(conn)
         existing = {r[0] for r in conn.execute("SELECT host FROM host_pool").fetchall()}
         wanted = set(hosts_list)
         for h in hosts_list:
@@ -4129,6 +4153,7 @@ def _db_set_hosts_bulk(usernames, host):
 def _db_set_all_accounts_host(host):
     with db_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        _db_assert_legacy_host_mutation_allowed(conn)
         _db_assert_account_write_allowed(conn)
         conn.execute("UPDATE ssh_accounts SET host=? WHERE status != '⏳ درحال ساخت'", (host,))
 def _db_get_recent_active_accounts(days=7):

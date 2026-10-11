@@ -320,6 +320,7 @@ from edge_egress_entrypoints import (
     edge_guard_message,
 )
 from edge_egress_status import read_egress_status, render_egress_status_html
+from edge_egress_f3_admin import render_assignment_preview
 from incident_observability import (
     INCIDENT_STATE_EVIDENCE_DEGRADED,
     INCIDENT_STATE_FAILOVER_BLOCKED,
@@ -10615,6 +10616,18 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.pop('state', None)
             await update.message.reply_text(edge_guard_message(edge_gate.reason))
             return
+
+    # F3: administrator-only Egress assignment PREVIEW, no DB/route mutation.
+    if state == 'EGRESS_F3_PLAN_INPUT':
+        context.user_data.pop('state', None)
+        if role != 'admin':
+            await update.message.reply_text("⛔️ دسترسی فقط برای مدیر مجاز است.")
+            return
+        preview = await asyncio.to_thread(
+            render_assignment_preview, db_conn, text
+        )
+        await update.message.reply_text(preview, parse_mode="HTML")
+        return
 
     # 🚚 Change Server wizard input. Secrets stay only in the module-level
     # in-memory session store; user_data persists only the non-secret step name.
@@ -23342,6 +23355,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d == "hp_filtering" and role == 'admin':
         await _render_filtering_monitor_panel(query)
 
+    elif d == "hpeg_plan":
+        # F3: bounded read-only plan preview; no provisioning or assignment.
+        if role != 'admin':
+            await query.message.reply_text("⛔️ دسترسی فقط برای مدیر مجاز است.")
+            return
+        context.user_data['state'] = 'EGRESS_F3_PLAN_INPUT'
+        await query.edit_message_text(
+            "🛡️ <b>پیش‌نمایش تخصیص Egress</b>\\n\\n"
+            "نام کاربر و شناسه Edge را با فاصله ارسال کنید.\\n"
+            "مثال: <code>nvl0557 fra1</code>\\n\\n"
+            "این بررسی فقط خواندنی است و هنوز کاربری منتقل نمی‌شود.",
+            parse_mode="HTML",
+        )
+        return
+
     elif d == "hpeg_status":
         # D1-C2B2: a strictly read-only status screen, NOT an enable button.
         if role != 'admin':
@@ -23352,6 +23380,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             render_egress_status_html(egress_status),
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("👤 پیش‌نمایش تخصیص کاربر", callback_data="hpeg_plan")],
                 [InlineKeyboardButton("🔙 سرویس IP", callback_data="hp_menu")]
             ]),
         )

@@ -14,7 +14,6 @@ from typing import Callable
 from edge_egress_uid_boot import BootGuardManifest, BootGuardApplier
 from edge_egress_uid_dns import DNSError, validate_nss_hosts, plan_transparent_dns
 from edge_egress_uid_policy import build_policy_plan
-from edge_egress_handoff import is_egress_recovery_hold
 
 
 class RecoveryState(str, Enum):
@@ -71,8 +70,9 @@ def assess_recovery(observation: RecoveryEvidence) -> RecoveryDecision:
 
 def has_6g_recovery_hold(rows) -> bool:
     """Takes SELECTed (status, detail_json) rows; never mutates SQLite."""
-    return any(status == "RUNNING" and is_egress_recovery_hold(detail)
-               for status, detail in rows)
+    # Any shared 6G RUNNING operation can race the protected boot audit.
+    # Treat unfamiliar phases as ambiguous, never as authorization.
+    return any(status == "RUNNING" for status, _detail in rows)
 
 
 def _run(*args: str):
@@ -140,6 +140,8 @@ def inspect_recovery(manifest: BootGuardManifest, *,
                         "--value").split()
     # systemd requires list may be space-delimited and reordered.
     required = ssh_unit_name in dependency
+    if manifest.dns_port is not None:
+        required = required and ("nvl-egress-dns-" + request.username + ".service") in dependency
     marker = marker_dir / (request.username + "-" + request.spec.edge_id + ".json")
 
     evidence = RecoveryEvidence(

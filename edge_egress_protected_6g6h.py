@@ -18,6 +18,7 @@ this module until those ports and VM proof are reviewed and exercised.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol, Optional
 
 from edge_egress_handoff import (
@@ -156,6 +157,7 @@ async def run_guarded_6g6h_handoff(
     trigger: str,
     incident_ref: str | None = None,
     explicitly_approved_for_isolated_lab: bool = False,
+    now: datetime | None = None,
 ) -> HandoffResult:
     """Runs the existing 6G saga only through guarded, reviewed semantics.
 
@@ -175,4 +177,4 @@ async def run_guarded_6g6h_handoff(
     if not explicitly_approved_for_isolated_lab:
         return HandoffResult(False, "PROTECTED_HANDOFF_RELEASE_NOT_APPROVED", None)
     adapter = _GuardedPorts(ports, trigger, incident_ref)
-    return await run_protected_handoff(adapter, source_host, target_host)
+    return await run_protected_handoff(adapter, source_host, target_host, now=now)

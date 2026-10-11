@@ -44,6 +44,11 @@ class StoreTests(unittest.TestCase):
                   source_host TEXT, target_host TEXT);
                 INSERT INTO failover_operations VALUES
                   (42,'RUNNING','172.86.94.174','216.126.229.12');
+                CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT);
+                INSERT INTO settings VALUES('dns_current_ip','172.86.94.174');
+                CREATE TABLE host_pool(host TEXT PRIMARY KEY,
+                  active INTEGER,is_default INTEGER);
+                INSERT INTO host_pool VALUES('172.86.94.174',1,1);
                 CREATE TABLE ssh_accounts(
                   username TEXT PRIMARY KEY,host TEXT,
                   service_type TEXT,status TEXT);
@@ -158,6 +163,37 @@ class StoreTests(unittest.TestCase):
             ).fetchone())
         self.store.transition(42,req(),source=SOURCE,expected="FROZEN",
                               target="HOLD")
+
+    def test_wrong_source_default_or_dns_prevents_binding(self):
+        for statement in (
+            "UPDATE host_pool SET is_default=0",
+            "UPDATE settings SET value='209.200.246.198' WHERE key='dns_current_ip'",
+        ):
+            with self.subTest(statement=statement):
+                with self.conn() as c:
+                    c.execute(statement)
+                with self.assertRaises(RuntimeStoreUnsafe):
+                    self.store.reserve_blocked(42,req(),source=SOURCE,dns_port=10553)
+                with self.conn() as c:
+                    c.execute("UPDATE host_pool SET is_default=1")
+                    c.execute("UPDATE settings SET value=? WHERE key='dns_current_ip'",
+                              (SOURCE,))
+
+    def test_only_valid_frozen_protected_binding_can_resume(self):
+        self.store.reserve_blocked(42,req(),source=SOURCE,dns_port=10553)
+        with self.assertRaisesRegex(RuntimeStoreUnsafe, "FROZEN_BINDING"):
+            self.store.assert_frozen_binding(42,req(),source=SOURCE)
+        self.store.transition(42,req(),source=SOURCE,expected="BLOCKED",
+                              target="ROUTED_UNVERIFIED")
+        self.store.commit_protected(42,req(),source=SOURCE)
+        self.store.transition(42,req(),source=SOURCE,expected="PROTECTED",
+                              target="FROZEN")
+        self.assertEqual(self.store.assert_frozen_binding(
+            42,req(),source=SOURCE).state,"FROZEN")
+        with self.conn() as c:
+            c.execute("DELETE FROM edge_egress_uid_bindings")
+        with self.assertRaisesRegex(RuntimeStoreUnsafe,"FROZEN_PROTECTED"):
+            self.store.assert_frozen_binding(42,req(),source=SOURCE)
 
     def test_foreign_edge_allocation_cannot_be_bound(self):
         with self.conn() as c:

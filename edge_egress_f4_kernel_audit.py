@@ -40,7 +40,13 @@ def inspect_uid_kernel(manifest: BootGuardManifest, *,
     req=manifest.request
     try:
         req.validate()
-        guard_factory().verify(manifest)
+        # A frozen UID on a shared Edge may coexist with an attached default
+        # used by other subscribers: require the exact per-UID deny fence.
+        guard_factory().verify(
+            manifest,
+            **({"require_frozen": True} if manifest.shared_edge
+               and expected_state in ("FROZEN", "HOLD") else {}),
+        )
     except (BootGuardError, ValueError, OSError):
         return F4KernelAudit(False,"UID_BOOT_GUARD_UNVERIFIED",
                              ("BOOT_GUARD_OR_DNS_IPV6_RULE_MISSING",))
@@ -54,6 +60,7 @@ def inspect_uid_kernel(manifest: BootGuardManifest, *,
         state=inspect_owned_routes(
             routes.stdout,next_hop=req.spec.ns_veth_ip,
             device=req.spec.veth_root,source=req.spec.root_veth_ip,
+            allow_ingress_return=manifest.ingress_return,
         )
         if not state.terminal_blackhole:
             raise ProtectedRouteError("MISSING_BLACKHOLE")
@@ -61,6 +68,10 @@ def inspect_uid_kernel(manifest: BootGuardManifest, *,
         return F4KernelAudit(False,"OWNED_ROUTING_UNVERIFIED",
                              ("ROUTE_TABLE_AMBIGUOUS",))
     if expected_state in ("FROZEN","HOLD"):
+        if manifest.shared_edge:
+            # Exact per-UID reject has already been verified above; the
+            # shared Edge next hop must not be removed for other users.
+            return F4KernelAudit(True,"LOCAL_UID_FENCE_CONSISTENT",())
         if state.edge_attached:
             return F4KernelAudit(False,"DENY_ONLY_NOT_ENFORCED",
                                  ("EDGE_ATTACHED_WHILE_FROZEN",))

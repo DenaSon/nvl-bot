@@ -226,6 +226,37 @@ class BootTests(unittest.TestCase):
         self.assertFalse(kernel.guards)
         self.assertFalse(kernel.blackhole)
 
+    def test_real_iproute2_trailing_space_preserves_strict_ingress_check(self):
+        # Reproduce K2-B26 on Core: iproute2 printed a space before each LF.
+        from dataclasses import replace
+        from edge_egress_uid_policy import build_policy_plan
+
+        m = replace(manifest(dns=None), ingress_return=True, shared_edge=True)
+        kernel = FakeKernel()
+        kernel.priority = True
+        kernel.blackhole = True
+        for guard in build_policy_plan(m.request).guard[:3]:
+            kernel(*guard.argv)
+
+        route = ("blackhole default metric 4096 \n"
+                 "10.77.0.0/24 dev wg0 scope link src 10.77.0.1 \n")
+
+        def fake_run(*args):
+            if args == ("ip", "-4", "route", "show", "table", "1780"):
+                return SimpleNamespace(returncode=0, stdout=route)
+            return kernel(*args)
+
+        boot = BootGuardApplier(
+            run=fake_run, get_uid=lambda _: 1644, geteuid=lambda: 0,
+            read_nss=lambda: "hosts: files dns\n",
+        )
+        boot.verify(m)  # Exact route exists despite trailing spaces.
+
+        # Whitespace tolerance must NOT accept an incorrect return route.
+        route = route.replace("10.77.0.1", "10.77.0.9")
+        with self.assertRaisesRegex(BootGuardError, "FOREIGN_ROUTE"):
+            boot.verify(m)
+
     def test_zero_live_operations_during_manifest_parse(self):
         x = manifest(dns=None)
         self.assertEqual(x.request.uid, 1644)

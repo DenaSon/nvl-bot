@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import json
+from ipaddress import IPv4Address
+import re
 import os
 from pathlib import Path
 import pwd
@@ -107,6 +109,28 @@ def examine_core(conn: sqlite3.Connection, *, username: str,
     return CorePreflight(not errors,tuple(dict.fromkeys(errors)))
 
 
+def sshd_connection_spec(*, username: str, local_addr: str,
+                         remote_addr: str, local_port: int) -> str:
+    """Pin the real SSH listener/peer for Match LocalPort/Address checks.
+
+    Core's public IP need not be the local socket address: wg0 ingress uses
+    10.77.0.1:2252. Never silently fall back to a localhost-only Match.
+    """
+    if not isinstance(username, str) or re.fullmatch(
+        r"[a-z_][a-z0-9_-]{0,31}", username
+    ) is None or type(local_port) is not int or not 1 <= local_port <= 65535:
+        raise ValueError("INVALID_SSH_CONNECTION_IDENTITY")
+    try:
+        local = str(IPv4Address(local_addr))
+        remote = str(IPv4Address(remote_addr))
+    except (ValueError, TypeError) as exc:
+        raise ValueError("INVALID_SSH_CONNECTION_IPV4") from exc
+    if local != local_addr or remote != remote_addr:
+        raise ValueError("NON_CANONICAL_SSH_CONNECTION_IPV4")
+    return (f"user={username},host=localhost,addr={remote},"
+            f"laddr={local},lport={local_port}")
+
+
 def main(argv=None):
     parser=argparse.ArgumentParser(description="NVL F4 Core READ-ONLY preflight")
     parser.add_argument("--db",default="/root/master_bot.db")
@@ -117,6 +141,12 @@ def main(argv=None):
     parser.add_argument("--edge-ip",required=True)
     parser.add_argument("--reviewed-gate-sha256",required=True,
                         help="SHA256 of the independently reviewed PAM hook file")
+    parser.add_argument("--ssh-local-addr",required=True,
+                        help="Actual Core socket IP (e.g. wg0 10.77.0.1)")
+    parser.add_argument("--ssh-remote-addr",required=True,
+                        help="Core-observed peer address from ingress wg0")
+    parser.add_argument("--ssh-local-port",required=True,type=int,
+                        help="Actual Core SSHD local port; Match LocalPort needs lport")
     args=parser.parse_args(argv)
     blockers=[]
     try:
@@ -125,8 +155,12 @@ def main(argv=None):
         os_uid=pwd.getpwnam(args.username).pw_uid
         pam=Path("/etc/pam.d/sshd").read_text(encoding="utf-8")
         effective=subprocess.run(
-            ["sshd","-T","-C",
-             f"user={args.username},host=localhost,addr=127.0.0.1"],
+            ["sshd","-T","-C",sshd_connection_spec(
+                username=args.username,
+                local_addr=args.ssh_local_addr,
+                remote_addr=args.ssh_remote_addr,
+                local_port=args.ssh_local_port,
+            )],
             capture_output=True,text=True,timeout=8,check=False,
         )
         if effective.returncode:

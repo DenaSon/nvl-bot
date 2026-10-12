@@ -40,7 +40,9 @@ class TwoHostTopologyTests(TestCase):
             marker_sha256=hashlib.sha256(b"test-lab-marker").hexdigest(),
             machine_id="a" * 32,
         )
-        with patch("edge_egress_r1_lab_topology.os.geteuid", return_value=0), patch(
+        with patch("edge_egress_r1_lab_topology._LAB_MARKER_SHA256", attestation.marker_sha256), patch(
+            "edge_egress_r1_lab_topology._LAB_MACHINE_ID", attestation.machine_id
+        ), patch("edge_egress_r1_lab_topology.os.geteuid", return_value=0), patch(
             "edge_egress_r1_lab_topology.Path.read_text", return_value="a" * 32
         ), patch(
             "edge_egress_r1_lab_topology.pwd.getpwnam",
@@ -133,14 +135,17 @@ class LeaseSourceTests(TestCase):
         with patch(
             "edge_egress_r1_lab_launcher.Existing6GR1LeaseProbe.active",
             return_value=True,
-        ) as live:
+        ) as live, patch.object(
+            TwoHostCoreIngress, "for_request", return_value=True
+        ) as identity:
             self.assertFalse(CurrentBridge6GLease(bridge).for_request(req()))
             self.assertFalse(CurrentBridge6GLease(
-                bridge, lambda r, source: False
+                bridge, lambda r, source: True
             ).for_request(req()))
             self.assertTrue(CurrentBridge6GLease(
-                bridge, lambda r, source: source == spec().core_public_ipv4
+                bridge, TwoHostCoreIngress()
             ).for_request(req()))
+            identity.assert_called_once()
             live.assert_called_once()
 
     def test_f2_core_ingress_refused_without_attestation(self):
@@ -153,16 +158,18 @@ class LeaseSourceTests(TestCase):
             dns_port=10553, authorized=True,
         ))
         self.assertEqual(original.reason, "INVALID_SOURCE_EDGE")
-        allowed = asyncio.run(attach_protected(
-            port, req(), source=spec().core_public_ipv4,
-            dns_port=10553, authorized=True,
-            lab_core_ingress_attestor=lambda r, source: True,
-        ))
+        with patch.object(TwoHostCoreIngress, "for_request",
+                          return_value=True):
+            allowed = asyncio.run(attach_protected(
+                port, req(), source=spec().core_public_ipv4,
+                dns_port=10553, authorized=True,
+                lab_core_ingress_attestor=TwoHostCoreIngress(),
+            ))
         self.assertEqual(allowed.reason, "SHARED_6G_BUSY")
         denied = asyncio.run(attach_protected(
             port, req(), source=spec().core_public_ipv4,
             dns_port=10553, authorized=True,
-            lab_core_ingress_attestor=lambda r, source: False,
+            lab_core_ingress_attestor=lambda r, source: True,
         ))
         self.assertEqual(denied.reason, "INVALID_SOURCE_EDGE")
 

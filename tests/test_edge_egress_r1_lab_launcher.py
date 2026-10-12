@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from edge_egress_r1_lab_launcher import (
     LabHost, LabSSHExecutor, R1Lab6GShadow, R1LabUnsafe,
+    CurrentBridge6GLease, bind_disposable_lab_shadow,
 )
 from edge_egress_r1_lab_agent import LabAgentUnsafe, _request, execute, main
 from edge_egress_r1_transport import R1Observation
@@ -134,6 +135,56 @@ class R1Lab6GTests(unittest.TestCase):
         candidate = Existing6GR1LeaseProbe(
             lambda: None, 1, spec().core_public_ipv4, spec().edge_public_ipv4)
         self.assertFalse(candidate.for_request(self.req))
+
+
+class R1LabBridgeBindingTests(unittest.TestCase):
+    def _bridge(self):
+        from edge_egress_uid_runtime_bridge import Existing6GUIDRuntimeBridge
+        return Existing6GUIDRuntimeBridge(
+            db_conn=lambda: None,
+            acquire_fn=lambda *_: None,
+            update_fn=lambda *_args, **_kwargs: None,
+            os_uid_for_username=lambda _: 1555,
+            kernel=object(),
+            session_gate_probe=lambda _: True,
+            existing_sessions_probe=lambda _: True,
+        )
+
+    def test_bridge_uses_acquired_live_operation_not_a_foreign_lock(self):
+        bridge = self._bridge()
+        lease = CurrentBridge6GLease(bridge)
+        req = UIDPolicyRequest(spec(), "labuser", 1555, 1791)
+        self.assertFalse(lease.for_request(req))
+        bridge.operation_id = 19
+        bridge.source = "172.86.94.174"
+        bridge.target = spec().edge_public_ipv4
+        with patch("edge_egress_r1_lab_launcher.Existing6GR1LeaseProbe.for_request",
+                   return_value=True) as check:
+            self.assertTrue(lease.for_request(req))
+        check.assert_called_once_with(req)
+        bridge.target = spec().core_public_ipv4
+        # With an actual store probe, source/target pinning is checked by F2.
+        with patch("edge_egress_r1_lab_launcher.Existing6GR1LeaseProbe.for_request",
+                   return_value=False):
+            self.assertFalse(lease.for_request(req))
+
+    def test_bind_defaults_off_and_refuses_replacement(self):
+        bridge = self._bridge()
+        port = bind_disposable_lab_shadow(
+            bridge, spec=spec(), guard_check=lambda _: True,
+            edge=host("edge"), core=host("core"),
+            ssh=LabSSHExecutor(Path("/root/k"), Path("/root/h")),
+        )
+        self.assertIs(bridge.shadow, port)
+        self.assertFalse(port.explicitly_enabled)
+        self.assertFalse(port.disposable_vps)
+        self.assertIsInstance(port.shared_lease, CurrentBridge6GLease)
+        with self.assertRaisesRegex(R1LabUnsafe, "BRIDGE_NOT_FRESH"):
+            bind_disposable_lab_shadow(
+                bridge, spec=spec(), guard_check=lambda _: True,
+                edge=host("edge"), core=host("core"),
+                ssh=LabSSHExecutor(Path("/root/k"), Path("/root/h")),
+            )
 
 
 class R1LabSSHTests(unittest.TestCase):

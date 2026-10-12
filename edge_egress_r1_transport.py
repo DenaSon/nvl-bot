@@ -283,7 +283,7 @@ def inspect_linux(spec: EgressSpec, role: str, *, run=_run,
         stage = stage_root / (spec.edge_id + "-" + role)
         try:
             wg_text = (stage / "wg.conf").read_text(encoding="utf-8")
-            peer_keys = re.findall(r"(?m)^PublicKey\\s*=\\s*(\\S+)\\s*$", wg_text)
+            peer_keys = re.findall(r"(?m)^PublicKey\s*=\s*(\S+)\s*$", wg_text)
         except (OSError, UnicodeError):
             peer_keys = []
         if len(peer_keys) == 1:

@@ -134,7 +134,8 @@ class Phase2TelegramTests(unittest.TestCase):
             ("e7", "144.172.84.72", "STAGED"))
         card = get_card(self.read(), "e7")
         self.assertFalse(card.ingress_verified)
-        self.assertEqual(card.allocation, "STAGED")
+        self.assertEqual(card.ip, EDGE)
+        self.assertEqual(card.allocation, "IDENTITY_CONFLICT")
         self.assertFalse(card.can_probe)
         self.assertIn("تأیید نشده", detail_html(card))
 

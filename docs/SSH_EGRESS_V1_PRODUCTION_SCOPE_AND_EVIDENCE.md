@@ -355,3 +355,12 @@ Decision:                                    P0 HOLD or propose ONE-UID change
 **مسیرهای محلی حساس، فقط برای Operator:** Core Backup `/root/nvl-egress-backups/core-20261012-153159-0MgVNi`؛ prep `/root/nvl-egress-mia1-prep`؛ Core stage `/root/nvl-egress-mia1-core-stage`؛ Edge prep `/root/nvl-egress-mia1-prep`؛ Edge stage `/root/nvl-egress-mia1-edge-stage`. **فایل‌های حاوی Private Key یا credential منتشر نشوند.** اجرای `down.sh` ساده بعد از اتصال UID به Route، rollback امن نیست؛ ابتدا Loginهای جدید deny، Sessionها مدیریت و Fail-Closed حفظ شود.
 
 **تغییر مستندات فقط با درخواست صریح اپراتور.**
+
+
+## 15) Dynamic Egress V1 implementation kickoff — 2026-10-12
+
+**User-approved development scope:** Complete Dynamic SSH Egress V1 code first; only after code delivery and a short CI suite, deploy once under a controlled operator-led procedure, then validate by provisioning **one NEW Edge** rather than repeating an unbounded set of historical experiments. Preserve Core SSHD, legacy `wg0`, 6G/6H implementation and current customer sessions. Update context and essential development documents after each stage. This §15 and [the delivery ledger](SSH_EGRESS_DYNAMIC_V1_DELIVERY.md) supersede earlier development-priority wording, but DO NOT supersede the safety evidence or production approval boundary.
+
+**F1 completed on branch, not deployed:** New `ops/edge_egress_v1_transport.py` is an idempotent dedicated Egress transport supervisor for any Edge ID, with SHA-pinned root-only stage files and conservative HOLD on resource collision/partial state. It renders only an optional systemd unit, does not install/enable it or touch customer UID, SSH/PAM, `wg0`, default route or bot. Six lightweight pure Python unit tests are checked in. **This alone does not fix the reboot fail-open issue** and is not customer-ready. No real production change in this stage.
+
+**Next:** F2 persistent deny-first UID guard and admission; G shared Edge multi-UID; H true ingress/session binding; I Egress in existing Edge onboarding; J 6H integration; K one gated deployment followed by NEW-Edge end-to-end acceptance. Full details and per-stage progress tracking: `docs/SSH_EGRESS_DYNAMIC_V1_DELIVERY.md`.

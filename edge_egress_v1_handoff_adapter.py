@@ -124,6 +124,14 @@ class Existing6GProtectedHandoffAdapter:
             for k, v in details.items()
         ):
             raise PositiveHandoffHold("UNSAFE_JOURNAL_DETAILS")
+        # Candidate staging may modify host-local WireGuard resources.
+        # Use protected phase names already recognized by 6G stale-lock
+        # recovery, before the first irreversible host operation.
+        if status == "RUNNING" and phase in {
+            "CANDIDATE_STAGE", "DEDICATED_PEER_REKEY",
+            "EXTERNAL_EGRESS_PROOF", "REVALIDATE_OWNERSHIP_AND_ALLOCATION",
+        }:
+            phase = "EGRESS_GUARDED_" + phase
         safe = {"phase": phase, "kind": "PROTECTED_EGRESS_J", **details}
         await asyncio.to_thread(
             self.journal_fn, operation_id, status=status, detail=safe,

@@ -83,3 +83,20 @@ The next safely deployable source step after PR #107 is **B2: exact Edge Stage i
 ### Phase 2 next source increment
 
 A **reviewed, disabled-by-default command-intent/controller** for pinned Edge provisioning and per-UID `freeze/attach/release`, with state-machine, TTL/nonce, 6G lease, root-owned PAM/DoH/boot admission and rollback. **Do not wire execute callbacks** before testable authority and Phase 1 release gates. Track via Issue #108.
+
+## Phase 2 — B3 operator review intents (source checkpoint, 2026-10-13)
+
+**Implementation PR:** Phase 2 B3 adds an immutable, read-only `edge_egress_phase2_review.py` and Telegram callbacks **inside** the existing `🛡 مدیریت Egress` panel. The UI is designed as a safe prerequisite for a future privileged controller; **NO live apply/ensure/attach/freeze/CLI command exists in this increment**.
+
+### Telegram interaction
+
+- Edge details → **🧭 طرح آماده‌سازی Edge (بدون اجرا)** → operator plan with current trusted identity, F3 allocation state, independent Stage pin/runtime observation, F4 acceptance and existing 6G RUNNING status.
+- Edge details → **👤 پیش‌نمایش تخصیص کاربر**, input one username within 120 seconds → choose **📋 طرح تخصیص (بدون اجرا)** or **🧊 طرح توقف امن (بدون اجرا)**. User selection is held briefly in `context.user_data` (username/Edge/actor/chat/expiry), not a password/UID token. It is consumed **before** any asynchronous review building. `ssh_accounts.host` is shown explicitly as the *existing DB ingress host*, not confused with the selected egress.
+- Each plan is **HOLD** regardless of staged files, `wg-nvl-e7 UP` or a claimed READY flag: additional blockers always include independently accepted PAM/Boot/rescue, DNS/IPv6/transport-loss safety, and a valid shared 6G privileged executor. An independent Stage hash/local observation is not permitted to write the DB pin.
+- **👁 تأیید مطالعه طرح (بدون اجرا)** issues a cryptographically random, 120-second **read-only receipt** bound to Telegram actor ID + chat ID + action + Edge + username + SHA256 fingerprint of the inspected F3/F4/Stage/account/6G snapshot. Upon click, the stored ticket is popped **before** any await; the evidence is re-read and the digest must match. Expiry, username change, changed 6G lease, changed F4/Stage evidence, replay, another chat or forged token all return HOLD. A successful receipt says **REVIEW_ACKNOWLEDGED_NO_EXECUTION**; this is NOT approval/authorization to mutate the system.
+- **Source guarantee:** `EXECUTOR_ENABLED = False`; no apply API, routes, PAM, systemd, DNS or Cloudflare updater. Telegram code only reads the existing DB and root-owned pre-existing Stage, invokes the pure planner and renders markup. Neither receipt nor private chat message creates a 6G lease or stores an action journal. This UI *cannot* be used to change live customer state.
+- Offline tests: invalid actions/usernames, e7 ingress-only, synthetic forged F4 READY still HOLD, read-only SQL traces, running 6G operation drift, expiring nonce, cross-user/chat denial, replay, stale operator plan and Telegram callback role gates.
+
+### Remaining before enabling actual execution
+
+The **next** source milestone is a separate privileged `6G`-journaled executor with a sealed root-only command allowlist and deterministic recovery, tested against disposable hosts before integrating *any* Telegram execute callback. It must re-read F4/PAM/Boot/DoH/UID/host key evidence **inside** the acquired shared lease; this B3 receipt must never be treated as its authority. Phase 1 [Issue #106](https://github.com/DenaSon/nvl-bot/issues/106) real-host acceptance remains OPEN, as does Phase 2 [Issue #108](https://github.com/DenaSon/nvl-bot/issues/108). Operator requested all Core and Edge real-world tests only at the end of implementations, not now.

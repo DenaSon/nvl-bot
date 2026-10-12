@@ -44,7 +44,7 @@ class PersistenceTests(unittest.TestCase):
             self.assertEqual(spec.edge_id, "mia1")
             self.assertEqual(peer, PEER)
             unit = p.render_unit(stage, "core", digest)
-            self.assertIn("edge_egress_v1_transport.py ensure", unit)
+            self.assertIn("ops.edge_egress_v1_transport ensure", unit)
             self.assertIn(digest, unit)
             self.assertNotIn("ExecStop=", unit)
             self.assertNotIn("ssh.service", unit)

@@ -1,6 +1,6 @@
 # NVL — Dynamic SSH Egress V1 / implementation handoff
 
-**Date:** 2026-10-12. **Branch:** `feature/ssh-egress-v1-p1f-20261012`. **Product scope:** only Core-terminated SSH/SOCKS same-Edge IPv4 egress, fail-closed, frequently changing 6H active ingress, lifecycle of new Edges and safe incremental customer rollout. No Marzban, sales, Xray, wallet, extra controller or rewriting 6G/6H.
+**Date:** 2026-10-12. **Status:** F1 merged to `master` via [PR #93](https://github.com/DenaSon/nvl-bot/pull/93), commit `0e9d976129cccbd47cb3ab6f9d14f93de468a64d`. **Product scope:** only Core-terminated SSH/SOCKS same-Edge IPv4 egress, fail-closed, frequently changing 6H active ingress, lifecycle of new Edges and safe incremental customer rollout. No Marzban, sales, Xray, wallet, extra controller or rewriting 6G/6H.
 
 ## Current real Production evidence (historical snapshot)
 
@@ -14,7 +14,7 @@
 
 | Phase | Deliverable | Current |
 |---|---|---|
-| F1 — dedicated transport supervisor | One idempotent, hash-pinned, per-Edge state probe / start, simple offline systemd unit renderer; never uninstall active resources | **Implemented on branch; CI pending** |
+| F1 — dedicated transport supervisor | One idempotent, hash-pinned, per-Edge state probe / start, simple offline systemd unit renderer; never uninstall active resources | **Merged / focused CI PASS and existing Python checks PASS** |
 | F2 — fail-closed boot and admission | Persist deny-first protections for selected users, safe recovery and service ordering, without global ssh.service dependencies; account lockdown where UID rule is absent | Not implemented |
 | G — shared-Edge multi-UID | Attach/detach individual UIDs without freezing Edge-wide default; reuse sole 6G lock/journal, no second DB/controller | Not implemented |
 | H — session-to-ingress ownership | Pin actual SSH sessions to real ingress Edge; prohibit ambiguous same-UID multi-Edge access until a verified per-session method exists | Not implemented |
@@ -37,3 +37,7 @@
 ## Immediate next action
 
 Implement **F2 deny-first boot guard/admission** next, reusing the existing F1/F2/F4 safety primitives where possible. Then G/H/I/J in order. One dedicated new test Edge will be used for the final real end-to-end acceptance; no repeated general full-lab exercise after every tiny change.
+
+### F1 acceptance record (2026-10-12)
+
+PR #93 **merged** into `master` after successful checks on the final PR head `28d00d6c12beb60958ea5c3d677d3ed8dd6530c6`: `Python checks=success`; `Edge egress stage-only checks=success` (Python 3.11 and 3.12). Squash merge `0e9d976129cccbd47cb3ab6f9d14f93de468a64d`. This proves only source checks, not Production persistence or feature completion. **Next F2, no deployment yet.**

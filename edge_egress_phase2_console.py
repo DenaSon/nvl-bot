@@ -141,7 +141,7 @@ def read_dashboard(db_conn: Callable, *,
                     if rows[edge_id][0] != ip:
                         # Same identity with contradictory public IP: no
                         # green ingress status or transport operations.
-                        rows[edge_id] = (ip, False)
+                        rows[edge_id] = (rows[edge_id][0], False)
                 else:
                     rows[edge_id] = (ip, False)
 

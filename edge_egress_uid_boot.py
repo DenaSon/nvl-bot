@@ -35,11 +35,12 @@ class BootGuardManifest:
     mode: str
     dns_port: int | None = None
     ingress_return: bool = False
+    shared_edge: bool = False
 
     @classmethod
     def parse(cls, data: dict) -> "BootGuardManifest":
         if not isinstance(data, dict) or (not {"mode", "username", "uid", "priority", "spec"} <= set(data)
-            or set(data) - {"mode", "username", "uid", "priority", "spec", "dns_port", "ingress_return"}):
+            or set(data) - {"mode", "username", "uid", "priority", "spec", "dns_port", "ingress_return", "shared_edge"}):
             raise BootGuardError("INVALID_MANIFEST_FIELDS")
         if data["mode"] != "PROTECTED_BOOT_GUARD":
             raise BootGuardError("PROTECTED_MODE_EXPLICITLY_REQUIRED")
@@ -56,7 +57,50 @@ class BootGuardManifest:
         ingress = data.get("ingress_return", False)
         if type(ingress) is not bool:
             raise BootGuardError("INVALID_INGRESS_RETURN")
-        return cls(req, data["mode"], port, ingress)
+        shared = data.get("shared_edge", False)
+        if type(shared) is not bool or (shared and not ingress):
+            raise BootGuardError("INVALID_SHARED_EDGE_MODE")
+        return cls(req, data["mode"], port, ingress, shared)
+
+
+def uid_deny_rule(uid: int, action: str = "-C") -> tuple[str, ...]:
+    """Exact per-UID IPv4 output fence. Never touches shared routes."""
+    if type(uid) is not int or not 1000 <= uid < 60000:
+        raise BootGuardError("UNSAFE_UID")
+    if action not in ("-C", "-I", "-D"):
+        raise BootGuardError("UNSAFE_FENCE_ACTION")
+    prefix = ("iptables", "-w", action, "OUTPUT")
+    if action == "-I":
+        prefix += ("1",)
+    return prefix + ("-m", "owner", "--uid-owner", str(uid), "-j", "REJECT")
+
+
+def uid_deny_present(run: Callable, uid: int) -> bool:
+    result = run(*uid_deny_rule(uid))
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise BootGuardError("UID_DENY_PROBE_FAILED")
+
+
+def arm_uid_deny(run: Callable, uid: int) -> None:
+    """Idempotent per-UID freeze with no table/default deletion."""
+    if not uid_deny_present(run, uid):
+        result = run(*uid_deny_rule(uid, "-I"))
+        if result.returncode != 0:
+            raise BootGuardError("UID_DENY_INSERT_FAILED")
+
+
+def release_uid_deny(run: Callable, uid: int) -> None:
+    """Release ONLY an already-verified exact owned per-UID fence."""
+    if not uid_deny_present(run, uid):
+        raise BootGuardError("UID_DENY_NOT_ARMED")
+    result = run(*uid_deny_rule(uid, "-D"))
+    if result.returncode != 0:
+        raise BootGuardError("UID_DENY_REMOVE_FAILED")
+    if uid_deny_present(run, uid):
+        raise BootGuardError("UID_DENY_DUPLICATE_HOLD")
 
 
 def read_root_only_manifest(path: Path) -> BootGuardManifest:
@@ -187,6 +231,9 @@ class BootGuardApplier:
 
     def apply(self, manifest: BootGuardManifest):
         plan, present = self.preflight(manifest)
+        if manifest.shared_edge:
+            # FIRST: freeze only this UID. Existing Edge subscribers stay live.
+            arm_uid_deny(self.run, manifest.request.uid)
         # First block IPv6/direct local DNS, then arm the terminal IPv4
         # blackhole, and only afterward bind the UID to the table.
         for guard in plan.guard[:3]:
@@ -212,16 +259,16 @@ class BootGuardApplier:
             source=manifest.request.spec.root_veth_ip,
             allow_ingress_return=True,
         )
-        if state.edge_attached:
+        if state.edge_attached and not manifest.shared_edge:
             self.call("ip", "-4", "route", "del", "default", "via",
                       manifest.request.spec.ns_veth_ip, "dev",
                       manifest.request.spec.veth_root, "table",
                       str(plan.table), "metric", "100")
         if not present:
             self.call(*plan.guard[4].argv)
-        self.verify(manifest)
+        self.verify(manifest, require_frozen=manifest.shared_edge)
 
-    def verify(self, manifest: BootGuardManifest) -> None:
+    def verify(self, manifest: BootGuardManifest, *, require_frozen: bool = False) -> None:
         plan, present = self.preflight(manifest)
         if not present:
             raise BootGuardError("UID_RULE_NOT_ARMED")
@@ -233,6 +280,10 @@ class BootGuardApplier:
             text,
         ):
             raise BootGuardError("INGRESS_RETURN_ROUTE_MISSING")
+        if require_frozen and manifest.shared_edge and not uid_deny_present(
+            self.run, manifest.request.uid
+        ):
+            raise BootGuardError("SHARED_UID_FENCE_MISSING")
         for guard in plan.guard[:3]:
             if self.run(*self.check_argv(guard.argv)).returncode != 0:
                 raise BootGuardError("IPV6_OR_LOCAL_DNS_GUARD_MISSING")

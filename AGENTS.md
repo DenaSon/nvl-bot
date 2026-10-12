@@ -37,6 +37,10 @@ Scope lock:
 
 **H merged on master via PR #96 (`e40d812`); Python + Stage-only PR checks PASS.** See `docs/SSH_EGRESS_DYNAMIC_V1_DELIVERY.md` H. Protected account PAM admission requires `PAM_RHOST` to equal the Core-observed `wg0` /32 of the **pinned** Edge, with a root-owned peer/public-IP registry (`/etc/nvl-egress/v1-ingress-peers.json`) and `wg show wg0 allowed-ips` proof. Unknown/mismatched peer => DENY, including after 6H relays switch. UID-only routing is sticky to one Edge: existing sessions must drain before controlled repin; H does NOT implement concurrent same-UID sessions via two different Edges. **Next I** must create/update registry from existing wg0 Edge onboarding; **J** must coordinate safe 6H switching/drain; **K** tests public SSH/SOCKS and PAM_RHOST on a NEW Edge. No Production changes, SSH/PAM install, network writes or customer migration in H. Keep tests small and docs updated.
 
+## I — Automatic Edge Onboarding source checkpoint (2026-10-12)
+
+Source branch `feature/ssh-egress-v1-i-new-edge-onboarding-20261012` adds optional **stage-only** dedicated Egress to existing `_provision_new_edge`; no new wizard. OFF unless `edge_egress_v1_onboard_enabled=1` after reviewed K rollout. Actual wg0 source /32 and Edge WG public key validated against Core's live `wg show wg0 allowed-ips` before staging Core/Edge with the existing `ops/edge_egress_provision.py`; write the root-owned H registry atomically only after both stages exist. Exact SSH host public key is pinned for the second connection. Failure => HOLD and reconciliation; never claim STAGED means READY. Existing protected-mode legacy onboarding gate stays until J can coordinate guarded activation and 6H; current F1/F2/G/H code is NOT deployed. **Next J 6H integration, then K one controlled deployment + new Edge E2E.** Keep CI light and update docs at each development stage.
+
 ## Historical context / safety controls (read second)
 
 - Production has Core-terminated SSH and a legacy WireGuard `wg0` ingress relay. Assigning `ssh_accounts.host` does **not** change Linux internet egress.

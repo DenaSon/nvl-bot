@@ -14,23 +14,26 @@ class Phase2CallbackContracts(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = BOT.read_text(encoding="utf-8")
-        begin = cls.source.index('    elif d == "hpeg_status":')
+        begin = cls.source.index('    elif d == "hpeg_status" or d.startswith("hpeg_page_"):')
         end = cls.source.index('    elif d == "flt_radar"', begin)
         cls.handler = cls.source[begin:end]
 
     def test_existing_single_dashboard_is_entry_point(self):
-        self.assertEqual(self.source.count('    elif d == "hpeg_status":'), 1)
-        self.assertIn('await asyncio.to_thread(read_egress_dashboard, db_conn)',
+        self.assertEqual(self.source.count('    elif d == "hpeg_status" or d.startswith("hpeg_page_"):'), 1)
+        self.assertIn('read_egress_dashboard, db_conn, page=page',
                       self.handler)
         self.assertIn('egress_dashboard_html(board)', self.handler)
         self.assertIn('callback_data="hp_addedge"', self.handler)
-        self.assertIn('callback_data="hpeg_status"', self.handler)
+        self.assertIn('callback_data=f"hpeg_page_{page}"', self.handler)
 
     def test_all_phase2_inspection_callbacks_are_admin_only(self):
         self.assertIn('d.startswith("hpeg_edge_")', self.handler)
         self.assertIn('d.startswith("hpeg_health_")', self.handler)
         self.assertIn('d.startswith("hpeg_actions_")', self.handler)
         self.assertIn('d.startswith("hpeg_probe_")', self.handler)
+        self.assertIn('d.startswith("hpeg_stage_")', self.handler)
+        self.assertIn('d.startswith("hpeg_user_")', self.handler)
+        self.assertIn('hpeg_page_', self.handler)
         self.assertGreaterEqual(
             self.handler.count("if role != 'admin':"), 3
         )

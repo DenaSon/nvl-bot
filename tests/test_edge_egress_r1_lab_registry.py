@@ -9,7 +9,7 @@ from unittest.mock import patch
 from edge_egress_r1_lab_registry import (
     register_verified_stage, verified_live_stage, Lab6GUnsafe,
 )
-from edge_egress_r1_lab_6g_bootstrap import JOURNAL_SCHEMA
+from edge_egress_r1_lab_6g_bootstrap import JOURNAL_SCHEMA, compile_pinned_bot_callbacks
 from edge_egress_inventory import SCHEMA as ALLOCATION_SCHEMA
 from edge_egress_f3_readiness import READINESS_SCHEMA
 from edge_egress_uid_runtime_store import RUNTIME_SCHEMA
@@ -28,6 +28,12 @@ def spec():
 # These are valid WireGuard-shaped public keys; test never uses private keys.
 KEY_A = "A" * 43 + "="
 KEY_B = "B" * 43 + "="
+BOT = Path(__file__).resolve().parents[1] / "bot_final_v49-2.py"
+
+
+def reviewed_bot_callbacks(_source, connector):
+    # Same immutable original bot source, but CI checkout is non-root-owned.
+    return compile_pinned_bot_callbacks(BOT.read_bytes(), connector)
 
 
 class LabRegistryTests(unittest.TestCase):
@@ -64,8 +70,8 @@ class LabRegistryTests(unittest.TestCase):
                 "edge_egress_r1_lab_registry.make_lab_db_conn",
                 return_value=self.connector(db),
             ), patch(
-                "edge_egress_r1_lab_registry.DEFAULT_SOURCE",
-                Path(__file__).resolve().parents[1] / "bot_final_v49-2.py",
+                "edge_egress_r1_lab_registry.verified_bot_callbacks",
+                side_effect=reviewed_bot_callbacks,
             ):
                 register_verified_stage()
             with sqlite3.connect(db) as c:
@@ -128,8 +134,8 @@ class LabRegistryTests(unittest.TestCase):
                 "edge_egress_r1_lab_registry.make_lab_db_conn",
                 return_value=self.connector(db),
             ), patch(
-                "edge_egress_r1_lab_registry.DEFAULT_SOURCE",
-                Path(__file__).resolve().parents[1] / "bot_final_v49-2.py",
+                "edge_egress_r1_lab_registry.verified_bot_callbacks",
+                side_effect=reviewed_bot_callbacks,
             ), patch(
                 "edge_egress_r1_lab_registry.reserve_allocation",
                 side_effect=RuntimeError("fault"),

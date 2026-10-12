@@ -82,3 +82,24 @@ Operator confirmed `LAB 6G BOOTSTRAP COMPLETE` on Amsterdam Core, with **zero** 
 A failed post-acquisition transaction intentionally leaves the true journal `RUNNING` as operator HOLD, with no false success, no automatic teardown or fabricated lock. Idempotent replay is intentionally refused; do not rerun after a success or after uncertainty. No `ssh_accounts`, `host_pool`, `settings.dns_current_ip`, `READY`, customer mapping, PAM/SSH or network mutation occurs. **This is not a production customer-ready gate**. The actual LAB Core-as-ingress needs a separately reviewed truthful direct-IP intent before allowing the F2 owner checks, and a distinct F4 canary policy before unblocking admission. Never invent production DNS/current host or grant readiness from namespace IPv4 alone.
 
 To deploy without invalidating the running old Stage git SHA, fetch a PINNED new PR commit and copy only `edge_egress_r1_lab_registry.py` into the separate root-only `/root/nvl-r1-controlplane-src` bundle, keeping Stage checkout at old pinned HEAD. Operators should run only once on the LAB Core with an independent console and inspect output, keeping `nvlr1test` password-locked, `nologin`, and terminal BLACKHOLE. No Edge commands are required.
+
+## 2026-10-12 — Genuine LAB Edge registration PASS + PAM installer candidate
+
+The operator ran exact pinned LAB command for the new `edge_egress_r1_lab_registry.py`, confirmed:
+```text
+VERIFIED_LAB_STAGE_AND_WG_PUBLIC_KEYS: PASS
+LAB_6G_OPERATION: ACQUIRED_AND_FINISHED
+EDGE_ALLOCATION: STAGED
+EDGE_READINESS: STAGED_NOT_READY
+SSH_ACCOUNTS: NOT_CREATED
+INGRESS_DNS: NOT_FABRICATED
+PAM_OR_SSH: UNCHANGED
+NETWORK: UNCHANGED
+CUSTOMER_READY: NO
+===== NVL LAB EDGE REGISTRATION PASS =====
+```
+Thus an **actual acquired and successfully finalized 6G lease** journaled the exact Edge Stage allocation, but it is not a standing operation, protected customer binding, PAM admission or F4 READY. Do not rerun the registry command; fresh LAB journal is now nonempty by design.
+
+**PAM-specific code checkpoint:** `edge_egress_r1_lab_pam_runtime.py` is a fixed root-only wrapper: it refuses any caller other than root, verifies root-controlled `/root/nvl-r1-controlplane-src` and the exact reviewed Git blob of `edge_egress_r1_lab_pam.py` before importing its fail-closed account policy. `edge_egress_r1_lab_pam_install.py` is a default-preflight-only, explicit-console-confirmed **disposable LAB** installer: verifies the registered 6G STAGED allocation and STAGED readiness, locked/nologin UID 1555, original PAM and UsePAM, places an exact **first** `account requisite pam_exec.so` rule, copies root-reviewed wrapper to `/opt/nvl-egress`, atomically backs up original PAM, checks root ALLOW and protected pilot DENY in process, validates `sshd -t`, never restarts SSH and contains exact-match `restore` plus same-operation error restoration. A PAM installation **must not** be attempted without an independent cloud console. Neither the wrapper nor installer creates customers, disables password lock, alters DNS/network, establishes F4 READY, or overcomes first-SSH acceptance circularity. Unit tests are read-only mocked on CI. No installer has been executed on either LAB VPS as of this writing.
+
+**Next operator step:** after reviewing PR/CI and confirming cloud console recovery, distribute ONLY the PINNED wrapper and installer files into the already separate root-only LAB control-plane bundle (never update the live WireGuard Stage checkout), run `preflight` once and, only if safe/console ready, run `install --console-confirmed`. Keep user blocked; on any fault stop rather than edit live PAM ad hoc. The protected SSH canary requires genuine F4 evidence and routing/DNS policy work; don't claim complete production readiness from installing the PAM policy.

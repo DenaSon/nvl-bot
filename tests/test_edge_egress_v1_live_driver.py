@@ -93,6 +93,25 @@ class HostUnitTests(unittest.TestCase):
             " 123 1001 bash -bash\n", "nvl0557", 1644
         )
 
+    def test_exact_root_attested_doh_main_pid_is_only_idle_exemption(self):
+        dns = (" 333 1644 python3 "
+               "/usr/bin/python3 /opt/nvl-egress/edge_egress_uid_dns.py "
+               "serve --username nvl0557 --uid 1644 --priority 20008 --table 20008")
+        basic = " 1 0 systemd /sbin/init\\n 2 0 kthreadd [kthreadd]\\n"
+        assert_idle_process_snapshot(basic + dns + "\\n", "nvl0557", 1644,
+                                     allowed_dns_pid=333)
+        for wrong_pid in (None, 332):
+            with self.assertRaises(LiveHold):
+                assert_idle_process_snapshot(
+                    basic + dns + "\\n", "nvl0557", 1644,
+                    allowed_dns_pid=wrong_pid,
+                )
+        with self.assertRaisesRegex(LiveHold, "ACTIVE_PROCESS"):
+            assert_idle_process_snapshot(
+                basic + dns + "\\n 334 1644 curl curl -4 https://example.net\\n",
+                "nvl0557", 1644, allowed_dns_pid=333,
+            )
+
     def test_uid_process_or_root_owned_sshd_session_holds(self):
         for line in (
             " 111 1644 curl curl --silent https://example.net",

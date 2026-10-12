@@ -214,7 +214,8 @@ def _remote_stage(ssh, spec: EgressSpec, edge_private: str,
             raise OnboardHold("UNTRUSTED_REMOTE_STAGE_HOME")
         sftp.mkdir(remote_dir, mode=0o700)
         for name, (data, mode) in artifacts.items():
-            with sftp.file(remote_dir + "/" + name, "x") as f:
+            # Paramiko requires w + x: exclusive creation alone opens read-only.
+            with sftp.file(remote_dir + "/" + name, "wx") as f:
                 f.write(data)
                 f.flush()
             sftp.chmod(remote_dir + "/" + name, mode)

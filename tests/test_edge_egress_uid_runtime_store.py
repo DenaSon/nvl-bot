@@ -132,7 +132,11 @@ class StoreTests(unittest.TestCase):
             self.store.commit_protected(42, req(), source=SOURCE)
 
     def test_multiple_users_share_edge_table_but_priority_and_port_unique(self):
+        self.store.shared_edge_enabled=True
         self.store.reserve_blocked(42, req(), source=SOURCE, dns_port=10553)
+        self.store.transition(42,req(),source=SOURCE,
+                              expected="BLOCKED",target="ROUTED_UNVERIFIED")
+        self.store.commit_protected(42,req(),source=SOURCE)
         user2 = req("nvl0558", 1645, 1781)
         other = self.store.reserve_blocked(42, user2, source=SOURCE,
                                            dns_port=10554)
@@ -186,7 +190,11 @@ class StoreTests(unittest.TestCase):
                                        source=SOURCE,dns_port=10554)
 
     def test_resource_collision_is_denied_transactionally(self):
+        self.store.shared_edge_enabled=True
         self.store.reserve_blocked(42, req(), source=SOURCE, dns_port=10553)
+        self.store.transition(42,req(),source=SOURCE,
+                              expected="BLOCKED",target="ROUTED_UNVERIFIED")
+        self.store.commit_protected(42,req(),source=SOURCE)
         with self.assertRaisesRegex(RuntimeStoreUnsafe, "COLLISION"):
             self.store.reserve_blocked(42, req("nvl0558",1645,1780),
                                        source=SOURCE,dns_port=10554)

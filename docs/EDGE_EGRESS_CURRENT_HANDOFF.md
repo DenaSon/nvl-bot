@@ -153,3 +153,24 @@ Supersedes section 9's offline-only lab state. Operator supplied both host outpu
 ## 11. Disposable lab protected UID IPv4 smoke test PASS — 2026-10-12
 
 Operator successfully created `nvlr1test` (UID 1555; password disabled, nologin) on **LAB Core only**, with F1 `BootGuardApplier` enforced as DENY/BLACKHOLE in dedicated table 1791. Then a manually attached, isolated single-UID route to the already active LAB Edge returned `UID_PUBLIC_IP: 216.126.229.12`; exact detachment returned `ROUTE_RETURNED_TO_BLACKHOLE: YES` and `AFTER_DETACH: INTERNET_BLOCKED`, ending in `UID ROUTING LAB PASS`. No production customer was attached; no SSH login was attempted. This verifies a **limited per-UID IPv4 attach/detach smoke case**, not actual Edge outage, DNS, IPv6, BadVPN, PAM, F2/6G, reboot or customer-ready conditions. The UID remains disabled and deny-only. Both LAB transport endpoints had been started by direct Stage scripts outside the 6G controller, so they are not managed/persistent. Proceed with genuine integration, not additional repeated connectivity probes.
+
+## 12. Persistent deny-only LAB BootGuard installed — 2026-10-12
+
+On disposable Amsterdam LAB Core `107.189.16.36`, operator deployed and enabled `/etc/systemd/system/nvl-egress-lab1-guard.service` for the locked, nologin test account `nvlr1test` / UID 1555. The unit invokes `edge_egress_uid_boot.py apply --manifest /etc/nvl-egress/protected/nvlr1test.json --enforce` followed by `verify`, and is enabled via `multi-user.target`. Supplied actual output:
+
+```text
+GUARD_PRESENT_NOT_CUSTOMER_READY
+BOOT_GUARD: ENABLED
+SERVICE: ACTIVE
+UID: 1555
+LOGIN: DISABLED
+SSH_SERVICE: UNCHANGED
+===== PERSISTENT GUARD PASS =====
+```
+
+Evidence scope: a `systemctl enable --now`/is-active/is-enabled success **not** evidence of successful reboot boot-order protection or PAM enforcement. The installed unit declares `Before=multi-user.target` but was not demonstrated to gate all `ssh.service`/`ssh.socket` start paths. User remains locked; temporary UID Edge attachment from previous smoke was removed and table 1791 ended blackhole-only. Do not reboot or unlock until SSH admission/boot ordering and out-of-band recovery are reviewed and tested.
+
+### Blocking integration finding
+
+The **LAB Core has no `/root/master_bot.db` and no `nvlbot.service`**, confirmed by read-only operator audit. Examining the existing Python bot source shows the true Phase 6G control functions `_db_acquire_failover_lock` and `_db_update_failover_operation` and SQLite `failover_operations` schema reside in the bot, while `Existing6GUIDRuntimeBridge` deliberately requires those injected genuine callbacks and a real DB. The existing UID runtime store also requires actual `ssh_accounts`, `host_pool`, `settings`, allocation/readiness schema, F4 readiness and an attested PAM gate. Therefore the next stage is to provision an authentic **isolated lab control plane** and integrate F2 with it under proper operator approval; DO NOT create a synthetic RUNNING operation, copy Production DB, globally install a PAM hook against an absent database, turn on protected customer mode, or claim `READY`. Do not repeat already passed WireGuard/UID smoke tests.
+

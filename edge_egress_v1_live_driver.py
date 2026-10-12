@@ -404,7 +404,7 @@ class ProtectedLiveHostActions:
             raise LiveHold("UNTRUSTED_EXISTING_DOH_UNIT")
         text = path.read_text(encoding="utf-8")
         expected = self._dns_unit_content(req, port)
-        optional_install = "\\n[Install]\\nWantedBy=multi-user.target\\n"
+        optional_install = "\n[Install]\nWantedBy=multi-user.target\n"
         if text not in (expected, expected + optional_install):
             raise LiveHold("DOH_SERVICE_NOT_OWNED_BY_MANIFEST")
         return path, text[len(expected):]

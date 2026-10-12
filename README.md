@@ -2,7 +2,11 @@
 
 Private production repository for the NVL Telegram bot and its server-management tooling.
 
-## 🔖 Current Edge Egress handoff (2026-10-12)
+## 🔖 Current priority — SSH Egress V1 (2026-10-12)
+
+**[Canonical scope, verified test evidence and next Production read-only step](docs/SSH_EGRESS_V1_PRODUCTION_SCOPE_AND_EVIDENCE.md).** The only current objective is for one controlled Production SSH/SOCKS account to exit through **the exact same public Edge IP it entered through**; diagnose routing/NAT/WireGuard first. No new 6G/6H development, no new control-plane/PR #92 work, and no production mutations without an independently reviewed P0 report and explicit operator approval.
+
+**Historical handoff (F1–F4/R1–R6; safety and evidence reference, not the active plan):**
 
 **Start here for ongoing SSH Edge Egress work:** [Canonical Egress handoff](docs/EDGE_EGRESS_CURRENT_HANDOFF.md).
 

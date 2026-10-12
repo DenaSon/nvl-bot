@@ -60,6 +60,9 @@ class Host:
     async def assert_real_ingress(self, target):
         self.mark("ingress")
 
+    async def assert_pam_admission(self):
+        self.mark("pam")
+
     async def assert_no_ssh_sessions(self, username, uid):
         self.mark("drain")
         if self.sessions:
@@ -215,6 +218,7 @@ class PositiveAdapterTests(unittest.TestCase):
         self.assertIn(("RUNNING", "DRAIN_SOURCE_SESSIONS"), self.events)
         self.assertIn(("RUNNING", "EDGE_ONLY_PROTECTED_DNS_CUTOVER"), self.events)
         self.assertNotIn(CORE, host.events)
+        self.assertLess(host.events.index("pam"), host.events.index("drain"))
         self.assertLess(host.events.index("drain"), host.events.index("repin"))
         self.assertLess(host.events.index("repin"), host.events.index("dns"))
         self.assertFalse(host.blocked)

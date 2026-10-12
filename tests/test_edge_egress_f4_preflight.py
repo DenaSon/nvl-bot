@@ -2,7 +2,7 @@
 import sqlite3
 import unittest
 
-from edge_egress_f4_preflight import examine_core
+from edge_egress_f4_preflight import examine_core, sshd_connection_spec
 from edge_egress_f4_pam import REQUIRED_ACCOUNT_LINE
 
 
@@ -44,6 +44,29 @@ class F4CorePreflightTests(unittest.TestCase):
         )
         params.update(kwargs)
         return examine_core(**params)
+
+    def test_match_localport_and_ingress_context_are_explicit(self):
+        actual = sshd_connection_spec(
+            username="nvl0557",local_addr="10.77.0.1",
+            remote_addr="10.77.0.7",local_port=2252,
+        )
+        self.assertEqual(
+            actual,
+            "user=nvl0557,host=localhost,addr=10.77.0.7,"
+            "laddr=10.77.0.1,lport=2252",
+        )
+        for invalid in (
+            {"local_port": 0}, {"local_port": True},
+            {"local_addr": "bad-address"},
+            {"remote_addr": "10.77.0.7,host=evil"},
+            {"username": "root; invalid"},
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                sshd_connection_spec(**{
+                    "username": "nvl0557", "local_addr": "10.77.0.1",
+                    "remote_addr": "10.77.0.7", "local_port": 2252,
+                    **invalid,
+                })
 
     def test_clean_mock_host_is_preflight_candidate_not_customer_ready(self):
         p=self.check()

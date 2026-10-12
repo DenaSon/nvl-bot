@@ -299,3 +299,15 @@ Decision:                                    P0 HOLD or propose ONE-UID change
 **Unresolved identity:** `104.194.144.195` (1017 `ssh_accounts.host` rows including witness `nvl0557`) does not appear in this host pool, the earlier `settings.hosts` IPv4 list, or observed `wg0` endpoints. This does not itself prove SSH downtime: configured host is not proven live ingress. Last-seen `dns_current_ip=172.86.94.174` predates latest host_pool snapshot, so current DNS/default agreement is UNKNOWN.
 
 **P0 next gate:** one narrow, read-only simultaneous Core snapshot of default and `dns_current_ip`, relevant non-secret 6H operation states (without PII), then non-invasive verification of actual public ingress/ownership for the account and, only after identification, read-only NAT/WG/forwarding inspection of that Edge. No live customer/session modifications, no mass migration, no routing/NAT/WG/Cloudflare changes. Status remains P0 HOLD; exact same-edge delta unknown.
+
+
+### P0 Core follow-up — active relay UI and synchronized DNS/default (2026-10-12T14:30:29Z)
+
+**Evidence:** operator-supplied read-only SQLite snapshot at `2026-10-12T14:30:29.036574+00:00` plus operator's report of role labels currently shown by the bot. Production remains unchanged.
+
+- `host_pool`: `144.172.84.76 (active=1,is_default=1)`, `144.172.111.51 (active=0,is_default=0)`, `144.172.84.82 (active=1,is_default=0)`, `172.86.94.174 (active=1,is_default=0)`.
+- `settings.dns_current_ip=144.172.84.76`, now **equal** to DB default; previous DNS/default values in earlier snapshot were point-in-time. `edge_egress_protected_mode=0`, `phase6h_auto_failover_enabled=1`.
+- Operator reports bot UI: `144.172.84.76` is active relay; `144.172.84.82` and `172.86.94.174` are standby; `144.172.111.51` disabled. These are UI/operator role observations, not data-plane proof. Grouping query on `failover_operations` returned no rows; cannot establish what caused previous default transition.
+- **Unresolved:** `ssh_accounts.host=104.194.144.195` for 1017 records including read-only witness `nvl0557` remains outside observed current host pool and wg0 endpoint list. Neither UI active relay nor DB default proves live ingress Edge of that existing SSH session. Do not treat `144.172.84.76` as its same-edge egress destination without verifying ingress.
+
+**Next minimal P0:** inspect only the existing user-owned `sshd` process ancestry and corresponding established Core socket (with redaction of external client IPs) to determine which `10.77.0.x` WireGuard peer carried it, if an active SSH socket exists. Match that internal peer to the known `wg0` endpoint mapping. If no attributable socket exists, label live ingress UNKNOWN and do not infer it from default/DNS. Then inspect only the confirmed Edge read-only (WG/forward/NAT), without changing any customer account/session, WireGuard, network rules, bot, DNS or 6G. P0 HOLD.

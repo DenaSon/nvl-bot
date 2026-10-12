@@ -102,7 +102,7 @@ class SSHProxyProbeTests(unittest.TestCase):
             core_ipv4="209.200.246.198",run=fail,
         )
         self.assertFalse(x.passed)
-        self.assertEqual(x.code,"SSH_SOCKS_UNAVAILABLE")
+        self.assertEqual(x.code,"CURL_OR_PROBE_NOT_EXECUTED")
 
     def test_input_guards(self):
         with self.assertRaises(SSHProbeUnsafe):

@@ -19,7 +19,7 @@
 | G — shared-Edge multi-UID | Immutable Edge default + owner-scoped UID deny/release, multi-UID roster, opt-in shared DB reservation under 6G | **Merged PR #95; all final-head checks PASS; NOT deployed** |
 | H — session-to-ingress ownership | PAM_RHOST on Core checked against root-only wg0 Peer↔Edge registry and live WireGuard AllowedIPs; deny conflicting Edge for pinned UID | **Merged PR #96; Python + Stage-only CI PASS; NOT deployed** |
 | I — Edge onboarding | Optional in existing `hp_addedge`: verify wg0 /32+public key, collision-screen new /30, stage Core and Edge, atomic H registry; readiness stays STAGED_NOT_READY | **Merged PR #97; Python + Stage-only CI PASS; OFF / NOT deployed** |
-| J — 6H integration | Shared read-only F4-ready + sticky-UID HOLD gate in manual 6G and auto 6H; never invoke legacy Core DNS fallback | **J gate merged PR #98; positive application adapter on PR #99 (CI pending); live host driver and K acceptance NOT done** |
+| J — 6H integration | Shared read-only F4-ready + sticky-UID HOLD gate in manual 6G and auto 6H; never invoke legacy Core DNS fallback | **J gate PR #98 + positive application adapter PR #99 MERGED; CI PASS; live HostActions/K acceptance NOT done** |
 | K — deploy + acceptance | One reviewed deployment after code complete, NEW Edge onboarding E2E, two-Edge switch, limited users, observed egress and negative-failure proof | Not started |
 
 **Boundary:** Production customer migration is forbidden until F2 and the shared-table/ingress ownership path work. Avoid blanket re-running past tests. Build lightweight unit tests for each new behavior. Keep the existing `python-checks.yml` unchanged; no new heavyweight CI jobs. Each stage updates this file and `AGENTS.md` with actual implemented vs pending.
@@ -143,7 +143,7 @@ PR #93 **merged** into `master` after successful checks on the final PR head `28
 **Explicit residual requirement before K rollout**: a positive, audited protected Edge-to-Edge transfer path with actual live implementation of existing `edge_egress_handoff.HandoffPorts`, using the same 6G operation/journal and account drain/per-UID repin. At present the J gate intentionally returns HOLD even for an otherwise READY new target; we did **not** silently enable the previous Core fallback. The final deploy/acceptance cannot be counted successful or enable auto protected failover until that separate positive path is implemented and externally proven on the NEW Edge. If this is not provided, leave protected failover disabled/HOLD and do not migrate customers.
 
 
-## J2 — Positive Protected 6G Handoff Adapter (2026-10-12; PR #99 development)
+## J2 — Positive Protected 6G Handoff Adapter (2026-10-12; merged source checkpoint)
 
 **Scope delivered in source:** `edge_egress_v1_handoff_adapter.py` implements the application-side `HandoffPorts` integration for `run_protected_handoff(..., guarded_failover=True, require_admission_drain=True)`. It consumes ONLY the existing bot's `_db_acquire_failover_lock`, `_db_update_failover_operation`, existing SQLite schema, and independently supplied K-audited `HostActions`. It does not create a second lock, scheduling loop, DNS controller or new customer table.
 
@@ -154,3 +154,9 @@ Ordered J2 path: acquire 6G → snapshot exact protected active usernames/OS UID
 **Critically important distinction:** This is a **concrete 6G/DB adapter**, not yet a verified *live HostActions driver*. There is deliberately NO default network/SSH/DNS driver; `execute_protected_switch` refuses to run without one. The host driver must be implemented and operator-attested during K: actual SSH session/process drain after PAM barrier, root-owned updated manifest+roster and per-UID Linux policy/table migration with no other UID interruption, pinned Core/Edge transport start, fresh external per-UID IPv4 and IPv6/DNS/blackhole proof, direct DNS cutover verification, and local fail-closed re-arm under fault. Old J gate **continues to HOLD** protected automatic failovers; PR #99 is not authority to flip a Production feature switch or migrate customers.
 
 **Tests:** `tests/test_edge_egress_v1_positive_handoff.py` has five small real-SQLite/fake-host cases (successful dual-UID guarded cutover, active-session HOLD, DNS fault recovery HOLD, invalid F4 READY refusal, no-live-driver refusal); existing protected lab-only tests retain their own distinct semantics and the positive adapter alone opts into mandatory admission/drain. No additional CI workflow.
+
+### J2 merge closure (2026-10-12)
+
+[PR #99](https://github.com/DenaSon/nvl-bot/pull/99) **squash-merged** on `master` as `d62d54a348aa8ec1bdb00cbe57b57fd73cccefc7`, final tested head `58fd84863c4c63be06a10f99e60359f78bdd365e`. Existing **Python checks** and **Edge egress stage-only checks** on Python 3.11/3.12 all **PASS**. The application/SQLite positive handoff adapter and five focused tests are merged, together with protected admission/drain journal phases. No Production change or new CI workflow. 
+
+**K entry gate, not yet satisfied:** the real `HostActions` driver remains absent and disabled; running `execute_protected_switch` with no audited driver fails explicitly. The legacy 6H auto/manual protected path remains a HOLD by design; F4 production readiness evidence, SSH drain, UID route/manifest/roster, remote Edge NAT/WG, direct Cloudflare Edge→Edge and guarded rollback must be proven in a controlled one-new-Edge environment before any switch or customer migration is enabled. Do not describe PR #99 as Production failover readiness.

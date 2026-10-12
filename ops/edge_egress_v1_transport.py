@@ -113,6 +113,13 @@ def observe(spec: EgressSpec, role: str, peer: str) -> str:
                    and default.startswith(f"default dev {spec.iface} "))
     else:
         if _run("ip", "link", "show", "dev", spec.iface).returncode != 0:
+            # A tagged NAT remnant means partial ownership, not a clean start.
+            leftover = _run("iptables", "-w", "-t", "nat", "-C", "POSTROUTING",
+                            "-s", spec.core_tunnel_ip + "/32", "-o", spec.edge_uplink,
+                            "-m", "comment", "--comment", "nvl-egress-" + spec.edge_id,
+                            "-j", "MASQUERADE")
+            if leftover.returncode == 0:
+                raise EgressHold("PARTIAL_EDGE_NAT")
             return "ABSENT"
         prefix = ()
         addr = _read("ip", "-4", "-o", "addr", "show", "dev", spec.iface)

@@ -14,6 +14,7 @@ from edge_egress_status import (
 )
 from edge_egress_inventory import ensure_schema
 from edge_egress_v1_console import overview_html, edge_id_checked, EgressConsoleHold
+from edge_egress_phase2_console import Dashboard, dashboard_html
 
 if sys.version_info >= (3, 12):
     from test_edge_egress_bot_integration import get_function
@@ -93,7 +94,8 @@ class StatusReadOnlyTests(unittest.TestCase):
 @unittest.skipIf(sys.version_info < (3,12),"NVL bot requires Python 3.12 syntax")
 class AdminStatusCallbackTests(unittest.TestCase):
     def run_handler(self,role):
-        status=EgressStatus("0",False,(),0)
+        # Phase 2 admin entry now uses the unified trusted Edge dashboard.
+        board=Dashboard((),0,False,"","","0")
         q=SimpleNamespace(
             data="hpeg_status",answer=AsyncMock(),
             edit_message_text=AsyncMock(),
@@ -104,7 +106,9 @@ class AdminStatusCallbackTests(unittest.TestCase):
             "_v2ray_management_target_from_callback": lambda d,ctx: None,
             "asyncio": asyncio,
             "classify_edge_callback":lambda _:None,
-            "read_egress_status": lambda conn: status,
+            "read_egress_dashboard": lambda conn: board,
+            "egress_dashboard_html": dashboard_html,
+            "log": SimpleNamespace(exception=lambda *a, **kw: None),
             "render_egress_status_html": render_egress_status_html,
             "overview_html": overview_html,
             "edge_id_checked": edge_id_checked,
@@ -122,7 +126,7 @@ class AdminStatusCallbackTests(unittest.TestCase):
         q=self.run_handler("admin")
         q.answer.assert_awaited_once()
         q.edit_message_text.assert_awaited_once()
-        self.assertIn("مدیریت Egress",q.edit_message_text.await_args.args[0])
+        self.assertIn("مرکز کنترل Egress",q.edit_message_text.await_args.args[0])
 
     def test_non_admin_gets_denied_without_status_read(self):
         q=self.run_handler("accountant")

@@ -106,6 +106,58 @@ class LabAssemblyTests(unittest.TestCase):
         self.assertIsNone(bridge.operation_id)
 
 
+
+class PersistentGuardVerificationTests(unittest.TestCase):
+    def test_reads_actual_manifest_including_dns_and_uses_both_service_checks(self):
+        actual = SimpleNamespace(
+            mode="PROTECTED_BOOT_GUARD", request=req(), dns_port=10553,
+        )
+        with patch(
+            "edge_egress_r1_lab_integration.os.geteuid", return_value=0
+        ), patch(
+            "edge_egress_r1_lab_integration.read_root_only_manifest",
+            return_value=actual,
+        ), patch(
+            "edge_egress_r1_lab_integration.BootGuardApplier"
+        ) as guard, patch(
+            "edge_egress_r1_lab_integration.subprocess.run",
+            return_value=SimpleNamespace(returncode=0),
+        ) as run:
+            self.assertTrue(LabUIDGuardProbe()(req()))
+            guard.return_value.verify.assert_called_once_with(actual)
+            self.assertEqual(run.call_count, 2)
+
+    def test_missing_real_dns_guard_or_inactive_service_never_attests(self):
+        actual = SimpleNamespace(
+            mode="PROTECTED_BOOT_GUARD", request=req(), dns_port=10553,
+        )
+        with patch(
+            "edge_egress_r1_lab_integration.os.geteuid", return_value=0
+        ), patch(
+            "edge_egress_r1_lab_integration.read_root_only_manifest",
+            return_value=actual
+        ), patch(
+            "edge_egress_r1_lab_integration.BootGuardApplier"
+        ) as guard:
+            guard.return_value.verify.side_effect = ValueError("DNS missing")
+            self.assertFalse(LabUIDGuardProbe()(req()))
+        with patch(
+            "edge_egress_r1_lab_integration.os.geteuid", return_value=0
+        ), patch(
+            "edge_egress_r1_lab_integration.read_root_only_manifest",
+            return_value=actual
+        ), patch(
+            "edge_egress_r1_lab_integration.BootGuardApplier"
+        ), patch(
+            "edge_egress_r1_lab_integration.subprocess.run",
+            side_effect=[
+                SimpleNamespace(returncode=0),
+                SimpleNamespace(returncode=3),
+            ]
+        ):
+            self.assertFalse(LabUIDGuardProbe()(req()))
+
+
 class PamFileAttestationTests(unittest.TestCase):
     def test_requires_first_account_rule_and_reviewed_bytes(self):
         code = b"reviewed lab scoped PAM code"

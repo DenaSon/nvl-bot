@@ -37,7 +37,7 @@ def inspect_owned_routes(raw: str, *, next_hop: str, device: str,
         r" metric 100(?: onlink)?(?: linkdown)?"
     )
     ingress = re.compile(
-        r"10\\.77\\.0\\.0/24 dev wg0(?: proto kernel)? scope link src 10\\.77\\.0\\.1"
+        r"10\.77\.0\.0/24 dev wg0(?: proto kernel)? scope link src 10\.77\.0\.1"
     )
     num_ingress = sum(bool(ingress.fullmatch(row)) for row in rows)
     num_blackhole = sum(bool(blackhole.fullmatch(row)) for row in rows)

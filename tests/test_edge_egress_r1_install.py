@@ -64,7 +64,7 @@ class R1InstallTests(unittest.TestCase):
                 **kw
             )
 
-    def rollback(self, *, check=lambda _: True):
+    def rollback(self, *, check=lambda _: True, absent=lambda _: True):
         with patch("edge_egress_r1_install.os.geteuid", return_value=0), \
              patch("edge_egress_r1_install._check_install_dirs"), \
              patch("edge_egress_r1_systemd._owned", return_value=True), \
@@ -72,7 +72,8 @@ class R1InstallTests(unittest.TestCase):
             return rollback_disabled(
                 self.bundle, manifest_root=self.manifest_dir,
                 unit_root=self.unit_dir, explicitly_authorized=True,
-                identity_check=lambda _: None, inactive_disabled_check=check
+                identity_check=lambda _: None, inactive_disabled_check=check,
+                transport_absent_check=absent
             )
 
     def test_unreviewed_bundle_rejected(self):
@@ -125,6 +126,26 @@ class R1InstallTests(unittest.TestCase):
         self.assertTrue(self.unit.exists())
         self.assertTrue(self.manifest.exists())
 
+    def test_rollback_refuses_live_or_unknown_transport_even_if_unit_inactive(self):
+        self.install()
+        with self.assertRaisesRegex(R1ServiceUnsafe, "TRANSPORT_STILL_PRESENT_OR_UNKNOWN"):
+            self.rollback(absent=lambda _: False)
+        self.assertTrue(self.unit.exists())
+        self.assertTrue(self.manifest.exists())
+
+    def test_rollback_fails_closed_without_absence_proof(self):
+        self.install()
+        with patch("edge_egress_r1_install.os.geteuid", return_value=0), \
+             patch("edge_egress_r1_install._check_install_dirs"):
+            with self.assertRaisesRegex(R1ServiceUnsafe, "TRANSPORT_STILL_PRESENT_OR_UNKNOWN"):
+                rollback_disabled(
+                    self.bundle, explicitly_authorized=True,
+                    unit_root=self.unit_dir, manifest_root=self.manifest_dir,
+                    identity_check=lambda _: None,
+                    inactive_disabled_check=lambda _: True
+                )
+        self.assertTrue(self.unit.exists())
+
     def test_rollback_refuses_tampered_unit_without_partial_delete(self):
         self.install()
         self.unit.write_text("different")
@@ -143,6 +164,16 @@ class R1InstallTests(unittest.TestCase):
         with self.assertRaisesRegex(R1ServiceUnsafe, "OWNERSHIP_OR_BYTES"):
             self.rollback()
         self.assertTrue(self.manifest.is_symlink())
+
+    def test_forged_bundle_rejected_even_on_disposable(self):
+        from dataclasses import replace
+        forged = replace(self.bundle, unit_bytes=b"ExecStart=/bin/true\n")
+        with patch("edge_egress_r1_install.os.geteuid", return_value=0):
+            with self.assertRaisesRegex(R1ServiceUnsafe, "IDENTITY_CHANGED"):
+                install_disabled(
+                    forged, explicitly_authorized=True,
+                    agent_check=lambda: True, identity_check=lambda _: None)
+        self.assertFalse(self.manifest.exists())
 
     def test_install_agent_and_provenance_mandatory(self):
         with patch("edge_egress_r1_install.os.geteuid", return_value=0):

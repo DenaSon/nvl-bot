@@ -147,6 +147,7 @@ class CurrentBridge6GLease:
     a lock; it reads the already-held bridge identity and checks SQLite.
     """
     bridge: object
+    lab_core_ingress_attestor: Callable[[UIDPolicyRequest, str], bool] | None = None
 
     def for_request(self, request: UIDPolicyRequest) -> bool:
         op = getattr(self.bridge, "operation_id", None)
@@ -160,8 +161,17 @@ class CurrentBridge6GLease:
             probe = Existing6GR1LeaseProbe(
                 self.bridge.db_conn, op, source, target,
             )
+            if source == request.spec.core_public_ipv4:
+                # Special-case only a real, machine-bound disposable Core ingress.
+                # The SAME current 6G RUNNING row is still required.
+                return bool(
+                    target == request.spec.edge_public_ipv4
+                    and self.lab_core_ingress_attestor is not None
+                    and self.lab_core_ingress_attestor(request, source) is True
+                    and probe.active()
+                )
             return probe.for_request(request)
-        except (ValueError, TypeError, AttributeError):
+        except (ValueError, TypeError, AttributeError, OSError):
             return False
 
 
@@ -181,6 +191,7 @@ class R1Lab6GShadow:
     ssh: LabSSHExecutor
     explicitly_enabled: bool = False
     disposable_vps: bool = False
+    accept_verified_running_transport: bool = False
 
     def _admit(self, request: UIDPolicyRequest) -> None:
         request.validate()
@@ -202,14 +213,26 @@ class R1Lab6GShadow:
         if guard is not True:
             raise R1LabUnsafe("FAIL_CLOSED_GUARD_NOT_ATTESTED")
 
-    async def _run(self, host: LabHost, action: str) -> None:
+    async def _run(self, host: LabHost, action: str) -> dict:
         # The host executor is blocking, never block the F2 event loop.
-        await asyncio.to_thread(self.ssh.run, host, action, self.spec)
+        return await asyncio.to_thread(self.ssh.run, host, action, self.spec)
 
     async def start(self, request: UIDPolicyRequest) -> None:
         self._admit(request)
         try:
-            # Observe both hosts before mutation; never adopt old resources.
+            if self.accept_verified_running_transport is True:
+                # Current disposable smoke pair is already UP. Reconcile via
+                # read-only identity inspection under the CURRENT 6G lease;
+                # never re-run the Stage script on an occupied interface.
+                edge_state = await self._run(self.edge, "inspect")
+                core_state = await self._run(self.core, "inspect")
+                self._admit(request)
+                states = (edge_state["state"], core_state["state"])
+                if states == ("TRANSPORT_VERIFIED", "TRANSPORT_VERIFIED"):
+                    return  # transport-only, never customer READY
+                if states != ("OFFLINE", "OFFLINE"):
+                    raise R1LabUnsafe("EXISTING_TRANSPORT_ASYMMETRY_HOLD")
+            # Brand-new transport still requires the exact offline collision proof.
             await self._run(self.edge, "probe")
             await self._run(self.core, "probe")
             self._admit(request)
@@ -233,7 +256,9 @@ def bind_disposable_lab_shadow(bridge, *, spec: EgressSpec,
                                edge: LabHost, core: LabHost,
                                ssh: LabSSHExecutor,
                                explicitly_enabled: bool = False,
-                               disposable_vps: bool = False) -> R1Lab6GShadow:
+                               disposable_vps: bool = False,
+                               lab_core_ingress_attestor: Callable[[UIDPolicyRequest, str], bool] | None = None,
+                               accept_verified_running_transport: bool = False) -> R1Lab6GShadow:
     """Wire an Existing6GUIDRuntimeBridge to this F2 transport port.
 
     The bridge must have its genuine kernel, PAM gate and existing-session
@@ -255,9 +280,10 @@ def bind_disposable_lab_shadow(bridge, *, spec: EgressSpec,
     edge.validate(spec)
     core.validate(spec)
     port = R1Lab6GShadow(
-        spec, CurrentBridge6GLease(bridge), guard_check, edge, core, ssh,
+        spec, CurrentBridge6GLease(bridge, lab_core_ingress_attestor), guard_check, edge, core, ssh,
         explicitly_enabled=explicitly_enabled,
         disposable_vps=disposable_vps,
+        accept_verified_running_transport=accept_verified_running_transport,
     )
     bridge.shadow = port
     return port

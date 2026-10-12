@@ -138,8 +138,14 @@ def probe_local_guards(conn: sqlite3.Connection, row: RuntimeBinding) -> bool:
     request = UIDPolicyRequest(
         spec, row.username, row.uid, priority=row.priority,
     )
-    manifest = BootGuardManifest(request, "PROTECTED_BOOT_GUARD", row.dns_port)
+    manifest = BootGuardManifest(request, "PROTECTED_BOOT_GUARD", row.dns_port,
+                                 ingress_return=True, shared_edge=True)
     BootGuardApplier().verify(manifest)
+    # Frozen/denied UID must never be admitted even though another UID on
+    # the same Edge keeps the shared route attached.
+    from edge_egress_uid_boot import uid_deny_present, _local_run
+    if uid_deny_present(_local_run, row.uid):
+        return False
     routes = subprocess.run(
         ["ip", "-4", "route", "show", "table", str(row.route_table)],
         capture_output=True, text=True, timeout=6, check=False,

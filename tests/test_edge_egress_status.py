@@ -106,7 +106,7 @@ class AdminStatusCallbackTests(unittest.TestCase):
             "_v2ray_management_target_from_callback": lambda d,ctx: None,
             "asyncio": asyncio,
             "classify_edge_callback":lambda _:None,
-            "read_egress_dashboard": lambda conn: board,
+            "read_egress_dashboard": lambda conn, **kw: board,
             "egress_dashboard_html": dashboard_html,
             "log": SimpleNamespace(exception=lambda *a, **kw: None),
             "render_egress_status_html": render_egress_status_html,

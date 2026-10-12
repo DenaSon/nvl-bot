@@ -263,7 +263,8 @@ def inspect_linux(spec: EgressSpec, role: str, *, run=_run,
             f"-i {spec.edge_uplink}" in line and
             f"-o {spec.iface}" in line and
             f"-d {spec.core_tunnel_ip}/32" in line and
-            "--ctstate RELATED,ESTABLISHED" in line and
+            ("--ctstate RELATED,ESTABLISHED" in line or
+             "--ctstate ESTABLISHED,RELATED" in line) and
             f"--comment nvl-egress-{spec.edge_id}" in line and
             "-j ACCEPT" in line
             for line in forward.splitlines()

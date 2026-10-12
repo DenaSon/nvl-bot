@@ -39,6 +39,7 @@ from edge_egress_uid_boot import (
     release_uid_deny,
 )
 from edge_egress_uid_policy import UIDPolicyRequest, build_policy_plan
+from edge_egress_uid_dns import render_dns_required_unit
 from edge_egress_uid_runtime_kernel import LocalLinuxProtectedRuntimeKernel
 from edge_egress_f3_readiness import read_readiness, admission_eligible
 from edge_egress_v1_cloudflare import ProtectedCloudflareDNS
@@ -93,7 +94,8 @@ def _atomic_root(path: Path, data: bytes):
             os.unlink(tmp)
 
 
-def assert_idle_process_snapshot(output: str, username: str, uid: int):
+def assert_idle_process_snapshot(output: str, username: str, uid: int, *,
+                                 allowed_dns_pid: int | None = None):
     """Conservative ps -eo snapshot, no assumption that SOCKS has a TTY.
 
     Under F2 FROZEN admission, require ZERO processes of this numeric UID
@@ -102,6 +104,7 @@ def assert_idle_process_snapshot(output: str, username: str, uid: int):
     if not isinstance(output, str) or not output.strip() or len(output) > 2000000:
         raise LiveHold("PROCESS_INVENTORY_UNAVAILABLE")
     seen = 0
+    verified_dns = False
     for line in output.splitlines():
         match = re.match(r"^\s*(\d+)\s+(\d+)\s+(\S+)\s*(.*)$", line)
         if not match:
@@ -109,12 +112,24 @@ def assert_idle_process_snapshot(output: str, username: str, uid: int):
         pid, owner, comm, args = match.groups()
         seen += 1
         if int(owner) == uid:
+            # Only systemd's exact recorded MainPID for the mandatory DoH
+            # helper is exempt. A second process, renamed binary, spoofed
+            # username/UID or stale PID fails closed.
+            expected_dns = (
+                "/usr/bin/python3 /opt/nvl-egress/edge_egress_uid_dns.py "
+                "serve --username " + username + " --uid " + str(uid) + " "
+            )
+            if (allowed_dns_pid is not None and int(pid) == allowed_dns_pid
+                    and comm.startswith("python") and args.startswith(expected_dns)
+                    and not verified_dns):
+                verified_dns = True
+                continue
             raise LiveHold("PROTECTED_UID_HAS_ACTIVE_PROCESS")
         if (comm in ("sshd", "sshd-session")
                 and re.search(r"\bsshd(?:-session)?:\s*" +
                               re.escape(username) + r"(?=@|\s|$)", args)):
             raise LiveHold("SSH_PRIVILEGED_SESSION_STILL_ACTIVE")
-    if seen < 2:
+    if seen < 2 or (allowed_dns_pid is not None and not verified_dns):
         raise LiveHold("PROCESS_INVENTORY_INCOMPLETE")
 
 
@@ -350,8 +365,17 @@ class ProtectedLiveHostActions:
     async def assert_no_ssh_sessions(self, username, uid):
         self._lease()
         self._owner(username, uid)
+        service = "nvl-egress-dns-" + username + ".service"
+        raw_pid = self._call(
+            "systemctl", "show", service, "-p", "MainPID", "--value",
+            timeout=8,
+        ).strip()
+        if not raw_pid.isascii() or not raw_pid.isdecimal() or int(raw_pid) < 2:
+            raise LiveHold("PROTECTED_DOH_UNIT_NOT_RUNNING")
+        self._call("systemctl", "is-active", "--quiet", service)
         snapshot = self._call("ps", "-eo", "pid=,uid=,comm=,args=", timeout=8)
-        assert_idle_process_snapshot(snapshot, username, uid)
+        assert_idle_process_snapshot(snapshot, username, uid,
+                                     allowed_dns_pid=int(raw_pid))
 
     async def freeze_uid(self, username, uid):
         self._lease()
@@ -362,6 +386,28 @@ class ProtectedLiveHostActions:
         self._lease()
         req = self._req(username, uid)
         await asyncio.to_thread(self.kernel.assert_frozen, req)
+
+    @staticmethod
+    def _dns_unit_path(username):
+        return Path("/etc/systemd/system") / ("nvl-egress-dns-" + username + ".service")
+
+    @staticmethod
+    def _dns_unit_content(req, port):
+        return render_dns_required_unit(req, port)
+
+    def _check_current_dns_unit(self, req, port):
+        path = self._dns_unit_path(req.username)
+        _trusted_directory(path.parent)
+        st = path.lstat()
+        if (not path.is_file() or path.is_symlink() or st.st_uid != 0
+                or st.st_mode & 0o022 or st.st_size > 8192):
+            raise LiveHold("UNTRUSTED_EXISTING_DOH_UNIT")
+        text = path.read_text(encoding="utf-8")
+        expected = self._dns_unit_content(req, port)
+        optional_install = "\\n[Install]\\nWantedBy=multi-user.target\\n"
+        if text not in (expected, expected + optional_install):
+            raise LiveHold("DOH_SERVICE_NOT_OWNED_BY_MANIFEST")
+        return path, text[len(expected):]
 
     async def repin_frozen_uid(self, username, uid, old_edge, new_edge):
         self._lease()
@@ -374,6 +420,9 @@ class ProtectedLiveHostActions:
         await self.assert_uid_frozen(username, uid)
 
         old_req = old.request
+        dns_unit, dns_suffix = self._check_current_dns_unit(
+            old_req, old.dns_port
+        )
         new_req = UIDPolicyRequest(self.spec, username, uid, old_req.priority)
         new_req.validate()
         newer = BootGuardManifest(new_req, old.mode, old.dns_port,
@@ -412,6 +461,20 @@ class ProtectedLiveHostActions:
         # between these writes results in hash mismatch=> DENY, not legacy.
         _atomic_root(GUARD_DIR / (username + ".json"), new_data)
         _atomic_root(ROSTER, roster_data)
+        # DNS unit verifies route table and peer identity on every restart.
+        # Updating manifest without updating this immutable ExecStart would
+        # strand the user on its former Edge after systemd restart/reboot.
+        new_unit = self._dns_unit_content(new_req, old.dns_port) + dns_suffix
+        _atomic_root(dns_unit, new_unit.encode())
+        self._call("systemctl", "daemon-reload", timeout=15)
+        self._call(
+            "systemctl", "restart",
+            "nvl-egress-dns-" + username + ".service", timeout=25
+        )
+        self._call(
+            "systemctl", "is-active", "--quiet",
+            "nvl-egress-dns-" + username + ".service"
+        )
         if checked_guard(load_roster()[username]).request.spec.edge_id != self.spec.edge_id:
             raise LiveHold("ROSTER_REPIN_NOT_VERIFIED")
 

@@ -6,6 +6,10 @@
 >
 > **شروع گفتگوهای بعدی:** این فایل را از `master` بخوان، وضعیت جاری GitHub و سرورها را از شواهد تازه (ابتدا Read-only) تطبیق بده، و فقط از «گام بعدی» بخش 10 پیش برو. تست‌های اثبات‌شده قبلی را بی‌دلیل تکرار نکن.
 
+
+> **وضعیت جدید اجرایی در Production (2026-10-12):** مراحل P1-A تا P1-E برای یک Canary مستقل روی Miami موفق بوده‌اند: هم IP خروجی `144.172.84.76` از طریق SSH/SOCKS عمومی واقعی دیده شد و هم Fail-Closed با حذف Route آزمایش شد. **جزئیات و تنها نقطه صحیح ادامه در `14 است**؛ عبارت‌های تاریخی `P0 HOLD` و «SSH عمومی اثبات نشده» مربوط به قبل از این آزمایش هستند.
+> **هدف مرحله بعد:** آماده‌سازی Persistence/Boot Guard و مسیر امن چندکاربره پیش از انتقال کاربران واقعی. هیچ مشتری منتقل نشده و هیچ پذیرش کلی امنیتی صادر نشده است. به‌روزرسانی سند فقط با درخواست صریح اپراتور.
+
 ## 1) مسئله و معیار موفقیت، بدون ابهام
 
 معماری عملیاتی NVL، **Core-terminated SSH / Edge Relay** است: اتصال SSH مشتری از Edge وارد می‌شود، از طریق WireGuard ورودی (`wg0`) به Core می‌رسد، و SSHD/احراز هویت/کاربران و Bot روی Core هستند. در مدل فعلی، خروج اینترنت پردازش SSH کاربر عموماً از IPv4 عمومی **Core** انجام می‌شود.
@@ -160,11 +164,11 @@ Client -> Ingress Edge A -> existing wg0 -> Core:sshd(UID test)
 
 ## 10) وضعیت پروژه و «دقیقاً از کجا ادامه بدهیم؟»
 
-**Checkpoint در لحظه ثبت (2026-10-12):**
+**Checkpoint تاریخی، قبل از اجرای P1 (آخرین شواهد §14):**
 - GitHub `master`: F1–F4 قبلاً Merge شده‌اند؛ برای SSH عمومی Production، IP خروجی هنوز اصلاح‌شده و پذیرفته‌شده نیست.
 - R1 PR #92: Draft، **Freeze / No merge**. روی LAB مستقل فقط bootstrap، registration، PAM و دسترسی تازه مدیریتی بررسی شده‌اند؛ customer E2E باز است.
 - Production: نتیجه معتبر قدیمی `nvl0557 uid=1644` خروج از Core است؛ آزمون SOCKS جداگانه خروج از فرانکفورت را نشان داده، نه هدف «همان Edge ورودی» را.
-- **فاز فعال بعدی فقط P0 است.** هیچ اسکریپت شبکه/DB/PAM/6G تغییر داده نشود.
+- **این تصمیم تاریخیِ قبل از P1 است؛ برای وضعیت فعلی و ادامه به §14 رجوع شود.**
 
 **پیام پیشنهادی در چت بعدی:**
 > «ریپو `DenaSon/nvl-bot` را بخوان، مخصوصاً `docs/SSH_EGRESS_V1_PRODUCTION_SCOPE_AND_EVIDENCE.md`. اسکوپ جدید V1 را رعایت کن، توسعه 6G و PR #92 را ادامه نده. از P0 فقط با ممیزی Read-only واقعی Production آغاز کن، یافته‌های تست‌های قبلی را تکرار نکن. اول Root Cause و حداقل Delta را گزارش بده؛ بعد از تأیید من برای هر Mutation اقدام کن.»
@@ -311,3 +315,43 @@ Decision:                                    P0 HOLD or propose ONE-UID change
 - **Unresolved:** `ssh_accounts.host=104.194.144.195` for 1017 records including read-only witness `nvl0557` remains outside observed current host pool and wg0 endpoint list. Neither UI active relay nor DB default proves live ingress Edge of that existing SSH session. Do not treat `144.172.84.76` as its same-edge egress destination without verifying ingress.
 
 **Next minimal P0:** inspect only the existing user-owned `sshd` process ancestry and corresponding established Core socket (with redaction of external client IPs) to determine which `10.77.0.x` WireGuard peer carried it, if an active SSH socket exists. Match that internal peer to the known `wg0` endpoint mapping. If no attributable socket exists, label live ingress UNKNOWN and do not infer it from default/DNS. Then inspect only the confirmed Edge read-only (WG/forward/NAT), without changing any customer account/session, WireGuard, network rules, bot, DNS or 6G. P0 HOLD.
+
+## 14) P1-A تا P1-E — مسیر واقعی Miami (شواهد اپراتور، 2026-10-12)
+
+**اعتبار:** خروجی‌های واقعی Core و Miami و Windows PowerShell که اپراتور در همین دور گزارش کرده است. این‌ها داده‌های نقطه‌ای هستند، نه تضمین سلامت دائمی یا سند امضاشده. این بخش بر وضعیت‌های قدیمی `P0 HOLD` مقدم است. هیچ دستور تغییر کد GitHub، مهاجرت کاربران واقعی، تغییر DNS/Cloudflare یا ویرایش `wg0` در این عملیات گزارش نشده است.
+
+### 14.1 انتخاب Edge و اندازه عملیاتی
+
+- Production Core: `209.200.246.198` (hostname: `CloudVPS121849`). Active Ingress Relay: Miami `144.172.84.76` (hostname: `ubuntu-Miami-1gb`)، `eth0=144.172.84.76/24` و `wg0=10.77.0.8/24`، خروج مستقیم Edge به اینترنت از `eth0` با IP خودش.
+- Miami پیش از تغییر: `wg show interfaces` فقط `wg0`؛ بدون netns؛ `net.ipv4.ip_forward=1`؛ DNAT ورودی TCP `2252` و `2088` به `10.77.0.1`؛ `POSTROUTING -j MASQUERADE` عمومی؛ `FORWARD ACCEPT`. وجود MASQUERADE عمومی به معنی آمادگی کامل Egress چندکاربره نیست.
+- وضعیت bot UI در Snapshot: Miami فعال، `144.172.84.82` و `172.86.94.174` standby و `144.172.111.51` disabled. در Core شمارش `ss`: **113 اتصال TCP established** از peer `10.77.0.8` روی پورت محلی `2252`. رادار بات جداگانه **540 فروش کل، 419 کاربر فعال SSH، 114 آنلاین، 118 اتصال مستقیم، صفر TLS/Gost** اعلام کرد. اختلاف روش/زمان شمارش‌ها را خرابی ندانید؛ 1019 سطر قدیمی `ssh_accounts` با 419 کاربر فعال برابر نیست.
+- گزارش آزمایش قبلی و مجزا از اپراتور: UID 1636 (`nvl0555`) با Rule موقت و AllowedIPs سراسری روی `wg0` قدیمی از Edge `107.189.22.144` خارج شد، ولی بازنویسی `wg0.conf` آن را شکست. **این تجربه مجوز افزودن `0.0.0.0/0` به peer مشترک wg0 و تعمیم ناامن آن به چند Edge نیست.**
+
+### 14.2 P1-A/P1-B — Backup، Stage و تونل اختصاصی
+
+- طبق تصمیم اپراتور، **فقط Core بکاپ کامل گرفت**: `/root/nvl-egress-backups/core-20261012-153159-0MgVNi`، حدود **41M**. خروجی: `BACKUP_OK`، `DATABASE_INTEGRITY=OK`، `ARCHIVE_VERIFIED=OK`، تطبیق SHA256 دیتابیس/آرشیو/iptables. شامل `master_bot.db` با `PRAGMA integrity_check=ok`، تنظیمات Core، وضعیت Route/Firewall و فایل‌های موجود مرحله قبل. **بکاپ محلی است؛ Snapshot مستقل VPS، کپی Offsite و تست Restore گزارش نشده‌اند.** Miami بکاپ کامل ندارد؛ جایگزینی Edge لزوماً نشست‌های فعال را حفظ نمی‌کند.
+- Provisioner موجود `ops/edge_egress_provision.py` با Git blob تأییدشده `9a5a193888f9f2f3d3b87ad996df361265061685` استفاده شد؛ کلیدهای **خصوصی** WG در سرورها باقی ماندند و نباید در سند/chat قرار گیرند. خروجی `CORE_STAGE_OK`، `TRANSFER_OK`، `MIAMI_STAGE_OK`؛ هر دو Preflight `ok=true,issues=[]`.
+- منابع: `edge_id=mia1`، `wg-nvl-mia1`، UDP Edge `51843`، تونل `10.78.130.0/30` (Miami `.1`، Core `.2`)، Core namespace `nvl-egress-mia1`، veth `10.78.131.0/30` (Core root `vnh-mia1=10.78.131.1`، ns peer `10.78.131.2`)، routing table `1781`. مسیر مستقل قدیمی `nvl-egress-stg1`، `wg0` اصلی و جدول legacy `77` حفظ شدند.
+- اپراتور `up.sh` ساخته‌شده را ابتدا در Miami سپس Core اجرا کرد: `MIAMI_EGRESS_UP` و `CORE_EGRESS_UP`، اینترفیس‌های متناظر و Route پیش‌فرض **فقط در namespace** تأیید شدند؛ `ssh` و `nvlbot` در Core هر دو `active`. هیچ `systemctl enable` یا Reboot آزمایشی برای Egress گزارش نشده است.
+- تست `curl -4` داخل namespace Core با IP مقصد از پیش Resolve‌شده: `OBSERVED_PUBLIC_IP=144.172.84.76`، `SAME_EDGE_EGRESS=PASS` و handshake اختصاصی WG. این فقط مسیر TCP از namespace را ثابت می‌کند.
+
+### 14.3 P1-C/P1-D/P1-E — Canary عمومی موفق
+
+- حساب آزمایشی **`nvl-egc1` / UID 1690 / GID 1690** تازه ایجاد شد. `passwd -S` وضعیت **`L`** (رمز عبور قفل) را نشان می‌دهد، **اما کلید عمومی SSH مجاز نصب شد و ورود با کلید واقعاً موفق بود**؛ password-locked بودن به معنی ممنوعیت همه SSH loginها نیست. حساب مشتری واقعی تغییر نکرد.
+- قواعد دستی و **غیرپایدار** مخصوص این UID: `ip rule pref 1781 uidrange 1690-1690 lookup 1781`؛ table `1781` دارای `default via 10.78.131.2 dev vnh-mia1 src 10.78.131.1 metric 100`، `blackhole default metric 4096` و `10.77.0.0/24 dev wg0 src 10.77.0.1` برای برگشت به Ingress؛ ip6tables owner reject و iptables owner DNS UDP/TCP 53 به `127.0.0.0/8`. Legacy `7700 fwmark 0x77→table 77` دست‌نخورده ماند.
+- `ip route get 1.1.1.1 uid 1690` مسیر `vnh-mia1` را نشان داد، `runuser -u nvl-egc1 curl -4` بازگشت `144.172.84.76`: **`CANARY_EGRESS=PASS`**.
+- P1-D: اسکریپت نخست قبل از تغییر Route در preflight متوقف شد؛ نسخه اصلاح‌شده `PREFLIGHT_PASS` و baseline IP صحیح داد. سپس فقط default متعلق به Miami در table 1781 حذف شد؛ با باقی‌ماندن blackhole، `ip route get` و probe اینترنت UID شکست خوردند: **`FAIL_CLOSED=PASS`**. Route بازسازی شد و IP Miami برگشت: `ROUTE_RESTORED`، **`EGRESS_RECOVERY=PASS`**، `P1_D_COMPLETE`. این **فقط یک آزمایش حذف Route** بود، نه اثبات قطع واقعی/rekey WG، packet capture یا همه نشت‌ها.
+- P1-E: از **Windows PowerShell**، SSH/SOCKS واقعی روی Ingress عمومی Miami `144.172.84.76:2252` برای `nvl-egc1`، با dynamic forwarding محلی `127.0.0.1:31884` برقرار شد. `curl.exe -4 --socks5-hostname 127.0.0.1:31884 https://api.ipify.org` پاسخ **`144.172.84.76`** داد. **هدف Same-Edge برای یک SSH/SOCKS واقعی روی Production اثبات شد.** برای سایر UIDها، BadVPN/UDPGW، Gost، IPv6 یا DNS/NSS چنین اثباتی نداریم.
+- جدیدترین خروجی کوتاه اپراتور: `id nvl-egc1` برابر UID/GID 1690، `passwd -S` برابر `L` و `systemctl is-active ssh nvlbot` هر دو `active`. بخش‌های `systemctl is-enabled`، واحدهای Egress، `sshd -T` و Route تازه در این پیام **ارائه نشده‌اند**؛ علامت `COMPLETE` معادل Boot Readiness نیست.
+
+### 14.4 مرز عملیاتی و دقیقاً از کجا ادامه دهیم
+
+**Checkpoint فعلی:** Dedicated Miami Egress و اتصال UID 1690 پس از P1-D طبق آخرین شواهد اپراتور برقرارند؛ اما ابزارهای اجرایی `up.sh` دستی و Ruleهای دستی UID **پس از reboot تضمین ندارند**. Canary اکنون authorized key دارد؛ با حذف selector UID پس از reboot، ممکن است به Route اصلی Core و IP `209.200.246.198` برگردد. **وجود blackhole در جدول غیرمنتخب محافظت نمی‌کند. از reboot کورکورانه یا migration قبل از BootGuard/admission deny-before-allow خودداری کنید.**
+
+**باز/حل‌نشده:** (1) Persistent systemd ordering و Runtime/PAM admission واقعی، admin console rescue و restore rehearsal؛ (2) قطع واقعی dedicated WG/Edge و اثبات نبود fallback، DNS/NSS/IPv6/BadVPN/packet capture؛ (3) ناسازگاری فعلی F2/F4 برای چند UID روی Edge مشترک: shared table freeze و runtime-store که ثبت دومین protected UID را منع می‌کند؛ (4) نگاشت واقعی حساب/Session به Edge و چالش یک UID با Sessionهای هم‌زمان از چند Edge؛ (5) حفظ 6G lock/journal و سازگاری با 6H؛ (6) هیچ مشتری منتقل نشده، **419 فقط Snapshot کاربران فعال** نه فهرست آماده Cutover.
+
+**گام بعد:** ابتدا **فقط Read-only** وضعیت Systemd/Boot، قواعد فعلی UID 1690، PAM/SSH و 6G lock را بررسی کنید. سپس Persistence همراه deny-first و rollback امن را در VPS ایزوله دارای Console تست و طراحی کنید؛ وضعیت shared-table چندکاربره را قبل از اضافه‌کردن UID دوم اصلاح و تست کنید؛ بعد از تست WG outage، DNS/IPv6 و rescue/restore، به‌صورت batch کوچک کاربران Miami را منتقل کنید و برای Edgeهای دیگر تونل و نگاشت جدا بسازید. برای Sessionهای هم‌زمان یک UID روی چند Edge، UID-only route به‌تنهایی Same-Edge per-session را تضمین نمی‌کند. **از همان تست‌های موفق namespace، UID curl، route-loss و SOCKS بدون علت تکرار نکنید.**
+
+**مسیرهای محلی حساس، فقط برای Operator:** Core Backup `/root/nvl-egress-backups/core-20261012-153159-0MgVNi`؛ prep `/root/nvl-egress-mia1-prep`؛ Core stage `/root/nvl-egress-mia1-core-stage`؛ Edge prep `/root/nvl-egress-mia1-prep`؛ Edge stage `/root/nvl-egress-mia1-edge-stage`. **فایل‌های حاوی Private Key یا credential منتشر نشوند.** اجرای `down.sh` ساده بعد از اتصال UID به Route، rollback امن نیست؛ ابتدا Loginهای جدید deny، Sessionها مدیریت و Fail-Closed حفظ شود.
+
+**تغییر مستندات فقط با درخواست صریح اپراتور.**

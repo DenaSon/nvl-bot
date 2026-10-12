@@ -126,7 +126,10 @@ def render_unit(contract: R1BootContract, manifest_sha256: str,
     No ExecStop: stopping systemd cannot silently tear down protected routes.
     """
     contract.spec.validate()
-    if (not _HEX64.fullmatch(manifest_sha256)
+    if contract.role not in ("core", "edge") or contract.mode != "DISPOSABLE_ONLY":
+        raise R1ServiceUnsafe("INVALID_SERVICE_ROLE_OR_MODE")
+    if (not isinstance(manifest_sha256, str)
+        or not _HEX64.fullmatch(manifest_sha256)
         or agent != AGENT):
         raise R1ServiceUnsafe("UNREVIEWED_UNIT_INPUT")
     path = MANIFEST_ROOT / contract.filename()
@@ -197,6 +200,9 @@ def start_disposable_transport(contract: R1BootContract, *,
     script's own ERR trap may clean up resources it has just created.
     On any uncertain result never invoke down.sh or release a 6G lock.
     """
+    contract.spec.validate()
+    if contract.role not in ("core", "edge") or contract.mode != "DISPOSABLE_ONLY":
+        raise R1ServiceUnsafe("INVALID_SERVICE_ROLE_OR_MODE")
     if os.geteuid() != 0:
         raise R1ServiceUnsafe("ROOT_REQUIRED")
     assert_disposable_identity(contract, marker=marker, machine_id=machine_id)

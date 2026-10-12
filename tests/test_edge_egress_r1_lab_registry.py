@@ -113,7 +113,8 @@ class LabRegistryTests(unittest.TestCase):
                 "edge_egress_r1_lab_registry.make_lab_db_conn",
                 return_value=self.connector(db),
             ), patch(
-                "edge_egress_r1_lab_registry.verified_bot_callbacks"
+                "edge_egress_r1_lab_registry.verified_bot_callbacks",
+                side_effect=reviewed_bot_callbacks,
             ) as callback:
                 with self.assertRaisesRegex(Lab6GUnsafe, "NOT_EMPTY"):
                     register_verified_stage()

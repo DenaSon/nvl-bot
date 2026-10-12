@@ -37,29 +37,33 @@ class KernelTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeKernelUnsafe,"UID_CHANGED"):
                 kernel.freeze(req())
 
-    def test_freeze_keeps_uid_selector_and_terminal_blackhole(self):
+    def test_freeze_is_per_uid_and_never_removes_shared_default(self):
         calls=[]
-        routes={"edge":True}
+        denied=set()
         def runner(*args,timeout=15):
             calls.append(args)
             if args[:5] == ("ip","-4","route","show","table"):
-                result = ("default via 10.78.101.2 dev vnh-fra1 "
-                          "src 10.78.101.1 metric 100\n") if routes["edge"] else ""
-                return SimpleNamespace(returncode=0,stdout=result+
-                                       "blackhole default metric 4096\n")
-            if args[:5] == ("ip","-4","route","del","default"):
-                routes["edge"]=False
+                return SimpleNamespace(returncode=0,stdout=(
+                    "default via 10.78.101.2 dev vnh-fra1 "
+                    "src 10.78.101.1 metric 100\n"
+                    "blackhole default metric 4096\n"))
+            if args[:4] == ("iptables","-w","-C","OUTPUT") and "--uid-owner" in args:
+                return SimpleNamespace(returncode=0 if args[args.index("--uid-owner")+1] in denied else 1,stdout="")
+            if args[:4] == ("iptables","-w","-I","OUTPUT") and "--uid-owner" in args:
+                denied.add(args[args.index("--uid-owner")+1])
             return SimpleNamespace(returncode=0,stdout="")
-        kernel=LocalLinuxProtectedRuntimeKernel(explicitly_enabled=True,run=runner)
+        fake_guard=lambda: SimpleNamespace(verify=lambda *a,**kw: None)
+        kernel=LocalLinuxProtectedRuntimeKernel(explicitly_enabled=True,run=runner,
+                                                guard_factory=fake_guard)
         with patch("edge_egress_uid_runtime_kernel.os.geteuid",return_value=0), \
              patch("edge_egress_uid_runtime_kernel.pwd.getpwnam",
                    return_value=SimpleNamespace(pw_uid=1644)):
             kernel.freeze(req())
-        self.assertFalse(routes["edge"])
-        self.assertTrue(any(args[:5]==("ip","-4","route","del","default")
-                            for args in calls))
-        self.assertFalse(any("wg0" in args or "flush" in args or "ip6tables" in args
+            kernel.freeze(req())  # idempotent
+        self.assertEqual(denied, {"1644"})
+        self.assertFalse(any(args[:5]==("ip","-4","route","del","default")
                              for args in calls))
+        self.assertFalse(any("flush" in args for args in calls))
 
     def test_no_silent_core_public_ip_fallback(self):
         def runner(*args,timeout=15):

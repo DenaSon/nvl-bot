@@ -115,7 +115,8 @@ def checked_guard(member: Member, directory: Path = GUARD_DIR) -> BootGuardManif
         raise AdmissionHold("INVALID_GUARD_MANIFEST") from exc
     if (manifest.request.username != member.username
             or manifest.request.uid != member.uid
-            or not manifest.ingress_return or manifest.dns_port is None):
+            or not manifest.ingress_return or not manifest.shared_edge
+            or manifest.dns_port is None):
         raise AdmissionHold("PROTECTED_GUARD_MISMATCH")
     return manifest
 
@@ -173,7 +174,8 @@ def render_roster(manifest_bytes: dict[str, bytes]) -> str:
         raise AdmissionHold("INVALID_ROSTER_INPUT")
     items = []
     uids = set()
-    edges = set()
+    edges = {}
+    tables = {}
     for username, raw in sorted(manifest_bytes.items()):
         if (not isinstance(username, str) or not NAME.fullmatch(username)
                 or not isinstance(raw, bytes) or len(raw) > MAX_GUARD_BYTES):
@@ -184,12 +186,18 @@ def render_roster(manifest_bytes: dict[str, bytes]) -> str:
             raise AdmissionHold("INVALID_MANIFEST_INPUT") from exc
         req = manifest.request
         if (req.username != username or not manifest.ingress_return
-                or manifest.dns_port is None or req.uid in uids
-                or req.spec.edge_id in edges):
-            # Single Canary per Edge until G fixes shared-table boot safety.
+                or not manifest.shared_edge or manifest.dns_port is None
+                or req.uid in uids):
             raise AdmissionHold("INVALID_OR_SHARED_EDGE_MANIFEST")
+        identity = (req.spec.edge_public_ipv4, req.spec.route_table,
+                    req.spec.tunnel_network, req.spec.veth_network)
+        if req.spec.edge_id in edges and edges[req.spec.edge_id] != identity:
+            raise AdmissionHold("SHARED_EDGE_SPEC_MISMATCH")
+        if req.spec.route_table in tables and tables[req.spec.route_table] != req.spec.edge_id:
+            raise AdmissionHold("CROSS_EDGE_TABLE_COLLISION")
+        edges[req.spec.edge_id] = identity
+        tables[req.spec.route_table] = req.spec.edge_id
         uids.add(req.uid)
-        edges.add(req.spec.edge_id)
         items.append(dict(username=username, uid=req.uid,
                           guard_sha256=hashlib.sha256(raw).hexdigest()))
     return json.dumps(dict(version=1, protected=items), sort_keys=True,
@@ -198,8 +206,8 @@ def render_roster(manifest_bytes: dict[str, bytes]) -> str:
 
 def render_v1_guard_unit(manifest: BootGuardManifest) -> str:
     """Per-user deny-only boot unit; no global SSH dependency, no install."""
-    if not manifest.ingress_return or manifest.dns_port is None:
-        raise AdmissionHold("V1_REQUIRES_INGRESS_AND_DNS_GUARD")
+    if not manifest.ingress_return or not manifest.shared_edge or manifest.dns_port is None:
+        raise AdmissionHold("V1_REQUIRES_SHARED_INGRESS_AND_DNS_GUARD")
     unit = render_ssh_required_unit(manifest)
     if "After=local-fs.target\n" not in unit:
         raise AdmissionHold("UNKNOWN_BOOT_UNIT_SHAPE")

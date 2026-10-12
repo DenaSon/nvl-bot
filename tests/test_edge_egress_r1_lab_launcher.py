@@ -98,6 +98,7 @@ class R1Lab6GTests(unittest.TestCase):
             asyncio.run(self.port.start(self.req))
         self.assertEqual(self.ssh.events, [])
         self.guard = True
+        self.lease.calls = 0
         self.lease.fail_at = 1
         with self.assertRaisesRegex(R1LabUnsafe, "LEASE_REQUIRED"):
             asyncio.run(self.port.start(self.req))
@@ -139,7 +140,7 @@ class R1LabSSHTests(unittest.TestCase):
     def test_ssh_strict_host_pin_and_fixed_agent(self):
         runner = LabSSHExecutor(
             Path("/root/id_r1"), Path("/root/known_hosts_r1"))
-        with patch.object(runner, "_check_local_files"), patch(
+        with patch.object(LabSSHExecutor, "_check_local_files"), patch(
             "edge_egress_r1_lab_launcher.subprocess.run",
             return_value=SimpleNamespace(returncode=0, stdout=json.dumps({
                 "ok": True, "role": "edge",
@@ -158,7 +159,7 @@ class R1LabSSHTests(unittest.TestCase):
 
     def test_ssh_output_does_not_authorize_without_exact_verified_response(self):
         runner = LabSSHExecutor(Path("/root/k"), Path("/root/h"))
-        with patch.object(runner, "_check_local_files"), patch(
+        with patch.object(LabSSHExecutor, "_check_local_files"), patch(
             "edge_egress_r1_lab_launcher.subprocess.run",
             return_value=SimpleNamespace(returncode=0, stdout='{"ok":true,"role":"core","state":"OFFLINE_VERIFIED"}')
         ):

@@ -138,12 +138,13 @@ class R1SystemdTests(unittest.TestCase):
         def observed():
             events.append("inspect")
             return after or observation(c.role)
-        with patch("edge_egress_r1_systemd.os.geteuid", return_value=0), \
-             patch("edge_egress_r1_systemd.assert_disposable_identity"), \
-             patch("edge_egress_r1_systemd._stage_owned", side_effect=owned):
-            action = lambda: start_disposable_transport(
-                c, executor=run, precheck=check, observe=observed)
-            return action, events
+        def action():
+            with patch("edge_egress_r1_systemd.os.geteuid", return_value=0), \
+                 patch("edge_egress_r1_systemd.assert_disposable_identity"), \
+                 patch("edge_egress_r1_systemd._stage_owned", side_effect=owned):
+                return start_disposable_transport(
+                    c, executor=run, precheck=check, observe=observed)
+        return action, events
 
     def test_start_happy_path_requires_pin_precheck_and_proof(self):
         action, events = self._start()
@@ -178,7 +179,7 @@ class R1SystemdTests(unittest.TestCase):
         action, events = self._start()
         with patch("edge_egress_r1_systemd.os.geteuid", return_value=1000):
             with self.assertRaisesRegex(R1ServiceUnsafe, "ROOT_REQUIRED"):
-                action()
+                start_disposable_transport(contract())
         self.assertEqual(events, [])
 
 

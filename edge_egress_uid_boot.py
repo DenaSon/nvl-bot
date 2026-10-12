@@ -275,6 +275,9 @@ class BootGuardApplier:
         if not present:
             raise BootGuardError("UID_RULE_NOT_ARMED")
         text = self.call("ip", "-4", "route", "show", "table", str(plan.table))
+        # iproute2 may emit trailing whitespace on otherwise exact owned routes.
+        # Normalize presentation only; preflight still rejects unknown routes.
+        text = "\n".join(line.rstrip() for line in text.splitlines())
         if not re.search(r"(?m)^blackhole default\b", text):
             raise BootGuardError("TERMINAL_BLACKHOLE_MISSING")
         if manifest.ingress_return and not re.search(

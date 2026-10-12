@@ -42,7 +42,7 @@ def _owned(path: Path, *, directory: bool = False) -> bool:
         if path.is_symlink():
             return False
         s = path.stat()
-        return (s.st_uid == 0 and not s.st_mode & 0o022
+        return (s.st_uid == 0 and not s.st_mode & 0o077
                 and (stat.S_ISDIR(s.st_mode) if directory
                      else stat.S_ISREG(s.st_mode)))
     except OSError:

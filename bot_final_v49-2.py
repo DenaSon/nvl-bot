@@ -333,6 +333,9 @@ from edge_egress_phase2_console import (
     detail_html as egress_detail_html,
     health_html as egress_health_html,
     actions_html as egress_actions_html,
+    inspect_local_stage, stage_html as egress_stage_html,
+    preview_uid_html as egress_uid_preview_html,
+    MAX_EDGES as EGRESS_PAGE_SIZE,
 )
 from edge_egress_f3_admin import render_assignment_preview
 from edge_egress_f3_readiness import record_ingress_candidate
@@ -10682,6 +10685,39 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.pop('state', None)
             await update.message.reply_text(edge_guard_message(edge_gate.reason))
             return
+
+    # K2 Phase 2: one-shot per-Edge protected user preview (never moves UID).
+    if state == 'EGRESS_PHASE2_USER_PREVIEW':
+        context.user_data.pop('state', None)
+        eid = context.user_data.pop('egress_preview_edge_id', None)
+        deadline = context.user_data.pop('egress_preview_expires', 0)
+        if role != 'admin':
+            await update.message.reply_text("⛔️ فقط مدیر")
+            return
+        if text.strip() in ('لغو', '/cancel'):
+            await update.message.reply_text("✅ پیش‌نمایش لغو شد.")
+            return
+        if not isinstance(eid, str) or time.time() > deadline:
+            await update.message.reply_text(
+                "⏳ اعتبار درخواست تمام شده؛ دوباره Edge را انتخاب کنید."
+            )
+            return
+        try:
+            edge_id_checked(eid)
+            board = await asyncio.to_thread(
+                read_egress_dashboard, db_conn, only_edge=eid,
+            )
+            card = get_egress_card(board, eid)
+            preview = await asyncio.to_thread(
+                egress_uid_preview_html, db_conn, card, text.strip(),
+            )
+        except (EgressConsoleHold, ValueError):
+            preview = "⛔️ هویت یا وضعیت Edge قابل تأیید نیست؛ هیچ اقدامی نشد."
+        except Exception:
+            log.exception("Phase 2 UID preview unavailable")
+            preview = "⛔️ بررسی کاربر ناموفق بود؛ هیچ تغییری انجام نشد."
+        await update.message.reply_text(preview, parse_mode="HTML")
+        return
 
     # F3: administrator-only Egress assignment PREVIEW, no DB/route mutation.
     if state == 'EGRESS_F3_PLAN_INPUT':
@@ -23451,14 +23487,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    elif d == "hpeg_status":
+    elif d == "hpeg_status" or d.startswith("hpeg_page_"):
         if role != 'admin':
             await query.message.reply_text("⛔️ فقط مدیر")
             return
         try:
+            page = 0
+            if d.startswith("hpeg_page_"):
+                raw_page = d[len("hpeg_page_"):]
+                if not re.fullmatch(r"[0-9]{1,3}", raw_page):
+                    raise EgressConsoleHold("INVALID_DASHBOARD_PAGE")
+                page = int(raw_page)
             # Phase 2: trusted H ingress registry + host pool + F3/F4.
             # Ingress-only e7 is visible even when no Egress allocation exists.
-            board = await asyncio.to_thread(read_egress_dashboard, db_conn)
+            board = await asyncio.to_thread(read_egress_dashboard, db_conn, page=page)
+            if page and not board.cards:
+                raise EgressConsoleHold("EMPTY_DASHBOARD_PAGE")
             buttons = []
             for item in board.cards:
                 eid = edge_id_checked(item.edge_id)
@@ -23467,8 +23511,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{icon} {eid} · {item.ip[:24]}",
                     callback_data=f"hpeg_edge_{eid}",
                 )])
+            pager = []
+            if page > 0:
+                pager.append(InlineKeyboardButton(
+                    "⬅️ قبلی", callback_data=f"hpeg_page_{page - 1}"
+                ))
+            if (page + 1) * EGRESS_PAGE_SIZE < board.total:
+                pager.append(InlineKeyboardButton(
+                    "بعدی ➡️", callback_data=f"hpeg_page_{page + 1}"
+                ))
+            if pager:
+                buttons.append(pager)
             buttons.extend([
-                [InlineKeyboardButton("🔄 بروزرسانی وضعیت", callback_data="hpeg_status")],
+                [InlineKeyboardButton("🔄 بروزرسانی وضعیت", callback_data=f"hpeg_page_{page}")],
                 [InlineKeyboardButton("🚀 افزودن Edge", callback_data="hp_addedge")],
                 [InlineKeyboardButton("🧭 مراحل راه‌اندازی", callback_data="hpeg_steps")],
                 [InlineKeyboardButton("🔙 بازگشت", callback_data="hp_menu")],
@@ -23496,20 +23551,49 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     elif (d.startswith("hpeg_edge_") or d.startswith("hpeg_probe_")
-          or d.startswith("hpeg_health_") or d.startswith("hpeg_actions_")):
+          or d.startswith("hpeg_health_") or d.startswith("hpeg_actions_")
+          or d.startswith("hpeg_stage_") or d.startswith("hpeg_user_")):
         if role != 'admin':
             await query.message.reply_text("⛔️ فقط مدیر")
             return
         is_probe = d.startswith("hpeg_probe_")
         is_health = d.startswith("hpeg_health_")
         is_actions = d.startswith("hpeg_actions_")
+        is_stage = d.startswith("hpeg_stage_")
+        is_user = d.startswith("hpeg_user_")
         prefix = ("hpeg_probe_" if is_probe else "hpeg_health_" if is_health
-                  else "hpeg_actions_" if is_actions else "hpeg_edge_")
+                  else "hpeg_actions_" if is_actions else "hpeg_stage_" if is_stage
+                  else "hpeg_user_" if is_user else "hpeg_edge_")
         edge_id = d[len(prefix):]
         try:
             edge_id_checked(edge_id)
-            board = await asyncio.to_thread(read_egress_dashboard, db_conn)
+            board = await asyncio.to_thread(
+                read_egress_dashboard, db_conn, only_edge=edge_id,
+            )
             card = get_egress_card(board, edge_id)
+            if is_user:
+                context.user_data['state'] = 'EGRESS_PHASE2_USER_PREVIEW'
+                context.user_data['egress_preview_edge_id'] = edge_id
+                context.user_data['egress_preview_expires'] = time.time() + 120
+                await query.edit_message_text(
+                    "👤 <b>پیش‌نمایش تخصیص محافظت‌شده</b>\n\n"
+                    f"Edge: <code>{esc(edge_id)}</code>\n"
+                    "فقط نام کاربری SSH را وارد کنید؛ مثال: <code>nvl0557</code>\n"
+                    "این بررسی هیچ تغییری ایجاد نمی‌کند.\n"
+                    "⏳ مهلت: ۲ دقیقه | لغو: «لغو»",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "🔙 جزئیات Edge", callback_data=f"hpeg_edge_{edge_id}"
+                        )],
+                    ]),
+                )
+                return
+            # Old one-shot user preview must not remain active on navigation.
+            context.user_data.pop('egress_preview_edge_id', None)
+            context.user_data.pop('egress_preview_expires', None)
+            if context.user_data.get('state') == 'EGRESS_PHASE2_USER_PREVIEW':
+                context.user_data.pop('state', None)
             if is_probe:
                 if not card.can_probe:
                     raise EgressConsoleHold("STAGE_OR_INGRESS_NOT_ATTESTED")
@@ -23517,6 +23601,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 html = probe_html(result)
                 if not result.matches:
                     log.warning("Egress admin live probe mismatch: edge_id=%s", edge_id)
+            elif is_stage:
+                result = await asyncio.to_thread(inspect_local_stage, card)
+                html = egress_stage_html(card, result)
             elif is_health or is_actions:
                 # Only pinned stage inspection when available; no ensure/up/down.
                 result = await asyncio.to_thread(inspect_egress_transport, card)
@@ -23524,7 +23611,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         else egress_actions_html(card, result))
             else:
                 html = egress_detail_html(card)
-            buttons = []
+            buttons = [
+                [InlineKeyboardButton(
+                    "📦 بازرسی Stage محلی", callback_data=f"hpeg_stage_{edge_id}",
+                )],
+                [InlineKeyboardButton(
+                    "👤 پیش‌نمایش تخصیص کاربر", callback_data=f"hpeg_user_{edge_id}",
+                )],
+            ]
             if card.can_probe:
                 buttons.append([InlineKeyboardButton(
                     "🌍 تست زنده IP خروجی", callback_data=f"hpeg_probe_{edge_id}",

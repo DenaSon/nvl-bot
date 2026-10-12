@@ -136,6 +136,20 @@ def edge_guard_message(reason: str) -> str:
         return "⛔️ مدیریت Edge فقط برای مدیر مجاز است."
     if reason == UNKNOWN_MODE:
         return "⛔️ تنظیم حالت محافظت Egress نامعتبر است؛ عملیات انجام نشد."
+    if isinstance(reason, str) and reason.startswith("EGRESS_J_"):
+        messages = {
+            "EGRESS_J_SCHEMA_MISSING": "مهاجرت دیتابیس Egress هنوز کامل نشده است.",
+            "EGRESS_J_TARGET_INGRESS_UNVERIFIED": "Edge مقصد به عنوان ورودی معتبر ثبت نشده است.",
+            "EGRESS_J_TARGET_NOT_F4_READY": "خروجی واقعی Edge مقصد هنوز گواهی READY معتبر ندارد.",
+            "EGRESS_J_MAPPING_UNCERTAIN": "نگاشت حساب‌های محافظت‌شده مبهم یا در وضعیت انتقال است.",
+            "EGRESS_J_PINNED_UIDS_REQUIRE_DRAIN_REBIND":
+                "حساب‌های محافظت‌شده هنوز به Edge قبلی متصل‌اند؛ انتقال بدون Drain و Rebind ممنوع است.",
+            "EGRESS_J_PROTECTED_6G_HANDOFF_NOT_RELEASED":
+                "تأیید نهایی اجرای انتقال محافظت‌شده در 6G هنوز انجام نشده است.",
+        }
+        return ("⛔️ سوییچ Edge در حالت محافظت‌شده انجام نشد. "
+                + messages.get(reason, "شواهد محافظت Egress کامل نیست.") 
+                + " هیچ مسیر یا حسابی تغییر نکرد.")
     if reason == LEGACY_MANUAL_UNSAFE:
         return (
             "⛔️ این مسیر قدیمی مدیریت Edge هنوز به Egress Manager متصل نیست. "

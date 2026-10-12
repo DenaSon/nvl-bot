@@ -56,6 +56,18 @@ def prepare_bundle(manifest_bytes: bytes, *, expected_manifest_sha256: str,
                            unit_hash)
 
 
+def _assert_bundle(bundle: R1InstallBundle) -> None:
+    if not isinstance(bundle, R1InstallBundle):
+        raise R1ServiceUnsafe("INVALID_INSTALL_BUNDLE")
+    checked = prepare_bundle(
+        bundle.manifest_bytes,
+        expected_manifest_sha256=bundle.manifest_sha256,
+        expected_unit_sha256=bundle.unit_sha256,
+    )
+    if checked != bundle:
+        raise R1ServiceUnsafe("INSTALL_BUNDLE_IDENTITY_CHANGED")
+
+
 def _paths(bundle: R1InstallBundle, manifest_root: Path, unit_root: Path):
     contract = bundle.contract
     contract.spec.validate()
@@ -108,6 +120,7 @@ def install_disabled(bundle: R1InstallBundle, *,
     """
     if explicitly_authorized is not True or os.geteuid() != 0:
         raise R1ServiceUnsafe("DISABLED_INSTALL_EXPLICIT_ROOT_GATE_REQUIRED")
+    _assert_bundle(bundle)
     if agent_check is None or agent_check() is not True:
         raise R1ServiceUnsafe("REVIEWED_ROOT_AGENT_REQUIRED")
     identity_check(bundle.contract)
@@ -141,7 +154,8 @@ def rollback_disabled(bundle: R1InstallBundle, *,
                       manifest_root: Path = MANIFEST_ROOT,
                       unit_root: Path = UNIT_ROOT,
                       identity_check: Callable[[R1BootContract], None] = assert_disposable_identity,
-                      inactive_disabled_check: Callable[[str], bool] | None = None) -> tuple[str, ...]:
+                      inactive_disabled_check: Callable[[str], bool] | None = None,
+                      transport_absent_check: Callable[[R1BootContract], bool] | None = None) -> tuple[str, ...]:
     """Only delete THIS pinned unit/manifest when externally verified inactive.
 
     A running unit, unverified systemd state, network activity, unexpected
@@ -149,11 +163,15 @@ def rollback_disabled(bundle: R1InstallBundle, *,
     """
     if explicitly_authorized is not True or os.geteuid() != 0:
         raise R1ServiceUnsafe("ROLLBACK_EXPLICIT_ROOT_GATE_REQUIRED")
+    _assert_bundle(bundle)
     identity_check(bundle.contract)
     _check_install_dirs(manifest_root, unit_root)
     manifest, unit = _paths(bundle, manifest_root, unit_root)
     if inactive_disabled_check is None or inactive_disabled_check(unit.name) is not True:
         raise R1ServiceUnsafe("UNIT_STATE_NOT_INACTIVE_DISABLED")
+    # An inactive oneshot service does NOT prove its old network is gone.
+    if transport_absent_check is None or transport_absent_check(bundle.contract) is not True:
+        raise R1ServiceUnsafe("DEDICATED_TRANSPORT_STILL_PRESENT_OR_UNKNOWN")
     if not (manifest.exists() or manifest.is_symlink()
             or unit.exists() or unit.is_symlink()):
         return ()

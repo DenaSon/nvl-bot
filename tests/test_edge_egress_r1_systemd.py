@@ -52,7 +52,8 @@ class R1SystemdTests(unittest.TestCase):
         self.assertIn("Restart=no", text)
         self.assertIn("WantedBy=multi-user.target", text)
         self.assertIn("r1-fra1-core.json", text)
-        self.assertIn("start --manifest", text)
+        self.assertIn("verify --manifest", text)
+        self.assertNotIn("start --manifest", text)
         self.assertNotIn("ExecStop=", text)
         self.assertNotIn("ssh.service", text.split("[Install]")[0])
         self.assertNotIn("BindsTo=", text)
@@ -130,7 +131,7 @@ class R1SystemdTests(unittest.TestCase):
                         c, marker=marker, machine_id=machine_id)
 
     def _start(self, *, c=None, stage_owned=True, preflight=True,
-               after=None, exit_code=0):
+               after=None, exit_code=0, lease=True):
         c = c or contract()
         events = []
         fake = SimpleNamespace(returncode=exit_code)
@@ -151,7 +152,8 @@ class R1SystemdTests(unittest.TestCase):
                  patch("edge_egress_r1_systemd.assert_disposable_identity"), \
                  patch("edge_egress_r1_systemd._stage_owned", side_effect=owned):
                 return start_disposable_transport(
-                    c, executor=run, precheck=check, observe=observed)
+                    c, executor=run, precheck=check, observe=observed,
+                    lease_check=lambda: lease)
         return action, events
 
     def test_start_happy_path_requires_pin_precheck_and_proof(self):
@@ -182,6 +184,17 @@ class R1SystemdTests(unittest.TestCase):
         with self.assertRaisesRegex(R1ServiceUnsafe, "IDENTITY_UNCERTAIN_HOLD"):
             action()
         self.assertEqual(events, ["pin","precheck","pin","start","inspect"])
+
+    def test_no_6g_lease_never_starts_or_reads_stage(self):
+        action, events = self._start(lease=False)
+        with self.assertRaisesRegex(R1ServiceUnsafe, "EXISTING_6G_LEASE_REQUIRED"):
+            action()
+        self.assertEqual(events, [])
+
+    def test_absent_6g_port_never_starts_direct_api(self):
+        with patch("edge_egress_r1_systemd.os.geteuid", return_value=0):
+            with self.assertRaisesRegex(R1ServiceUnsafe, "EXISTING_6G_LEASE_REQUIRED"):
+                start_disposable_transport(contract())
 
     def test_never_start_without_root(self):
         action, events = self._start()

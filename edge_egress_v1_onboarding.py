@@ -81,11 +81,15 @@ def assert_live_ingress(peer: IngressPeer, allowed_ips: str) -> None:
 
 
 def planned_peer(ingress_ip: str, edge_ip: str, public_key: str) -> IngressPeer:
-    # Validate using H's full registry parser, not a second implementation.
-    spec = spec_for_new_edge(
-        edge_ip=edge_ip, core_ip="209.200.246.198", ingress_ip=ingress_ip
-    )
-    peer = IngressPeer(spec.edge_id, edge_ip, ingress_ip, public_key)
+    # Validate with H's full registry parser; no hardcoded Core identity.
+    try:
+        src = IPv4(ingress_ip)
+    except ValueError as exc:
+        raise OnboardHold("INVALID_INGRESS_IP") from exc
+    n = int(src) - int(IPv4("10.77.0.0"))
+    if not 2 <= n <= 254:
+        raise OnboardHold("INVALID_INGRESS_IP")
+    peer = IngressPeer("e" + str(n), edge_ip, ingress_ip, public_key)
     render_registry([peer])
     return peer
 

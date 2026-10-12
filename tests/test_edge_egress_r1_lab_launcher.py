@@ -31,7 +31,8 @@ def host(role):
         role=role,
         public_ipv4=spec().core_public_ipv4 if role == "core"
                     else spec().edge_public_ipv4,
-        machine_id="1" * 32, marker_sha256="2" * 64,
+        machine_id="1" * 32, source_commit="a" * 40,
+        marker_sha256="2" * 64,
         stage_sha256={name: "3" * 64 for name in (
             "manifest.json", "wg.conf", "up.sh", "down.sh")},
     )
@@ -169,7 +170,7 @@ class R1LabSSHTests(unittest.TestCase):
 
 class R1LabAgentTests(unittest.TestCase):
     def test_strict_request(self):
-        self.assertEqual(_request(payload("edge")).role, "edge")
+        self.assertEqual(_request(payload("edge"))[0].role, "edge")
         bad = base64.b64encode(b'{"action":"start"}').decode()
         with self.assertRaisesRegex(LabAgentUnsafe, "REQUEST_FIELDS"):
             _request(bad)

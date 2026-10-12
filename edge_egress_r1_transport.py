@@ -10,7 +10,6 @@ implicitly adopted, stopped, restarted, or cleaned up.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-import inspect
 import json
 import os
 from pathlib import Path
@@ -87,6 +86,7 @@ class R1Observation:
     nat_tagged: bool
     nat_shadowed: bool
     probe_errors: tuple[str, ...] = ()
+    identity_proven: bool = False
 
 
 @dataclass(frozen=True)
@@ -110,6 +110,8 @@ def decide(observation: R1Observation) -> R1Decision:
     if o.role == "edge" and o.nat_shadowed:
         return R1Decision("HOLD", "LEGACY_NAT_PRECEDENCE_UNREVIEWED")
     if occupied:
+        if not o.identity_proven:
+            return R1Decision("HOLD", "WIREGUARD_OR_ROUTE_IDENTITY_UNVERIFIED")
         complete = (o.interface_present and
                     (o.namespace_present and o.veth_present if o.role == "core"
                      else o.nat_tagged))
@@ -177,7 +179,14 @@ def inspect_linux(spec: EgressSpec, role: str, *, run=_run,
     # Existing interfaces yield a nonzero 'ip link show' only when absent.
     # Treat absent link as a normal observation, not a command failure.
     unit = unit_root / ("nvl-egress-" + spec.edge_id + "-transport.service")
-    unit_owned = _root_owned(unit) and _root_owned(unit_root, directory=True)
+    try:
+        us = unit_root.stat()
+        trusted_unit_root = (not unit_root.is_symlink() and
+                             stat.S_ISDIR(us.st_mode) and us.st_uid == 0 and
+                             not us.st_mode & 0o022)
+    except OSError:
+        trusted_unit_root = False
+    unit_owned = _root_owned(unit) and trusted_unit_root
     active = False
     if unit_owned:
         state = output("SYSTEMD_STATE_UNKNOWN", "systemctl", "show",
@@ -188,6 +197,7 @@ def inspect_linux(spec: EgressSpec, role: str, *, run=_run,
 
     tagged = False
     shadowed = False
+    forward_ok = False
     if role == "edge":
         nat = output("NAT_INVENTORY_FAILED", "iptables", "-t", "nat",
                      "-S", "POSTROUTING")
@@ -204,10 +214,49 @@ def inspect_linux(spec: EgressSpec, role: str, *, run=_run,
                     and re.search(r"\s-j MASQUERADE\s*$", line)):
                 tagged = True
                 shadowed = prior_broad
+        forward = output("FORWARD_INVENTORY_FAILED", "iptables", "-S", "FORWARD")
+        forward_ok = (f'-i {spec.iface} -o {spec.edge_uplink}' in forward
+                      and f'-s {spec.core_tunnel_ip}/32' in forward
+                      and f'--comment nvl-egress-{spec.edge_id}' in forward)
+        forwarding = output("FORWARD_SYSCTL_FAILED", "sysctl", "-n",
+                            "net.ipv4.ip_forward")
+        forward_ok = forward_ok and forwarding.strip() == "1"
+
+    stage_owned = _stage_owned(spec, role, stage_root)
+    identity = False
+    if iface and stage_owned:
+        # Compare only PUBLIC peer identity from the root-only staged config.
+        # Never return/read out its private key or include command output.
+        stage = stage_root / (spec.edge_id + "-" + role)
+        try:
+            wg_text = (stage / "wg.conf").read_text(encoding="utf-8")
+            peer_keys = re.findall(r"(?m)^PublicKey\\s*=\\s*(\\S+)\\s*$", wg_text)
+        except (OSError, UnicodeError):
+            peer_keys = []
+        if len(peer_keys) == 1:
+            prefix = ("ip", "netns", "exec", spec.namespace) if role == "core" else ()
+            peers = output("WG_PEER_INVENTORY_FAILED", *prefix,
+                           "wg", "show", spec.iface, "peers")
+            identity = peers.split() == peer_keys
+            allowed = output("WG_ALLOWED_IPS_FAILED", *prefix,
+                             "wg", "show", spec.iface, "allowed-ips")
+            expected = "0.0.0.0/0" if role == "core" else spec.core_tunnel_ip + "/32"
+            identity = identity and (len(allowed.splitlines()) == 1 and
+                                      allowed.split()[-1:] == [expected])
+            if role == "core":
+                default = output("CORE_NS_DEFAULT_FAILED", "ip", "netns",
+                                 "exec", spec.namespace, "ip", "-4",
+                                 "route", "show", "default")
+                identity = identity and (len(default.splitlines()) == 1 and
+                                          f"dev {spec.iface}" in default)
+            else:
+                port = output("WG_LISTEN_PORT_FAILED", "wg", "show",
+                              spec.iface, "listen-port")
+                identity = identity and port.strip() == str(spec.edge_listen_port)
+                identity = identity and forward_ok and tagged
     return R1Observation(role, bool(iface), ns, veth,
-                         _stage_owned(spec, role, stage_root),
-                         unit_owned, active, tagged, shadowed,
-                         tuple(errors))
+                         stage_owned, unit_owned, active, tagged, shadowed,
+                         tuple(errors), identity)
 
 
 @dataclass

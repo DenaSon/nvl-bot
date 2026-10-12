@@ -57,13 +57,15 @@ class LocalLinuxProtectedRuntimeKernel:
                        str(req.spec.route_table)),
             next_hop=req.spec.ns_veth_ip,
             device=req.spec.veth_root, source=req.spec.root_veth_ip,
+            allow_ingress_return=True,
         )
 
     def arm(self, req: UIDPolicyRequest, dns_port: int) -> None:
         self._assert(req)
         if type(dns_port) is not int or not 1024 <= dns_port <= 65535:
             raise RuntimeKernelUnsafe("INVALID_DNS_PORT")
-        manifest = BootGuardManifest(req, "PROTECTED_BOOT_GUARD", dns_port)
+        manifest = BootGuardManifest(req, "PROTECTED_BOOT_GUARD", dns_port,
+                                     ingress_return=True)
         # If another UID already uses this Edge table, F1 intentionally
         # removes the shared Edge default while arming this account. The
         # shared 6G lease serializes the brief outage; unknown routes fail.

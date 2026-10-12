@@ -72,3 +72,27 @@ Do not mark CI PASS until the new PR-head workflow jobs have reported completion
 These components are testable code with **injected verification ports**, not a deployable production installer or a complete R1 release. The agent dependencies and independent agent signature review, concrete systemd-state and kernel-absence probes, operator-directed installation/runbook, cross-host launcher, fresh boot/reboot fault behavior and recovery continuity **must be accepted on a disposable Core+Edge VPS with independent console**. The existing Core/Edge `stg1`, `wg0`, old UID `1658` path, production SSH/BadVPN and DB remain untouched. R2–R6 blocked; no customer cutover.
 
 Focused CI now covers `tests/test_edge_egress_r1_install.py`, `tests/test_edge_egress_r1_shared6g.py`, and the earlier R1 suites. GitHub CI PASS must be checked against the **last code/docs commit**; never infer readiness from an older run.
+
+## R1 disposable Amsterdam↔Frankfurt lab: 2026-10-12 operator stage evidence
+
+This **supersedes the older live Frankfurt Edge inventory** above for IP `216.126.229.12`: the operator *reinstalled* that host. It no longer has the old `wg0`, `wg-nvl-stg1`, broad NAT or 10 previously listed Linux accounts. The 10 accounts **remain marked active in the Production SQLite DB**, and the owner explicitly deferred any account migration. Do not silently rewrite those records.
+
+Isolated LAB pair, **not** the Production Core (`209.200.246.198`):
+- Core: Amsterdam `107.189.16.36` (Ubuntu 24.04.3; fresh); public WG key `vikt7RynwBk0lpFDgz8Lbz7CBQs7Xuf+9IwPnGxbykY=`.
+- Edge: Frankfurt `216.126.229.12` (Ubuntu 24.04.3; reinstalled); public WG key `f43HBIfTFpdm5yNNo8YbjIERIY+UqBSLyB3yW0R9pxc=`.
+- Planned `lab1` WireGuard `10.78.120.0/30`, veth `10.78.121.0/30`, UDP `51852`, table `1791`, uplink `eth0`.
+- Both checkout SHA `d37cf20d1e99f2a8236b2d481ddd41d708c86258` and stage **only**, with no tunnel/network activation. Core `/root/nvl-egress-staging/lab1-core`; Edge `.../lab1-edge`.
+- Core Stage independent SHA-256: manifest `629fa465f68d87274447b6feac585b3108423b0451489131a7bf21ccbf6fb665`, wg.conf `39aec2fa1fd68bd7d4be9cbb4eb7c80db7fc46186c4ce3bc9490d179b2260157`, up.sh `424b32a3048d6a816daf78d9e0697dd94b03b5897dbc393bca51a349570d10f8`, down.sh `57c243bd6614e795bcbfcbfda78dc1c5a2208037779d3361c9dc8616a6a0a389`.
+- Edge Stage SHA-256: manifest `2628951a7fdff4c219ecd191e09160974ef7daf737a97ae6f310f0d8e4378c1b`, wg.conf `58d46ad0e5212e9b79378e43e6cb2198535aa07282d20dc958d1d1f9757f3e00`, up.sh `31f5f7380087288e2ac93436fe813bcd6132b5fcfa2753cf7d3443f3632126a4`, down.sh `309dac5c560448eeb4424bf24fe208d0aaeaefce21efbb6d13b22422f9d2215c`.
+- Both operator `preflight=PASS` and `_stage_owned=PASS`. Edge `net.ipv4.ip_forward` was changed **temporarily** from 0 to 1 before the passing preflight; persistence through reboot is NOT configured. Verify the current value again before activation.
+- Two hosts have **no shared lab 6G DB/journal or installed PAM/UID BootGuard**. Neither a passing Stage SHA nor this PR allows network start/customer attachment. No live route/egress/leak/reboot proof yet.
+
+### New implementation — only the explicit F2/6G bridge may dispatch
+
+`edge_egress_r1_lab_launcher.py` adds a concrete, opt-in `RuntimeShadowPort` (`R1Lab6GShadow`), accepting the existing `Existing6GR1LeaseProbe`, *independent externally attested* UID guard check, and a pinned `LabSSHExecutor`. It checks live shared 6G and guard before probing both machines, between remote Edge and Core activation, and after both. Unknown result or lost admission raises `R1_DUAL_HOST_START_UNCERTAIN_HOLD` and never calls a cleanup, disables another interface or restores Core egress; F2 must persist HOLD and freeze its protected UID table.
+
+`edge_egress_r1_lab_agent.py` is a **lab-only root transport agent**: exact root-owned Stage hashes, disposable marker, machine ID, clean pinned repository commit, host IPv4, absent prior resources, scoped NAT rules, WireGuard peer identity and tunnel addresses are verified. It only supports `probe` or `start`, and a failed start remains an operator-reconciled HOLD. It does NOT independently acquire or attest a live 6G lease on Edge: the live lease is exclusively on Core and must be checked around SSH dispatch. Its `SSH_CONNECTION` check is operational friction, **not** authentication or an F2 lock; restrict remote root SSH key access to the disposable Core and never use Production credentials.
+
+This is **not yet runnable on the staged pair**: their checkout is pinned to the earlier SHA, the lab boot identity markers/agent sources/host-key-pinned SSH identity are not yet deployed, and the F2 Core database/session gate/UID boot guard are not initialized. Do **not** bypass this by issuing `up.sh` manually, setting `lab_activation=true` in a legacy worker, creating a pretend 6G RUNNING DB row, or faking the guard predicate. The R1 verification service still checks identity at boot, **not** auto-starts WireGuard. No `READY`, production installation, or cutover permitted.
+
+After reviewing the new PR head and its CI: pin a fresh code SHA on **both** disposable hosts, provision a separate SSH key with strict known_hosts and an isolated access policy, independently provision the disposable identity marker and machine IDs, instantiate the *real* F2 journal/guard on the fresh Core, then run reviewed failure injection with an out-of-band console. Run `python3 -m unittest -v tests.test_edge_egress_r1_lab_launcher` before host integration.

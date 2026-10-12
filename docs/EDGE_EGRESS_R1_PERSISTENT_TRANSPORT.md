@@ -57,3 +57,18 @@ python3 -m unittest -v tests.test_edge_egress_r1_transport tests.test_edge_egres
 ```
 
 Do not mark CI PASS until the new PR-head workflow jobs have reported completion.
+
+
+## R1 continuation: disabled-file install, rollback and live 6G admission (2026-10-12)
+
+**This section supersedes the earlier wording that the rendered systemd service can start networking automatically at boot.** It now renders `ExecStart=... verify` (read-only identity check). In particular, neither boot nor invoking the CLI `start` may create the WireGuard tunnel or override the shared journal. `start_disposable_transport()` instead requires an explicit, *injected* `lease_check` callback that must remain true before preflight, before executing the reviewed stage `up.sh`, and after transport identity proof. The direct CLI `start` action always refuses. This is not automatic recovery of protected users.
+
+- `edge_egress_r1_shared6g.py` supplies `Existing6GR1LeaseProbe`. It calls the **existing** `Existing6GUIDRuntimeStore._lock()` read-only verifier against `failover_operations`; source, target, ID, single RUNNING operation and lease validity are required. No new tables, locks, or lease acquisition. External F2 must still acquire and journal the transaction and attest the UID guard.
+- `edge_egress_r1_install.py` provides a **DISPOSABLE_ONLY**, default-off, root-gated `prepare_bundle`, `install_disabled`, `rollback_disabled`. Independently reviewed SHA-256 digests are mandatory for the boot manifest and generated systemd unit; the stage files, disposable-host identity and reviewed root agent are required before exclusive file creation. Only one dedicated `/etc/nvl-egress/r1-ID-ROLE.json` and one `/etc/systemd/system/nvl-egress-ID-transport.service` are created, initially disabled. There is **no** `systemctl daemon-reload`, `start`, `enable`, SSH/PAM change or network mutation. Files are never overwritten or adopted.
+- Rollback deletes **only byte-identical, root-owned files**, after *separately supplied* read-only attestation that the unit is inactive/disabled **and** all dedicated transport resources are absent. Unknown state, a live interface/netns, tampered bytes, symlink, or active unit => refusal. Rollback never removes running tunnels or releases the existing 6G lease; a failed/interrupted installation may require operator cleanup after independent verification.
+
+### Remaining R1 acceptance boundary
+
+These components are testable code with **injected verification ports**, not a deployable production installer or a complete R1 release. The agent dependencies and independent agent signature review, concrete systemd-state and kernel-absence probes, operator-directed installation/runbook, cross-host launcher, fresh boot/reboot fault behavior and recovery continuity **must be accepted on a disposable Core+Edge VPS with independent console**. The existing Core/Edge `stg1`, `wg0`, old UID `1658` path, production SSH/BadVPN and DB remain untouched. R2–R6 blocked; no customer cutover.
+
+Focused CI now covers `tests/test_edge_egress_r1_install.py`, `tests/test_edge_egress_r1_shared6g.py`, and the earlier R1 suites. GitHub CI PASS must be checked against the **last code/docs commit**; never infer readiness from an older run.

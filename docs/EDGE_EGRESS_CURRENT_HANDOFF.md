@@ -78,3 +78,32 @@
 - [Release blockers](https://github.com/DenaSon/nvl-bot/issues/88)
 
 **مرز اعتماد:** متن GitHub وضعیت کد را مستند می‌کند، نه وضعیت لحظه‌ای سیستم‌عامل VPS؛ هیچ عملیات Production با اتکا به این سند به‌تنهایی مجاز نیست.
+
+## 8. Live VPS audit — 2026-10-12 (operator terminal evidence; not independent attestation)
+
+**Scope:** Read-only inventory of actual Production Core `209.200.246.198` and Frankfurt Egress Edge `216.126.229.12`. No route, PAM, SSH, database, `wg0`, firewall, systemd or user assignment mutations. Times and packet counters below are snapshots, **not fresh health guarantees**. R1–R6 remain open; `customer_ready=false`.
+
+### Core facts
+
+- `ssh` and `nvlbot` were active. Normal SSH listeners on ports `22` and `2252`; isolated pilot proxy listener only on `127.0.0.1:22284`. Pilot `nvl-egress-pilot-{sshd,proxy}.service` and `nvl-egress-pilot-proxy.socket` were active; their unit files are marked **static**. **Static does not prove boot activation or absence thereof** — dependency/socket wiring requires separate evidence.
+- Effective `sshd -T -C` for `nvl0557`, using explicit `laddr=209.200.246.198,lport=22` and separately `lport=2252`: `usepam yes`, password/public-key/keyboard-interactive enabled, `allowtcpforwarding yes`, `disableforwarding no`, `permitopen any`. Earlier omission of `lport` gave `Match LocalPort ... 'lport' not in connection test specification`; **that command failure was not evidence that SSH had bad configuration**. These are effective checks with a localhost source address, not an exhaustive customer-source `Match` audit.
+- `ip -4 route get 1.1.1.1 uid 1644` returned `dev eth0 src 209.200.246.198`: Canary `nvl0557` **still egresses via Core** under the observed host UID routing. A user-owned `sshd` process was observed (started 2026-10-12 02:05:58 local host time); session ownership/forwarding activity has **not** been established. Do not interrupt it.
+- Existing root-namespace `wg0` and separate `nvl-egress-stg1` namespace with `wg-nvl-stg1`, veth and namespace default route over dedicated WG; recent handshake observed. `wg-quick@wg-nvl-stg1.service` is inactive/disabled, **not proof that the shadow tunnel is down**. No `/opt/nvl-egress` installed, and no Egress `pam_exec` account hook observed in `/etc/pam.d/sshd` output.
+- SQLite query-only inventory: `ssh_accounts`, `host_pool`, `settings`, `failover_operations`, `edge_egress_allocations` present; `edge_egress_readiness`, `edge_egress_uid_runtime`, `edge_egress_uid_bindings` absent. `edge_egress_protected_mode=0`, `RUNNING` shared 6G operations = 0. `nvl0557` ingress owner remains `172.86.94.174` and account active. **Do not migrate DB tables as an implicit preflight step.**
+- `nvl-edge-sync.service` showed `ActiveState=activating, SubState=start, Result=success` at observation; diagnose independently if required, without assuming it manages Egress persistence.
+
+### Edge facts
+
+- Ubuntu kernel `6.8.0-90-generic`; `eth0=216.126.229.12`, original `wg0=10.77.0.6/24`, dedicated `wg-nvl-stg1=10.78.110.1/30`, listening UDP `51842` and recent handshake; `net.ipv4.ip_forward=1`.
+- `wg-quick@wg-nvl-stg1.service` inactive/disabled, no `/etc/wireguard/wg-nvl-stg1.conf`, no matching dedicated systemd unit file discovered. WG interface **exists and is up nevertheless**: current creator/credential ownership and restart/reboot behavior remain unverified. Never copy private keys into Git or print them in evidence.
+- `iptables v1.8.10 (nf_tables)`. `POSTROUTING` rule 1 is unconditional `MASQUERADE` (12,643 packets) and rule 2 is tagged `nvl-egress-stg1` source `10.78.110.2/32` → `eth0` (zero packets). Forward counters on staged path were nonzero (191 outbound, 148 return). The earlier broad NAT rule likely shadows the tagged NAT rule; **do not reorder or remove it** before owner/legacy dependency review. NAT counters are not a packet-capture leak proof.
+- Edge has a public IPv6 default route but `net.ipv6.conf.all.forwarding=0`. That does not itself prove protected Core-UID IPv6 policy, DNS safety or leak absence.
+
+### Decision / next permissible work
+
+1. **Inventory completed for the two current hosts.** Preserve running `stg1`, public SSH ports, BadVPN and original `wg0`; do not recreate namespace, NAT or pilot SSHD just to repeat the 2026-10-11 proof.
+2. **R1 implementation, not activation:** create a dedicated root-owned, version-pinned Core/Edge transport lifecycle with independent systemd/reconcile and fail-closed recovery, integrating the existing F2 bridge and sole shared 6G journal; include a non-destructive adoption/refusal rule for the *already existing* shadow resources and a legacy NAT owner check. No second controller/DB or global SSH dependency.
+3. **R2–R3 blockers remain:** audited PAM account enforcement on actual forwarding paths, independent root/non-root rescue access, socket-activated SSH and crash/reboot of a **disposable** full-system VPS. No deployment of PAM/BootGuard or protected-mode setting on these production hosts.
+4. **R4–R6 remain unproven:** external normal SSH + SOCKS IP proof, DNS/NSS UDP/TCP/IPv6 and BadVPN packet captures, Edge-loss leak proof, active-session drain, multi-user/shared-table behavior, offsite restore and signed acceptance. Only then a single-UID `nvl0557` canary following explicit operator approval.
+
+**Evidence quality:** Operator-copied real terminal outputs; not independently signed or recorded as kernel packet captures. This section supersedes historical assumptions about stage service persistence, but does **not** change Issue #88 release status.

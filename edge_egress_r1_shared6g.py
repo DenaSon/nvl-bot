@@ -45,5 +45,6 @@ class Existing6GR1LeaseProbe:
     def for_request(self, req: UIDPolicyRequest) -> bool:
         req.validate()
         return (req.spec.edge_public_ipv4 == self.target_host
-                and req.spec.core_public_ipv4 != self.source_host
+                and self.source_host not in (
+                    req.spec.core_public_ipv4, req.spec.edge_public_ipv4)
                 and self.active())

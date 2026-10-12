@@ -97,18 +97,18 @@ class HostUnitTests(unittest.TestCase):
         dns = (" 333 1644 python3 "
                "/usr/bin/python3 /opt/nvl-egress/edge_egress_uid_dns.py "
                "serve --username nvl0557 --uid 1644 --priority 20008 --table 20008")
-        basic = " 1 0 systemd /sbin/init\\n 2 0 kthreadd [kthreadd]\\n"
-        assert_idle_process_snapshot(basic + dns + "\\n", "nvl0557", 1644,
+        basic = " 1 0 systemd /sbin/init\n 2 0 kthreadd [kthreadd]\n"
+        assert_idle_process_snapshot(basic + dns + "\n", "nvl0557", 1644,
                                      allowed_dns_pid=333)
         for wrong_pid in (None, 332):
             with self.assertRaises(LiveHold):
                 assert_idle_process_snapshot(
-                    basic + dns + "\\n", "nvl0557", 1644,
+                    basic + dns + "\n", "nvl0557", 1644,
                     allowed_dns_pid=wrong_pid,
                 )
         with self.assertRaisesRegex(LiveHold, "ACTIVE_PROCESS"):
             assert_idle_process_snapshot(
-                basic + dns + "\\n 334 1644 curl curl -4 https://example.net\\n",
+                basic + dns + "\n 334 1644 curl curl -4 https://example.net\n",
                 "nvl0557", 1644, allowed_dns_pid=333,
             )
 

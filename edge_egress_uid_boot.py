@@ -34,11 +34,12 @@ class BootGuardManifest:
     request: UIDPolicyRequest
     mode: str
     dns_port: int | None = None
+    ingress_return: bool = False
 
     @classmethod
     def parse(cls, data: dict) -> "BootGuardManifest":
         if not isinstance(data, dict) or (not {"mode", "username", "uid", "priority", "spec"} <= set(data)
-            or set(data) - {"mode", "username", "uid", "priority", "spec", "dns_port"}):
+            or set(data) - {"mode", "username", "uid", "priority", "spec", "dns_port", "ingress_return"}):
             raise BootGuardError("INVALID_MANIFEST_FIELDS")
         if data["mode"] != "PROTECTED_BOOT_GUARD":
             raise BootGuardError("PROTECTED_MODE_EXPLICITLY_REQUIRED")
@@ -52,7 +53,10 @@ class BootGuardManifest:
         port = data.get("dns_port")
         if port is not None and (type(port) is not int or not 1024 <= port <= 65535):
             raise BootGuardError("INVALID_DNS_PORT")
-        return cls(req, data["mode"], port)
+        ingress = data.get("ingress_return", False)
+        if type(ingress) is not bool:
+            raise BootGuardError("INVALID_INGRESS_RETURN")
+        return cls(req, data["mode"], port, ingress)
 
 
 def read_root_only_manifest(path: Path) -> BootGuardManifest:
@@ -173,7 +177,7 @@ class BootGuardApplier:
             state = inspect_owned_routes(
                 routes, next_hop=request.spec.ns_veth_ip,
                 device=request.spec.veth_root, source=request.spec.root_veth_ip,
-                allow_empty=True,
+                allow_empty=True, allow_ingress_return=True,
             )
         except ProtectedRouteError as exc:
             raise BootGuardError("FOREIGN_ROUTE_IN_PROTECTED_TABLE") from exc
@@ -195,6 +199,10 @@ class BootGuardApplier:
                 if self.run(*verify.argv).returncode != 0:
                     self.call(*add.argv)
         self.call(*plan.guard[3].argv)
+        if manifest.ingress_return:
+            # Preserve only wg0 inbound SSH replies, before UID selection.
+            self.call("ip", "-4", "route", "replace", "10.77.0.0/24",
+                      "dev", "wg0", "src", "10.77.0.1", "table", str(plan.table))
         # Boot recovery always returns an owned Edge route to DENY-only.
         # Never delete wg0 or an unknown/default route.
         state = inspect_owned_routes(
@@ -202,6 +210,7 @@ class BootGuardApplier:
             next_hop=manifest.request.spec.ns_veth_ip,
             device=manifest.request.spec.veth_root,
             source=manifest.request.spec.root_veth_ip,
+            allow_ingress_return=True,
         )
         if state.edge_attached:
             self.call("ip", "-4", "route", "del", "default", "via",
@@ -219,6 +228,11 @@ class BootGuardApplier:
         text = self.call("ip", "-4", "route", "show", "table", str(plan.table))
         if not re.search(r"(?m)^blackhole default\b", text):
             raise BootGuardError("TERMINAL_BLACKHOLE_MISSING")
+        if manifest.ingress_return and not re.search(
+            r"(?m)^10\\.77\\.0\\.0/24 dev wg0(?: proto kernel)? scope link src 10\\.77\\.0\\.1$",
+            text,
+        ):
+            raise BootGuardError("INGRESS_RETURN_ROUTE_MISSING")
         for guard in plan.guard[:3]:
             if self.run(*self.check_argv(guard.argv)).returncode != 0:
                 raise BootGuardError("IPV6_OR_LOCAL_DNS_GUARD_MISSING")

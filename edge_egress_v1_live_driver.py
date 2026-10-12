@@ -207,12 +207,21 @@ class ProtectedLiveHostActions:
         )
         self.guards = BootGuardApplier(run=run)
         self._proven: dict[str, float] = {}
+        self._adapter = None  # Bound ONLY by make_live_adapter(), never by bot callbacks.
         if config.acceptance_enabled is not True or os.geteuid() != 0:
             raise LiveHold("K_ACCEPTANCE_AND_ROOT_REQUIRED")
         self.spec, _peer = pinned(config.core_stage, "core", config.core_digest)
         if (self.spec.edge_public_ipv4 != config.edge.ipv4
                 or self.config.edge.remote_stage.name != "edge-" + self.spec.edge_id):
             raise LiveHold("EDGE_STAGE_IDENTITY_MISMATCH")
+
+    def _lease(self):
+        adapter = self._adapter
+        if adapter is None or adapter.operation_id is None or adapter.snapshot is None:
+            raise LiveHold('ACTIVE_6G_ADAPTER_LEASE_REQUIRED')
+        with self.db_conn() as conn:
+            adapter._locked(conn, source=adapter.snapshot.source_host,
+                            target=adapter.snapshot.target_host)
 
     def _call(self, *cmd, timeout=15):
         out = self.run(*cmd, timeout=timeout)
@@ -252,6 +261,7 @@ class ProtectedLiveHostActions:
         return evidence
 
     async def ensure_target_transport(self, target):
+        self._lease()
         self._attested(target)
         await asyncio.to_thread(self.config.edge.transport, "ensure")
         if self.spec.edge_public_ipv4 != target:
@@ -261,6 +271,7 @@ class ProtectedLiveHostActions:
         await self.assert_target_peer(target)
 
     async def assert_target_peer(self, target):
+        self._lease()
         self._attested(target)
         # WG ingress identity is from H's immutable, root-only registry.
         peers = load_registry()
@@ -299,6 +310,7 @@ class ProtectedLiveHostActions:
         return match.group(1)
 
     async def external_target_observation(self, target):
+        self._lease()
         await self.assert_target_peer(target)
         if self._trace(("ip", "netns", "exec", self.spec.namespace)) != target:
             raise LiveHold("NEW_EDGE_EGRESS_IP_MISMATCH")
@@ -314,22 +326,27 @@ class ProtectedLiveHostActions:
         ), datetime.now(timezone.utc), self.spec.edge_id)
 
     async def assert_real_ingress(self, target):
+        self._lease()
         await self.assert_target_peer(target)
 
     async def assert_no_ssh_sessions(self, username, uid):
+        self._lease()
         self._owner(username, uid)
         snapshot = self._call("ps", "-eo", "pid=,uid=,comm=,args=", timeout=8)
         assert_idle_process_snapshot(snapshot, username, uid)
 
     async def freeze_uid(self, username, uid):
+        self._lease()
         req = self._req(username, uid)
         await asyncio.to_thread(self.kernel.freeze, req)
 
     async def assert_uid_frozen(self, username, uid):
+        self._lease()
         req = self._req(username, uid)
         await asyncio.to_thread(self.kernel.assert_frozen, req)
 
     async def repin_frozen_uid(self, username, uid, old_edge, new_edge):
+        self._lease()
         if new_edge != self.spec.edge_public_ipv4 or new_edge == old_edge:
             raise LiveHold("TARGET_EDGE_UNTRUSTED")
         old = self._manifest(username, uid)
@@ -381,6 +398,7 @@ class ProtectedLiveHostActions:
             raise LiveHold("ROSTER_REPIN_NOT_VERIFIED")
 
     async def prove_uid_ipv4(self, username, uid, target_ip):
+        self._lease()
         req = self._req(username, uid)
         if req.spec.edge_public_ipv4 != target_ip:
             raise LiveHold("UID_TARGET_NOT_PINNED")
@@ -401,13 +419,20 @@ class ProtectedLiveHostActions:
         self._proven[username] = self.clock()
 
     async def switch_dns_edge_to_edge(self, source, target):
+        self._lease()
         # Adapter has already CAS-rebound every UID while keeping PAM FROZEN.
+        if target != self.spec.edge_public_ipv4:
+            raise LiveHold('DNS_TARGET_NOT_PINNED_EDGE')
         await asyncio.to_thread(self.cf.switch_edge_to_edge, source, target)
 
     async def assert_dns_target(self, target):
+        self._lease()
+        if target != self.spec.edge_public_ipv4:
+            raise LiveHold('DNS_TARGET_NOT_PINNED_EDGE')
         await asyncio.to_thread(self.cf.assert_target, target)
 
     async def assert_uid_target(self, username, uid, target_ip):
+        self._lease()
         if (self._req(username, uid).spec.edge_public_ipv4 != target_ip
                 or username not in self._proven
                 or self.clock() - self._proven[username] > 45):
@@ -415,7 +440,21 @@ class ProtectedLiveHostActions:
         await self.assert_uid_frozen(username, uid)
 
     async def release_uid(self, username, uid):
+        self._lease()
         req = self._req(username, uid)
         if username not in self._proven or self.clock() - self._proven[username] > 45:
             raise LiveHold("UID_PROOF_EXPIRED")
         self.kernel.attach(req)
+
+
+def make_live_adapter(*, config: LiveDriverConfig, db_conn, acquire_fn,
+                      journal_fn, core_ip: str, cf_config_loader):
+    """Construct one per-operation 6G adapter; no global live singleton."""
+    from edge_egress_v1_handoff_adapter import Existing6GProtectedHandoffAdapter
+    driver = ProtectedLiveHostActions(config, db_conn, cf_config_loader)
+    adapter = Existing6GProtectedHandoffAdapter(
+        db_conn=db_conn, acquire_fn=acquire_fn, journal_fn=journal_fn,
+        core_ip=core_ip, host_actions=driver,
+    )
+    driver._adapter = adapter
+    return adapter

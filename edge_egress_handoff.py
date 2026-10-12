@@ -73,6 +73,7 @@ EGRESS_HOLD_PHASES = frozenset({
     # J: durable account-admission freeze and source-session drain are
     # protected mutations; stale 6G leases must never auto-unlock these.
     "ADMISSION_FENCE", "DRAIN_SOURCE_SESSIONS",
+    "EDGE_ONLY_PROTECTED_DNS_CUTOVER",
 })
 
 
@@ -309,7 +310,7 @@ async def run_protected_handoff(
         await _record(ports, operation_id, "RUNNING", phase, {})
         await ports.commit_source_accounts_cas(snapshot)
 
-        phase = ("VERIFY_PUBLIC_INGRESS_DNS_UNCHANGED" if guarded_failover
+        phase = ("EDGE_ONLY_PROTECTED_DNS_CUTOVER" if guarded_failover
                  else "EDGE_ONLY_DNS_CUTOVER")
         await _record(ports, operation_id, "RUNNING", phase, {})
         await ports.switch_dns_direct_to_target(snapshot)

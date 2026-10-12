@@ -15,7 +15,8 @@ import pwd
 import re
 import subprocess
 
-from edge_egress_uid_boot import BootGuardApplier, BootGuardManifest
+from edge_egress_uid_boot import (BootGuardApplier, BootGuardManifest,
+    arm_uid_deny, release_uid_deny, uid_deny_present)
 from edge_egress_uid_policy import UIDPolicyRequest, build_policy_plan
 from edge_egress_uid_route_state import inspect_owned_routes
 
@@ -64,11 +65,9 @@ class LocalLinuxProtectedRuntimeKernel:
         self._assert(req)
         if type(dns_port) is not int or not 1024 <= dns_port <= 65535:
             raise RuntimeKernelUnsafe("INVALID_DNS_PORT")
+        # G: deny the new UID first; never remove another user's Edge route.
         manifest = BootGuardManifest(req, "PROTECTED_BOOT_GUARD", dns_port,
-                                     ingress_return=True)
-        # If another UID already uses this Edge table, F1 intentionally
-        # removes the shared Edge default while arming this account. The
-        # shared 6G lease serializes the brief outage; unknown routes fail.
+                                     ingress_return=True, shared_edge=True)
         self.guard_factory().apply(manifest)
         self.guard_factory().verify(manifest)
         self._call("systemctl", "start",
@@ -89,24 +88,43 @@ class LocalLinuxProtectedRuntimeKernel:
                 self._call(*cmd.argv)
         if not self._routes(req).edge_attached:
             raise RuntimeKernelUnsafe("OWNED_EDGE_ROUTE_NOT_ATTACHED")
+        # Release only after terminal policy, return route and guards pass.
+        self.guard_factory().verify(BootGuardManifest(
+            req, "PROTECTED_BOOT_GUARD", ingress_return=True,
+            shared_edge=True))
+        try:
+            release_uid_deny(self.run, req.uid)
+        except Exception as exc:
+            raise RuntimeKernelUnsafe("UID_FENCE_RELEASE_UNCERTAIN") from exc
 
     def _run_link(self, device):
         return self.run("ip", "link", "show", "dev", device).returncode == 0
 
     def freeze(self, req: UIDPolicyRequest) -> None:
         self._assert(req)
-        observed = self._routes(req)
-        if observed.edge_attached:
-            for cmd in build_policy_plan(req).fail_closed_detach:
-                self._call(*cmd.argv)
+        # Per-UID fail-closed guard; NEVER remove another UID's shared route.
+        try:
+            arm_uid_deny(self.run, req.uid)
+        except Exception as exc:
+            raise RuntimeKernelUnsafe("UID_FENCE_ARM_FAILED") from exc
         self.assert_frozen(req)
 
     def assert_frozen(self, req: UIDPolicyRequest) -> None:
         self._assert(req)
         routes = self._routes(req)
-        if routes.edge_attached or not routes.terminal_blackhole:
-            raise RuntimeKernelUnsafe("ROUTE_NOT_FROZEN")
-        # Never remove the UID rule, blackhole or per-UID firewall.
+        if not routes.terminal_blackhole:
+            raise RuntimeKernelUnsafe("TERMINAL_BLACKHOLE_MISSING")
+        # Shared default may remain attached for other active subscribers.
+        try:
+            if not uid_deny_present(self.run, req.uid):
+                raise RuntimeKernelUnsafe("UID_NOT_FROZEN")
+            self.guard_factory().verify(BootGuardManifest(
+                req, "PROTECTED_BOOT_GUARD", ingress_return=True,
+                shared_edge=True), require_frozen=True)
+        except RuntimeKernelUnsafe:
+            raise
+        except Exception as exc:
+            raise RuntimeKernelUnsafe("UID_FENCE_UNVERIFIED") from exc
 
     def public_ipv4(self, req: UIDPolicyRequest) -> str:
         self._assert(req)

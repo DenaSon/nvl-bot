@@ -97,16 +97,36 @@ def verified_bot_callbacks(source: Path, db_conn):
 def compile_pinned_bot_callbacks(data: bytes, db_conn, filename="pinned_bot"):
     if git_blob_sha(data) != REVIEWED_BOT_GIT_BLOB:
         raise Lab6GUnsafe("BOT_GIT_BLOB_MISMATCH")
-    tree = ast.parse(data, filename=filename)
-    found = [
-        node for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name in EXPECTED_CALLBACKS
-    ]
-    if len(found) != 3 or {node.name for node in found} != EXPECTED_CALLBACKS:
+    # The monolithic bot includes Python-3.12-only f-string expressions.
+    # Parse ONLY the three SHA-pinned function definitions so that the LAB
+    # callback adapter and tests also work on 3.11; never parse/exec the
+    # surrounding bot application, imports, Telegram handlers or main().
+    import re
+    source_text = data.decode("utf-8")
+    heads = list(re.finditer(
+        r"(?m)^(?:def |async def |class )[A-Za-z_][A-Za-z_0-9]*",
+        source_text,
+    ))
+    found = []
+    names_seen = []
+    for i, match in enumerate(heads):
+        if not match.group().startswith("def "):
+            continue
+        name = match.group().split()[1]
+        if name not in EXPECTED_CALLBACKS:
+            continue
+        stop = heads[i + 1].start() if i + 1 < len(heads) else len(source_text)
+        fragment = source_text[match.start():stop]
+        parsed = ast.parse(fragment, filename=filename)
+        if len(parsed.body) != 1 or not isinstance(parsed.body[0], ast.FunctionDef):
+            raise Lab6GUnsafe("BOT_CALLBACK_DEFINITION_UNEXPECTED")
+        node = parsed.body[0]
+        if node.name != name or node.decorator_list:
+            raise Lab6GUnsafe("BOT_CALLBACK_DEFINITION_UNEXPECTED")
+        found.append(node)
+        names_seen.append(name)
+    if len(found) != 3 or set(names_seen) != EXPECTED_CALLBACKS:
         raise Lab6GUnsafe("BOT_CALLBACKS_UNAVAILABLE")
-    if any(not isinstance(n, ast.FunctionDef) or n.decorator_list for n in found):
-        raise Lab6GUnsafe("BOT_CALLBACK_DEFINITION_UNEXPECTED")
     code = compile(ast.Module(body=found, type_ignores=[]), filename, "exec")
     env = {
         "__builtins__": __builtins__,

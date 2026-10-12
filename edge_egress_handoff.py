@@ -70,6 +70,9 @@ EGRESS_HOLD_PHASES = frozenset({
     "EGRESS_F3_SHADOW_STOP",
     "EGRESS_F3_RECORD_LAB_PROOF",
     "EGRESS_F3_SHADOW_RECOVERY_REQUIRED",
+    # J: durable account-admission freeze and source-session drain are
+    # protected mutations; stale 6G leases must never auto-unlock these.
+    "ADMISSION_FENCE", "DRAIN_SOURCE_SESSIONS",
 })
 
 
@@ -195,6 +198,8 @@ class HandoffPorts(Protocol):
     async def rekey_dedicated_peer(self, snapshot: HandoffSnapshot) -> None: ...
     async def observe_target(self, snapshot: HandoffSnapshot) -> TargetObservation: ...
     async def revalidate_before_cutover(self, snapshot: HandoffSnapshot) -> None: ...
+    async def block_new_logins(self, snapshot: HandoffSnapshot) -> None: ...
+    async def drain_source_sessions(self, snapshot: HandoffSnapshot) -> None: ...
     async def arm_fail_closed(self, snapshot: HandoffSnapshot) -> None: ...
     async def select_target_egress(self, snapshot: HandoffSnapshot) -> None: ...
     async def prove_selected_egress(self, snapshot: HandoffSnapshot) -> None: ...
@@ -269,6 +274,18 @@ async def run_protected_handoff(
         # MUST compare account username+UID mapping, DNS, allocation and
         # candidate readiness under lock. Raise on any stale state.
         await ports.revalidate_before_cutover(snapshot)
+
+        if guarded_failover:
+            # F2 PAM reads the existing runtime state. Mark the entire
+            # protected set FROZEN under 6G before checking for live sessions;
+            # otherwise a new SSH auth can race the last idle observation.
+            phase = "ADMISSION_FENCE"
+            safety_touched = True
+            await _record(ports, operation_id, "RUNNING", phase, {})
+            await ports.block_new_logins(snapshot)
+            phase = "DRAIN_SOURCE_SESSIONS"
+            await _record(ports, operation_id, "RUNNING", phase, {})
+            await ports.drain_source_sessions(snapshot)
 
         # Arm terminal 'unreachable' fallback before changing any target route.
         # Treat a partial arm as possible mutation: freeze on ANY exception.

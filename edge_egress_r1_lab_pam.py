@@ -44,8 +44,8 @@ def decide_lab_pam(*, username: str, pam_type: str, geteuid: int,
         account = lookup(username)
     except (KeyError, OSError, ValueError):
         return False
-    if username == "root" and account.pw_uid == 0:
-        return True  # existing break-glass access, still subject to PAM
+    if username == "root":
+        return account.pw_uid == 0  # break-glass, still subject to PAM
     if username != LAB_USER:
         return account.pw_uid != LAB_UID
     if account.pw_uid != LAB_UID:

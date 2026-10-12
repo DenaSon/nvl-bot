@@ -98,5 +98,76 @@ class NewEdgeI(unittest.TestCase):
         self.assertNotIn("ip rule add", module)
 
 
+    def test_remote_sftp_stage_uses_exclusive_write_not_creation_only(self):
+        # B22 regression: Paramiko 'x' creates a zero-byte, read-only
+        # handle. 'wx' must be used for first-write with O_EXCL.
+        from types import SimpleNamespace
+        from edge_egress_v1_onboarding import _remote_stage
+
+        spec = spec_for_new_edge(
+            edge_ip="172.86.105.67", core_ip="209.200.246.198",
+            ingress_ip="10.77.0.7",
+        )
+        writes = []
+        modes = {}
+
+        class RemoteFile:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def write(self, data):
+                self.data = data
+
+            def flush(self):
+                pass
+
+        class SFTP:
+            def stat(self, path):
+                return SimpleNamespace(st_uid=0, st_mode=0o700)
+
+            def mkdir(self, path, mode=0o700):
+                pass
+
+            def file(self, path, mode):
+                if mode != "wx":
+                    raise OSError("SFTP file handle lacks write permission")
+                writes.append(path.rsplit("/", 1)[-1])
+                return RemoteFile()
+
+            def chmod(self, path, mode):
+                modes[path.rsplit("/", 1)[-1]] = mode
+
+            def close(self):
+                pass
+
+        class SSH:
+            def exec_command(self, cmd, timeout=None):
+                channel = SimpleNamespace(recv_exit_status=lambda: 0)
+                return None, SimpleNamespace(channel=channel), None
+
+            def open_sftp(self):
+                return SFTP()
+
+        with patch("edge_egress_v1_onboarding.wireguard_config",
+                   return_value="fake-wg-conf"), patch(
+            "edge_egress_v1_onboarding.edge_up_script",
+            return_value="fake-up"
+        ), patch(
+            "edge_egress_v1_onboarding.edge_down_script",
+            return_value="fake-down"
+        ):
+            directory = _remote_stage(SSH(), spec, KEY1, KEY2)
+
+        self.assertEqual(directory, "/root/nvl-egress-v1/edge-e7")
+        self.assertEqual(writes, ["manifest.json", "wg.conf", "up.sh", "down.sh"])
+        self.assertEqual(modes["manifest.json"], 0o600)
+        self.assertEqual(modes["wg.conf"], 0o600)
+        self.assertEqual(modes["up.sh"], 0o700)
+        self.assertEqual(modes["down.sh"], 0o700)
+
+
 if __name__ == "__main__":
     unittest.main()

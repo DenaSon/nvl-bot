@@ -399,3 +399,6 @@ The J2 HostActions implementation is staged in GitHub: bounded pinned Paramiko E
 ## 23) K2 Telegram Egress UI source checkpoint — 2026-10-12
 
 Admin Edge pool → Egress Management now exposes registered Edge status, F4 evidence/expiry, optional signed-stage Core namespace IPv4 trace, existing Edge onboarding and the five K2 activation prerequisites. This is read-only except the pre-existing `hp_addedge` wizard, which still follows its own existing legacy fences and default-OFF dedicated Egress opt-in. The IP probe requires an operator-attested root-owned stage SHA256 and an already-running dedicated namespace; it only reports IP equality, never marks READY. NO one-button enable/reboot, customer route/DNS mutation or claim that a protected 6H switch is already ready. Initial Core/PAM boot installation and a new Edge E2E acceptance remain to be performed under K2 with rescue. See [delivery ledger](SSH_EGRESS_DYNAMIC_V1_DELIVERY.md).
+
+
+**K2 UI merge evidence (2026-10-12):** [PR #101](https://github.com/DenaSon/nvl-bot/pull/101) merged to `master` (`7c3218116974974ae124ef44e995c9e9fa3ecb4d`), final-head Python + Stage-only CI PASS. Admin-only UI is code-complete but NOT deployed on Production, and it cannot enable protected accounts, PAM/Boot or 6H. One NEW Edge SSH/SOCKS egress/DNS/IPv6/WG-loss and rescue acceptance is pending.

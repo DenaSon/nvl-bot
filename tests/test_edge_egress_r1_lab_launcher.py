@@ -11,6 +11,7 @@ from unittest.mock import patch
 from edge_egress_r1_lab_launcher import (
     LabHost, LabSSHExecutor, R1Lab6GShadow, R1LabUnsafe,
     CurrentBridge6GLease, bind_disposable_lab_shadow,
+    inspect_lab_transport,
 )
 from edge_egress_r1_lab_agent import LabAgentUnsafe, _request, execute, main
 from edge_egress_r1_transport import R1Observation
@@ -220,6 +221,25 @@ class R1LabSSHTests(unittest.TestCase):
             runner.run(host("edge"), "stop", spec())
 
 
+class R1LabRecoveryTests(unittest.TestCase):
+    def test_read_only_both_verified_is_transport_not_customer_ready(self):
+        ssh = FakeSSH()
+        report = asyncio.run(inspect_lab_transport(
+            ssh, spec=spec(), edge=host("edge"), core=host("core")))
+        self.assertFalse(report.recovery_required)
+        self.assertFalse(report.customer_ready)
+        self.assertEqual(ssh.events, [("edge", "inspect"), ("core", "inspect")])
+
+    def test_remote_unreachable_is_hold_without_cleanup(self):
+        ssh = FakeSSH()
+        ssh.error_at = ("edge", "inspect")
+        report = asyncio.run(inspect_lab_transport(
+            ssh, spec=spec(), edge=host("edge"), core=host("core")))
+        self.assertTrue(report.recovery_required)
+        self.assertEqual(report.edge_state, "UNKNOWN")
+        self.assertNotIn(("core", "start"), ssh.events)
+
+
 class R1LabAgentTests(unittest.TestCase):
     def test_strict_request(self):
         self.assertEqual(_request(payload("edge"))[0].role, "edge")
@@ -234,6 +254,25 @@ class R1LabAgentTests(unittest.TestCase):
             result = execute("probe", payload("edge"))
         self.assertEqual(result["state"], "OFFLINE_VERIFIED")
         invoked.assert_not_called()
+
+    def test_inspect_is_read_only_even_when_resources_partial(self):
+        offline = R1Observation("edge", False, False, False, True,
+                                False, False, False, False, (), False)
+        with patch("edge_egress_r1_lab_agent._assert_local_host"), patch(
+            "edge_egress_r1_lab_agent._no_previous_resources"
+        ) as preflight, patch(
+            "edge_egress_r1_lab_agent.inspect_linux", return_value=offline
+        ):
+            self.assertEqual(execute("inspect", payload("edge"))["state"], "OFFLINE")
+        preflight.assert_not_called()
+
+    def test_inspect_marks_unverified_partial_tunnel_hold(self):
+        partial = R1Observation("core", True, False, False, True,
+                                False, False, False, False, (), False)
+        with patch("edge_egress_r1_lab_agent._assert_local_host"), patch(
+            "edge_egress_r1_lab_agent.inspect_linux", return_value=partial
+        ):
+            self.assertEqual(execute("inspect", payload("core"))["state"], "HOLD")
 
     def test_agent_denies_direct_local_start(self):
         with patch("edge_egress_r1_lab_agent._assert_local_host"), patch(

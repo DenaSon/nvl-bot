@@ -31,7 +31,7 @@ Scope lock:
 
 ## G Multi-UID source checkpoint (2026-10-12)
 
-**Next read:** `docs/SSH_EGRESS_DYNAMIC_V1_DELIVERY.md` (G). G fixes shared-Edge default deletion: per-UID IPv4 OUTPUT deny/release protects selected UID without changing the shared Edge default, existing 6G store opt-in `shared_edge_enabled` allows multiple users on one Edge, and root-only manifest roster accepts multiple coherent UIDs. No Production deployment. **Before first multiuser attach, all existing protected manifests on that Edge must use `shared_edge=true`; old F2 boot units would still delete shared route.** Next H real ingress/session binding, then I new Edge wizard, J 6H, K one rollout/new Edge validation. Keep tests focused; update status after CI/merge.
+**Next read:** `docs/SSH_EGRESS_DYNAMIC_V1_DELIVERY.md` (G). **G merged via PR #95 (`222a782`), all latest CI PASS:** per-UID IPv4 OUTPUT deny/release protects only selected UID without deleting the Edge default; 6G store opt-in `shared_edge_enabled` allows multiple users per Edge; roster accepts coherent UID manifests. **No Production deployment.** **Before first multiuser attach, all existing protected manifests on that Edge must use `shared_edge=true`; old F2 boot units would still delete shared route.** **Next H real ingress/session binding**, then I new Edge wizard, J 6H and K single deployment/new Edge validation. Tests stay focused and lightweight.
 
 ## Historical context / safety controls (read second)
 

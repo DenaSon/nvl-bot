@@ -68,3 +68,18 @@ No production shell commands or reboots now. At the end of implementation, recon
 - [K2 phase 1 plan](K2_PHASE1_PROTECTED_FOUNDATION_2026-10-13.md)
 - [K2 actual e7 iPhone evidence](SSH_EGRESS_K2_E7_MEMORY_2026-10-13.md)
 - [K2 end-of-phase live release-gate checklist, Issue #106](https://github.com/DenaSon/nvl-bot/issues/106)
+
+## Phase 2 — B2 incremental checkpoint (2026-10-13)
+
+The next safely deployable source step after PR #107 is **B2: exact Edge Stage inspection, paginated inventory and selected-user preview**. This is intentionally a **read-only operator workflow** until Phase 1 Issue #106 is accepted and a separate, reviewed privileged action controller exists.
+
+- **Pagination:** `hpeg_status` now has `hpeg_page_<n>` back/forward buttons; per-page list size stays 8; Edge detail direct lookup is independent of the visible page, and all pages enforce admin-only, bounded page index and strict `edge_id`.
+- **Existing e7 local Stage:** `📦 بازرسی Stage محلی` reads only root-owned files using `ops.edge_egress_v1_transport.stage_hash/pinned/observe` (no raw `wg.conf` or private keys). Correct `core-e7` Stage can now be inspected even when F3 allocation is absent. Reports computed SHA and runtime state as **LOCAL_UNATTESTED** unless the SHA matches an independently attested DB pin. A mismatch is **PIN_MISMATCH / HOLD**; the UI **never writes** the SHA to settings, starts the tunnel or claims READY. Neither this inspect nor legacy `live_ip_probe` constitutes F4 evidence.
+- **Selected UID preview:** from the chosen Edge select `👤 پیش‌نمایش تخصیص کاربر`, then type only the SSH username (e.g. `nvl0557`). A one-shot admin-only TTL (120 sec) stores only Edge ID/time in `context.user_data`; the handler rechecks the trusted ingress identity, active pool membership and exact `ssh_accounts` status/recorded host, then gives F3/F4 and existing 6G RUNNING-lease diagnostics. No password/PAM inspection or UID changes. After a reply, cancellation, timeout or access rejection, pending state is cleared. Never expose direct callback `assign` / `unfreeze` / `READY` paths.
+- **Safe discrepancy reporting:** public-default IP and Cloudflare DNS remain separate, F4 evidence is timestamp/expiry-sensitive and is **not equivalent to active tunnel or safety-certified SSH client egress**. `NOT_STAGED` in the UI refers only to the allocation database; Stage inspection can independently prove locally staged files without committing allocation.
+- **Tests:** kernel/transport reads mocked, no external network action; >8 Edge list pages, direct deep-page Edge lookup, wrong/missing Stage pin, untrusted identity, 6G lease busy, invalid username before DB, one-shot/expired/nonadmin Telegram Handler, SQL no-mutation trace and legacy callback fixtures.
+- **Operational policy remains unchanged:** Core tests are deferred until all source phases are complete; do not modify Core, `wg0`, live accounts, DNS, default relay, PAM, or reboot. A GitHub merge or successful CI is not E2E acceptance. `nvl0557` temporary UID guard/freeze remains unknown until a later read-only reconciliation.
+
+### Phase 2 next source increment
+
+A **reviewed, disabled-by-default command-intent/controller** for pinned Edge provisioning and per-UID `freeze/attach/release`, with state-machine, TTL/nonce, 6G lease, root-owned PAM/DoH/boot admission and rollback. **Do not wire execute callbacks** before testable authority and Phase 1 release gates. Track via Issue #108.

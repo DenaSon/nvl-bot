@@ -147,7 +147,7 @@ class CurrentBridge6GLease:
     a lock; it reads the already-held bridge identity and checks SQLite.
     """
     bridge: object
-    lab_core_ingress_attestor: Callable[[UIDPolicyRequest, str], bool] | None = None
+    lab_core_ingress_attestor: object | None = None
 
     def for_request(self, request: UIDPolicyRequest) -> bool:
         op = getattr(self.bridge, "operation_id", None)
@@ -164,10 +164,11 @@ class CurrentBridge6GLease:
             if source == request.spec.core_public_ipv4:
                 # Special-case only a real, machine-bound disposable Core ingress.
                 # The SAME current 6G RUNNING row is still required.
+                from edge_egress_r1_lab_topology import TwoHostCoreIngress
                 return bool(
                     target == request.spec.edge_public_ipv4
-                    and self.lab_core_ingress_attestor is not None
-                    and self.lab_core_ingress_attestor(request, source) is True
+                    and type(self.lab_core_ingress_attestor) is TwoHostCoreIngress
+                    and self.lab_core_ingress_attestor.for_request(request, source) is True
                     and probe.active()
                 )
             return probe.for_request(request)
@@ -257,7 +258,7 @@ def bind_disposable_lab_shadow(bridge, *, spec: EgressSpec,
                                ssh: LabSSHExecutor,
                                explicitly_enabled: bool = False,
                                disposable_vps: bool = False,
-                               lab_core_ingress_attestor: Callable[[UIDPolicyRequest, str], bool] | None = None,
+                               lab_core_ingress_attestor: object | None = None,
                                accept_verified_running_transport: bool = False) -> R1Lab6GShadow:
     """Wire an Existing6GUIDRuntimeBridge to this F2 transport port.
 

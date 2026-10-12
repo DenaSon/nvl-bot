@@ -104,7 +104,7 @@ class Host:
 
 class PositiveAdapterTests(unittest.TestCase):
     def setUp(self):
-        self.db = sqlite3.connect(":memory:", check_same_thread=False)
+        self.db = sqlite3.connect(":memory:", check_same_thread=False, isolation_level=None)
         self.addCleanup(self.db.close)
         self.db.executescript("""
             CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT);

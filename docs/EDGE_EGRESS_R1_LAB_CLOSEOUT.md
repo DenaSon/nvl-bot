@@ -35,3 +35,25 @@
 ## Operator pause instructions
 
 No more commands required from the operator **now**. Do not reboot, open `nvlr1test`, modify `/etc/pam.d/sshd`, change default routes, re-run Stage `up.sh`, or use production records as LAB fixtures. Preserve the current enablement/blackhole, LAB keys and verified Stage for the next reviewed implementation.
+
+## 2026-10-12 6G/PAM code integration checkpoint (PR #92)
+
+The following **code-only** implementation now exists on the draft PR. It does not install PAM, operate either VPS, seed a DB or mark customer READY:
+
+| Module | Architectural responsibility | Default / release boundary |
+| --- | --- | --- |
+| `edge_egress_r1_lab_topology.py` | Exact `107.189.16.36` Core-as-ingress, `216.126.229.12` Egress Edge, independent lab marker SHA, machine ID, UID 1555 `nologin` ownership and real eth0 IPv4 verification | No production fallback; refuses foreign hosts/users/sources; this is a two-host **disposable LAB** exception, not an ingress identity invented in a DB. |
+| `edge_egress_uid_runtime.attach_protected(...lab_core_ingress_attestor=...)` | Allows actual Core-as-ingress source **only** when the concrete `TwoHostCoreIngress` attests; otherwise preserves rejection of Core/target-as-source | Requires `authorized=True` and all existing F2 steps/real 6G journal. Caller-supplied `lambda: True` is rejected. |
+| `edge_egress_r1_lab_launcher.CurrentBridge6GLease` and `bind_disposable_lab_shadow` | Re-verify the same acquired, unique RUNNING 6G row, including independently attested two-host source | Never creates a lock or journal; any row/status/missing DB fails closed. |
+| `R1Lab6GShadow(...accept_verified_running_transport=True)` | With current real 6G lease and verified guard, reconcile a pair already UP from operator's smoke test by `inspect` on both sides, avoiding an unsafe repeat of `up.sh` | Mismatched/partial pair is HOLD. Still transport-only: no UID-ready inference, no reboot recovery. Default false. |
+| `edge_egress_r1_lab_pam.py` | Disposable first-account-rule `pam_exec` candidate; if the exact UID 1555 lacks authentic F2 PROTECTED mapping + F4 READY + verified kernel/DNS guard, deny the protected SSH login | No automatic installation; root and unrelated accounts remain governed by normal PAM rules. No DB means pilot DENIED. |
+| `edge_egress_r1_lab_ssh_gate.py` | Optional, root-restricted SSH `SSH_ORIGINAL_COMMAND` dispatcher, allowing only fixed agent `probe`/`inspect` actions from verified Coordinator IP | Never executes `start` or an arbitrary shell. Existing installed LAB keys remain statically `probe`-only until separately reviewed operator installation. |
+
+### Required real dependencies before lab SSH acceptance
+
+1. LAB Core needs an authentic **isolated** Phase-6G-compatible bot control-plane deployment: the same `failover_operations` journal and **real acquisition/update callbacks**, not a hand-inserted RUNNING row. The `Existing6GUIDRuntimeBridge` must use those exact callbacks and the live DB. Never copy Production DB.
+2. F2 store additionally requires truthful lab `ssh_accounts`, `host_pool` (Core genuinely terminates test SSH), `dns_current_ip` matching *actual* ingress, allocations, F3 readiness and unique protected bindings. `READY` may only result from genuine F4 acceptance; `VERIFIED_LAB` does not substitute. The test account **must remain locked** while its admission/boot safety is still uncertain.
+3. The independent per-account PAM installer and 6G-aware remote `start` authorization are still **not implemented/accepted**. The new read-only SSH gate is insufficient for post-reboot WireGuard activation; the F2 code cannot invoke it to start transport. Do not remove old `from=... restrict` options or change the global PAM file based on code-only status.
+4. Once dependencies and console are available, do **one** coordinated E2E: legitimate F2 attach, actual SSH dynamic forwarding via UID, real Edge loss with no Core fallback, and Core reboot deny-before-unlock. DNS/IPv6/BadVPN and multi-UID remain F4/R4–R6 evidence, not automatically proven by tests.
+
+**This closes the source-topology mismatch and defines PAM denial semantics in code, but NOT the complete deployed 6G/PAM runtime.** Existing verified transport/UID smoke results remain accepted; avoid further isolated smoke loops.

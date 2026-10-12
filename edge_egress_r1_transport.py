@@ -186,6 +186,11 @@ def inspect_linux(spec: EgressSpec, role: str, *, run=_run,
     ns = False
     veth = False
     if role == "core":
+        # A misplaced dedicated WG interface in the host root namespace is
+        # a hard collision, not a clean state eligible for a new start.
+        if link_exists("ROOT_WG_COLLISION_PROBE_FAILED", "ip",
+                       "link", "show", "dev", spec.iface):
+            errors.append("ROOT_NAMESPACE_DEDICATED_WG_COLLISION")
         lines = output("NETNS_INVENTORY_FAILED", "ip", "netns", "list")
         ns = spec.namespace in {s.split()[0] for s in lines.splitlines()
                                 if s.strip()}
@@ -246,9 +251,24 @@ def inspect_linux(spec: EgressSpec, role: str, *, run=_run,
                 tagged = True
                 shadowed = prior_broad
         forward = output("FORWARD_INVENTORY_FAILED", "iptables", "-S", "FORWARD")
-        forward_ok = (f'-i {spec.iface} -o {spec.edge_uplink}' in forward
-                      and f'-s {spec.core_tunnel_ip}/32' in forward
-                      and f'--comment nvl-egress-{spec.edge_id}' in forward)
+        tagged_forward = any(
+            f"-i {spec.iface}" in line and
+            f"-o {spec.edge_uplink}" in line and
+            f"-s {spec.core_tunnel_ip}/32" in line and
+            f"--comment nvl-egress-{spec.edge_id}" in line and
+            "-j ACCEPT" in line
+            for line in forward.splitlines()
+        )
+        tagged_return = any(
+            f"-i {spec.edge_uplink}" in line and
+            f"-o {spec.iface}" in line and
+            f"-d {spec.core_tunnel_ip}/32" in line and
+            "--ctstate RELATED,ESTABLISHED" in line and
+            f"--comment nvl-egress-{spec.edge_id}" in line and
+            "-j ACCEPT" in line
+            for line in forward.splitlines()
+        )
+        forward_ok = tagged_forward and tagged_return
         forwarding = output("FORWARD_SYSCTL_FAILED", "sysctl", "-n",
                             "net.ipv4.ip_forward")
         forward_ok = forward_ok and forwarding.strip() == "1"
@@ -276,12 +296,29 @@ def inspect_linux(spec: EgressSpec, role: str, *, run=_run,
             identity = identity and (len(allowed.splitlines()) == 1 and
                                       allowed.split()[-1:] == [expected])
             if role == "core":
+                wg_addr = output("CORE_WG_ADDRESS_FAILED", "ip", "netns",
+                                 "exec", spec.namespace, "ip", "-4", "-o",
+                                 "addr", "show", "dev", spec.iface)
+                root_addr = output("ROOT_VETH_ADDRESS_FAILED", "ip", "-4",
+                                   "-o", "addr", "show", "dev", spec.veth_root)
+                peer_addr = output("NS_VETH_ADDRESS_FAILED", "ip", "netns",
+                                   "exec", spec.namespace, "ip", "-4", "-o",
+                                   "addr", "show", "dev", spec.veth_ns)
+                identity = identity and all((
+                    f"inet {spec.core_tunnel_ip}/30" in wg_addr,
+                    f"inet {spec.root_veth_ip}/30" in root_addr,
+                    f"inet {spec.ns_veth_ip}/30" in peer_addr
+                ))
                 default = output("CORE_NS_DEFAULT_FAILED", "ip", "netns",
                                  "exec", spec.namespace, "ip", "-4",
                                  "route", "show", "default")
                 identity = identity and (len(default.splitlines()) == 1 and
                                           f"dev {spec.iface}" in default)
             else:
+                wg_addr = output("EDGE_WG_ADDRESS_FAILED", "ip", "-4", "-o",
+                                 "addr", "show", "dev", spec.iface)
+                identity = identity and (
+                    f"inet {spec.edge_tunnel_ip}/30" in wg_addr)
                 port = output("WG_LISTEN_PORT_FAILED", "wg", "show",
                               spec.iface, "listen-port")
                 identity = identity and port.strip() == str(spec.edge_listen_port)

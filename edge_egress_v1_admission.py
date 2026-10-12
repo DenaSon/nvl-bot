@@ -189,8 +189,10 @@ def render_roster(manifest_bytes: dict[str, bytes]) -> str:
                 or not manifest.shared_edge or manifest.dns_port is None
                 or req.uid in uids):
             raise AdmissionHold("INVALID_OR_SHARED_EDGE_MANIFEST")
-        identity = (req.spec.edge_public_ipv4, req.spec.route_table,
-                    req.spec.tunnel_network, req.spec.veth_network)
+        identity = (req.spec.edge_public_ipv4, req.spec.core_public_ipv4,
+                    req.spec.route_table, req.spec.tunnel_network,
+                    req.spec.veth_network, req.spec.edge_listen_port,
+                    req.spec.edge_uplink)
         if req.spec.edge_id in edges and edges[req.spec.edge_id] != identity:
             raise AdmissionHold("SHARED_EDGE_SPEC_MISMATCH")
         if req.spec.route_table in tables and tables[req.spec.route_table] != req.spec.edge_id:

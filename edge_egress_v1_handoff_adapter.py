@@ -96,6 +96,11 @@ class Existing6GProtectedHandoffAdapter:
             "AND id!=? LIMIT 1", (self.operation_id,),
         ).fetchone():
             raise PositiveHandoffHold("SECOND_RUNNING_OPERATION")
+        if conn.execute(
+            "SELECT value FROM settings "
+            "WHERE key='edge_egress_protected_mode'"
+        ).fetchone() != ("1",):
+            raise PositiveHandoffHold("PROTECTED_MODE_CHANGED")
 
     async def acquire_6g_lock(self, source, target):
         if self.operation_id is not None:

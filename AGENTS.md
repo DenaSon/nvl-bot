@@ -66,3 +66,6 @@ Scope lock:
 ## K2 Telegram Egress UI checkpoint (2026-10-12)
 
 Existing host pool's `hpeg_status` is now the admin Egress console: Edge list/detail, DB F4 readiness/expiry, and **pinned read-only Core namespace live IPv4 probe** per Edge when operator-pinned SHA256 exists. `hp_addedge` remains the existing wizard, no second Edge controller; `edge_egress_v1_onboard_enabled` still defaults OFF. UI does NOT install PAM/Boot, enable protected accounts or 6H, write settings or mark READY. No protected-user IP fixes on Production are implied. Next K2 is ONE reviewed Core+NEW Edge installation, rescue and SSH/SOCKS/IPv6/DNS/tunnel-loss acceptance, then limited canary. Updated document: `docs/SSH_EGRESS_DYNAMIC_V1_DELIVERY.md` §K2. Keep CI small, protect legacy/mixed customers.
+
+
+**K2 Telegram console MERGED:** PR #101, commit `7c3218116974974ae124ef44e995c9e9fa3ecb4d`, final-head CI PASS. Existing Edge pool → `hpeg_status` now offers admin-only overview, per-Edge F4 proof/stage pin, existing `hp_addedge` wizard, and a read-only live IP probe only after trusted root-owned Core stage+SHA256 and dedicated tunnel UP. No user/6H activation buttons; new Edge wizard Egress opt-in remains OFF. **Next K2 controlled Production deployment with independent rescue and ONE new Edge acceptance** before any customer use. See `docs/SSH_EGRESS_DYNAMIC_V1_DELIVERY.md` K2.

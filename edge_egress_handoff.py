@@ -70,6 +70,10 @@ EGRESS_HOLD_PHASES = frozenset({
     "EGRESS_F3_SHADOW_STOP",
     "EGRESS_F3_RECORD_LAB_PROOF",
     "EGRESS_F3_SHADOW_RECOVERY_REQUIRED",
+    # J: durable account-admission freeze and source-session drain are
+    # protected mutations; stale 6G leases must never auto-unlock these.
+    "ADMISSION_FENCE", "DRAIN_SOURCE_SESSIONS",
+    "EDGE_ONLY_PROTECTED_DNS_CUTOVER",
 })
 
 
@@ -195,6 +199,8 @@ class HandoffPorts(Protocol):
     async def rekey_dedicated_peer(self, snapshot: HandoffSnapshot) -> None: ...
     async def observe_target(self, snapshot: HandoffSnapshot) -> TargetObservation: ...
     async def revalidate_before_cutover(self, snapshot: HandoffSnapshot) -> None: ...
+    async def block_new_logins(self, snapshot: HandoffSnapshot) -> None: ...
+    async def drain_source_sessions(self, snapshot: HandoffSnapshot) -> None: ...
     async def arm_fail_closed(self, snapshot: HandoffSnapshot) -> None: ...
     async def select_target_egress(self, snapshot: HandoffSnapshot) -> None: ...
     async def prove_selected_egress(self, snapshot: HandoffSnapshot) -> None: ...
@@ -216,6 +222,7 @@ async def run_protected_handoff(
     *,
     now: Optional[datetime] = None,
     guarded_failover: bool = False,
+    require_admission_drain: bool = False,
 ) -> HandoffResult:
     """A conservative saga plan using 6G shared lock/journal.
 
@@ -224,6 +231,8 @@ async def run_protected_handoff(
     The lock MUST be persisted across process crashes, and stale-lock
     recovery MUST respect EGRESS_RECOVERY_REQUIRED (release gate D1-C3).
     """
+    if require_admission_drain and not guarded_failover:
+        raise HandoffUnsafe("DRAIN_REQUIRES_GUARDED_HANDOFF")
     operation_id, busy_id = await ports.acquire_6g_lock(source_host, target_host)
     if operation_id is None:
         return HandoffResult(False, "SHARED_FAILOVER_BUSY", busy_id)
@@ -270,6 +279,18 @@ async def run_protected_handoff(
         # candidate readiness under lock. Raise on any stale state.
         await ports.revalidate_before_cutover(snapshot)
 
+        if require_admission_drain:
+            # F2 PAM reads the existing runtime state. Mark the entire
+            # protected set FROZEN under 6G before checking for live sessions;
+            # otherwise a new SSH auth can race the last idle observation.
+            phase = "ADMISSION_FENCE"
+            safety_touched = True
+            await _record(ports, operation_id, "RUNNING", phase, {})
+            await ports.block_new_logins(snapshot)
+            phase = "DRAIN_SOURCE_SESSIONS"
+            await _record(ports, operation_id, "RUNNING", phase, {})
+            await ports.drain_source_sessions(snapshot)
+
         # Arm terminal 'unreachable' fallback before changing any target route.
         # Treat a partial arm as possible mutation: freeze on ANY exception.
         phase = "ARM_FAIL_CLOSED"
@@ -292,7 +313,7 @@ async def run_protected_handoff(
         await _record(ports, operation_id, "RUNNING", phase, {})
         await ports.commit_source_accounts_cas(snapshot)
 
-        phase = ("VERIFY_PUBLIC_INGRESS_DNS_UNCHANGED" if guarded_failover
+        phase = ("EDGE_ONLY_PROTECTED_DNS_CUTOVER" if guarded_failover
                  else "EDGE_ONLY_DNS_CUTOVER")
         await _record(ports, operation_id, "RUNNING", phase, {})
         await ports.switch_dns_direct_to_target(snapshot)

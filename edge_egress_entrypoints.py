@@ -147,7 +147,7 @@ def edge_guard_message(reason: str) -> str:
             "EGRESS_J_PROTECTED_6G_HANDOFF_NOT_RELEASED":
                 "تأیید نهایی اجرای انتقال محافظت‌شده در 6G هنوز انجام نشده است.",
         }
-        return ("⛔️ سوییچ Edge در حالت محافظت‌شده انجام نشد. "
+        return ("⛔️ Egress Manager: سوییچ Edge در حالت محافظت‌شده انجام نشد. "
                 + messages.get(reason, "شواهد محافظت Egress کامل نیست.") 
                 + " هیچ مسیر یا حسابی تغییر نکرد.")
     if reason == LEGACY_MANUAL_UNSAFE:

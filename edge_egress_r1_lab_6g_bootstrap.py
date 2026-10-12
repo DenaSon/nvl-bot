@@ -76,7 +76,7 @@ class Lab6GUnsafe(ValueError):
 
 def git_blob_sha(data: bytes) -> str:
     return hashlib.sha1(
-        b"blob " + str(len(data)).encode("ascii") + b"\\0" + data
+        b"blob " + str(len(data)).encode("ascii") + b"\0" + data
     ).hexdigest()
 
 
@@ -91,10 +91,13 @@ def verified_bot_callbacks(source: Path, db_conn):
     st = source.stat()
     if st.st_uid != 0 or st.st_mode & 0o022:
         raise Lab6GUnsafe("BOT_SOURCE_UNTRUSTED")
-    data = source.read_bytes()
+    return compile_pinned_bot_callbacks(source.read_bytes(), db_conn, str(source))
+
+
+def compile_pinned_bot_callbacks(data: bytes, db_conn, filename="pinned_bot"):
     if git_blob_sha(data) != REVIEWED_BOT_GIT_BLOB:
         raise Lab6GUnsafe("BOT_GIT_BLOB_MISMATCH")
-    tree = ast.parse(data, filename=str(source))
+    tree = ast.parse(data, filename=filename)
     found = [
         node for node in tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -104,7 +107,7 @@ def verified_bot_callbacks(source: Path, db_conn):
         raise Lab6GUnsafe("BOT_CALLBACKS_UNAVAILABLE")
     if any(not isinstance(n, ast.FunctionDef) or n.decorator_list for n in found):
         raise Lab6GUnsafe("BOT_CALLBACK_DEFINITION_UNEXPECTED")
-    code = compile(ast.Module(body=found, type_ignores=[]), str(source), "exec")
+    code = compile(ast.Module(body=found, type_ignores=[]), filename, "exec")
     env = {
         "__builtins__": __builtins__,
         "db_conn": db_conn,
@@ -145,15 +148,17 @@ def make_lab_db_conn(path: Path):
 
     @contextmanager
     def db_conn():
-        with sqlite3.connect(path, timeout=10) as conn:
+        conn = sqlite3.connect(path, timeout=10)
+        try:
             conn.execute("PRAGMA busy_timeout=10000")
             conn.execute("PRAGMA foreign_keys=ON")
-            try:
-                yield conn
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     return db_conn
 

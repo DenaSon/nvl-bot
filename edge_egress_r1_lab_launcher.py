@@ -97,7 +97,7 @@ class LabSSHExecutor:
             raise R1LabUnsafe("SSH_TIMEOUT_INVALID")
 
     def run(self, host: LabHost, action: str, spec: EgressSpec) -> dict:
-        if action not in ("probe", "start"):
+        if action not in ("probe", "start", "inspect"):
             raise R1LabUnsafe("HOST_ACTION_NOT_ALLOWED")
         host.validate(spec)
         self._check_local_files()
@@ -125,12 +125,15 @@ class LabSSHExecutor:
             response = json.loads(result.stdout)
         except (ValueError, TypeError) as exc:
             raise R1LabUnsafe("INVALID_HOST_RESPONSE_HOLD") from exc
+        states = ({"OFFLINE", "TRANSPORT_VERIFIED", "HOLD"}
+                  if action == "inspect" else
+                  {"OFFLINE_VERIFIED"} if action == "probe"
+                  else {"TRANSPORT_VERIFIED"})
         if (not isinstance(response, dict)
                 or set(response) != {"ok", "role", "state"}
                 or response["ok"] is not True
                 or response["role"] != host.role
-                or response["state"] != ("OFFLINE_VERIFIED" if action == "probe"
-                                          else "TRANSPORT_VERIFIED")):
+                or response["state"] not in states):
             raise R1LabUnsafe("HOST_VERIFICATION_FAILED_HOLD")
         return response
 
@@ -258,3 +261,33 @@ def bind_disposable_lab_shadow(bridge, *, spec: EgressSpec,
     )
     bridge.shadow = port
     return port
+
+
+@dataclass(frozen=True)
+class R1LabRecoveryEvidence:
+    """Transport-only reconciliation; never a customer READY/release proof."""
+    edge_state: str
+    core_state: str
+    recovery_required: bool
+    customer_ready: bool = False
+
+
+async def inspect_lab_transport(ssh: LabSSHExecutor, *, spec: EgressSpec,
+                                edge: LabHost, core: LabHost) -> R1LabRecoveryEvidence:
+    """Observe both hosts without restarting, teardown, UID attach or repair.
+
+    Unknown/partial/asymmetric states mean HOLD. F2 still owns persistent
+    frozen UID guards, the 6G journal and operator-led recovery decisions.
+    """
+    spec.validate()
+    edge.validate(spec)
+    core.validate(spec)
+    try:
+        e = await asyncio.to_thread(ssh.run, edge, "inspect", spec)
+        q = await asyncio.to_thread(ssh.run, core, "inspect", spec)
+    except Exception:
+        return R1LabRecoveryEvidence("UNKNOWN", "UNKNOWN", True)
+    es, cs = e["state"], q["state"]
+    return R1LabRecoveryEvidence(
+        es, cs, es == "HOLD" or cs == "HOLD" or es != cs,
+    )

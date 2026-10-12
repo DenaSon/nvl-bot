@@ -71,6 +71,8 @@ def read_binding(conn: sqlite3.Connection, username: str) -> RuntimeBinding | No
 class Existing6GUIDRuntimeStore:
     db_conn: Callable
     os_uid_for_username: Callable[[str], int]
+    # Opt-in only after per-UID fences + complete durable roster are attested.
+    shared_edge_enabled: bool = False
 
     @staticmethod
     def _lock(conn, op_id: int, source: str, target: str) -> None:
@@ -170,19 +172,29 @@ class Existing6GUIDRuntimeStore:
             self._owner(conn, req, source)
             if read_binding(conn, req.username) is not None:
                 raise RuntimeStoreUnsafe("UID_BINDING_ALREADY_EXISTS")
-            # F4 first-canary isolation: BootGuard freezes the per-Edge
-            # shared route table while arming a new UID. Never cause an
-            # outage for another protected customer by enrolling a second
-            # account on that same Edge before independent multi-UID E2E.
+            # G: the shared Edge next hop is stable; arming a second UID
+            # must never freeze that route. The kernel boot path instead
+            # inserts a per-UID IPv4 deny before selecting its policy table.
             other = conn.execute(
-                "SELECT 1 FROM edge_egress_uid_runtime "
-                "WHERE edge_id=? AND username<>? AND "
-                "state IN ('ROUTED_UNVERIFIED','PROTECTED','FROZEN','HOLD') "
-                "LIMIT 1",
+                "SELECT route_table,edge_ipv4,state "
+                "FROM edge_egress_uid_runtime WHERE edge_id=? "
+                "AND username<>? LIMIT 1",
                 (req.spec.edge_id, req.username),
             ).fetchone()
             if other:
-                raise RuntimeStoreUnsafe("SHARED_EDGE_CANARY_ISOLATION_REQUIRED")
+                if not self.shared_edge_enabled:
+                    raise RuntimeStoreUnsafe("SHARED_EDGE_CANARY_ISOLATION_REQUIRED")
+                if other[0:2] != (req.spec.route_table, req.spec.edge_public_ipv4):
+                    raise RuntimeStoreUnsafe("SHARED_EDGE_IDENTITY_CONFLICT")
+                if other[2] in ("BLOCKED", "ROUTED_UNVERIFIED"):
+                    raise RuntimeStoreUnsafe("SHARED_EDGE_PENDING_UID_HOLD")
+            # Different Edges must never reference the same route table.
+            if conn.execute(
+                "SELECT 1 FROM edge_egress_uid_runtime "
+                "WHERE edge_id<>? AND route_table=? LIMIT 1",
+                (req.spec.edge_id, req.spec.route_table),
+            ).fetchone():
+                raise RuntimeStoreUnsafe("CROSS_EDGE_ROUTE_TABLE_COLLISION")
             if conn.execute(
                 "SELECT 1 FROM edge_egress_uid_bindings WHERE "
                 "username=? OR uid=? LIMIT 1", (req.username, req.uid),

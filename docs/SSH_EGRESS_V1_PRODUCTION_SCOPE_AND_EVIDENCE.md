@@ -180,3 +180,77 @@ Client -> Ingress Edge A -> existing wg0 -> Core:sshd(UID test)
 - [Issue #88 — بدهی فاز کامل Production](https://github.com/DenaSon/nvl-bot/issues/88)
 
 **قاعده تقدم:** برای **اولویت توسعه و Scope فعلی** این سند مقدم بر برنامه‌های قدیمی R1–R6 و handoff قبلی است؛ اسناد قبلی برای **شواهد تاریخی و قیود ایمنی** همچنان معتبرند. ادعاهای محیطی تا زمان تأیید Read-only تازه، تاریخی محسوب می‌شوند.
+
+
+## 12) بازبینی واقعی Workflow بات: «افزودن Edge» و «رله فعال» — 2026-10-12
+
+**منبع بررسی:** `bot_final_v49-2.py` و `setup_edge_relay.sh` از `master`؛ شرح رفتار **کد موجود** است، نه ادعای یکسان‌بودن نسخه نصب‌شده یا مقدار فعلی Production. هیچ کد/DB/شبکه در این بازبینی تغییر نکرده است.
+
+### 12.1 تفکیک چهار مفهوم موجود (از نو نسازید)
+
+| مفهوم | وضعیت واقعی در کد | آیا IP خروجی کاربر را تعیین می‌کند؟ |
+|---|---|---|
+| «➕ افزودن IP جدید به استخر» (`hp_add`, `HOSTPOOL_ADD_INPUT`) | فقط `settings.hosts` و `host_pool` را ثبت/فعال می‌کند؛ **VPS را provision نمی‌کند** | **خیر** |
+| «🚀 افزودن Edge جدید» (`hp_addedge`, `EDGE_NEW_*`, `_provision_new_edge`) | VPS موجود را از طریق SSH به **Ingress Relay** تبدیل می‌کند؛ Edge `wg0`، ثبت Peer روی Core `wg0`، DNAT پورت SSH/TLS، NAT، ثبت `host_pool` و `settings.hosts` و `record_ingress_candidate(...)` | **خیر**؛ F3 فقط `INGRESS_ONLY`، نه Egress `READY` |
+| «⭐ پیش‌فرض کل سیستم» (`hpdef_*`) | پس از TCP service reachability، `host_pool.is_default` را برای یک Host تنظیم می‌کند؛ Host حساب‌های **قبلی** را فقط با دکمه مستقل `hpdefmig_yes_*` منتقل می‌کند | **خیر**؛ پیش‌فرض نمایش/Endpoint است، نه Route برای UID |
+| «🎯 رله فعال» در «وضعیت و نقش سرورها» (`srv_mkactive_*`) | پیش‌فرض را تغییر می‌دهد، `tls_passthrough=1`، Cloudflare A-record(s)، `dns_current_ip` و DNAT پورت TLS روی Edge را تنظیم می‌کند | **خیر**؛ صرفاً Ingress/domain و تنظیم پورت |
+
+**واژگان داده‌ای مرتبط:** `host_pool.active` عضویت فعال در استخر است؛ `host_pool.is_default` پیش‌فرض سیستم است؛ `settings.dns_current_ip` آخرین مقصد ثبت‌شده دامنه است؛ `ssh_accounts.host` Endpoint/Ingress منتسب به آن حساب است. **هیچ‌کدام به‌تنهایی Policy Routing یک UID را روی Linux نمی‌سازند.**
+
+**تفاوت دو دکمه:** `hpdef_*` قبل از تغییر پیش‌فرض، TCP Reachability پورت سرویس را چک می‌کند و درباره انتقال حساب‌های قبلی سؤال می‌پرسد. اما `srv_mkactive_*` در مسیر بررسی‌شده، قبل از تغییر `is_default` چک معادل ندارد؛ `is_default` **قبل** از درخواست Cloudflare تغییر می‌کند؛ شکست Cloudflare می‌تواند Default و DNS را ناهماهنگ بگذارد. این یک **ریسک کد موجود** است، نه مجوز تعمیر آن در V1. هر دو مسیر می‌توانند دسترسی ورودی مشتریان را تحت تأثیر قرار دهند؛ برای P0 **هیچ دکمه تغییر رله/پیش‌فرض/دامنه را نزنید**.
+
+**نکته UI:** در `_render_server_status_panel` اگر `host == dns_current_ip OR host == default_host` باشد برچسب «🎯 رله فعال — متصل به دامنه» ظاهر می‌شود؛ پس ممکن است هنگام واگرایی دو مقدار، **بیش از یک Edge** همین برچسب را داشته باشد. عنوان UI، اثبات مالکیت یک Session یا سلامت DNS نیست.
+
+### 12.2 افزودن Edge از قبل وجود دارد، اما فقط Ingress
+
+مسیر ویزارد `hp_addedge` → `EDGE_NEW_IP` → `EDGE_NEW_ROOTPASS` → `EDGE_NEW_PORT` → `_provision_new_edge_sync`:
+
+1. IP/رمز Root/پورت مشتری را دریافت می‌کند؛ اسکریپت `/root/setup_edge_relay.sh` را از Core به Edge می‌فرستد (منبع اسکریپت: `setup_edge_relay.sh` در ریپو).
+2. روی Edge، `wg0` را برای `10.77.0.0/24` می‌سازد، آن را برای بوت enable می‌کند، `ip_forward=1` و DNAT `PREROUTING` برای SSH و TLS → `10.77.0.1` می‌گذارد. اسکریپت فعلی یک `iptables -t nat -A POSTROUTING -j MASQUERADE` **عمومی** هم اضافه می‌کند؛ **به‌تنهایی Egress از Edge برای Core SSH نمی‌سازد** و می‌تواند با Rule اختصاصی Egress هم‌پوشانی/Shadow داشته باشد.
+3. کلید **عمومی** Peer را به تنظیمات Core `wg0` اضافه و با `wg syncconf` همگام می‌کند؛ عضویت استخر فعال می‌شود؛ دکمه «⭐ پیش‌فرض» جداگانه نمایش می‌یابد. صرف ثبت در استخر، Edge را Default/رله دامنه نمی‌کند.
+4. در بخش `record_ingress_candidate` فقط کاندید `INGRESS_ONLY` ثبت می‌شود. این مرحله **تونل اختصاصی Egress، UID rule، table blackhole یا SNAT اختصاصی را برای مشتری فعال نمی‌کند**.
+5. ویزارد ورود مدیریتی SSH به VPS مقصد و پیکربندی آن را واقعاً تغییر می‌دهد؛ صرفاً یک رکورد دیتابیس نیست. پس **برای تشخیص P0 مجدداً اجرا نشود**.
+
+**نتیجه طراحی:** وظیفه Ingress Provisioning بات از قبل موجود است و **نباید بازنویسی شود**. کمبود فعلی، اتصال **مسیر خروجی همان UID → همان Edge ورودی حساب** در Data Plane است. افزودن Rule باید فقط پس از تعیین Edge واقعی حساب از داده‌های Production باشد؛ Default عمومی، گزینه «رله فعال» یا DNS عمومی به تنهایی دلیل تعیین Egress مقصد نیست.
+
+**منابع دقیق در master:**
+- `bot_final_v49-2.py`: `_provision_new_edge_sync` حدود خطوط 3582–3743؛ `_provision_new_edge` حدود 3746–3833؛ ویزارد `EDGE_NEW_*` حدود 12771–12824.
+- `bot_final_v49-2.py`: پنل `_render_host_pool_panel` حدود 13437–13612؛ `_render_server_status_panel` حدود 14165–14257؛ `srv_mkactive_*` حدود 20896–20954؛ `hpdef_*` و `hpdefmig_yes_*` حدود 23882–23951.
+- `bot_final_v49-2.py`: `_db_set_default_host` حدود 3436–3445؛ `_cf_update_dns_record_sync` حدود 3968–4034.
+- `setup_edge_relay.sh`: سازوکار WireGuard ورودی، DNAT و MASQUERADE حدود 63–94.
+- `docs/EDGE_EGRESS_CURRENT_HANDOFF.md`: Snapshot تولید، UID1644 و مسیر `stg1`.
+- مسیر قدیمی `setup_edge_datapath.sh` معماری متناقض **Edge-terminates-SSH** است؛ **برای V1 اجرا نشود**.
+
+### 12.3 چگونه ابهام «این Edge واقعاً برای Egress آماده است؟» را رفع کنیم؟
+
+**P0 = Read-only و دو گام؛ هیچ «راه‌اندازی»، افزودن Edge، تغییر DNS، انتخاب رله یا تغییر 6G نداریم.**
+
+**الف) فقط Production Core `209.200.246.198`:**
+- از دیتابیس واقعی صرفاً **سطر حساب شناخته‌شده** (`nvl0557` به‌عنوان شاهد تاریخی، *نه Canary مجاز برای تغییر*)، `host_pool` فعال و `is_default`، و کلیدهای تنظیمات **غیرمحرمانه** (`dns_current_ip`, `tls_passthrough`, `edge_egress_protected_mode`, `phase6h_auto_failover_enabled`) را بخوان؛ هیچ Token یا Password چاپ نشود.
+- `id -u nvl0557`، `ip -4 route get 1.1.1.1 uid 1644` (عدد را با UID واقعی تطبیق بده)، `ip -4 rule show`، فقط جدول‌های Route موردنیاز، `ip netns list`، نام Interfaceهای WG و Routeهای namespace Egress موجود را بخوان.
+- تطبیق `ssh_accounts.host` با **public IP همان Edge ورودی** و `host_pool`، و بررسی زنده‌بودن تونل اختصاصی موجود، بدون افشای کلیدهای WireGuard؛ از Source/Targetهای تاریخی بدون ممیزی جدید نتیجه نگیر.
+
+**ب) فقط Edge متعلق به همان حساب، پس از تعیین IP در (الف):**
+- `ip -4 -br addr`, `ip -4 route show`, `ip -4 rule show`، `wg show interfaces` و فقط Rules مربوط `iptables -t nat -S PREROUTING`, `POSTROUTING` و `iptables -S FORWARD` را **Read-only** ببین؛ از پرینت کردن full `wg show`/config و هر private key خودداری کن.
+- مشخص کن آیا Edge انتخاب‌شده **هم‌اکنون تونل Egress اختصاصی از Core**، Forwarding و SNAT scoped دارد یا فقط Ingress `wg0`/DNAT دارد. **اگر Ingress حساب مثلاً `172.86.94.174` باشد، موفقیت قبلی روی Frankfurt `216.126.229.12` برای شرط Same-Edge معتبر نیست**.
+
+**خروجی P0 لازم، پیش از هر Mutation:**
+
+```text
+Production Core confirmed?                  YES / NO / UNKNOWN
+Candidate account / UID / ingress Edge IP:  ... (NO customer changes)
+Active relay / default / public DNS match?  YES / NO / DIVERGED / UNKNOWN
+Regular UID IPv4 route currently via:        Core / Edge / Other
+Dedicated egress tunnel to SAME Edge exists? YES / NO / UNKNOWN
+SAME Edge forward+scoped SNAT proven?         YES / NO / UNKNOWN
+Exact missing delta:                         routing / tunnel / SNAT / combination
+Legacy wg0/NAT/UID1658/6G collision:          NONE / FOUND / UNKNOWN
+Admin rescue/snapshot/read-only baseline:    VERIFIED / NOT VERIFIED
+Decision:                                    P0 HOLD or propose ONE-UID change
+```
+
+**توقف:** تا وقتی Edge واقعی کاربر مشخص و مسیر Egress *همان* Edge تأیید نشده، **هیچ Rule** اعمال نشود. هیچ اسکریپت Stage یا 6G رجیستری دوباره اجرا نشود. نسخه در حال اجرای Production را فقط در حالت Read-only با منبع کد `master` تطبیق بده.
+
+### 12.4 تعریف Stop برای V1
+
+بعد از ارائه P0 و تأیید جداگانه اپراتور، تنها تغییرات شبکه **یک Canary ایزوله Production** قابل بررسی‌اند؛ هیچ Wizard، انتقال دسته‌جمعی کاربران، تغییر Default/DNS، Mer​ge PR #92 یا اتصال 6G جزو این فاز نیست. حتی مشاهده Egress IPv4 صحیح از namespace یا loopback SSHD، به‌تنهایی Feature-Complete نیست. پذیرش واقعی باید از **SSH عمومی** و برای **همان Edge حساب** باشد.

@@ -108,6 +108,7 @@ class AdminStatusCallbackTests(unittest.TestCase):
             "classify_edge_callback":lambda _:None,
             "read_egress_dashboard": lambda conn, **kw: board,
             "egress_dashboard_html": dashboard_html,
+            "EGRESS_PAGE_SIZE": 8,
             "log": SimpleNamespace(exception=lambda *a, **kw: None),
             "render_egress_status_html": render_egress_status_html,
             "overview_html": overview_html,

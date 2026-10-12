@@ -1,5 +1,5 @@
 """R1 persistent transport boundary tests: fake commands, no host mutation."""
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import hashlib
 import json
 from pathlib import Path
@@ -64,6 +64,14 @@ class R1SystemdTests(unittest.TestCase):
             render_unit(contract(), "not-sha")
         with self.assertRaisesRegex(R1ServiceUnsafe, "UNREVIEWED_UNIT_INPUT"):
             render_unit(contract(), "a" * 64, Path("/tmp/evil.py"))
+
+    def test_direct_dataclass_forgery_cannot_change_boot_mode_or_role(self):
+        for changed in (replace(contract(), mode="PRODUCTION"),
+                        replace(contract(), role="edge\nExecStart=evil")):
+            with self.assertRaisesRegex(R1ServiceUnsafe, "ROLE_OR_MODE"):
+                render_unit(changed, "a" * 64)
+            with self.assertRaisesRegex(R1ServiceUnsafe, "ROLE_OR_MODE"):
+                start_disposable_transport(changed)
 
     def test_contract_schema_strict_and_no_customer_mode(self):
         data = dict(spec=asdict(spec()), role="core",

@@ -80,7 +80,7 @@ class RuntimePorts(Protocol):
 async def attach_protected(
     ports: RuntimePorts, request: UIDPolicyRequest, *, source: str,
     dns_port: int, authorized: bool = False, resume_frozen: bool = False,
-    lab_core_ingress_attestor: Callable[[UIDPolicyRequest, str], bool] | None = None,
+    lab_core_ingress_attestor: object | None = None,
 ) -> RuntimeOutcome:
     """Atomic-intent/journaled attach. No Core fallback or canary restore."""
     request.validate()
@@ -92,8 +92,9 @@ async def attach_protected(
         # Only an independently verified disposable LAB host may also be its
         # own ingress. Production calls do not supply this port and stay denied.
         try:
-            if (lab_core_ingress_attestor is None or
-                    lab_core_ingress_attestor(request, source) is not True):
+            from edge_egress_r1_lab_topology import TwoHostCoreIngress
+            if (type(lab_core_ingress_attestor) is not TwoHostCoreIngress or
+                    lab_core_ingress_attestor.for_request(request, source) is not True):
                 return RuntimeOutcome(False, "INVALID_SOURCE_EDGE")
         except Exception:
             return RuntimeOutcome(False, "INVALID_SOURCE_EDGE")

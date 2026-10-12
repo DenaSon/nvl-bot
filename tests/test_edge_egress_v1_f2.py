@@ -87,7 +87,8 @@ class F2Tests(unittest.TestCase):
     def decide(self, name="nvl0557", uid=1644, verify=True):
         return check_account(self.c, name, uid, self.members,
                              guard_loader=lambda _: self.guard,
-                             guard_probe=lambda conn, row: verify)
+                             guard_probe=lambda conn, row: verify,
+                             ingress_probe=lambda row: True)
 
     def test_only_exact_ingress_return_is_safe(self):
         with self.assertRaises(ProtectedRouteError):

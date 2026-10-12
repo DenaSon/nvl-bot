@@ -123,7 +123,8 @@ def checked_guard(member: Member, directory: Path = GUARD_DIR) -> BootGuardManif
 
 def check_account(conn: sqlite3.Connection, username: str, uid: int,
                   members: dict[str, Member], guard_loader=checked_guard,
-                  guard_probe=probe_local_guards) -> bool:
+                  guard_probe=probe_local_guards,
+                  ingress_probe=None) -> bool:
     """Pure policy boundary over existing F2 decision, with durable roster."""
     member = members.get(username)
     # A renamed/reused OS UID must never obtain legacy rights.
@@ -145,6 +146,10 @@ def check_account(conn: sqlite3.Connection, username: str, uid: int,
                 or row.priority != req.priority
                 or row.route_table != req.spec.route_table
                 or row.dns_port != manifest.dns_port):
+                return False
+            # SSH transport peer must map to the pinned Edge's wg0 key.
+            # Missing H evidence always DENIES a protected login.
+            if ingress_probe is None or not ingress_probe(row):
                 return False
             return guard_probe(conn, row)
         decision = decide_account(conn, username, uid, verified)
@@ -240,11 +245,20 @@ def main() -> int:
         # Break-glass root must not depend on a working DB, roster or WG.
         if name == "root" and uid == 0:
             return 0
+        if os.environ.get("PAM_SERVICE") != "sshd":
+            return 1
         members = load_roster()
+        # PAM_RHOST is set by sshd/PAM from the TCP peer, not SSH SendEnv.
+        # If Edge ingress is not SNATed to its own wg0 /32, fail closed.
+        from edge_egress_v1_ingress import probe_ingress
+        rhost = os.environ.get("PAM_RHOST", "")
         with sqlite3.connect("file:" + FIXED_DB + "?mode=ro",
                              uri=True, timeout=2) as conn:
             conn.execute("PRAGMA query_only=ON")
-            return 0 if check_account(conn, name, uid, members) else 1
+            return 0 if check_account(
+                conn, name, uid, members,
+                ingress_probe=lambda row: probe_ingress(row, rhost),
+            ) else 1
     except (OSError, sqlite3.Error, ValueError, KeyError, LookupError):
         return 1
 

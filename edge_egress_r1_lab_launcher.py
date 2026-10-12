@@ -28,6 +28,7 @@ from ops.edge_egress_provision import EgressSpec
 
 _SHA = re.compile(r"^[a-f0-9]{64}$")
 _ID = re.compile(r"^[a-f0-9]{32}$")
+_COMMIT = re.compile(r"^[a-f0-9]{40}$")
 _FILES = frozenset(("manifest.json", "wg.conf", "up.sh", "down.sh"))
 _AGENT = "/root/nvl-egress-lab1-source/edge_egress_r1_lab_agent.py"
 
@@ -41,6 +42,7 @@ class LabHost:
     role: str
     public_ipv4: str
     machine_id: str
+    source_commit: str
     marker_sha256: str
     stage_sha256: dict[str, str]
 
@@ -48,6 +50,7 @@ class LabHost:
         address = spec.core_public_ipv4 if self.role == "core" else spec.edge_public_ipv4
         if (self.role not in ("core", "edge") or self.public_ipv4 != address
                 or not _ID.fullmatch(self.machine_id)
+                or not _COMMIT.fullmatch(self.source_commit)
                 or not _SHA.fullmatch(self.marker_sha256)
                 or not isinstance(self.stage_sha256, dict)
                 or set(self.stage_sha256) != _FILES
@@ -63,6 +66,7 @@ class LabHost:
             "mode": "DISPOSABLE_ONLY",
             "spec": asdict(spec), "role": self.role,
             "machine_id": self.machine_id,
+            "source_commit": self.source_commit,
             "marker_sha256": self.marker_sha256,
             "stage_sha256": self.stage_sha256,
         }

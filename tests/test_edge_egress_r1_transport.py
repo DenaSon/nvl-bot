@@ -153,7 +153,7 @@ class R1InspectTests(unittest.TestCase):
                     value = "REVIEWED_PUBLIC_PEER\n"
                 elif args[-4:] == ("wg", "show", "wg-nvl-stg1", "allowed-ips"):
                     value = "REVIEWED_PUBLIC_PEER\t0.0.0.0/0\n"
-                elif args[-4:] == ("route", "show", "default"):
+                elif args[-3:] == ("route", "show", "default"):
                     value = "default dev wg-nvl-stg1 scope link\n"
                 elif args[-1:] == ("wg-nvl-stg1",):
                     value = "42: wg-nvl-stg1 inet 10.78.110.2/30\n"

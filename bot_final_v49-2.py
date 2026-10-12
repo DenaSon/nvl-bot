@@ -3648,6 +3648,9 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
     # شد، اینجا هم لازم بود — چون sftp.put پایین‌تر (خطِ setup_edge_relay.sh) قبلاً هیچ timeout
     # ی نداشت.
     _transport = ssh.get_transport()
+    # Pin the same server SSH host key for the optional I stage connection.
+    # Only a public host key is kept in RAM; never store SSH/WG private keys.
+    _edge_ssh_host_key = _transport.get_remote_server_key() if _transport else None
     if _transport is not None:
         _transport.set_keepalive(10)
 
@@ -3740,7 +3743,10 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
     except Exception:
         pass
 
-    return True, "", {"edge_wg_ip": edge_wg_ip, "edge_pubkey": edge_pubkey, "tunnel_ok": tunnel_ok}
+    return True, "", {"edge_wg_ip": edge_wg_ip, "edge_pubkey": edge_pubkey,
+                      "tunnel_ok": tunnel_ok,
+                      "_edge_ssh_host_key": _edge_ssh_host_key,
+                      "_edge_ssh_port": connected_port}
 
 
 async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, chat_id, app,
@@ -3798,6 +3804,37 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
         await app.bot.send_message(chat_id, err, parse_mode="HTML")
         return False, None, None
 
+    # I — opt-in dedicated Egress STAGING added to the existing Edge wizard.
+    # Default OFF: preserve legacy behavior. STAGED never means READY.
+    # A partial stage/H registry is held for operator reconciliation, never
+    # advertised as protected Egress or used to rebind customer UID routes.
+    _i_enabled = (await asyncio.to_thread(
+        _db_get_setting, 'edge_egress_v1_onboard_enabled', '0'
+    )) == '1'
+    if _i_enabled:
+        try:
+            from edge_egress_v1_onboarding import onboard_after_ingress
+            result['egress_v1'] = await asyncio.to_thread(
+                onboard_after_ingress,
+                edge_ip=edge_ip,
+                core_ip=await asyncio.to_thread(_get_core_public_ip_cached),
+                ingress_ip=result['edge_wg_ip'],
+                public_key=result['edge_pubkey'],
+                ssh_host_key=result.get('_edge_ssh_host_key'),
+                ssh_port=result.get('_edge_ssh_port'),
+                root_password=root_password,
+                private_key_path=private_key_path,
+            )
+        except Exception:
+            log.exception('I dedicated Egress stage HOLD for Edge %s', edge_ip)
+            await app.bot.send_message(
+                chat_id,
+                "⛔️ <b>Ingress ساخته شد، اما Egress در وضعیت HOLD است.</b>\\n"
+                "Stage و رجیستری کامل تأیید نشدند؛ Edge هنوز برای کاربران محافظت‌شده آماده نیست. "
+                "بدون بررسی وضعیت جزئی روی سرورها، عملیات را دوباره اجرا نکنید.",
+                parse_mode="HTML",
+            )
+            return False, edge_ip, result
     await asyncio.to_thread(_db_add_host_pool, edge_ip)
     if provider:
         await asyncio.to_thread(_db_set_host_provider_meta, edge_ip, provider, provider_instance_id)
@@ -3827,7 +3864,8 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
         f"🔑 کلید عمومی Edge: <code>{esc(result['edge_pubkey'])}</code>\n"
         f"{status}\n\n"
         f"این IP هم‌اکنون به «🌐 سرویس IP» اضافه و فعال شد.\n"
-        f"🛡 Egress خروجی: هنوز تأیید نشده؛ ثبت ورودی به‌معنای خروج کاربران از Edge نیست.",
+        f"🛡 Egress خروجی: "
+        f"{'Stage ثبت شد، هنوز READY نیست.' if result.get('egress_v1') else 'هنوز تأیید نشده؛ ثبت ورودی به‌معنای خروج کاربران از Edge نیست.'}",
         parse_mode="HTML", reply_markup=kb
     )
     return True, edge_ip, result

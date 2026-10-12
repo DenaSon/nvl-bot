@@ -15501,7 +15501,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         edge_gate = evaluate_manual_edge_gate(edge_action, edge_mode, role=role)
         if not edge_gate.allowed:
-            await query.message.reply_text(edge_guard_message(edge_gate.reason))
+            # J: manual default/assignment callbacks share the same
+            # protected-readiness diagnostic as automatic 6H. A detailed
+            # reason is NOT a bypass to the legacy mutation path.
+            _reason = edge_gate.reason
+            if (edge_mode == '1' and role == 'admin'
+                    and (d.startswith('hpdef_')
+                         or d.startswith('hpdefmig_yes_'))):
+                _j_target = d.split('_')[-1]
+                _j_source = await asyncio.to_thread(_db_get_default_host)
+                if _j_source and _j_target:
+                    _j = await asyncio.to_thread(
+                        evaluate_j_switch, db_conn, edge_mode,
+                        _j_source, _j_target
+                    )
+                    _reason = _j.reason
+            await query.message.reply_text(edge_guard_message(_reason))
             return
 
     # 🚨 گارد اجباری بودن برند نماینده در کالبک‌ها (بررسی مستقیم از دیتابیس)

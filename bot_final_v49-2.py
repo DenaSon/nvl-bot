@@ -10697,7 +10697,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text.strip() in ('لغو', '/cancel'):
             await update.message.reply_text("✅ پیش‌نمایش لغو شد.")
             return
-        if not isinstance(eid, str) or time.time() > deadline:
+        if not isinstance(eid, str) or type(deadline) not in (int, float) or time.time() > deadline:
             await update.message.reply_text(
                 "⏳ اعتبار درخواست تمام شده؛ دوباره Edge را انتخاب کنید."
             )

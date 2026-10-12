@@ -6,6 +6,8 @@
 This is the canonical source for **current scope, past real-host test results, blockers and the next action**.
 Older [EDGE_EGRESS_CURRENT_HANDOFF](docs/EDGE_EGRESS_CURRENT_HANDOFF.md), F4 and [Issue #88](https://github.com/DenaSon/nvl-bot/issues/88) remain **historical evidence and safety references**, NOT instructions to resume expansive R1–R6 work.
 
+**Latest read-only bot audit:** canonical V1 document **§12** records the existing `hp_addedge` ingress `wg0` + DNAT wizard, `hpdef_*` host default, `srv_mkactive_*` Cloudflare/DNS active relay, and the critical distinction from UID Egress routing. Preserve these flows; NEVER recreate Edge provisioning or assume UI “active relay” == egress-ready. P0 must first identify the actual account's ingress Edge.
+
 Scope lock:
 - **First priority:** fix the **outgoing IPv4 of one controlled SSH/SOCKS session on actual Production** to equal **the same account's genuine INGRESS Edge IP**. Do not confuse observed experimental Frankfurt Egress with the earlier `nvl0557` ingress IP.
 - **P0 only until explicit approval:** narrow read-only inventory of actual Core, selected ingress Edge, routing/NAT/WG and candidate identity; report root cause and minimal exact delta BEFORE changes.

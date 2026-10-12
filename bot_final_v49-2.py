@@ -23620,7 +23620,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=update.effective_chat.id,
             )
             await query.edit_message_text(
-                "✅ <b>مطالعه طرح ثبت شد.</b>\n"
+                "✅ <b>مطالعه طرح در این نشست تأیید شد.</b>\n"
                 f"کد: <code>{esc(receipt)}</code>\n"
                 "🔒 هیچ Route، حساب، DNS، PAM یا تونلی تغییر نکرد.\n"
                 "اجرای واقعی تا تأیید مستقل فاز اول غیرفعال است.",

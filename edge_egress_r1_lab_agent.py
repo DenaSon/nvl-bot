@@ -94,12 +94,29 @@ def _assert_local_host(contract: R1BootContract, source_commit: str) -> None:
 
 
 def execute(action: str, encoded: str) -> dict:
-    if action not in ("probe", "start"):
+    if action not in ("probe", "start", "inspect"):
         raise LabAgentUnsafe("ACTION_NOT_ALLOWED")
     contract, source_commit = _request(encoded)
     _assert_local_host(contract, source_commit)
-    # This catches collision, port reuse and legacy unscoped NAT without
-    # treating 'not found' or an unknown command failure as permission.
+    if action == "inspect":
+        # Fault/reboot reconciliation is read-only, including partial resources.
+        obs = inspect_linux(
+            contract.spec, contract.role, stage_root=_STAGE_ROOT,
+            reviewed_stage_sha256=contract.stage_sha256,
+        )
+        if obs.probe_errors or obs.nat_shadowed or not obs.stage_owned:
+            state = "HOLD"
+        elif (not obs.interface_present and not obs.namespace_present
+              and not obs.veth_present and not obs.nat_tagged):
+            state = "OFFLINE"
+        elif (obs.interface_present and obs.identity_proven
+              and (obs.namespace_present and obs.veth_present
+                   if contract.role == "core" else obs.nat_tagged)):
+            state = "TRANSPORT_VERIFIED"
+        else:
+            state = "HOLD"
+        return {"ok": True, "role": contract.role, "state": state}
+    # Refuse collision, port reuse, or legacy NAT, before host mutation.
     _no_previous_resources(contract)
     if action == "probe":
         return {"ok": True, "role": contract.role, "state": "OFFLINE_VERIFIED"}

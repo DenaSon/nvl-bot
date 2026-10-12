@@ -14,7 +14,7 @@ class Phase2CallbackContracts(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = BOT.read_text(encoding="utf-8")
-        begin = cls.source.index('    elif d == "hpeg_status" or d.startswith("hpeg_page_"):')
+        begin = cls.source.index('    elif d.startswith("hpeg_review_"):')
         end = cls.source.index('    elif d == "flt_radar"', begin)
         cls.handler = cls.source[begin:end]
 
@@ -34,6 +34,12 @@ class Phase2CallbackContracts(unittest.TestCase):
         self.assertIn('d.startswith("hpeg_stage_")', self.handler)
         self.assertIn('d.startswith("hpeg_user_")', self.handler)
         self.assertIn('hpeg_page_', self.handler)
+        self.assertIn('d.startswith("hpeg_review_")', self.handler)
+        self.assertIn('d.startswith("hpeg_ack_")', self.handler)
+        self.assertIn('hpeg_review_edge_', self.handler)
+        self.assertIn('hpeg_ack_', self.handler)
+        self.assertIn('egress_operator_review_ticket', self.handler)
+        self.assertIn("ticket = context.user_data.pop(", self.handler)
         self.assertGreaterEqual(
             self.handler.count("if role != 'admin':"), 3
         )

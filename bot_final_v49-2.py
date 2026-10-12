@@ -23576,7 +23576,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except (EgressConsoleHold, ValueError, AttributeError):
             await query.edit_message_text(
-                "⛔️ <b>HOLD — طرح قابل بررسی نیست.</b>\\n"
+                "⛔️ <b>HOLD — طرح قابل بررسی نیست.</b>\n"
                 "جلسه یا هویت Edge نامعتبر است. هیچ تغییری انجام نشد.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
@@ -23620,9 +23620,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=update.effective_chat.id,
             )
             await query.edit_message_text(
-                "✅ <b>مطالعه طرح ثبت شد.</b>\\n"
-                f"کد: <code>{esc(receipt)}</code>\\n"
-                "🔒 هیچ Route، حساب، DNS، PAM یا تونلی تغییر نکرد.\\n"
+                "✅ <b>مطالعه طرح ثبت شد.</b>\n"
+                f"کد: <code>{esc(receipt)}</code>\n"
+                "🔒 هیچ Route، حساب، DNS، PAM یا تونلی تغییر نکرد.\n"
                 "اجرای واقعی تا تأیید مستقل فاز اول غیرفعال است.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
@@ -23633,7 +23633,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except (EgressConsoleHold, ValueError, AttributeError):
             await query.edit_message_text(
-                "⛔️ <b>HOLD — طرح منقضی یا تغییر کرده است.</b>\\n"
+                "⛔️ <b>HOLD — طرح منقضی یا تغییر کرده است.</b>\n"
                 "تأییدی ثبت نشد و هیچ عملیات اجرایی انجام نشد.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([

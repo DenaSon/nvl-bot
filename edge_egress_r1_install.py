@@ -140,11 +140,11 @@ def install_disabled(bundle: R1InstallBundle, *,
 
 
 def _exact_owned_bytes(path: Path, digest: str) -> bool:
-    if not _owned(path):
+    if path.is_symlink() or not _owned(path):
         return False
     try:
         raw = _read_checked(path, 16384)
-    except R1ServiceUnsafe:
+    except (R1ServiceUnsafe, OSError):
         return False
     return hashlib.sha256(raw).hexdigest() == digest
 

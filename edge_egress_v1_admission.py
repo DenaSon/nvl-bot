@@ -26,7 +26,7 @@ import sys
 from edge_egress_uid_admission import (
     AdmissionResult, NAME, FIXED_DB, decide_account, probe_local_guards,
 )
-from edge_egress_uid_boot import BootGuardManifest
+from edge_egress_uid_boot import BootGuardManifest, render_ssh_required_unit
 from edge_egress_f4_pam import inspect_pam_sshd, REQUIRED_ACCOUNT_LINE
 
 ROSTER = Path("/etc/nvl-egress/v1-protected-users.json")
@@ -161,6 +161,63 @@ def inspect_pam(pam_contents: str, sshd_effective: str) -> bool:
         pam_contents.count(PAM_LINE) == 1
     )
 
+
+
+def render_roster(manifest_bytes: dict[str, bytes]) -> str:
+    """Pure output only: durable identity roster for reviewed deployment.
+
+    Record every protected identity BEFORE its protected runtime intent.
+    A rollback must retain these identities until every UID is safely drained.
+    """
+    if not isinstance(manifest_bytes, dict) or len(manifest_bytes) > 2000:
+        raise AdmissionHold("INVALID_ROSTER_INPUT")
+    items = []
+    uids = set()
+    edges = set()
+    for username, raw in sorted(manifest_bytes.items()):
+        if (not isinstance(username, str) or not NAME.fullmatch(username)
+                or not isinstance(raw, bytes) or len(raw) > MAX_GUARD_BYTES):
+            raise AdmissionHold("INVALID_MANIFEST_INPUT")
+        try:
+            manifest = BootGuardManifest.parse(json.loads(raw))
+        except (ValueError, KeyError, TypeError, UnicodeError) as exc:
+            raise AdmissionHold("INVALID_MANIFEST_INPUT") from exc
+        req = manifest.request
+        if (req.username != username or not manifest.ingress_return
+                or manifest.dns_port is None or req.uid in uids
+                or req.spec.edge_id in edges):
+            # Single Canary per Edge until G fixes shared-table boot safety.
+            raise AdmissionHold("INVALID_OR_SHARED_EDGE_MANIFEST")
+        uids.add(req.uid)
+        edges.add(req.spec.edge_id)
+        items.append(dict(username=username, uid=req.uid,
+                          guard_sha256=hashlib.sha256(raw).hexdigest()))
+    return json.dumps(dict(version=1, protected=items), sort_keys=True,
+                      indent=2) + "\n"
+
+
+def render_v1_guard_unit(manifest: BootGuardManifest) -> str:
+    """Per-user deny-only boot unit; no global SSH dependency, no install."""
+    if not manifest.ingress_return or manifest.dns_port is None:
+        raise AdmissionHold("V1_REQUIRES_INGRESS_AND_DNS_GUARD")
+    unit = render_ssh_required_unit(manifest)
+    if "After=local-fs.target\n" not in unit:
+        raise AdmissionHold("UNKNOWN_BOOT_UNIT_SHAPE")
+    unit = unit.replace("After=local-fs.target\n",
+                        "After=local-fs.target wg-quick@wg0.service\n")
+    return unit + "\n[Install]\nWantedBy=multi-user.target\n"
+
+
+def render_pam_review() -> str:
+    return (
+        "# Review only: no PAM file is modified by F2.\n"
+        "# Install as the FIRST account rule in /etc/pam.d/sshd only after\n"
+        "# a tested independent root/admin recovery path and valid DB schema.\n"
+        + PAM_LINE + "\n"
+        "# Install the root-only roster before enabling this hook.\n"
+        "# Missing roster or DB denies every non-root SSH login.\n"
+        "# No ssh.service/ssh.socket dependency or automatic restart.\n"
+    )
 
 def main() -> int:
     if os.geteuid() != 0 or os.environ.get("PAM_TYPE") != "account":

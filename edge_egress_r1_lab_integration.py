@@ -24,7 +24,9 @@ from edge_egress_r1_lab_pam import PAM_ACCOUNT_LINE
 from edge_egress_r1_lab_launcher import (
     LabHost, LabSSHExecutor, bind_disposable_lab_shadow,
 )
-from edge_egress_uid_boot import BootGuardApplier, BootGuardManifest
+from edge_egress_uid_boot import (
+    BootGuardApplier, BootGuardManifest, read_root_only_manifest,
+)
 from edge_egress_uid_policy import UIDPolicyRequest
 from edge_egress_uid_runtime import attach_protected, RuntimeOutcome
 from edge_egress_uid_runtime_bridge import Existing6GUIDRuntimeBridge
@@ -97,15 +99,27 @@ class LabUIDGuardProbe:
         try:
             if os.geteuid() != 0 or (req.username, req.uid) != ("nvlr1test", 1555):
                 return False
-            BootGuardApplier().verify(BootGuardManifest(
-                req, "PROTECTED_BOOT_GUARD",
-            ))
-            result = subprocess.run(
+            actual = read_root_only_manifest(
+                Path("/etc/nvl-egress/protected/nvlr1test.json")
+            )
+            # Verify the MANIFEST ON DISK, including DNS port; do not
+            # validate a fabricated DNS-less manifest against live routes.
+            if (actual.mode != "PROTECTED_BOOT_GUARD"
+                    or actual.request != req):
+                return False
+            BootGuardApplier().verify(actual)
+            for args in (
                 ["systemctl", "is-enabled", "--quiet",
                  "nvl-egress-lab1-guard.service"],
-                timeout=6, capture_output=True,
-            )
-            return result.returncode == 0
+                ["systemctl", "is-active", "--quiet",
+                 "nvl-egress-lab1-guard.service"],
+            ):
+                result = subprocess.run(
+                    args, timeout=6, capture_output=True
+                )
+                if result.returncode != 0:
+                    return False
+            return True
         except (ValueError, OSError, subprocess.SubprocessError):
             return False
 

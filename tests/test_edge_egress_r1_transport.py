@@ -134,6 +134,42 @@ class R1InspectTests(unittest.TestCase):
         self.assertTrue(all("delete" not in c and "flush" not in c
                             and "add" not in c for c in calls))
 
+    def test_staged_peer_parser_accepts_real_wireguard_key_line(self):
+        with TemporaryDirectory() as d:
+            stage = Path(d) / "stg1-core"
+            stage.mkdir()
+            (stage / "wg.conf").write_text(
+                "[Interface]\nPrivateKey = OMITTED\n"
+                "[Peer]\nPublicKey = REVIEWED_PUBLIC_PEER\n"
+                "AllowedIPs = 0.0.0.0/0\n")
+            def run(*args):
+                if args == ("ip", "link", "show", "dev", "wg-nvl-stg1"):
+                    return SimpleNamespace(returncode=1, stdout="",
+                        stderr='Device "wg-nvl-stg1" does not exist.')
+                if args == ("ip", "netns", "list"):
+                    return SimpleNamespace(returncode=0,
+                        stdout="nvl-egress-stg1 (id: 0)\n", stderr="")
+                if args[-4:] == ("wg", "show", "wg-nvl-stg1", "peers"):
+                    value = "REVIEWED_PUBLIC_PEER\n"
+                elif args[-4:] == ("wg", "show", "wg-nvl-stg1", "allowed-ips"):
+                    value = "REVIEWED_PUBLIC_PEER\t0.0.0.0/0\n"
+                elif args[-4:] == ("route", "show", "default"):
+                    value = "default dev wg-nvl-stg1 scope link\n"
+                elif args[-1:] == ("wg-nvl-stg1",):
+                    value = "42: wg-nvl-stg1 inet 10.78.110.2/30\n"
+                elif args[-1:] == ("vnh-stg1",):
+                    value = "17: vnh-stg1 inet 10.78.111.1/30\n"
+                elif args[-1:] == ("vnn-stg1",):
+                    value = "17: vnn-stg1 inet 10.78.111.2/30\n"
+                else:
+                    value = ""
+                return SimpleNamespace(returncode=0, stdout=value, stderr="")
+            with patch("edge_egress_r1_transport._stage_owned", return_value=True):
+                obs = inspect_linux(spec(), "core", run=run,
+                    stage_root=Path(d), unit_root=Path(d))
+            self.assertTrue(obs.identity_proven)
+            self.assertEqual(obs.probe_errors, ())
+
     def test_permission_failure_is_not_interpreted_as_absent_interface(self):
         def run(*args):
             if args[:3] == ("ip", "link", "show"):

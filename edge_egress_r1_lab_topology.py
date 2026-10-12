@@ -16,6 +16,12 @@ import subprocess
 
 from edge_egress_uid_policy import UIDPolicyRequest
 
+# Immutable identity of the independently inventoried disposable pair.
+_LAB_CORE = "107.189.16.36"
+_LAB_EDGE = "216.126.229.12"
+_LAB_MACHINE_ID = "a5138b340f5c41e58aaaa1069a7d463e"
+_LAB_MARKER_SHA256 = "95bd7c1aba40493912e81dae570bd517cf8a30cea8e881215d1c0e1bdeec1958"
+
 
 class LabTopologyUnsafe(ValueError):
     pass
@@ -37,6 +43,10 @@ class TwoHostCoreIngress:
         """Fail closed on any unknown identity, shell unlock or host failure."""
         try:
             request.validate()
+            if ((self.core_ipv4, self.edge_ipv4, self.machine_id,
+                 self.marker_sha256) != (_LAB_CORE, _LAB_EDGE,
+                 _LAB_MACHINE_ID, _LAB_MARKER_SHA256)):
+                return False
             if os.geteuid() != 0 or source != self.core_ipv4:
                 return False
             if request.spec.core_public_ipv4 != self.core_ipv4:

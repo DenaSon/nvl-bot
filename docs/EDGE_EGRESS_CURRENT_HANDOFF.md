@@ -1,3 +1,5 @@
+> **CURRENT PRIORITY CHANGE (2026-10-12):** This file remains a **historical, detailed F1–F4/R1 evidence handoff**. The **new authoritative scope and exact next step** are in [SSH Egress V1 Production Scope & Evidence](SSH_EGRESS_V1_PRODUCTION_SCOPE_AND_EVIDENCE.md): correct **one controlled Production user's** IPv4 SSH/SOCKS Internet egress to **that same user's ingress Edge IP**. P0 READ-ONLY diagnosis first; no new 6G/6H or PR #92 development. Keep all existing safety rules and historical test classifications in this file. **Do not follow the old R1–R6 sequence as the active work plan.**
+
 # NVL — Edge Egress: مرجع ادامه کار و وضعیت قطعی
 
 **آخرین بازبینی: 2026-10-12 | مرجع پیش‌فرض چت‌ها و توسعه‌های بعدی**

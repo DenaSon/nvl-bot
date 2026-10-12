@@ -238,8 +238,8 @@ class BootTests(unittest.TestCase):
         for guard in build_policy_plan(m.request).guard[:3]:
             kernel(*guard.argv)
 
-        route = ("blackhole default metric 4096 \\n"
-                 "10.77.0.0/24 dev wg0 scope link src 10.77.0.1 \\n")
+        route = ("blackhole default metric 4096 \n"
+                 "10.77.0.0/24 dev wg0 scope link src 10.77.0.1 \n")
 
         def fake_run(*args):
             if args == ("ip", "-4", "route", "show", "table", "1780"):
@@ -248,7 +248,7 @@ class BootTests(unittest.TestCase):
 
         boot = BootGuardApplier(
             run=fake_run, get_uid=lambda _: 1644, geteuid=lambda: 0,
-            read_nss=lambda: "hosts: files dns\\n",
+            read_nss=lambda: "hosts: files dns\n",
         )
         boot.verify(m)  # Exact route exists despite trailing spaces.
 

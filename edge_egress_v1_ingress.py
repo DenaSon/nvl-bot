@@ -128,14 +128,14 @@ def _networks(raw: str) -> dict[str, tuple[ipaddress._BaseNetwork, ...]]:
         raise IngressHold("WG_PEER_INVENTORY_INVALID")
     result = {}
     for line in raw.splitlines():
-        tokens = line.split()
+        tokens = line.split(None, 1)
         if len(tokens) != 2 or tokens[0] in result:
             raise IngressHold("WG_PEER_INVENTORY_AMBIGUOUS")
         key = _key(tokens[0])
         networks = []
         for item in tokens[1].split(","):
             try:
-                net = ipaddress.ip_network(item, strict=True)
+                net = ipaddress.ip_network(item.strip(), strict=True)
             except ValueError as exc:
                 raise IngressHold("WG_ALLOWED_IP_INVALID") from exc
             networks.append(net)

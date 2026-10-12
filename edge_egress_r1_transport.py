@@ -156,15 +156,21 @@ def inspect_linux(spec: EgressSpec, role: str, *, run=_run,
         raise R1Unsafe("INVALID_ROLE")
     errors = []
 
-    def check(label: str, *args: str) -> bool:
+    def link_exists(label: str, *args: str) -> bool:
+        """Unknown nonzero status is NOT proof that a resource is absent."""
         try:
             p = run(*args)
-            if not isinstance(p.returncode, int):
-                raise ValueError("BAD_RESULT")
-            return p.returncode == 0
+            if p.returncode == 0:
+                return True
+            stderr = getattr(p, "stderr", "")
+            if (p.returncode == 1 and isinstance(stderr, str)
+                    and ("does not exist" in stderr.lower()
+                         or "cannot find device" in stderr.lower())):
+                return False
         except (OSError, ValueError, subprocess.TimeoutExpired):
-            errors.append(label)
-            return False
+            pass
+        errors.append(label)
+        return False
 
     def output(label: str, *args: str) -> str:
         try:
@@ -183,17 +189,17 @@ def inspect_linux(spec: EgressSpec, role: str, *, run=_run,
         lines = output("NETNS_INVENTORY_FAILED", "ip", "netns", "list")
         ns = spec.namespace in {s.split()[0] for s in lines.splitlines()
                                 if s.strip()}
-        iface = ns and check("NETNS_INTERFACE_PROBE_FAILED", "ip", "netns",
+        iface = ns and link_exists("NETNS_INTERFACE_PROBE_FAILED", "ip", "netns",
                              "exec", spec.namespace, "ip", "link", "show",
                              "dev", spec.iface)
-        veth = check("VETH_PROBE_FAILED", "ip", "link", "show",
+        veth = link_exists("VETH_PROBE_FAILED", "ip", "link", "show",
                      "dev", spec.veth_root)
     else:
-        iface = check("EDGE_INTERFACE_PROBE_FAILED", "ip", "link", "show",
+        iface = link_exists("EDGE_INTERFACE_PROBE_FAILED", "ip", "link", "show",
                       "dev", spec.iface)
 
-    # Existing interfaces yield a nonzero 'ip link show' only when absent.
-    # Treat absent link as a normal observation, not a command failure.
+    # A verified kernel "device does not exist" is absence; permission or
+    # malformed command failure is uncertain and yields HOLD.
     unit = unit_root / ("nvl-egress-" + spec.edge_id + "-transport.service")
     try:
         us = unit_root.stat()

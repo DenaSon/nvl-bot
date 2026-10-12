@@ -119,6 +119,7 @@ class HostUnitTests(unittest.TestCase):
         # The UID is only unfenced for the isolated, F2-admission-blocked probe.
         driver = object.__new__(ProtectedLiveHostActions)
         driver.run = Mock()
+        driver._lease = lambda: None  # Isolate re-arm contract after verified 6G lease.
         driver._req = lambda username, uid: SimpleNamespace(
             spec=SimpleNamespace(edge_public_ipv4=TGT)
         )

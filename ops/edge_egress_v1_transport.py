@@ -16,7 +16,7 @@ import re
 import subprocess
 import sys
 
-from ops.edge_egress_provision import EgressSpec
+from ops.edge_egress_provision import EgressSpec, preflight
 
 FILES = ("manifest.json", "wg.conf", "up.sh", "down.sh")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -70,6 +70,8 @@ def pinned(stage: Path, role: str, digest: str) -> tuple[EgressSpec, str]:
                     if row.strip().startswith("PublicKey ="))
         if len(peer) != 44:
             raise EgressHold("INVALID_PEER")
+    except EgressHold:
+        raise
     except (ValueError, KeyError, StopIteration, UnicodeError, TypeError) as exc:
         raise EgressHold("STAGE_MANIFEST_INVALID") from exc
     return spec, peer
@@ -137,6 +139,9 @@ def ensure(stage: Path, role: str, digest: str) -> str:
         return "EXACT_TRANSPORT_ALREADY_UP"
     if state != "ABSENT":
         raise EgressHold("UNKNOWN_TRANSPORT")
+    screen = preflight(spec, role)
+    if not screen.get("ok") or screen.get("issues"):
+        raise EgressHold("PRESTART_RESOURCE_COLLISION")
     pinned(stage, role, digest)
     try:
         p = subprocess.run(["/bin/bash", str(stage / "up.sh")],

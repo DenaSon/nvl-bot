@@ -281,3 +281,21 @@ Decision:                                    P0 HOLD or propose ONE-UID change
 - `wg0` peer endpoints (public key deliberately suppressed): `10.77.0.3/32 → 172.86.94.174:39370` (1 min since handshake); `10.77.0.9/32 → 144.172.111.51:58288` (32 min); `10.77.0.7/32 → 144.172.84.82:53398` (1 min); `10.77.0.8/32 → 144.172.84.76:60170` (0 min). Additional peer AllowedIPs `10.77.0.2/32`, `.5/32`, `.4/32` had endpoint `(none)` and handshake `never`. Endpoint addresses alone may differ from a peer's configured advertised host due to NAT; these observations do **not** establish which Edge currently receives any given customer's ingress.
 - **Key mismatch:** `nvl0557` is configured on `104.194.144.195` (Section 13); that address appears in neither supplied `settings.hosts` nor observed `wg0` endpoints. The current default/DNS last seen is `172.86.94.174`; the dedicated staging egress endpoint is `216.126.229.12`. Do not substitute default/DNS or Frankfurt egress for a proven same-edge ingress.
 - **Next gate (P0 only):** recover the omitted `HOST POOL` output (or re-query only `host,active,is_default`), establish authoritative current Edge public-IP ownership and intended account endpoint vs actual ingress using minimally scoped, credential-free Core/Edge evidence, then inspect NAT/forward/WG only on the confirmed relevant Edge. Keep live `nvl0557` read-only; no mass host migration or DNS edits. **P0 HOLD**; minimum specific route/tunnel/NAT delta unresolved.
+
+
+### P0 Core follow-up — full host_pool snapshot (2026-10-12)
+
+**Evidence:** operator-supplied read-only SQLite query of `host_pool` (timestamp of the newest capture not included):
+
+| host | active | is_default |
+|---|---:|---:|
+| `144.172.84.76` | 1 | 1 |
+| `144.172.111.51` | 0 | 0 |
+| `144.172.84.82` | 1 | 0 |
+| `172.86.94.174` | 1 | 0 |
+
+**Changed default:** earlier P0 filtered query returned `172.86.94.174 / is_default=1`; newest full query instead reports `144.172.84.76 / is_default=1`. These are distinct read-only snapshots, not an attestation of what caused the transition. Earlier `phase6h_auto_failover_enabled=1` makes automation a possibility, not proof of causality. Do not change defaults, auto-failover or DNS.
+
+**Unresolved identity:** `104.194.144.195` (1017 `ssh_accounts.host` rows including witness `nvl0557`) does not appear in this host pool, the earlier `settings.hosts` IPv4 list, or observed `wg0` endpoints. This does not itself prove SSH downtime: configured host is not proven live ingress. Last-seen `dns_current_ip=172.86.94.174` predates latest host_pool snapshot, so current DNS/default agreement is UNKNOWN.
+
+**P0 next gate:** one narrow, read-only simultaneous Core snapshot of default and `dns_current_ip`, relevant non-secret 6H operation states (without PII), then non-invasive verification of actual public ingress/ownership for the account and, only after identification, read-only NAT/WG/forwarding inspection of that Edge. No live customer/session modifications, no mass migration, no routing/NAT/WG/Cloudflare changes. Status remains P0 HOLD; exact same-edge delta unknown.

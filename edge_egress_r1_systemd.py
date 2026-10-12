@@ -140,7 +140,7 @@ def render_unit(contract: R1BootContract, manifest_sha256: str,
         "Restart=no\nTimeoutStartSec=75\n"
         f"ExecStart=/usr/bin/python3 {agent} "
         f"start --manifest {path} --sha256 {manifest_sha256}\n"
-        "# Deliberately no ExecStop or ssh.service/UID dependencies.\n\n"
+        "# No lifecycle stop/teardown hook; no shared service dependencies.\n\n"
         "[Install]\nWantedBy=multi-user.target\n"
     )
 

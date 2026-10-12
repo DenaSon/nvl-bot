@@ -130,10 +130,15 @@ class RemotePinnedEdge:
     def _ssh(self):
         try:
             import paramiko
+            if not isinstance(self.host_key_b64, str) or len(self.host_key_b64) > 512:
+                raise ValueError("untrusted host key")
+            # Paramiko SSHKey.get_base64() is an RFC 4253 SSH public-key
+            # *blob* (algorithm + encoded key), NOT the raw 32-byte Ed25519
+            # public key. Round-trip the exact pinned host identity.
             raw = base64.b64decode(self.host_key_b64, validate=True)
             key = paramiko.Ed25519Key(data=raw)
-            if len(raw) != 32:
-                raise ValueError("host key size")
+            if key.get_name() != "ssh-ed25519" or key.get_base64() != self.host_key_b64:
+                raise ValueError("host key identity changed")
             if self.key_path.is_symlink():
                 raise ValueError("ssh key symlink")
             st = self.key_path.stat()

@@ -61,3 +61,8 @@ Scope lock:
 - Historical version labels in `docs/NVL_PROJECT_MEMORY.md` are **not live deployment attestation**. Read-only verify the actual current Production build before any deployment.
 
 **K1 release limits:** J2 requires all active SSH accounts protected+idle and MUST NOT global-switch the current mixed legacy population. K2 ONE new Edge isolated canary needs real operator stage/SSH pins, trusted F2 PAM and boot/DoH units, scoped Cloudflare token, tested rescue, real external same-Edge IP/DNS/IPv6 and failure proof. HostActions now handles only exact attested DoH MainPID and migrates its route-bound systemd unit; all other UID processes cause HOLD. Manual/auto protected 6H still blocked until K2 acceptance. No Production changes from K1 merge.
+
+
+## K2 Telegram Egress UI checkpoint (2026-10-12)
+
+Existing host pool's `hpeg_status` is now the admin Egress console: Edge list/detail, DB F4 readiness/expiry, and **pinned read-only Core namespace live IPv4 probe** per Edge when operator-pinned SHA256 exists. `hp_addedge` remains the existing wizard, no second Edge controller; `edge_egress_v1_onboard_enabled` still defaults OFF. UI does NOT install PAM/Boot, enable protected accounts or 6H, write settings or mark READY. No protected-user IP fixes on Production are implied. Next K2 is ONE reviewed Core+NEW Edge installation, rescue and SSH/SOCKS/IPv6/DNS/tunnel-loss acceptance, then limited canary. Updated document: `docs/SSH_EGRESS_DYNAMIC_V1_DELIVERY.md` §K2. Keep CI small, protect legacy/mixed customers.

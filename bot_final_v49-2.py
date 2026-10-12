@@ -321,6 +321,10 @@ from edge_egress_entrypoints import (
     edge_guard_message,
 )
 from edge_egress_status import read_egress_status, render_egress_status_html
+from edge_egress_v1_console import (
+    edge_id_checked, read_edge_detail, overview_html, detail_html,
+    instructions_html, live_ip_probe, probe_html, EgressConsoleHold,
+)
 from edge_egress_f3_admin import render_assignment_preview
 from edge_egress_f3_readiness import record_ingress_candidate
 from incident_observability import (
@@ -13620,7 +13624,7 @@ async def _render_host_pool_panel(query, page=0):
     kb.append([InlineKeyboardButton("🚀 افزودن Edge جدید (VPS از قبل‌خریداری‌شده)", callback_data="hp_addedge")])
     kb.append([InlineKeyboardButton("🌍 دامنهٔ ثابت + Cloudflare", callback_data="hp_cf_settings")])
     kb.append([InlineKeyboardButton("🛡 فیلترینگ و دسترسی", callback_data="hp_filtering")])
-    kb.append([InlineKeyboardButton("🔐 وضعیت Egress (فقط مشاهده)", callback_data="hpeg_status")])
+    kb.append([InlineKeyboardButton("🛡 مدیریت Egress", callback_data="hpeg_status")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="ipsvc_menu")])
     cf_cfg = await asyncio.to_thread(_cf_get_config)
     if _cf_configured(cf_cfg):
@@ -23439,19 +23443,98 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     elif d == "hpeg_status":
-        # D1-C2B2: a strictly read-only status screen, NOT an enable button.
         if role != 'admin':
-            await query.message.reply_text("⛔️ دسترسی فقط برای مدیر مجاز است.")
+            await query.message.reply_text("⛔️ فقط مدیر")
             return
-        egress_status = await asyncio.to_thread(read_egress_status, db_conn)
+        try:
+            state = await asyncio.to_thread(read_egress_status, db_conn)
+            buttons = []
+            for item in state.registrations:
+                try:
+                    eid = edge_id_checked(item.edge_id)
+                except EgressConsoleHold:
+                    continue
+                buttons.append([InlineKeyboardButton(
+                    f"🔎 {eid} · {item.edge_ipv4[:24]}",
+                    callback_data=f"hpeg_edge_{eid}",
+                )])
+            buttons.extend([
+                [InlineKeyboardButton("🚀 افزودن Edge", callback_data="hp_addedge")],
+                [InlineKeyboardButton("🧭 مراحل راه‌اندازی", callback_data="hpeg_steps")],
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="hp_menu")],
+            ])
+            await query.edit_message_text(
+                overview_html(state), parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        except Exception:
+            log.exception("Egress admin console overview unavailable")
+            await query.message.reply_text("⛔️ وضعیت Egress قابل بررسی نیست؛ هیچ تغییری انجام نشد.")
+        return
+
+    elif d == "hpeg_steps":
+        if role != 'admin':
+            await query.message.reply_text("⛔️ فقط مدیر")
+            return
         await query.edit_message_text(
-            render_egress_status_html(egress_status),
-            parse_mode="HTML",
+            instructions_html(), parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("👤 پیش‌نمایش تخصیص کاربر", callback_data="hpeg_plan")],
-                [InlineKeyboardButton("🔙 سرویس IP", callback_data="hp_menu")]
+                [InlineKeyboardButton("🚀 افزودن Edge", callback_data="hp_addedge")],
+                [InlineKeyboardButton("🔙 مدیریت Egress", callback_data="hpeg_status")],
             ]),
         )
+        return
+
+    elif d.startswith("hpeg_edge_") or d.startswith("hpeg_probe_"):
+        if role != 'admin':
+            await query.message.reply_text("⛔️ فقط مدیر")
+            return
+        is_probe = d.startswith("hpeg_probe_")
+        edge_id = d[len("hpeg_probe_"):] if is_probe else d[len("hpeg_edge_"):]
+        try:
+            edge_id_checked(edge_id)
+            detail = await asyncio.to_thread(read_edge_detail, db_conn, edge_id)
+            if detail is None:
+                raise EgressConsoleHold("EDGE_NOT_REGISTERED")
+            if is_probe:
+                result = await asyncio.to_thread(live_ip_probe, db_conn, edge_id)
+                html = probe_html(result)
+                if not result.matches:
+                    log.warning("Egress admin live probe mismatch: edge_id=%s", edge_id)
+            else:
+                html = detail_html(detail)
+            buttons = []
+            if detail.stage_pin_present and not is_probe:
+                buttons.append([InlineKeyboardButton(
+                    "🌍 تست زنده IP خروجی (فقط خواندنی)",
+                    callback_data=f"hpeg_probe_{edge_id}",
+                )])
+            if is_probe:
+                buttons.append([InlineKeyboardButton(
+                    "🔄 تست مجدد", callback_data=f"hpeg_probe_{edge_id}",
+                )])
+            buttons.extend([
+                [InlineKeyboardButton("🔎 جزئیات Edge", callback_data=f"hpeg_edge_{edge_id}")],
+                [InlineKeyboardButton("🔙 مدیریت Egress", callback_data="hpeg_status")],
+            ])
+            await query.edit_message_text(
+                html, parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        except (EgressConsoleHold, ValueError) as exc:
+            # No raw system commands, credentials or traceback in Telegram.
+            await query.edit_message_text(
+                "⛔️ <b>HOLD — Egress تأیید نشد.</b>\n"
+                f"علت: <code>{esc(str(exc)[:90])}</code>\n"
+                "هیچ Route، تونل یا حسابی تغییر نکرد.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 مدیریت Egress", callback_data="hpeg_status")],
+                ]),
+            )
+        except Exception:
+            log.exception("Egress admin console detail/probe unavailable")
+            await query.message.reply_text("⛔️ بررسی Egress ناموفق بود؛ هیچ تغییری انجام نشد.")
         return
 
     elif d == "flt_radar" and role == 'admin':

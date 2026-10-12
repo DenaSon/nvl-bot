@@ -119,11 +119,11 @@ def read_contract(path: Path, expected_sha256: str) -> R1BootContract:
 
 def render_unit(contract: R1BootContract, manifest_sha256: str,
                 agent: Path = AGENT) -> str:
-    """Offline text only. Installer and systemctl enable are NOT provided.
+    """Render a boot-time, READ-ONLY identity check, never a network start.
 
-    Unit autostart is only for an explicitly prepared disposable lab host:
-    its command rechecks the pinned contract and unique machine-id/marker.
-    No ExecStop: stopping systemd cannot silently tear down protected routes.
+    No systemd unit may obtain the shared 6G lease by itself on boot.
+    An explicit F2 coordinator must supply a checked live 6G admission
+    before ANY transport start; the stand-alone CLI cannot grant it.
     """
     contract.spec.validate()
     if contract.role not in ("core", "edge") or contract.mode != "DISPOSABLE_ONLY":
@@ -142,7 +142,7 @@ def render_unit(contract: R1BootContract, manifest_sha256: str,
         "User=root\nGroup=root\nUMask=0077\n"
         "Restart=no\nTimeoutStartSec=75\n"
         f"ExecStart=/usr/bin/python3 {agent} "
-        f"start --manifest {path} --sha256 {manifest_sha256}\n"
+        f"verify --manifest {path} --sha256 {manifest_sha256}\n"
         "# No lifecycle stop/teardown hook; no shared service dependencies.\n\n"
         "[Install]\nWantedBy=multi-user.target\n"
     )
@@ -193,18 +193,21 @@ def start_disposable_transport(contract: R1BootContract, *,
                                stage_root: Path = STAGE_ROOT,
                                executor: Callable | None = None,
                                precheck: Callable | None = None,
-                               observe: Callable | None = None) -> str:
-    """Explicit lab-only startup; runner cannot elevate Egress user state.
+                               observe: Callable | None = None,
+                               lease_check: Callable[[], bool] | None = None) -> str:
+    """Explicit F2-gated disposable-only start; never a boot/autostart path.
 
-    This invokes the existing independently reviewed staging up.sh; that
-    script's own ERR trap may clean up resources it has just created.
-    On any uncertain result never invoke down.sh or release a 6G lock.
+    Requires an injected LIVE shared-6G lease verifier. No default, flag
+    or unit start can fake a currently held operation. The current F2
+    coordinator retains responsibility for freeze/HOLD and journal.
     """
     contract.spec.validate()
     if contract.role not in ("core", "edge") or contract.mode != "DISPOSABLE_ONLY":
         raise R1ServiceUnsafe("INVALID_SERVICE_ROLE_OR_MODE")
     if os.geteuid() != 0:
         raise R1ServiceUnsafe("ROOT_REQUIRED")
+    if lease_check is None or lease_check() is not True:
+        raise R1ServiceUnsafe("EXISTING_6G_LEASE_REQUIRED")
     assert_disposable_identity(contract, marker=marker, machine_id=machine_id)
     if not _stage_owned(contract.spec, contract.role, stage_root,
                         contract.stage_sha256):
@@ -213,6 +216,9 @@ def start_disposable_transport(contract: R1BootContract, *,
         _no_previous_resources(contract)
     else:
         _no_previous_resources(contract, run=precheck)
+    # A live lease must still be held after all read-only preflight steps.
+    if lease_check() is not True:
+        raise R1ServiceUnsafe("EXISTING_6G_LEASE_LOST_HOLD")
     # Verify the package immediately before calling bash.
     if not _stage_owned(contract.spec, contract.role, stage_root,
                         contract.stage_sha256):
@@ -247,6 +253,8 @@ def start_disposable_transport(contract: R1BootContract, *,
         raise R1ServiceUnsafe("POST_START_IDENTITY_UNCERTAIN_HOLD") from exc
     if not complete:
         raise R1ServiceUnsafe("POST_START_IDENTITY_UNCERTAIN_HOLD")
+    if lease_check() is not True:
+        raise R1ServiceUnsafe("EXISTING_6G_LEASE_LOST_HOLD")
     return "TRANSPORT_ONLY_NOT_CUSTOMER_READY"
 
 
@@ -265,9 +273,10 @@ def main(argv=None) -> int:
                             contract.stage_sha256):
             raise R1ServiceUnsafe("STAGE_SHA_OR_OWNER_MISMATCH")
         if args.action == "start":
-            print(start_disposable_transport(contract))
-        else:
-            print("R1_DISPOSABLE_INPUTS_VERIFIED_ONLY")
+            # This CLI has no way to obtain/attest the existing F2 6G lease.
+            # A typed, injected coordinator is required for an explicit start.
+            raise R1ServiceUnsafe("CLI_START_FORBIDDEN_USE_EXISTING_F2")
+        print("R1_DISPOSABLE_INPUTS_VERIFIED_ONLY")
     except (R1ServiceUnsafe, OSError, ValueError, subprocess.TimeoutExpired) as exc:
         # No command output, file contents or WG keys in failure messages.
         reason = str(exc) if isinstance(exc, R1ServiceUnsafe) else "R1_UNEXPECTED_HOLD"

@@ -33,6 +33,10 @@ Scope lock:
 
 **Next read:** `docs/SSH_EGRESS_DYNAMIC_V1_DELIVERY.md` (G). **G merged via PR #95 (`222a782`), all latest CI PASS:** per-UID IPv4 OUTPUT deny/release protects only selected UID without deleting the Edge default; 6G store opt-in `shared_edge_enabled` allows multiple users per Edge; roster accepts coherent UID manifests. **No Production deployment.** **Before first multiuser attach, all existing protected manifests on that Edge must use `shared_edge=true`; old F2 boot units would still delete shared route.** **Next H real ingress/session binding**, then I new Edge wizard, J 6H and K single deployment/new Edge validation. Tests stay focused and lightweight.
 
+## H — SSH Session Binding (2026-10-12)
+
+**H implementation on feature branch; CI and merge not yet attested.** See `docs/SSH_EGRESS_DYNAMIC_V1_DELIVERY.md` H. Protected account PAM admission requires `PAM_RHOST` to equal the Core-observed `wg0` /32 of the **pinned** Edge, with a root-owned peer/public-IP registry (`/etc/nvl-egress/v1-ingress-peers.json`) and `wg show wg0 allowed-ips` proof. Unknown/mismatched peer => DENY, including after 6H relays switch. UID-only routing is sticky to one Edge: existing sessions must drain before controlled repin; H does NOT implement concurrent same-UID sessions via two different Edges. I must create/update registry when adding an Edge; J must coordinate safe switch/drain; K tests public SSH/SOCKS and PAM_RHOST on a NEW Edge. No Production changes, SSH/PAM install, network writes or customer migration in H. Keep tests small and docs updated.
+
 ## Historical context / safety controls (read second)
 
 - Production has Core-terminated SSH and a legacy WireGuard `wg0` ingress relay. Assigning `ssh_accounts.host` does **not** change Linux internet egress.

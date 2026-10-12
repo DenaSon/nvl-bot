@@ -29,6 +29,10 @@ Scope lock:
 
 **Latest source checkpoint:** F2 merged on `master` via [PR #94](https://github.com/DenaSon/nvl-bot/pull/94) (`29e66d7`), all PR-head checks PASS; see `docs/SSH_EGRESS_DYNAMIC_V1_DELIVERY.md` F2 and G handoff. Durable root-only protected UID roster + PAM hook + exact `wg0` ingress return + deny-first guard/boot unit candidates are code-only, **not installed on Production**. The single-UID guard still freezes the shared Edge default; G must solve multi-UID safely before customer rollout. A failed/missing roster/DB will deny non-root SSH if PAM is installed: require tested emergency administrative recovery and staged migration; no unattended PAM install. **Next: G shared-Edge multi-UID runtime**. No Production deploy until G/H/I/J delivery is complete.
 
+## G Multi-UID source checkpoint (2026-10-12)
+
+**Next read:** `docs/SSH_EGRESS_DYNAMIC_V1_DELIVERY.md` (G). G fixes shared-Edge default deletion: per-UID IPv4 OUTPUT deny/release protects selected UID without changing the shared Edge default, existing 6G store opt-in `shared_edge_enabled` allows multiple users on one Edge, and root-only manifest roster accepts multiple coherent UIDs. No Production deployment. **Before first multiuser attach, all existing protected manifests on that Edge must use `shared_edge=true`; old F2 boot units would still delete shared route.** Next H real ingress/session binding, then I new Edge wizard, J 6H, K one rollout/new Edge validation. Keep tests focused; update status after CI/merge.
+
 ## Historical context / safety controls (read second)
 
 - Production has Core-terminated SSH and a legacy WireGuard `wg0` ingress relay. Assigning `ssh_accounts.host` does **not** change Linux internet egress.

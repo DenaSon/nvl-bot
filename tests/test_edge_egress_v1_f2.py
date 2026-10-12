@@ -26,14 +26,14 @@ KW = dict(next_hop="10.78.101.2", device="vnh-fra1", source="10.78.101.1")
 
 def protected_fixture():
     source = base_manifest()
-    return replace(source, ingress_return=True)
+    return replace(source, ingress_return=True, shared_edge=True)
 
 
 def guard_bytes():
     m = protected_fixture()
     raw = dict(mode=m.mode, username=m.request.username, uid=m.request.uid,
                priority=m.request.priority, dns_port=m.dns_port,
-               ingress_return=True, spec=m.request.spec.__dict__)
+               ingress_return=True, shared_edge=True, spec=m.request.spec.__dict__)
     return json.dumps(raw).encode()
 
 
@@ -113,7 +113,7 @@ class F2Tests(unittest.TestCase):
         guard = BootGuardApplier(run=kernel, get_uid=lambda _: 1644,
                                  geteuid=lambda: 0,
                                  read_nss=lambda: "hosts: files dns\n")
-        guard.apply(self.guard)
+        guard.apply(replace(self.guard, shared_edge=False))
         self.assertTrue(kernel.ingress_return)
         self.assertFalse(kernel.edge_attached)
         self.assertTrue(kernel.blackhole)
@@ -150,9 +150,14 @@ class F2Tests(unittest.TestCase):
         self.assertEqual(out["protected"][0]["uid"], 1644)
         stripped = json.loads(raw)
         del stripped["ingress_return"]
-        with self.assertRaisesRegex(AdmissionHold, "INVALID_OR_SHARED"):
+        with self.assertRaisesRegex(AdmissionHold, "INVALID_MANIFEST_INPUT"):
             render_roster({"nvl0557": json.dumps(stripped).encode()})
         changed = dict(stripped, ingress_return=True, uid=1645, username="nvl0558")
+        shared = json.loads(render_roster({
+            "nvl0557": raw, "nvl0558": json.dumps(changed).encode()
+        }))
+        self.assertEqual(len(shared["protected"]), 2)
+        changed["uid"] = 1644
         with self.assertRaisesRegex(AdmissionHold, "INVALID_OR_SHARED"):
             render_roster({"nvl0557": raw, "nvl0558": json.dumps(changed).encode()})
 

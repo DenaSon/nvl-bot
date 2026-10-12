@@ -202,9 +202,10 @@ async def freeze_protected(
 ) -> RuntimeOutcome:
     """Explicit per-user freeze, no removal of UID rule/blackhole or mapping.
 
-    For multiple users on the SAME Edge route-table, freezing the Edge default
-    deliberately affects *all* users sharing the Edge. F2 never claims that
-    this is a single-user kernel route action.
+    G freezes only the selected UID using a dedicated OUTPUT owner fence.
+    The shared Edge route stays attached for other protected users.
+    Requires the G LocalLinuxProtectedRuntimeKernel implementation and
+    attested per-UID BootGuard; an old F2 kernel port is not multi-user safe.
     """
     request.validate()
     if not authorized:

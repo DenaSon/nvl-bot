@@ -337,6 +337,12 @@ from edge_egress_phase2_console import (
     preview_uid_html as egress_uid_preview_html,
     MAX_EDGES as EGRESS_PAGE_SIZE,
 )
+from edge_egress_phase2_review import (
+    build_review as build_egress_operator_review,
+    review_html as egress_review_html,
+    issue_ticket as issue_egress_review_ticket,
+    acknowledge_ticket as acknowledge_egress_review_ticket,
+)
 from edge_egress_f3_admin import render_assignment_preview
 from edge_egress_f3_readiness import record_ingress_candidate
 from incident_observability import (
@@ -10702,21 +10708,46 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "⏳ اعتبار درخواست تمام شده؛ دوباره Edge را انتخاب کنید."
             )
             return
+        buttons = None
+        context.user_data.pop('egress_review_uid_selector', None)
         try:
             edge_id_checked(eid)
             board = await asyncio.to_thread(
                 read_egress_dashboard, db_conn, only_edge=eid,
             )
             card = get_egress_card(board, eid)
+            username = text.strip()
             preview = await asyncio.to_thread(
-                egress_uid_preview_html, db_conn, card, text.strip(),
+                egress_uid_preview_html, db_conn, card, username,
             )
-        except (EgressConsoleHold, ValueError):
+            if re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", username):
+                # B3 only stores a short-lived review *selector*; it does not
+                # create an executable intent, change UID routes or save secrets.
+                context.user_data['egress_review_uid_selector'] = (
+                    eid, username, time.time() + 120,
+                    update.effective_user.id, update.effective_chat.id,
+                )
+                buttons = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "📋 طرح تخصیص (بدون اجرا)",
+                        callback_data=f"hpeg_review_attach_{eid}"
+                    )],
+                    [InlineKeyboardButton(
+                        "🧊 طرح توقف امن (بدون اجرا)",
+                        callback_data=f"hpeg_review_freeze_{eid}"
+                    )],
+                ])
+        except (EgressConsoleHold, ValueError, AttributeError):
             preview = "⛔️ هویت یا وضعیت Edge قابل تأیید نیست؛ هیچ اقدامی نشد."
         except Exception:
             log.exception("Phase 2 UID preview unavailable")
             preview = "⛔️ بررسی کاربر ناموفق بود؛ هیچ تغییری انجام نشد."
-        await update.message.reply_text(preview, parse_mode="HTML")
+        if buttons is None:
+            await update.message.reply_text(preview, parse_mode="HTML")
+        else:
+            await update.message.reply_text(
+                preview, parse_mode="HTML", reply_markup=buttons,
+            )
         return
 
     # F3: administrator-only Egress assignment PREVIEW, no DB/route mutation.
@@ -23487,6 +23518,137 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    elif d.startswith("hpeg_review_"):
+        if role != 'admin':
+            await query.message.reply_text("⛔️ فقط مدیر")
+            return
+        selection = d[len("hpeg_review_"):]
+        if selection.startswith("edge_"):
+            kind, edge_id = "EDGE_PREPARE", selection[5:]
+        elif selection.startswith("attach_"):
+            kind, edge_id = "UID_ATTACH", selection[7:]
+        elif selection.startswith("freeze_"):
+            kind, edge_id = "UID_FREEZE", selection[7:]
+        else:
+            kind, edge_id = "", ""
+        try:
+            edge_id_checked(edge_id)
+            actor_id = update.effective_user.id
+            chat_id = update.effective_chat.id
+            username = ""
+            if kind != "EDGE_PREPARE":
+                # Consume before the first await so repeated callbacks do not
+                # reuse a prior UID selection, including from another chat.
+                chosen = context.user_data.pop(
+                    'egress_review_uid_selector', None
+                )
+                if not isinstance(chosen, tuple) or len(chosen) != 5:
+                    raise EgressConsoleHold("REVIEW_USERNAME_SELECTION_MISSING")
+                eid, username, expiry, owner, chat = chosen
+                if (eid != edge_id or type(expiry) not in (int, float)
+                        or time.time() >= expiry or owner != actor_id
+                        or chat != chat_id):
+                    raise EgressConsoleHold("REVIEW_USERNAME_SELECTION_EXPIRED")
+            board = await asyncio.to_thread(
+                read_egress_dashboard, db_conn, only_edge=edge_id,
+            )
+            card = get_egress_card(board, edge_id)
+            stage = await asyncio.to_thread(inspect_local_stage, card)
+            review = await asyncio.to_thread(
+                build_egress_operator_review, db_conn, card, stage,
+                kind, username,
+            )
+            ticket = issue_egress_review_ticket(
+                review, actor_id=actor_id, chat_id=chat_id
+            )
+            context.user_data['egress_operator_review_ticket'] = ticket
+            await query.edit_message_text(
+                egress_review_html(review), parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "👁 تأیید مطالعه طرح (بدون اجرا)",
+                        callback_data=f"hpeg_ack_{ticket.token}",
+                    )],
+                    [InlineKeyboardButton(
+                        "🔙 جزئیات Edge", callback_data=f"hpeg_edge_{edge_id}",
+                    )],
+                ]),
+            )
+        except (EgressConsoleHold, ValueError, AttributeError):
+            await query.edit_message_text(
+                "⛔️ <b>HOLD — طرح قابل بررسی نیست.</b>\\n"
+                "جلسه یا هویت Edge نامعتبر است. هیچ تغییری انجام نشد.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "🔙 مدیریت Egress", callback_data="hpeg_status",
+                    )],
+                ]),
+            )
+        except Exception:
+            log.exception("K2 operator review unavailable")
+            await query.message.reply_text(
+                "⛔️ خطا در بررسی طرح؛ هیچ عملیاتی انجام نشد."
+            )
+        return
+
+    elif d.startswith("hpeg_ack_"):
+        if role != 'admin':
+            await query.message.reply_text("⛔️ فقط مدیر")
+            return
+        # Always consume the ticket BEFORE doing asynchronous revalidation.
+        ticket = context.user_data.pop(
+            'egress_operator_review_ticket', None
+        )
+        try:
+            if ticket is None or not re.fullmatch(
+                r"[0-9a-f]{16}", d[len("hpeg_ack_"):]
+            ):
+                raise EgressConsoleHold("REVIEW_NONCE_MISSING")
+            board = await asyncio.to_thread(
+                read_egress_dashboard, db_conn, only_edge=ticket.edge_id,
+            )
+            card = get_egress_card(board, ticket.edge_id)
+            stage = await asyncio.to_thread(inspect_local_stage, card)
+            latest = await asyncio.to_thread(
+                build_egress_operator_review, db_conn, card, stage,
+                ticket.action, ticket.username,
+            )
+            receipt = acknowledge_egress_review_ticket(
+                ticket, latest, token=d[len("hpeg_ack_"):],
+                actor_id=update.effective_user.id,
+                chat_id=update.effective_chat.id,
+            )
+            await query.edit_message_text(
+                "✅ <b>مطالعه طرح ثبت شد.</b>\\n"
+                f"کد: <code>{esc(receipt)}</code>\\n"
+                "🔒 هیچ Route، حساب، DNS، PAM یا تونلی تغییر نکرد.\\n"
+                "اجرای واقعی تا تأیید مستقل فاز اول غیرفعال است.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "🔙 مدیریت Egress", callback_data="hpeg_status",
+                    )],
+                ]),
+            )
+        except (EgressConsoleHold, ValueError, AttributeError):
+            await query.edit_message_text(
+                "⛔️ <b>HOLD — طرح منقضی یا تغییر کرده است.</b>\\n"
+                "تأییدی ثبت نشد و هیچ عملیات اجرایی انجام نشد.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "🔙 مدیریت Egress", callback_data="hpeg_status",
+                    )],
+                ]),
+            )
+        except Exception:
+            log.exception("K2 operator review receipt unavailable")
+            await query.message.reply_text(
+                "⛔️ تأیید مطالعه ناموفق بود؛ هیچ تغییری انجام نشد."
+            )
+        return
+
     elif d == "hpeg_status" or d.startswith("hpeg_page_"):
         if role != 'admin':
             await query.message.reply_text("⛔️ فقط مدیر")
@@ -23617,6 +23779,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )],
                 [InlineKeyboardButton(
                     "👤 پیش‌نمایش تخصیص کاربر", callback_data=f"hpeg_user_{edge_id}",
+                )],
+                [InlineKeyboardButton(
+                    "🧭 طرح آماده‌سازی Edge (بدون اجرا)",
+                    callback_data=f"hpeg_review_edge_{edge_id}",
                 )],
             ]
             if card.can_probe:

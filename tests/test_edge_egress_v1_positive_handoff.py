@@ -210,6 +210,10 @@ class PositiveAdapterTests(unittest.TestCase):
         self.assertEqual(self.db.execute(
             "SELECT status FROM failover_operations WHERE id=42"
         ).fetchone(), ("SUCCEEDED",))
+        self.assertIn(("RUNNING", "EGRESS_GUARDED_CANDIDATE_STAGE"), self.events)
+        self.assertIn(("RUNNING", "ADMISSION_FENCE"), self.events)
+        self.assertIn(("RUNNING", "DRAIN_SOURCE_SESSIONS"), self.events)
+        self.assertIn(("RUNNING", "EDGE_ONLY_PROTECTED_DNS_CUTOVER"), self.events)
         self.assertNotIn(CORE, host.events)
         self.assertLess(host.events.index("drain"), host.events.index("repin"))
         self.assertLess(host.events.index("repin"), host.events.index("dns"))

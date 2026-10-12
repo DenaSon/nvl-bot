@@ -190,3 +190,8 @@ Admin's EXISTING Edge pool panel now opens **🛡 مدیریت Egress** (`hpeg_s
 UI is admin-only and has **no customer activation, protected 6H, PAM install or unsafe 'enable' callback**. The new Edge button reuses `hp_addedge` unchanged with its legacy safety gate; opt-in `edge_egress_v1_onboard_enabled` stays OFF unless separately authorized for K2. No one-click Core deployment or reboot; initial installation still requires independent console rescue and manual validation. Six small offline tests were added, no CI workflow changes.
 
 **Next K2 execution:** operator-controlled initial Core/PAM/Boot/Edge install and one NEW Edge acceptance with live SSH/SOCKS, same-Edge IP egress, IPv6/DNS/transport-loss/reboot/recovery/rollback before any customer migration. The current mixed Legacy/Protected population is not globally auto-switchable under J2. Keep protected 6H HOLD.
+
+
+### K2 Telegram UI merged (2026-10-12)
+
+[PR #101](https://github.com/DenaSon/nvl-bot/pull/101) squash-merged into `master` as `7c3218116974974ae124ef44e995c9e9fa3ecb4d`. The final PR head `901e2498c51ed7d19c5343e959a2ce0cb7340ffd` passed both existing `Python checks` and `Edge egress stage-only checks` (3.11/3.12). This closes the Telegram **code-only UI** delivery: admin Edge status/detail, evidence-only optional real Core namespace IPv4 test, and existing guarded onboarding entry. **No Production deployment, no new Edge end-to-end acceptance, no automatic protected failover or customer migration yet.** Next: operator K2 Core rescue/PAM/Boot install and ONE NEW Edge live E2E. The Stage SHA256 must be independently reviewed before registration; it is not set automatically by the UI.

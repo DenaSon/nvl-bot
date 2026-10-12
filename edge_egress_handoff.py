@@ -222,6 +222,7 @@ async def run_protected_handoff(
     *,
     now: Optional[datetime] = None,
     guarded_failover: bool = False,
+    require_admission_drain: bool = False,
 ) -> HandoffResult:
     """A conservative saga plan using 6G shared lock/journal.
 
@@ -230,6 +231,8 @@ async def run_protected_handoff(
     The lock MUST be persisted across process crashes, and stale-lock
     recovery MUST respect EGRESS_RECOVERY_REQUIRED (release gate D1-C3).
     """
+    if require_admission_drain and not guarded_failover:
+        raise HandoffUnsafe("DRAIN_REQUIRES_GUARDED_HANDOFF")
     operation_id, busy_id = await ports.acquire_6g_lock(source_host, target_host)
     if operation_id is None:
         return HandoffResult(False, "SHARED_FAILOVER_BUSY", busy_id)
@@ -276,7 +279,7 @@ async def run_protected_handoff(
         # candidate readiness under lock. Raise on any stale state.
         await ports.revalidate_before_cutover(snapshot)
 
-        if guarded_failover:
+        if require_admission_drain:
             # F2 PAM reads the existing runtime state. Mark the entire
             # protected set FROZEN under 6G before checking for live sessions;
             # otherwise a new SSH auth can race the last idle observation.

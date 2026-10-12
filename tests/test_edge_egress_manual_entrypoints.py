@@ -115,6 +115,11 @@ class LiveBotEntryPointVetoTests(unittest.TestCase):
             "classify_edge_callback": classify_edge_callback,
             "evaluate_manual_edge_gate": evaluate_manual_edge_gate,
             "edge_guard_message": edge_guard_message,
+            "_db_get_default_host": lambda: "172.86.94.174",
+            "evaluate_j_switch": lambda *args: SimpleNamespace(
+                reason="EGRESS_J_TARGET_NOT_F4_READY"
+            ),
+            "db_conn": lambda: None,
         })
         ctx = SimpleNamespace(user_data={"role": role, "agent_id": 0})
         asyncio.run(bot(SimpleNamespace(callback_query=query), ctx))

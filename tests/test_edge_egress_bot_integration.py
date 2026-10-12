@@ -41,6 +41,11 @@ def get_function(name, extra=None):
     ns = {"asyncio": asyncio, "PROTECTED_SETTING_KEY": PROTECTED_SETTING_KEY,
           "PROTECTED_SETTING_DEFAULT": "0",
           "legacy_failover_gate": legacy_failover_gate,
+          # J protected preflight reads a trusted readiness snapshot. This
+          # pure fake keeps legacy-safety extraction tests network-free.
+          "evaluate_j_switch": lambda *a: types.SimpleNamespace(
+              reason=LEGACY_FAILOVER_UNSAFE
+          ),
           "legacy_new_edge_gate": legacy_new_edge_gate,
           "any_protected_bindings": lambda _db: False,
           "db_conn": lambda: None,

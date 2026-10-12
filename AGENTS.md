@@ -41,6 +41,10 @@ Scope lock:
 
 **I merged via PR #97 (`185cba0`), Python + Stage-only checks PASS:** adds optional **stage-only** dedicated Egress to existing `_provision_new_edge`; no new wizard. OFF unless `edge_egress_v1_onboard_enabled=1` after reviewed K rollout. Actual wg0 source /32 and Edge WG public key validated against Core's live `wg show wg0 allowed-ips` before staging Core/Edge with the existing `ops/edge_egress_provision.py`; write the root-owned H registry atomically only after both stages exist. Exact SSH host public key is pinned for the second connection. Failure => HOLD and reconciliation; never claim STAGED means READY. Existing protected-mode legacy onboarding gate stays until J can coordinate guarded activation and 6H; current F1/F2/G/H code is NOT deployed. **Next J 6H integration, then K one controlled deployment + new Edge E2E.** Keep CI light and update docs at each development stage.
 
+## J protected 6H safety integration (2026-10-12)
+
+J branch adds `edge_egress_v1_6h.py` **read-only** target F4 READY/ingress/pinned-UID gate. The existing bot's manual 6G preflight, Phase6H automatic tick and manual default host callback HOLD diagnostics now call it when protected mode is on. Legacy modes preserve old behavior; the unsafe legacy Core DNS fallback/account rebuild is STILL FORBIDDEN in protected mode. Any active protected UID or nonsettled intent blocks global DNS switches; even zero UID with READY target remains `EGRESS_J_PROTECTED_6G_HANDOFF_NOT_RELEASED` because the protected 6G-locked positive adapter and real per-UID drain/rebind are NOT installed. This is a **safety integration, not working automatic protected handoff**. Next final integration must implement live HandoffPorts and test NEW Edge under K gate, without touching Production beforehand. See `docs/SSH_EGRESS_DYNAMIC_V1_DELIVERY.md` §J. Keep existing CI light and do not merge unless all current checks pass.
+
 ## Historical context / safety controls (read second)
 
 - Production has Core-terminated SSH and a legacy WireGuard `wg0` ingress relay. Assigning `ssh_accounts.host` does **not** change Linux internet egress.

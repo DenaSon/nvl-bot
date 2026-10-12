@@ -308,6 +308,7 @@ from edge_egress_lifecycle import (
     legacy_new_edge_gate,
 )
 from edge_egress_handoff import is_egress_recovery_hold
+from edge_egress_v1_6h import evaluate_j_switch
 from edge_egress_legacy_fence import (
     LEGACY_PROTECTED_BINDINGS_BLOCKED,
     assert_legacy_mutation_safe,
@@ -15500,7 +15501,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         edge_gate = evaluate_manual_edge_gate(edge_action, edge_mode, role=role)
         if not edge_gate.allowed:
-            await query.message.reply_text(edge_guard_message(edge_gate.reason))
+            # J: manual default/assignment callbacks share the same
+            # protected-readiness diagnostic as automatic 6H. A detailed
+            # reason is NOT a bypass to the legacy mutation path.
+            _reason = edge_gate.reason
+            if (edge_mode == '1' and role == 'admin'
+                    and (d.startswith('hpdef_')
+                         or d.startswith('hpdefmig_yes_'))):
+                _j_target = d.split('_')[-1]
+                _j_source = await asyncio.to_thread(_db_get_default_host)
+                if _j_source and _j_target:
+                    _j = await asyncio.to_thread(
+                        evaluate_j_switch, db_conn, edge_mode,
+                        _j_source, _j_target
+                    )
+                    _reason = _j.reason
+            await query.message.reply_text(edge_guard_message(_reason))
             return
 
     # 🚨 گارد اجباری بودن برند نماینده در کالبک‌ها (بررسی مستقیم از دیتابیس)
@@ -25424,12 +25440,19 @@ async def _safe_manual_failover_preflight(
     # D1-C1: both admin previews and the lock-protected 6G/6H execution use this
     # same preflight. The old path unconditionally sends public DNS to Core and
     # rebuilds users on Standby, neither of which is a protected Relay handoff.
-    egress_gate = legacy_failover_gate(await asyncio.to_thread(
+    protected_mode = await asyncio.to_thread(
         _db_get_setting, PROTECTED_SETTING_KEY, PROTECTED_SETTING_DEFAULT
-    ))
+    )
+    egress_gate = legacy_failover_gate(protected_mode)
     if not egress_gate.allowed:
-        return {"ok": False, "errors": [egress_gate.reason],
-                "egress_protected": True, "egress_gate": egress_gate.reason}
+        # J read-only gate is shared with Phase 6H automatic and manual
+        # previews. It never admits this legacy DNS-to-Core rebuild engine.
+        j = await asyncio.to_thread(
+            evaluate_j_switch, db_conn, protected_mode, source_host, target_host
+        )
+        reason = j.reason if protected_mode == '1' else egress_gate.reason
+        return {"ok": False, "errors": [reason],
+                "egress_protected": True, "egress_gate": reason}
     if await asyncio.to_thread(any_protected_bindings, db_conn):
         return {"ok": False, "errors": [LEGACY_PROTECTED_BINDINGS_BLOCKED],
                 "egress_protected": True,
@@ -27517,6 +27540,22 @@ async def _phase6h_auto_failover_tick(app, ready_candidate_override=None):
                 )
         return {"eligible": False, "reason": "NO_DEFAULT_SOURCE"}
 
+    # J: before automatic 6H ranks or starts an incident transition, check
+    # the SAME protected switch gate as manual preflight. An H-pinned UID
+    # cannot follow a global default DNS move without drain + repin.
+    _j_mode = await asyncio.to_thread(
+        _db_get_setting, PROTECTED_SETTING_KEY, PROTECTED_SETTING_DEFAULT
+    )
+    if _j_mode != '0' or await asyncio.to_thread(any_protected_bindings, db_conn):
+        _j = await asyncio.to_thread(
+            evaluate_j_switch, db_conn, _j_mode, source_host,
+            (next((h for h in await asyncio.to_thread(_db_get_standby_hosts)
+                   if h != source_host), source_host))
+        )
+        reason = (_j.reason if _j_mode != '0'
+                  else LEGACY_PROTECTED_BINDINGS_BLOCKED)
+        log.info("Phase6H protected candidate HOLD reason=%s", reason)
+        return {"eligible": False, "reason": reason}
     source_meta = await asyncio.to_thread(_db_get_failover_host_meta, source_host)
     health_map = await asyncio.to_thread(_db_get_host_port_health_map)
     pool_rows = await asyncio.to_thread(_db_get_host_pool)

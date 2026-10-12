@@ -1,5 +1,9 @@
 """R1 ownership/bridge regression tests; mocks only, never modify host networking."""
 import asyncio
+from dataclasses import asdict
+import hashlib
+import json
+from unittest.mock import patch
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,7 +11,7 @@ from types import SimpleNamespace
 import unittest
 
 from edge_egress_r1_transport import (
-    GuardedR1ShadowPort, R1Observation, R1Unsafe, _root_owned,
+    GuardedR1ShadowPort, R1Observation, R1Unsafe, _root_owned, _stage_owned,
     decide, inspect_linux,
 )
 from edge_egress_uid_policy import UIDPolicyRequest
@@ -73,6 +77,30 @@ class R1DecisionTests(unittest.TestCase):
         s = snapshot(probe_errors=("NAT_INVENTORY_FAILED",))
         self.assertEqual(decide(s).reason, "INCOMPLETE_READ_ONLY_EVIDENCE")
 
+    def test_stage_ownership_requires_reviewed_hashes_and_tamper_refusal(self):
+        with TemporaryDirectory() as d:
+            root = Path(d) / "stage-root"
+            st = root / "stg1-core"
+            st.mkdir(parents=True)
+            data = {"config": asdict(spec()), "role": "core",
+                    "stage_only": True, "user_routes_installed": False,
+                    "owner_token": "a" * 32}
+            contents = {
+                "manifest.json": json.dumps(data),
+                "wg.conf": "[Peer]\\nPublicKey = TEST\\n",
+                "up.sh": "# reviewed script\\n",
+                "down.sh": "# reviewed cleanup script\\n",
+            }
+            for name, value in contents.items():
+                (st / name).write_text(value)
+            hashes = {name: hashlib.sha256(value.encode()).hexdigest()
+                      for name, value in contents.items()}
+            with patch("edge_egress_r1_transport._root_owned", return_value=True):
+                self.assertFalse(_stage_owned(spec(), "core", root))
+                self.assertTrue(_stage_owned(spec(), "core", root, hashes))
+                (st / "up.sh").write_text("modified")
+                self.assertFalse(_stage_owned(spec(), "core", root, hashes))
+
     def test_symlink_never_root_owned(self):
         with TemporaryDirectory() as d:
             p = Path(d) / "data"
@@ -102,6 +130,19 @@ class R1InspectTests(unittest.TestCase):
         self.assertTrue(all(c[0] in {"ip", "systemctl"} for c in calls))
         self.assertTrue(all("delete" not in c and "flush" not in c
                             and "add" not in c for c in calls))
+
+    def test_permission_failure_is_not_interpreted_as_absent_interface(self):
+        def run(*args):
+            if args[:3] == ("ip", "link", "show"):
+                return SimpleNamespace(returncode=2, stdout="",
+                                       stderr="Operation not permitted")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        with TemporaryDirectory() as d:
+            obs = inspect_linux(spec(), "edge", run=run,
+                                stage_root=Path(d)/"no-stage",
+                                unit_root=Path(d)/"no-unit")
+        self.assertIn("EDGE_INTERFACE_PROBE_FAILED", obs.probe_errors)
+        self.assertEqual(decide(obs).reason, "INCOMPLETE_READ_ONLY_EVIDENCE")
 
     def test_iptables_early_broad_nat_detected_without_mutations(self):
         commands = []

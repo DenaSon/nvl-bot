@@ -16,7 +16,7 @@
 |---|---|---|
 | F1 — dedicated transport supervisor | One idempotent, hash-pinned, per-Edge state probe / start, simple offline systemd unit renderer; never uninstall active resources | **Merged / focused CI PASS and existing Python checks PASS** |
 | F2 — fail-closed boot and admission | Durable protected UID roster, strict PAM gate, exact wg0 reply route, deny-first boot guard/unit candidates; no global SSH dependency | **Merged PR #94; checks PASS; NOT deployed** |
-| G — shared-Edge multi-UID | Immutable Edge default + owner-scoped UID deny/release, multi-UID roster, opt-in shared DB reservation under 6G | **Code submitted; CI pending, no deploy** |
+| G — shared-Edge multi-UID | Immutable Edge default + owner-scoped UID deny/release, multi-UID roster, opt-in shared DB reservation under 6G | **Merged PR #95; all final-head checks PASS; NOT deployed** |
 | H — session-to-ingress ownership | Pin actual SSH sessions to real ingress Edge; prohibit ambiguous same-UID multi-Edge access until a verified per-session method exists | Not implemented |
 | I — Edge onboarding | Extend existing `hp_addedge` ingress wizard with separate dedicated Egress allocation/stage/readiness, no changes to operational `wg0` | Not implemented |
 | J — 6H integration | Manual and automatic active-relay switch must check Egress readiness and preserve old-session mapping; deny protected sessions when target unready | Not implemented |
@@ -63,10 +63,10 @@ PR #93 **merged** into `master` after successful checks on the final PR head `28
 
 **F2 is code-complete and merged, not Production-enabled.** Exact committed components: `edge_egress_v1_admission.py`, targeted `edge_egress_uid_boot.py` + `edge_egress_uid_route_state.py` compatibility, `edge_egress_uid_admission.py`, `edge_egress_uid_runtime_kernel.py`, and seven focused F2 tests. No host modifications were performed. The PAM hook and roster are *proposed root-owned deployment assets*, not currently installed on Core. `nvl-egc1` remains the manually routed Canary; do not reboot Core or switch real customers on F2 source merge alone.
 
-**G implementation submitted.** Continue H (ingress session identity) after G CI/merge, then I (new Edge), J (6H); single deploy + NEW Edge acceptance in K.
+**G merged. Next H (actual ingress/session identity)**, then I (new Edge), J (6H); one controlled deploy + NEW Edge acceptance in K.
 
 
-## G — Shared-Edge Multi-User Egress (2026-10-12, source checkpoint)
+## G — Shared-Edge Multi-User Egress (2026-10-12, merged code checkpoint)
 
 **What changed:** one per-Edge dedicated WG tunnel and one shared Edge table, with **per-UID firewall OUTPUT owner REJECT** as the deny-only freeze. The Edge default is **not removed** by arming or freezing one subscriber. Explicit 6G lease/journal and F2 admission are retained; there is no second coordinator, DB, new daemon or CI pipeline.
 
@@ -78,3 +78,9 @@ PR #93 **merged** into `master` after successful checks on the final PR head `28
 - Focused tests extend the existing F2/kernel/store cases plus a tiny G-specific suite. No new CI workflow.
 
 **Important boundaries:** `shared_edge_enabled` is OFF unless the rollout coordinator explicitly attests **all** active/proposed protected manifests for that Edge use G per-UID fencing. **Do not mix old F2 boot units that remove a shared route** with new multi-user manifests: migrate them before enrolling second UID. This is source-only until K. No protected customers were attached, production PAM/SSH untouched, no reboot and no evidence of actual WireGuard peer-death fail-closed or multi-Edge ingress binding. Account removal is HOLD/freeze, not an unfenced deletion. A single raw iptables owner rule is not a claim to cover traffic emitted on behalf of a user by privileged DNS/helper processes. H must resolve same-UID simultaneous ingress across different Edges before automated failover.
+
+### G merge verification (2026-10-12)
+
+[PR #95](https://github.com/DenaSon/nvl-bot/pull/95) squash-merged to `master`, SHA `222a782da9b4a6bbbb5c17aee248260540918a6d`; last reviewed PR head `583c1ff8c2697b4032e6a94823570baba7d65374`. GitHub CI PASS on that head: `Python checks`, `Edge egress stage-only checks` (Python 3.11/3.12), and existing `Edge egress disposable kernel lab`. One prior test run failed due to outdated blocked-simultaneous-UID Store assumptions; the tests were aligned to the new deliberate opt-in/sequential state contract, and **all final-head checks passed**. No new heavy CI workflow was added.
+
+**Next action H:** detect actual ingress Edge per public SSH connection, bind/deny conflicting same-UID multi-Edge sessions while old sessions exist, do not depend on `dns_current_ip` or merely `ssh_accounts.host`. Preserve old sessions/fail closed under 6H switching. G source merge is **not** authorization to deploy, reboot, or mass-attach users; do that once code stages H/I/J are completed and reviewed for K.

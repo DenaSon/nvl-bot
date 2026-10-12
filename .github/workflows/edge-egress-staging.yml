@@ -1,8 +1,21 @@
 name: Edge egress stage-only checks
 
 on:
+  push:
+    branches: [master]
+    paths:
+      - 'edge_egress_*.py'
+      - 'tests/test_edge_egress_*.py'
+      - 'ops/edge_egress_provision.py'
+      - 'ops/edge_egress_host_worker.py'
+      - 'ops/labs/**'
+      - 'ops/backup_nvl_host.sh'
+      - 'bot_final_v49-2.py'
+      - '.github/workflows/edge-egress-staging.yml'
   pull_request:
     paths:
+      - 'edge_egress_*.py'
+      - 'tests/test_edge_egress_*.py'
       - 'edge_egress_policy.py'
       - 'edge_egress_lifecycle.py'
       - 'edge_egress_handoff.py'

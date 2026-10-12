@@ -1,0 +1,80 @@
+# NVL — Edge Egress: مرجع ادامه کار و وضعیت قطعی
+
+**آخرین بازبینی: 2026-10-12 | مرجع پیش‌فرض چت‌ها و توسعه‌های بعدی**
+
+> **اول این فایل را بخوانید؛ فازهای F1–F4، تست‌های CI و آزمایش SSHD ایزوله را از صفر تکرار نکنید.** این سند خلاصه وضعیت است؛ برای Runbook عملی و شواهد دقیق، فایل‌های مرتبط در انتهای سند را ببینید. اگر شواهد جدید VPS با این فایل مغایرت داشتند، مشاهده جدید را ثبت و این فایل را اصلاح کنید.
+
+## 1. هدف دقیق و وضعیت فعلی
+
+**هدف:** اتصال SSH مشتری از Edge ورودی به Core (احراز هویت)، سپس خروج اینترنت **همان UID** از تونل WireGuard اختصاصی Egress به IP عمومی Edge؛ در صورت خرابی Edge، خروجی **قطع شود** و هرگز به مسیر پیش‌فرض/Core برنگردد (Fail-Closed).
+
+**وضعیت امروز:** کدهای F1–F4 و ابزارهای آزمون/کنترل در GitHub ادغام شده‌اند؛ **Egress محافظت‌شده برای SSH معمولی مشتریان در Production راه‌اندازی نشده است.** تعریف Edge جدید یا انتقال کاربر در بات، فعلاً مدیریت **Ingress/Ownership** است و **به‌تنهایی IP خروجی اینترنت SSH را تغییر نمی‌دهد**. بخش پیش‌نمایش تخصیص کاربر **Read-only** است؛ Runtime واقعی و PAM/Boot روی VPS هنوز به تأیید/یکپارچه‌سازی نیاز دارند.
+
+**شرط پایان:** ورود از SSH معمولی مشتری، خروج از IP دقیق Edge، قطع کامل هنگام از‌دست‌رفتن Edge بدون نشت Core/DNS/IPv6، بازیابی کنترل‌شده پس از Reboot، بدون اختلال برای سایر کاربران و سرویس‌های Core، سپس اتصال این چرخه به Wizard افزودن/تعویض Edge در بات.
+
+## 2. توپولوژیِ گزارش‌شده (نه تأیید لحظه‌ای)
+
+| نقش | شناسه/آدرس | توضیح |
+|---|---|---|
+| Core | `209.200.246.198` | اجرای بات، SSH اصلی، احراز هویت، `wg0` موجود |
+| Edge ورودی قدیمی | `172.86.94.174` | Edge Relay / ورودی؛ با «خروج اینترنت» اشتباه نشود |
+| Edge مورد آزمون Egress | `216.126.229.12` | IP خروجی تأییدشده در **namespace آزمایشی** |
+| کاربر Canary | `nvl0557`، UID `1644` | فقط پس از عبور از Release Gate، نه انتقال خودکار |
+| مسیر آزمایش | `nvl-egress-stg1` و `wg-nvl-stg1` | تونل مجزا؛ نه `wg0` تولیدی |
+| SSHD آزمایشگاهی | `127.0.0.1:22284`؛ SOCKS `127.0.0.1:31884` | **loopback و مجزا از SSH عمومی**؛ وضعیت فعلی فعالیت آن را باید Read-only بازبینی کرد |
+
+این شناسه‌ها براساس خروجی‌های ارائه‌شده در آزمایش‌های **2026-10-11** هستند؛ قبل از هر تغییر، وضعیت زنده و مالکیت واقعی سرورها/جدول Route باید دوباره **فقط خوانده** شود.
+
+## 3. چه چیزی واقعاً اثبات شده است؟
+
+- **آزمایش روی Core موجود با SSHD جداگانه و loopback-only:** احراز هویت واقعی رمزدار برای `nvl0557`، SOCKS و مشاهده IPv4 خروجی `216.126.229.12` از تونل اختصاصی؛ خاموش‌کردن لینک WG در namespace باعث شکست درخواست آزمایشی شد و پس از بازیابی لینک، همان IP Edge بازگشت. نتیجه محدود به **همین مسیر و درخواست آزمایشی** است، نه SSH عادی و نه تمام انواع ترافیک.
+- **CI روی GitHub:** آخرین Commit ادغام‌شده F1–F4 و اصلاح CI، `589625073e5b191529485bd9dc3d1bbbd2119cea`، دارای Python Unit/Integration **1069 PASS**، Stage-only روی Python 3.11 **330 PASS** و 3.12 **330 PASS**، و Kernel Lab **PASS** شامل UID routing، WireGuard، DNS UDP/TCP، IPv6 guard، outage/blackhole و recovery در محیط ایزوله. GitHub Actions سبز است.
+- **اثبات‌نشده:** خروج IP Edge از **SSH عمومی فعلی** برای `nvl0557`؛ نصب واقعی PAM session/account gate، بقای Guard پس از Reboot، تمام forwardingها و اتصال‌های طولانی، عدم نشت با packet capture روی Core واقعی، BadVPN/UDP، عدم تداخل multi-user و خودکارشدن تخصیص Edge جدید.
+
+**هشدار تفسیر:** شکست `curl` به‌تنهایی گواه نبودِ نشت نیست؛ تست Fail-Closed جدید ابتدا SOCKS سالم و IP Edge را اثبات می‌کند و سپس در محیط disposable خرابی را تزریق می‌کند. `STAGED` یا `VERIFIED_LAB` به‌معنای `READY` نیست.
+
+## 4. وضعیت کد / تصمیم معماری
+
+- ریپو: `DenaSon/nvl-bot`؛ شاخه اصلی `master`.
+- PRهای ادغام‌شده: [F1 #84](https://github.com/DenaSon/nvl-bot/pull/84)، [F2 #85](https://github.com/DenaSon/nvl-bot/pull/85)، [F3 #86](https://github.com/DenaSon/nvl-bot/pull/86)، [F4 #87](https://github.com/DenaSon/nvl-bot/pull/87)، [CI fix #89](https://github.com/DenaSon/nvl-bot/pull/89).
+- F1: UID route + blackhole، DNS/IPv6 guard، boot policy، جلوگیری از برخورد Ruleها و Legacy mutation.
+- F2: store/controller با وضعیت‌های `BLOCKED / ROUTED_UNVERIFIED / PROTECTED / FROZEN / HOLD` و قفل و Journal **مشترک 6G**؛ اجرای Kernel **opt-in و پیش‌فرض خاموش**؛ PAM hook هنوز در مسیر SSH اصلی نصب نشده.
+- F3: ثبت `INGRESS_ONLY` هنگام Wizard (در صورت Migration صریح)، stage و شاهد `VERIFIED_LAB`، پنل وضعیت/پیش‌نمایش تخصیص Read-only؛ هنوز جایگزین Production-ready نیست.
+- F4: Preflight، ممیزی PAM و SHA-256، ابزار تست SSH SOCKS خارجی، ممیزی Kernel، چک‌لیست Release؛ **هیچ ابزار F4 به‌تنهایی مجوز READY یا Cutover صادر نمی‌کند.**
+- **تصمیم:** Core محل SSH و احراز هویت می‌ماند؛ Edge برای ingress و public egress. Egress با **WireGuard اختصاصی** و Route برای UID انجام شود، نه تغییر main default route یا `wg0`. فقط **یک منبع حقیقت** برای Egress و Failover: مدل `edge_egress_uid_*` با lock/journal فعلی **6G/6H**. ساخت کنترلر و دیتابیس موازی ممنوع.
+
+## 5. دقیقاً چه کارهایی باقی مانده؟ (به ترتیب، بدون فاز جدید)
+
+1. **Live Read-only inventory، یک‌بار:** وضعیت دو VPS، SSH/PAM، سرویس‌ها، `wg show` بدون کلید، `ip rule`، جدول‌های Route، DB schema/6G lock، unitهای تستی و Shadow namespace؛ بدون تغییر شبکه. از خروجی‌ها یک Snapshot وضعیت بسازید. اگر آزمایش روز قبل هنوز فعال است، **بدون ممیزی آن را حذف یا دوباره نصب نکنید**.
+2. **R1–R3، بستن اتصال واقعی:** Runtime پایدار و root-owned برای Egress اختصاصی Core↔Edge + راه‌اندازی و Freeze/Recovery بعد از Reboot، پشت lock/journal فعلی؛ PAM دقیق و مؤثر برای ورود SSH و `direct-tcpip / SOCKS` و جلوگیری از Session قبلی. ابتدا روی VPS **ایزوله/قابل‌بازیابی با کنسول مستقل**؛ `ssh.service` سراسری را به گارد UID وابسته نکنید.
+3. **R4–R6، فقط آزمایش‌های باقی‌مانده:** از **کلاینت خارجی** SSH عادی، SOCKS/IP، قطع Edge بدون Core fallback، DNS UDP/TCP و NSS، IPv6، BadVPN/UDP، نشست قدیمی، Reboot، root/non-root admin recovery، Restore از Backup، اثر روی کاربران دیگر. نتیجه را با شواهد host/زمان/packet capture ثبت کنید.
+4. **Canary تک‌کاربره:** فقط پس از PASS مرحله 3 و تأیید صریح اپراتور، `nvl0557` را روی مسیر public SSH واقعی محافظت کنید؛ تست IP خروجی و Rollback/Fail-Closed و سلامتی `nvlbot`، SSH سایر کاربران و `wg0`. هنگام شکست، HOLD/FROZEN، **نه fallback به Core**.
+5. **ادغام با بات:** وقتی Canary واقعی پذیرفته شد، «افزودن Edge» و «انتقال کاربر» فقط با Edge `READY` و Journal قفل‌شده مسیر خروجی را مدیریت کنند؛ تا آن زمان نمایش وضعیت Read-only و مسیر ingress قبلی حفظ شود.
+
+**Release blocker مرجع:** [Issue #88](https://github.com/DenaSon/nvl-bot/issues/88). دستورالعمل مفصل: [F4 Release Acceptance](EDGE_EGRESS_F4_RELEASE_ACCEPTANCE.md).
+
+## 6. مواردی که نباید دوباره انجام دهیم
+
+- تکرار ساخت F1–F4، همان 1069 تست CI، یا اثبات SOCKS در SSHD جداگانه به‌عنوان «پیش‌نیاز تازه». تنها با تغییر کد یا محیط، تست مرتبط را مجدداً اجرا کنید.
+- فرض اینکه با `ssh_accounts.host`، افزودن Edge، DNS عمومی یا 6G/6H قدیمی، **خروج اینترنت** کاربر به Edge تغییر می‌کند.
+- استفاده از `setup_edge_datapath.sh` (معماری Edge-terminates-SSH) به‌جای معماری Core-terminated SSH فعلی.
+- کپی مستقل Draft PRهای قدیمی #80/#81/#82 یا ساخت `ssh_egress_intents`/lock دوم؛ یافته‌های آن‌ها در اسناد قدیمی موجود است، نه مجوز ساخت مسیر موازی.
+- روشن‌کردن `edge_egress_protected_mode`، نصب PAM روی Production، اجرای guard `--enforce`، ریستارت SSH، Flush کردن iptables یا تغییر `wg0` بدون snapshot/console، تست ایزوله و تأیید صریح.
+- اعتباردادن `READY` به صرف Unit Test، `VERIFIED_LAB`، IP نمونه، JSON چک‌لیست دستی یا خطای نامشخص Curl.
+- تغییر Domainهای عمومی/Marzban یا جریان دیگر کاربران برای حل موضوعی که مختص **Egress SSH** است.
+
+## 7. نحوه ادامه در چت‌های آینده
+
+**دستور شروع:** «سند `docs/EDGE_EGRESS_CURRENT_HANDOFF.md` در ریپو `DenaSon/nvl-bot` را از GitHub بخوان؛ از مرحله 5 ادامه بده. کارهای ثبت‌شده را دوباره انجام نده؛ ابتدا وضعیت VPS را Read-only بازبینی کن.»
+
+در آغاز هر نشست: 1) سند حاضر را بخوان، 2) `master` و Issue #88 را بررسی کن، 3) فقط شکاف بین **شواهد جدید واقعی** و **Release Gate باز** را هدف بگیر، 4) پس از هر تست معتبر، همین سند را با تاریخ، نتیجه و شواهد به‌روزرسانی کن.
+
+### مراجع تکمیلی
+- [آزمایش واقعی SSHD ایزوله، 2026-10-11](EDGE_EGRESS_STG3B_RUNTIME_EVIDENCE.md)
+- [Runbook Release F4](EDGE_EGRESS_F4_RELEASE_ACCEPTANCE.md)
+- [مدل F2 Runtime](EDGE_EGRESS_F2_PROTECTED_RUNTIME.md)
+- [مدل F3 Onboarding](EDGE_EGRESS_F3_ONBOARDING.md)
+- [Runbook عمومی و قدیمی‌تر NVL](NVL_PROJECT_MEMORY.md) — بخش نسخه V115.2 تاریخی است؛ نسخه فعلی Production را از سرور بخوانید، نه از آن عنوان.
+- [Release blockers](https://github.com/DenaSon/nvl-bot/issues/88)
+
+**مرز اعتماد:** متن GitHub وضعیت کد را مستند می‌کند، نه وضعیت لحظه‌ای سیستم‌عامل VPS؛ هیچ عملیات Production با اتکا به این سند به‌تنهایی مجاز نیست.

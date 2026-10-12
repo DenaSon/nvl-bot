@@ -177,9 +177,32 @@ def install() -> None:
     print("CUSTOMER_READY: NO")
 
 
+def restore() -> None:
+    """Exact rollback; refuse if PAM differs or pilot was unblocked."""
+    if not lab_host_attested():
+        raise LabPAMUnsafe("NOT_ATTESTED_LAB_CORE")
+    pilot = pwd.getpwnam("nvlr1test")
+    if pilot.pw_uid != 1555 or pilot.pw_shell != "/usr/sbin/nologin":
+        raise LabPAMUnsafe("PILOT_ACCOUNT_CHANGED_HOLD")
+    original = root_owned_regular(BACKUP)
+    expected_installed = (PAM_ACCOUNT_LINE + "\\n").encode() + original
+    if root_owned_regular(PAM) != expected_installed:
+        raise LabPAMUnsafe("PAM_CHANGED_SINCE_INSTALL_HOLD")
+    if MODULE.is_symlink() or not MODULE.is_file():
+        raise LabPAMUnsafe("PAM_MODULE_MISSING_HOLD")
+    atomic_root_file(PAM, original, 0o644)
+    if subprocess.run(["/usr/sbin/sshd", "-t"],
+                      capture_output=True, timeout=8).returncode:
+        # Do NOT repeat a potentially unsafe change when new state is unknown.
+        raise LabPAMUnsafe("RESTORE_CONFIG_UNVERIFIED_HOLD")
+    print("PAM_RESTORE: ORIGINAL_BYTES_RESTORED")
+    print("ADMIN_SSH_SERVICE: NOT_RESTARTED")
+    print("LAB_UID: STILL_LOCKED")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("preflight", "install"))
+    parser.add_argument("action", choices=("preflight", "install", "restore"))
     parser.add_argument("--console-confirmed", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -190,7 +213,10 @@ def main(argv=None):
             return 0
         if not args.console_confirmed:
             raise LabPAMUnsafe("INDEPENDENT_CLOUD_CONSOLE_REQUIRED")
-        install()
+        if args.action == "restore":
+            restore()
+        else:
+            install()
         return 0
     except (LabPAMUnsafe, OSError, sqlite3.Error, IndexError, KeyError,
             subprocess.SubprocessError, ValueError) as exc:

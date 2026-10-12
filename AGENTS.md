@@ -23,7 +23,7 @@ Scope lock:
 
 ## Dynamic SSH Egress V1 development checkpoint (2026-10-12)
 
-**Mandatory next read:** [Dynamic V1 delivery and F1 implementation checkpoint](docs/SSH_EGRESS_DYNAMIC_V1_DELIVERY.md). User has explicitly approved completing the scoped feature in GitHub before a single controlled deployment and testing via onboarding a NEW Edge. Keep tests focused and fast, update this delivery document at every actual stage. **F1 code exists on feature branch but DOES NOT enable persistent user-safe egress**. Next implement F2 deny-first boot/admission, then G multi-UID, H session ingress binding, I new Edge wizard, J 6H, K deploy. Do not re-run past Canary experiments without cause. No unreviewed Production SSH/PAM changes, reboot or customer migrations. Historical R1 PR #92 remains independent and unmerged.
+**Mandatory next read:** [Dynamic V1 delivery and F1 implementation checkpoint](docs/SSH_EGRESS_DYNAMIC_V1_DELIVERY.md). User has explicitly approved completing the scoped feature in GitHub before a single controlled deployment and testing via onboarding a NEW Edge. Keep tests focused and fast, update this delivery document at every actual stage. **F1 merged on master via PR #93 (`0e9d976`), focused + existing CI PASS; it DOES NOT enable persistent user-safe egress**. Next implement F2 deny-first boot/admission, then G multi-UID, H session ingress binding, I new Edge wizard, J 6H, K deploy. Do not re-run past Canary experiments without cause. No unreviewed Production SSH/PAM changes, reboot or customer migrations. Historical R1 PR #92 remains independent and unmerged.
 
 ## Historical context / safety controls (read second)
 

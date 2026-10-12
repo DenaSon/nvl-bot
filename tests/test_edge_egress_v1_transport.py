@@ -90,6 +90,11 @@ class PersistenceTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(p.EgressHold, "PARTIAL_CORE"):
                 p.observe(spec, "core", PEER)
+        with patch.object(p, "_run", side_effect=[
+            CompletedProcess([], 1, "", ""), CompletedProcess([], 0, "", "")
+        ]):
+            with self.assertRaisesRegex(p.EgressHold, "PARTIAL_EDGE_NAT"):
+                p.observe(spec, "edge", PEER)
 
     def test_existing_healthy_transport_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(p, "_file", read_user_stage):

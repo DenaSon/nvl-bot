@@ -1,3 +1,5 @@
+> **K2 Production checkpoint (2026-10-13):** The previously source-only K2 UI has progressed through **a NEW New York e7 dedicated WireGuard transport and operator-confirmed iPhone SSH egress IP match** (`nvl0557` / UID1644 / `172.86.105.67`). The complete stages, evidence and unresolved safety gates are in [SSH_EGRESS_K2_E7_MEMORY_2026-10-13.md](SSH_EGRESS_K2_E7_MEMORY_2026-10-13.md). **This does not prove F4 READY, production persistence, PAM admission, DNS/IPv6 leak safety or transport-loss fail-closed.** Earlier "K not started" and "no E2E" statements below describe 2026-10-12 snapshots, not the latest e7 operator evidence.
+
 # NVL — Dynamic SSH Egress V1 / implementation handoff
 
 **Date:** 2026-10-12. **Status:** F1 merged to `master` via [PR #93](https://github.com/DenaSon/nvl-bot/pull/93), commit `0e9d976129cccbd47cb3ab6f9d14f93de468a64d`. **Product scope:** only Core-terminated SSH/SOCKS same-Edge IPv4 egress, fail-closed, frequently changing 6H active ingress, lifecycle of new Edges and safe incremental customer rollout. No Marzban, sales, Xray, wallet, extra controller or rewriting 6G/6H.

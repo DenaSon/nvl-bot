@@ -150,7 +150,7 @@ class F2Tests(unittest.TestCase):
         self.assertEqual(out["protected"][0]["uid"], 1644)
         stripped = json.loads(raw)
         del stripped["ingress_return"]
-        with self.assertRaisesRegex(AdmissionHold, "INVALID_OR_SHARED"):
+        with self.assertRaisesRegex(AdmissionHold, "INVALID_MANIFEST_INPUT"):
             render_roster({"nvl0557": json.dumps(stripped).encode()})
         changed = dict(stripped, ingress_return=True, uid=1645, username="nvl0558")
         shared = json.loads(render_roster({

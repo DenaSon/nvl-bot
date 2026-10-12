@@ -325,6 +325,19 @@ class ProtectedLiveHostActions:
             ipv6_leak_protected=True, fresh=True,
         ), datetime.now(timezone.utc), self.spec.edge_id)
 
+    async def assert_pam_admission(self):
+        self._lease()
+        # No hot PAM installation: inspect actual order and effective sshd.
+        # An independent disposable-VPS direct-tcpip test remains K acceptance.
+        from edge_egress_v1_admission import inspect_pam
+        try:
+            contents = Path("/etc/pam.d/sshd").read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise LiveHold("PAM_ACCOUNT_HOOK_UNAVAILABLE") from exc
+        effective = self._call("sshd", "-T", timeout=10)
+        if not inspect_pam(contents, effective):
+            raise LiveHold("F2_PAM_ACCOUNT_GATE_NOT_ATTESTED")
+
     async def assert_real_ingress(self, target):
         self._lease()
         await self.assert_target_peer(target)

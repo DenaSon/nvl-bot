@@ -26,6 +26,10 @@ import sys
 from edge_egress_r1_lab_topology import TwoHostCoreIngress
 from edge_egress_uid_policy import UIDPolicyRequest
 from ops.edge_egress_provision import EgressSpec
+from edge_egress_inventory import SCHEMA as ALLOCATION_SCHEMA
+from edge_egress_protected_mapping import MAPPING_SCHEMA
+from edge_egress_uid_runtime_store import RUNTIME_SCHEMA
+from edge_egress_f3_readiness import READINESS_SCHEMA
 
 from safe_failover import (
     FAILOVER_MODE_MANUAL,
@@ -202,7 +206,14 @@ def install_empty_journal(*, path=DEFAULT_DATABASE, source=DEFAULT_SOURCE) -> No
     os.close(fd)
     try:
         with connector() as conn:
-            conn.executescript(JOURNAL_SCHEMA)
+            # Genuine existing F1/F2/F3 schema definitions; these remain
+            # EMPTY, not fabricated attestations. Importantly we do NOT
+            # synthesize ssh_accounts, host_pool or dns_current_ip.
+            for schema in (
+                JOURNAL_SCHEMA, ALLOCATION_SCHEMA, MAPPING_SCHEMA,
+                RUNTIME_SCHEMA, READINESS_SCHEMA,
+            ):
+                conn.executescript(schema)
             num = conn.execute("SELECT COUNT(*) FROM failover_operations").fetchone()[0]
             if num != 0:
                 raise Lab6GUnsafe("NONEMPTY_JOURNAL_REFUSED")
@@ -215,6 +226,8 @@ def install_empty_journal(*, path=DEFAULT_DATABASE, source=DEFAULT_SOURCE) -> No
     print("LAB_JOURNAL_SCHEMA: INSTALLED")
     print("ORIGINAL_BOT_6G_CALLBACKS: SHA_PINNED")
     print("6G_OPERATIONS: 0")
+    print("F1_F2_F3_TABLES: EMPTY")
+    print("CUSTOMER_OR_READINESS_ROWS: 0")
     print("PAM_CHANGED: NO")
     print("SSH_USER_UNLOCKED: NO")
     print("NETWORK_CHANGED: NO")

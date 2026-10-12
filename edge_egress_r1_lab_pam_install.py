@@ -185,7 +185,7 @@ def restore() -> None:
     if pilot.pw_uid != 1555 or pilot.pw_shell != "/usr/sbin/nologin":
         raise LabPAMUnsafe("PILOT_ACCOUNT_CHANGED_HOLD")
     original = root_owned_regular(BACKUP)
-    expected_installed = (PAM_ACCOUNT_LINE + "\\n").encode() + original
+    expected_installed = (PAM_ACCOUNT_LINE + "\n").encode() + original
     if root_owned_regular(PAM) != expected_installed:
         raise LabPAMUnsafe("PAM_CHANGED_SINCE_INSTALL_HOLD")
     if MODULE.is_symlink() or not MODULE.is_file():

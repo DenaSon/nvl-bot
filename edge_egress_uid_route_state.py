@@ -21,7 +21,8 @@ class ProtectedRouteState:
 
 
 def inspect_owned_routes(raw: str, *, next_hop: str, device: str,
-                         source: str, allow_empty: bool = False) -> ProtectedRouteState:
+                         source: str, allow_empty: bool = False,
+                         allow_ingress_return: bool = False) -> ProtectedRouteState:
     if not isinstance(raw, str) or not all(
         isinstance(x, str) and x for x in (next_hop, device, source)
     ):
@@ -35,8 +36,14 @@ def inspect_owned_routes(raw: str, *, next_hop: str, device: str,
         r"(?: proto static)? src " + re.escape(source) +
         r" metric 100(?: onlink)?(?: linkdown)?"
     )
+    ingress = re.compile(
+        r"10\.77\.0\.0/24 dev wg0(?: proto kernel)? scope link src 10\.77\.0\.1"
+    )
+    num_ingress = sum(bool(ingress.fullmatch(row)) for row in rows)
     num_blackhole = sum(bool(blackhole.fullmatch(row)) for row in rows)
     num_edge = sum(bool(edge.fullmatch(row)) for row in rows)
-    if num_blackhole != 1 or num_edge > 1 or len(rows) != num_blackhole + num_edge:
+    if (num_blackhole != 1 or num_edge > 1
+        or (num_ingress > 1 or (num_ingress and not allow_ingress_return))
+        or len(rows) != num_blackhole + num_edge + num_ingress):
         raise ProtectedRouteError("UNOWNED_OR_MISSING_TERMINAL_ROUTE")
     return ProtectedRouteState(True, num_edge == 1)

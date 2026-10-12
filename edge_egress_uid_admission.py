@@ -147,6 +147,7 @@ def probe_local_guards(conn: sqlite3.Connection, row: RuntimeBinding) -> bool:
     if routes.returncode or not inspect_owned_routes(
         routes.stdout, next_hop=spec.ns_veth_ip,
         device=spec.veth_root, source=spec.root_veth_ip,
+        allow_ingress_return=True,
     ).edge_attached:
         return False
     dns = subprocess.run(

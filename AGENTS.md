@@ -25,6 +25,10 @@ Scope lock:
 
 **Mandatory next read:** [Dynamic V1 delivery and F1 implementation checkpoint](docs/SSH_EGRESS_DYNAMIC_V1_DELIVERY.md). User has explicitly approved completing the scoped feature in GitHub before a single controlled deployment and testing via onboarding a NEW Edge. Keep tests focused and fast, update this delivery document at every actual stage. **F1 merged on master via PR #93 (`0e9d976`), focused + existing CI PASS; it DOES NOT enable persistent user-safe egress**. Next implement F2 deny-first boot/admission, then G multi-UID, H session ingress binding, I new Edge wizard, J 6H, K deploy. Do not re-run past Canary experiments without cause. No unreviewed Production SSH/PAM changes, reboot or customer migrations. Historical R1 PR #92 remains independent and unmerged.
 
+## F2 Boot Guard / Admission checkpoint (2026-10-12)
+
+**Next source checkpoint:** F2 source and 7 focused tests are on the F2 branch; see `docs/SSH_EGRESS_DYNAMIC_V1_DELIVERY.md` F2 section. Durable root-only protected UID roster + PAM hook + exact `wg0` ingress return + deny-first guard/boot unit candidates are code-only, **not installed on Production**. The single-UID guard still freezes the shared Edge default; G must solve multi-UID safely before customer rollout. A failed/missing roster/DB will deny non-root SSH if PAM is installed: require tested emergency administrative recovery and staged migration; no unattended PAM install. Next G after F2 checks/merge.
+
 ## Historical context / safety controls (read second)
 
 - Production has Core-terminated SSH and a legacy WireGuard `wg0` ingress relay. Assigning `ssh_accounts.host` does **not** change Linux internet egress.

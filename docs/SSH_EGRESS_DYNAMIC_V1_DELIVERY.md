@@ -15,7 +15,7 @@
 | Phase | Deliverable | Current |
 |---|---|---|
 | F1 — dedicated transport supervisor | One idempotent, hash-pinned, per-Edge state probe / start, simple offline systemd unit renderer; never uninstall active resources | **Merged / focused CI PASS and existing Python checks PASS** |
-| F2 — fail-closed boot and admission | Persist deny-first protections for selected users, safe recovery and service ordering, without global ssh.service dependencies; account lockdown where UID rule is absent | Not implemented |
+| F2 — fail-closed boot and admission | Durable protected UID roster, strict PAM gate, exact wg0 reply route, deny-first boot guard/unit candidates; no global SSH dependency | **Code on branch; CI pending; not installed** |
 | G — shared-Edge multi-UID | Attach/detach individual UIDs without freezing Edge-wide default; reuse sole 6G lock/journal, no second DB/controller | Not implemented |
 | H — session-to-ingress ownership | Pin actual SSH sessions to real ingress Edge; prohibit ambiguous same-UID multi-Edge access until a verified per-session method exists | Not implemented |
 | I — Edge onboarding | Extend existing `hp_addedge` ingress wizard with separate dedicated Egress allocation/stage/readiness, no changes to operational `wg0` | Not implemented |
@@ -36,8 +36,25 @@
 
 ## Immediate next action
 
-Implement **F2 deny-first boot guard/admission** next, reusing the existing F1/F2/F4 safety primitives where possible. Then G/H/I/J in order. One dedicated new test Edge will be used for the final real end-to-end acceptance; no repeated general full-lab exercise after every tiny change.
+F2 code is on a separate branch pending focused CI/review. After merge, proceed with **G shared-Edge multi-UID**, then H/I/J and the one controlled new-Edge deployment. One dedicated new test Edge will be used for the final real end-to-end acceptance; no repeated general full-lab exercise after every tiny change.
 
 ### F1 acceptance record (2026-10-12)
 
 PR #93 **merged** into `master` after successful checks on the final PR head `28d00d6c12beb60958ea5c3d677d3ed8dd6530c6`: `Python checks=success`; `Edge egress stage-only checks=success` (Python 3.11 and 3.12). Squash merge `0e9d976129cccbd47cb3ab6f9d14f93de468a64d`. This proves only source checks, not Production persistence or feature completion. **Next F2, no deployment yet.**
+
+
+## F2 — Boot Guard / Admission (2026-10-12; code checkpoint)
+
+**Status:** source + focused tests committed to a feature branch; CI/merge to be independently recorded. No Production PAM, systemd, protected roster, route, SSH, database, or reboot changed.
+
+**Implementation:**
+- `edge_egress_uid_route_state.py`: opt-in acceptance of only `10.77.0.0/24 dev wg0 scope link src 10.77.0.1` as safe ingress-return route; foreign WAN or duplicate routes stay rejected.
+- `edge_egress_uid_boot.py`: optional `ingress_return=true` manifest; after IPv6/loopback-DNS blockers and terminal blackhole, add precise ingress reply route BEFORE the UID selector. During boot recovery remove only an owned Edge next hop; retain deny-only route.
+- `edge_egress_uid_admission.py` and `edge_egress_uid_runtime_kernel.py` understand the same narrowly scoped return route; the latter arms guards with ingress-return support.
+- New `edge_egress_v1_admission.py`: read-only PAM account hook. A separate root-only durable roster stores protected `username`, numeric UID, SHA-256 of the exact guard manifest. Roster ownership and identity checked before the existing F2 SQLite runtime/mapping/readiness/6G/Kernel/DNS admission. If protected DB intent vanishes the roster still forces DENY; no silent downgrade to LEGACY. Missing roster, broken DB, mismatched UID, uncertain kernel/6G state deny non-root; root remains an emergency exception.
+- Pure roster/PAM-review/deny-only per-UID systemd unit renderers, no installer or SSH restart. Generated guard service has wg0 startup ordering, **not** global `ssh.service` dependency.
+- Seven small isolated cases in `tests/test_edge_egress_v1_f2.py` for exact routes, boot ordering, legacy vs protected identity, deleted DB row, 6G lock, root exception, PAM/unit renderers.
+
+**Deployment sequence (later K):** Validate independent root/admin recovery and backup; apply required existing F1/F2 schema under genuine 6G guard; install root-owned reviewed manifests and complete durable roster **before** DB protected intent; install/review PAM hook only with a rescue path; configure guarded per-UID boot units; attach only after kernel protection and full readiness. An unavailable roster or DB intentionally denies **all non-root SSH logins**; this is why PAM must not be hot-installed by a bot callback. Keep a protected account roster entry until its sessions are drained and all protected state is intentionally retired.
+
+**Not yet solved:** F2 still uses single-user shared-Edge BootGuard freeze and roster restriction; G must implement non-disruptive multi-UID per-Edge ownership. Previously established SSH sessions cannot be revoked by a PAM account hook. Actual broken-WG peer and reboot acceptance, other Edge provisioning, 6H and customer rollout remain later phases.

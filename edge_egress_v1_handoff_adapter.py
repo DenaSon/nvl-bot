@@ -432,5 +432,6 @@ async def execute_protected_switch(adapter: Existing6GProtectedHandoffAdapter,
     if adapter.host_actions is None:
         raise PositiveHandoffHold("K_LIVE_HOST_ACTIONS_NOT_INSTALLED")
     return await run_protected_handoff(
-        adapter, source_host, target_host, guarded_failover=True
+        adapter, source_host, target_host, guarded_failover=True,
+        require_admission_drain=True
     )

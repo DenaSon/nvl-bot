@@ -114,3 +114,24 @@ Limit: the new disposable SSH host agent is a root-capable executor whose `SSH_C
 Earlier, the pinned Git checkout `06d10e9cceae38c8519834e69ac3a2717ef8c18b` produced 20/20 R1 lab tests PASS on **each** host, disposable marker/Stage offline probes PASS on both, Core SSH host-key pinning PASS for both host keys, and distinct restricted `probe` SSH access from Amsterdam Core to Frankfurt Edge and to Core loopback/public address returned `OFFLINE_VERIFIED`. Restricted keys were still `probe`-only; the transport smoke test did not exercise SSH agent `start` authorization.
 
 **Important current live state:** both LAB transport interfaces may now remain **UP but unmanaged/not boot-persistent**. Do not rerun `up.sh`, run `start` with fake guard or lease, enable the staging systemd unit, reboot expecting recovery, run any `down.sh`, or assume production customer fail-closed semantics without a fresh read-only ownership/lease assessment. Actual 6G journal/schema, account/PAM gate, UID BootGuard, safe reboot and outage tests, external SSH customer and DNS/IPv6/BadVPN leak checks remain OPEN. No production hosts, accounts or DB were intentionally changed. Do not classify the lab Edge `READY`. For efficiency do **not** repeat the already successful network smoke test unless code/hosts change.
+
+### Operator lab UID-route smoke proof — 2026-10-12
+
+On **disposable Amsterdam LAB Core 107.189.16.36**, operator provisioned a **locked, no-login local user** `nvlr1test` (UID `1555`) and applied the F1 `BootGuardApplier` in default-deny state (table `1791`, UID selector priority `1780`) with terminal blackhole. The operator reported `LAB GUARD PASS`, `EGRESS_TABLE: BLACKHOLE ONLY`, `CUSTOMER_READY: NO`. The account had no SSH login shell and no password, and **no PAM/6G runtime was installed**.
+
+The operator then ran a **temporary manual single-UID attach/detach smoke test** on the existing LAB transport; observed console output was:
+
+```text
+GUARD: VERIFIED
+BEFORE: BLACKHOLE
+UID_PUBLIC_IP: 216.126.229.12
+UID_EGRESS: PASS
+ROUTE_RETURNED_TO_BLACKHOLE: YES
+AFTER_DETACH: INTERNET_BLOCKED
+CUSTOMER_READY: NO
+===== UID ROUTING LAB PASS =====
+```
+
+Interpretation: IPv4 requests issued as the specific disposable UID traversed the Edge and later failed after exact UID default-route detachment, while a terminal blackhole remained. The test used a pinned literal-IP HTTPS probe (not DNS resolution) and did not involve an SSH customer session, live 6G journal, PAM gate, DNS service or boot management. **It does not prove no IPv6/DNS/privileged-helper leakage, BadVPN, real link-loss fail-close or reboot behavior**. This smoke proof should not be repeated unless the topology/code changed. Guard is currently armed and the `nvlr1test` route is DENY/BLACKHOLE; do not treat this as an enabled customer account. Production remains untouched.
+
+Current remaining release blocker is not WireGuard connectivity but **integration** of real shared F2/6G DB/lease, verified PAM SSH session admission, boot-persistent guard and recovery/fault E2E. No fake lock, hand-inserted `RUNNING` journal, unguarded SSH account activation or production cutover is authorized.

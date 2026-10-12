@@ -131,7 +131,7 @@ class R1SystemdTests(unittest.TestCase):
                         c, marker=marker, machine_id=machine_id)
 
     def _start(self, *, c=None, stage_owned=True, preflight=True,
-               after=None, exit_code=0, lease=True):
+               after=None, exit_code=0, lease=True, lease_sequence=None):
         c = c or contract()
         events = []
         fake = SimpleNamespace(returncode=exit_code)
@@ -153,7 +153,8 @@ class R1SystemdTests(unittest.TestCase):
                  patch("edge_egress_r1_systemd._stage_owned", side_effect=owned):
                 return start_disposable_transport(
                     c, executor=run, precheck=check, observe=observed,
-                    lease_check=lambda: lease)
+                    lease_check=(lambda: lease_sequence.pop(0)
+                                 if lease_sequence else lease))
         return action, events
 
     def test_start_happy_path_requires_pin_precheck_and_proof(self):
@@ -184,6 +185,18 @@ class R1SystemdTests(unittest.TestCase):
         with self.assertRaisesRegex(R1ServiceUnsafe, "IDENTITY_UNCERTAIN_HOLD"):
             action()
         self.assertEqual(events, ["pin","precheck","pin","start","inspect"])
+
+    def test_6g_lease_lost_during_preflight_never_runs_shell(self):
+        action, events = self._start(lease_sequence=[True, False], lease=False)
+        with self.assertRaisesRegex(R1ServiceUnsafe, "EXISTING_6G_LEASE_LOST_HOLD"):
+            action()
+        self.assertEqual(events, ["pin", "precheck"])
+
+    def test_6g_lease_lost_after_start_keeps_operator_hold(self):
+        action, events = self._start(lease_sequence=[True, True, False], lease=False)
+        with self.assertRaisesRegex(R1ServiceUnsafe, "EXISTING_6G_LEASE_LOST_HOLD"):
+            action()
+        self.assertEqual(events, ["pin", "precheck", "pin", "start", "inspect"])
 
     def test_no_6g_lease_never_starts_or_reads_stage(self):
         action, events = self._start(lease=False)

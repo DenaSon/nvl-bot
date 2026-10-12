@@ -281,13 +281,13 @@ class ProtectedLiveHostActions:
             raise LiveHold("INGRESS_PEER_REGISTRY_MISSING")
         output = self._call("wg", "show", "wg0", "allowed-ips")
         mapping = _networks(output)
-        observed = chosen[0]
-        expected = ipaddress.ip_network(observed.ingress_ipv4 + "/32")
-        if expected not in mapping.get(observed.wg_public_key, ()):
+        ingress = chosen[0]
+        expected = ipaddress.ip_network(ingress.ingress_ipv4 + "/32")
+        if expected not in mapping.get(ingress.wg_public_key, ()):
             raise LiveHold("INGRESS_WG0_PEER_MISMATCH")
-        address = ipaddress.IPv4Address(observed.ingress_ipv4)
+        address = ipaddress.IPv4Address(ingress.ingress_ipv4)
         if any(address in network for key, nets in mapping.items()
-               if key != observed.wg_public_key for network in nets):
+               if key != ingress.wg_public_key for network in nets):
             raise LiveHold("INGRESS_WG0_SOURCE_OVERLAP")
         if await asyncio.to_thread(observe, self.spec, "core",
                                    pinned(self.config.core_stage, "core",

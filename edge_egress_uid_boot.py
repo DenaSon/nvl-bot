@@ -229,7 +229,7 @@ class BootGuardApplier:
         if not re.search(r"(?m)^blackhole default\b", text):
             raise BootGuardError("TERMINAL_BLACKHOLE_MISSING")
         if manifest.ingress_return and not re.search(
-            r"(?m)^10\\.77\\.0\\.0/24 dev wg0(?: proto kernel)? scope link src 10\\.77\\.0\\.1$",
+            r"(?m)^10\.77\.0\.0/24 dev wg0(?: proto kernel)? scope link src 10\.77\.0\.1$",
             text,
         ):
             raise BootGuardError("INGRESS_RETURN_ROUTE_MISSING")

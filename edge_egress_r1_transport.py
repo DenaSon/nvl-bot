@@ -10,6 +10,7 @@ implicitly adopted, stopped, restarted, or cleaned up.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -50,14 +51,27 @@ def _root_owned(path: Path, *, directory: bool = False) -> bool:
         return False
 
 
-def _stage_owned(spec: EgressSpec, role: str, root: Path) -> bool:
+def _stage_owned(spec: EgressSpec, role: str, root: Path,
+                 reviewed_stage_sha256: dict[str, str] | None = None) -> bool:
     """Offline provenance check; does not grant ownership of live interfaces."""
     stage = root / (spec.edge_id + "-" + role)
     if not (_root_owned(root, directory=True)
             and _root_owned(stage, directory=True)):
         return False
-    for filename in ("manifest.json", "wg.conf", "up.sh", "down.sh"):
-        if not _root_owned(stage / filename):
+    files = ("manifest.json", "wg.conf", "up.sh", "down.sh")
+    if not isinstance(reviewed_stage_sha256, dict) or set(reviewed_stage_sha256) != set(files):
+        return False
+    for filename in files:
+        f = stage / filename
+        digest = reviewed_stage_sha256[filename]
+        if (not _root_owned(f) or
+                not isinstance(digest, str) or
+                re.fullmatch(r"[a-f0-9]{64}", digest) is None):
+            return False
+        try:
+            if f.stat().st_size > 65536 or hashlib.sha256(f.read_bytes()).hexdigest() != digest:
+                return False
+        except OSError:
             return False
     try:
         manifest = stage / "manifest.json"
@@ -129,7 +143,9 @@ def decide(observation: R1Observation) -> R1Decision:
 
 def inspect_linux(spec: EgressSpec, role: str, *, run=_run,
                   stage_root: Path = STAGE_ROOT,
-                  unit_root: Path = UNIT_ROOT) -> R1Observation:
+                  unit_root: Path = UNIT_ROOT,
+                  reviewed_stage_sha256: dict[str, str] | None = None,
+                  reviewed_unit_sha256: str | None = None) -> R1Observation:
     """Observe only the selected role's dedicated resources, without mutation.
 
     The public Core root namespace deliberately does not carry wg-nvl-stg1;
@@ -186,7 +202,16 @@ def inspect_linux(spec: EgressSpec, role: str, *, run=_run,
                              not us.st_mode & 0o022)
     except OSError:
         trusted_unit_root = False
-    unit_owned = _root_owned(unit) and trusted_unit_root
+    unit_owned = False
+    if (_root_owned(unit) and trusted_unit_root and
+            isinstance(reviewed_unit_sha256, str) and
+            re.fullmatch(r"[a-f0-9]{64}", reviewed_unit_sha256)):
+        try:
+            unit_owned = (unit.stat().st_size <= 16384 and
+                          hashlib.sha256(unit.read_bytes()).hexdigest()
+                          == reviewed_unit_sha256)
+        except OSError:
+            pass
     active = False
     if unit_owned:
         state = output("SYSTEMD_STATE_UNKNOWN", "systemctl", "show",
@@ -222,7 +247,8 @@ def inspect_linux(spec: EgressSpec, role: str, *, run=_run,
                             "net.ipv4.ip_forward")
         forward_ok = forward_ok and forwarding.strip() == "1"
 
-    stage_owned = _stage_owned(spec, role, stage_root)
+    stage_owned = _stage_owned(spec, role, stage_root,
+                               reviewed_stage_sha256)
     identity = False
     if iface and stage_owned:
         # Compare only PUBLIC peer identity from the root-only staged config.

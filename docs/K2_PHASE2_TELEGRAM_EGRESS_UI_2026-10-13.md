@@ -1,0 +1,70 @@
+# NVL K2 — Phase 2 Telegram Egress UI / Controller Handoff
+
+**Status (2026-10-13):** Phase 2 **UI/read-only-controller implementation increment**, no Core operator testing yet (intentionally deferred by operator). **Not** live host/persistence acceptance. Next phase still requires full Phase 1 F4 acceptance before enabling writes.
+
+## What this GitHub change implements
+
+1. Reuses the existing admin flow: `مدیریت IP / استخر` → `🛡 مدیریت Egress` (`hpeg_status`). No parallel Edge registry or alternate activation workflow.
+2. **Unified dashboard:** merges the root-owned H ingress registry `/etc/nvl-egress/v1-ingress-peers.json`, `host_pool`, independent `host_pool.is_default`, `settings.dns_current_ip`, F3 allocation/readiness and separately operator-pinned Stage SHA256. The previously invisible *e7* (`172.86.105.67`) now renders **INGRESS_ONLY** when its H registry identity is trusted—even if no `edge_egress_allocations` DB row exists.
+3. Separates **default public Ingress**, **Cloudflare DNS target** and **actual UID-specific Linux Egress**, which are NOT equivalent. A mismatch has an explicit ⚠️ label, not two ambiguous active-relay badges.
+4. Individual Edge actions are `📋 جزئیات`, `🔎 بازرسی تونل`, `🧭 وضعیت آمادگی عملیات`, and existing `🌍 تست زنده IP خروجی` **only after** trusted ingress, active pool membership, a recorded Egress allocation and an independently pinned SHA256. The probe still checks only the pinned pre-existing Core namespace; it never installs/starts a tunnel or sets F4 READY.
+5. **Safe action preview:** displays precise missing gates, always **HOLD** for activation/customer routing, even when F4 DB status is valid; this is intentional until PAM, boot, failure injection and 6G-controlled admission have passed. No implementation of protected assign/freeze/unfreeze, PAM installation or domain migration occurs from the new buttons.
+6. Each new callback requires `role == 'admin'`, validates the Edge ID, catches HOLD without revealing raw secrets, and only uses bounded read-only inspection. The new component never touches `wg0`, changes IP routes, UID, SQLite data, Cloudflare or server configuration.
+7. Unit tests reproduce the real e7 missing allocation, stale/expired F4 evidence, trusted/untrusted ingress registry, role mismatch, pinned transport `UP/ABSENT/HOLD`, HTML escaping, and static checks that the existing bot callback branch has no network/DB mutations.
+
+## UX — operator-visible flow
+
+```text
+🛡 مرکز کنترل Egress
+  ⭐ پیش‌فرض ورودی: 144.172.84.76
+  🌐 مقصد DNS: 144.172.84.76
+  🔐 حالت محافظت: خاموش
+  ⏳ e7 · 172.86.105.67 · INGRESS_ONLY
+  [⏳ e7 · 172.86.105.67]
+  [🔄 بروزرسانی وضعیت]
+  [🚀 افزودن Edge]
+  [🧭 مراحل راه‌اندازی]
+        ↓
+🛡 جزئیات Edge e7
+  📥 Ingress: شناسه ثبت‌شده (زنده‌بودن هنوز نامشخص)
+  ⭐ پیش‌فرض ورودی: خیر
+  🌐 مقصد DNS: خیر
+  📤 Egress: NOT_STAGED (در DB؛ Stage مستقل ممکن است روی دیسک موجود باشد)
+  🔏 SHA Pin: ثبت نشده
+  🧾 F4: NO_EVIDENCE
+  🧯 Fail-Closed: بررسی نشده
+  🗝 PAM/Boot: بررسی نشده
+  🧬 DNS/IPv6: بررسی نشده
+  [🔎 بازرسی تونل]
+  [🧭 وضعیت آمادگی عملیات]
+  [📋 جزئیات Edge]
+  [🔙 مدیریت Egress]
+```
+
+**Important:** `NOT_STAGED` is explicitly the **Allocation state in DB**, not an assertion that manually staged e7 files are absent; e7 operator evidence proves staged files and successful iPhone public IPv4. Until dedicated F3/6G release ledger is written, UI must not infer Allocation from the host disk.
+
+## Role/authority and safety invariants
+
+- **Data boundary:** H ingress peer registry is root-owned and validated by the existing reader; untrusted/missing registry cannot confer `ingress_verified`. Host-pool membership is **not** live WG status. Only separately approved F4 `READY` witness with nonexpired `observed_ip == edge_ip` is presented as valid evidence—never as automatic authorization.
+- **Trust pins:** the Stage SHA `settings.edge_egress_v1_stage_sha256_<edge_id>` must already be attested by the independent operator. This UI never sets it. The read-only inspector calls only `pinned()`/`observe()`; intentionally does **not** call `ensure()`, `up.sh`, `down.sh` or shell.
+- **Probe scope:** existing `live_ip_probe` requires an allocation row in addition to a pin; operator's previous manual e7 probe/phone trace is recorded in K2 memory but **not automatically converted** into F3/F4 DB proof by Telegram.
+- **Global safety:** no changes to `edge_egress_protected_mode`, `edge_egress_v1_onboard_enabled`, `hpdef_*`, `srv_mkactive_*`, `ssh_accounts.host`, `settings.dns_current_ip` or the existing 6G/6H lock/journal.
+- **Telegram size:** overview is bounded to eight recognized Edge entries; an invalid/contradictory registry/DB mapping is conservatively flagged. A later enhancement can add explicit pagination without relaxing identity verification.
+
+## Phase 2 remaining actions (later PR, only after F4 acceptance)
+
+- Add a privileged **guarded** Edge operator installer/controller based on existing F1/F2/H/K HostActions, with exact Stage/host-key digest pins, independent rescue, dry-run plan, transaction journal and *per-resource recovery*. This is not a simple `/bin/bash up.sh` button.
+- Add tested single-UID attach/detach/freeze semantics under owner-only manifests and existing shared 6G lock, verified PAM session binding, no whole-Edge route deletion. Prevent button-driven ready flags.
+- Add normalized, fresh Core/Edge service health observability and optional bounded status cache without poll-spam.
+- Add confirmation UX with explicit affected user counts, protected/legacy population and rollback plan before any operation.
+- Only then Phase 3: guarded protected Edge→Edge relay + Cloudflare CAS, never old `hpdef_` or `srv_mkactive_` direct operation for protected customers.
+
+## Operator-deferred end-of-implementation tests
+
+No production shell commands or reboots now. At the end of implementation, reconcile live Core e7/UID1644 status and timed freeze; validate the deployed bot version; inspect the real Telegram callback rendering and authorization; complete F4/PAM/boot/DNS/IPv6/WG-loss acceptance in an authorized window. **Production UI may not show these code changes until the bot has been deployed.** Preserve all current customers and default relay.
+
+## Sources
+
+- [K2 phase 1 plan](K2_PHASE1_PROTECTED_FOUNDATION_2026-10-13.md)
+- [K2 actual e7 iPhone evidence](SSH_EGRESS_K2_E7_MEMORY_2026-10-13.md)
+- [K2 end-of-phase live release-gate checklist, Issue #106](https://github.com/DenaSon/nvl-bot/issues/106)

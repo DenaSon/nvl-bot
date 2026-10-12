@@ -325,6 +325,15 @@ from edge_egress_v1_console import (
     edge_id_checked, read_edge_detail, overview_html, detail_html,
     instructions_html, live_ip_probe, probe_html, EgressConsoleHold,
 )
+from edge_egress_phase2_console import (
+    read_dashboard as read_egress_dashboard,
+    get_card as get_egress_card,
+    transport_check as inspect_egress_transport,
+    dashboard_html as egress_dashboard_html,
+    detail_html as egress_detail_html,
+    health_html as egress_health_html,
+    actions_html as egress_actions_html,
+)
 from edge_egress_f3_admin import render_assignment_preview
 from edge_egress_f3_readiness import record_ingress_candidate
 from incident_observability import (
@@ -23447,28 +23456,29 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("⛔️ فقط مدیر")
             return
         try:
-            state = await asyncio.to_thread(read_egress_status, db_conn)
+            # Phase 2: trusted H ingress registry + host pool + F3/F4.
+            # Ingress-only e7 is visible even when no Egress allocation exists.
+            board = await asyncio.to_thread(read_egress_dashboard, db_conn)
             buttons = []
-            for item in state.registrations:
-                try:
-                    eid = edge_id_checked(item.edge_id)
-                except EgressConsoleHold:
-                    continue
+            for item in board.cards:
+                eid = edge_id_checked(item.edge_id)
+                icon = "✅" if item.f4_valid else ("⛔" if not item.ingress_verified else "⏳")
                 buttons.append([InlineKeyboardButton(
-                    f"🔎 {eid} · {item.edge_ipv4[:24]}",
+                    f"{icon} {eid} · {item.ip[:24]}",
                     callback_data=f"hpeg_edge_{eid}",
                 )])
             buttons.extend([
+                [InlineKeyboardButton("🔄 بروزرسانی وضعیت", callback_data="hpeg_status")],
                 [InlineKeyboardButton("🚀 افزودن Edge", callback_data="hp_addedge")],
                 [InlineKeyboardButton("🧭 مراحل راه‌اندازی", callback_data="hpeg_steps")],
                 [InlineKeyboardButton("🔙 بازگشت", callback_data="hp_menu")],
             ])
             await query.edit_message_text(
-                overview_html(state), parse_mode="HTML",
+                egress_dashboard_html(board), parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
         except Exception:
-            log.exception("Egress admin console overview unavailable")
+            log.exception("Egress Phase 2 admin dashboard unavailable")
             await query.message.reply_text("⛔️ وضعیت Egress قابل بررسی نیست؛ هیچ تغییری انجام نشد.")
         return
 
@@ -23485,36 +23495,54 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    elif d.startswith("hpeg_edge_") or d.startswith("hpeg_probe_"):
+    elif (d.startswith("hpeg_edge_") or d.startswith("hpeg_probe_")
+          or d.startswith("hpeg_health_") or d.startswith("hpeg_actions_")):
         if role != 'admin':
             await query.message.reply_text("⛔️ فقط مدیر")
             return
         is_probe = d.startswith("hpeg_probe_")
-        edge_id = d[len("hpeg_probe_"):] if is_probe else d[len("hpeg_edge_"):]
+        is_health = d.startswith("hpeg_health_")
+        is_actions = d.startswith("hpeg_actions_")
+        prefix = ("hpeg_probe_" if is_probe else "hpeg_health_" if is_health
+                  else "hpeg_actions_" if is_actions else "hpeg_edge_")
+        edge_id = d[len(prefix):]
         try:
             edge_id_checked(edge_id)
-            detail = await asyncio.to_thread(read_edge_detail, db_conn, edge_id)
-            if detail is None:
-                raise EgressConsoleHold("EDGE_NOT_REGISTERED")
+            board = await asyncio.to_thread(read_egress_dashboard, db_conn)
+            card = get_egress_card(board, edge_id)
             if is_probe:
+                if not card.can_probe:
+                    raise EgressConsoleHold("STAGE_OR_INGRESS_NOT_ATTESTED")
                 result = await asyncio.to_thread(live_ip_probe, db_conn, edge_id)
                 html = probe_html(result)
                 if not result.matches:
                     log.warning("Egress admin live probe mismatch: edge_id=%s", edge_id)
+            elif is_health or is_actions:
+                # Only pinned stage inspection when available; no ensure/up/down.
+                result = await asyncio.to_thread(inspect_egress_transport, card)
+                html = (egress_health_html(card, result) if is_health
+                        else egress_actions_html(card, result))
             else:
-                html = detail_html(detail)
+                html = egress_detail_html(card)
             buttons = []
-            if detail.stage_pin_present and not is_probe:
+            if card.can_probe:
                 buttons.append([InlineKeyboardButton(
-                    "🌍 تست زنده IP خروجی (فقط خواندنی)",
-                    callback_data=f"hpeg_probe_{edge_id}",
+                    "🌍 تست زنده IP خروجی", callback_data=f"hpeg_probe_{edge_id}",
+                )])
+            if not is_health:
+                buttons.append([InlineKeyboardButton(
+                    "🔎 بازرسی تونل", callback_data=f"hpeg_health_{edge_id}",
+                )])
+            if not is_actions:
+                buttons.append([InlineKeyboardButton(
+                    "🧭 وضعیت آمادگی عملیات", callback_data=f"hpeg_actions_{edge_id}",
                 )])
             if is_probe:
                 buttons.append([InlineKeyboardButton(
                     "🔄 تست مجدد", callback_data=f"hpeg_probe_{edge_id}",
                 )])
             buttons.extend([
-                [InlineKeyboardButton("🔎 جزئیات Edge", callback_data=f"hpeg_edge_{edge_id}")],
+                [InlineKeyboardButton("📋 جزئیات Edge", callback_data=f"hpeg_edge_{edge_id}")],
                 [InlineKeyboardButton("🔙 مدیریت Egress", callback_data="hpeg_status")],
             ])
             await query.edit_message_text(
@@ -23522,18 +23550,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
         except (EgressConsoleHold, ValueError) as exc:
-            # No raw system commands, credentials or traceback in Telegram.
             await query.edit_message_text(
                 "⛔️ <b>HOLD — Egress تأیید نشد.</b>\n"
                 f"علت: <code>{esc(str(exc)[:90])}</code>\n"
-                "هیچ Route، تونل یا حسابی تغییر نکرد.",
+                "هیچ Route، تونل، DNS یا حسابی تغییر نکرد.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔙 مدیریت Egress", callback_data="hpeg_status")],
                 ]),
             )
         except Exception:
-            log.exception("Egress admin console detail/probe unavailable")
+            log.exception("Egress Phase 2 admin detail/probe unavailable")
             await query.message.reply_text("⛔️ بررسی Egress ناموفق بود؛ هیچ تغییری انجام نشد.")
         return
 

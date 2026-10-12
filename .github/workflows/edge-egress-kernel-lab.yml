@@ -1,6 +1,15 @@
 name: Edge egress disposable kernel lab
 
 on:
+  push:
+    branches: [master]
+    paths:
+      - 'edge_egress_uid_boot.py'
+      - 'edge_egress_uid_dns.py'
+      - 'edge_egress_uid_policy.py'
+      - 'ops/edge_egress_provision.py'
+      - 'ops/labs/edge_egress_*'
+      - '.github/workflows/edge-egress-kernel-lab.yml'
   pull_request:
     paths:
       - 'ops/edge_egress_provision.py'

@@ -155,6 +155,7 @@ class Phase2UidTextHandlerTests(unittest.TestCase):
         q=SimpleNamespace(text=username,reply_text=AsyncMock())
         update=SimpleNamespace(
             message=q,effective_chat=SimpleNamespace(id=1),
+            effective_user=SimpleNamespace(id=123),
         )
         globals={
             "classify_edge_text":lambda *_:None,
@@ -165,6 +166,9 @@ class Phase2UidTextHandlerTests(unittest.TestCase):
             "get_egress_card":lambda *_args:object(),
             "egress_uid_preview_html":lambda *_args:"UID_PREVIEW_HOLD",
             "db_conn":lambda:None,
+            "re":__import__("re"),
+            "InlineKeyboardButton":lambda label,callback_data:(label,callback_data),
+            "InlineKeyboardMarkup":lambda rows:rows,
         }
         fn=get_function("text_handler",globals)
         asyncio.run(fn(update,SimpleNamespace(user_data=data)))
@@ -172,8 +176,11 @@ class Phase2UidTextHandlerTests(unittest.TestCase):
 
     def test_admin_username_one_shot_no_uid_changes(self):
         q,context=self.call()
-        q.reply_text.assert_awaited_once_with(
-            "UID_PREVIEW_HOLD",parse_mode="HTML")
+        self.assertEqual(q.reply_text.await_args.args[0], "UID_PREVIEW_HOLD")
+        self.assertEqual(q.reply_text.await_args.kwargs["parse_mode"], "HTML")
+        self.assertTrue(q.reply_text.await_args.kwargs["reply_markup"])
+        self.assertEqual(context["egress_review_uid_selector"][:2],
+                         ("e7","nvl0557"))
         self.assertNotIn("state",context)
         self.assertNotIn("egress_preview_edge_id",context)
 

@@ -60,6 +60,9 @@ class Host:
     async def assert_real_ingress(self, target):
         self.mark("ingress")
 
+    async def assert_pam_admission(self):
+        self.mark("pam")
+
     async def assert_no_ssh_sessions(self, username, uid):
         self.mark("drain")
         if self.sessions:

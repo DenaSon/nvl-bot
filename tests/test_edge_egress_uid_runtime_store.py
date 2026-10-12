@@ -156,6 +156,35 @@ class StoreTests(unittest.TestCase):
             self.assertIsNone(read_binding(c,"nvl0558"))
             self.assertEqual(read_binding(c,"nvl0557").state,"PROTECTED")
 
+    def test_opt_in_second_protected_uid_keeps_first_on_shared_table(self):
+        first=req()
+        second=req("nvl0558",1645,1781)
+        self.store.shared_edge_enabled = True
+        self.store.reserve_blocked(42,first,source=SOURCE,dns_port=10553)
+        self.store.transition(42,first,source=SOURCE,
+                              expected="BLOCKED",target="ROUTED_UNVERIFIED")
+        self.store.commit_protected(42,first,source=SOURCE)
+        other=self.store.reserve_blocked(42,second,source=SOURCE,dns_port=10554)
+        self.assertEqual((other.state,other.route_table),("BLOCKED",1780))
+        with self.conn() as db:
+            self.assertEqual(read_binding(db,"nvl0557").state,"PROTECTED")
+            self.assertEqual(read_binding(db,"nvl0558").state,"BLOCKED")
+        self.store.transition(42,second,source=SOURCE,
+                              expected="BLOCKED",target="ROUTED_UNVERIFIED")
+        self.store.commit_protected(42,second,source=SOURCE)
+        with self.conn() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM edge_egress_uid_runtime "
+                "WHERE edge_id='fra1' AND state='PROTECTED'"
+            ).fetchone()[0],2)
+
+    def test_second_user_waits_while_first_is_unverified(self):
+        self.store.shared_edge_enabled=True
+        self.store.reserve_blocked(42,req(),source=SOURCE,dns_port=10553)
+        with self.assertRaisesRegex(RuntimeStoreUnsafe,"PENDING_UID_HOLD"):
+            self.store.reserve_blocked(42,req("nvl0558",1645,1781),
+                                       source=SOURCE,dns_port=10554)
+
     def test_resource_collision_is_denied_transactionally(self):
         self.store.reserve_blocked(42, req(), source=SOURCE, dns_port=10553)
         with self.assertRaisesRegex(RuntimeStoreUnsafe, "COLLISION"):

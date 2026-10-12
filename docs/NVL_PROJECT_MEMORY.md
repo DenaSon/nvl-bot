@@ -1,3 +1,7 @@
+> **Current SSH Edge Egress status (2026-10-12):** This file contains historical NVL production runbooks and release notes, including V115.2; do **not** infer today's deployed version from them. For the current F1–F4 implementation, actual CI results, blocked public SSH Egress, and exact next steps, read **[EDGE_EGRESS_CURRENT_HANDOFF.md](EDGE_EGRESS_CURRENT_HANDOFF.md)** first. GitHub `master` last verified at `589625073e5b191529485bd9dc3d1bbbd2119cea`; Production host state still requires read-only verification. **Do not rebuild finished Egress phases or confuse isolated SOCKS success with customer SSH Egress.**
+
+---
+
 # NVL Project Memory / Production Runbook
 
 Last updated: **2026-10-02**  

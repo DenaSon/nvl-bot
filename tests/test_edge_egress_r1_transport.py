@@ -118,7 +118,10 @@ class R1InspectTests(unittest.TestCase):
             if args == ("ip", "netns", "list"):
                 return SimpleNamespace(returncode=0,
                                        stdout="nvl-egress-stg1 (id: 0)\n")
-            return SimpleNamespace(returncode=0, stdout="")
+            if args == ("ip", "link", "show", "dev", "wg-nvl-stg1"):
+                return SimpleNamespace(returncode=1, stdout="",
+                                       stderr='Device "wg-nvl-stg1" does not exist.')
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         with TemporaryDirectory() as d:
             obs = inspect_linux(spec(), "core", run=run,
                                 stage_root=Path(d)/"no-stage",

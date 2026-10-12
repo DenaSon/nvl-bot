@@ -135,6 +135,33 @@ class LabSSHExecutor:
         return response
 
 
+@dataclass(frozen=True)
+class CurrentBridge6GLease:
+    """Resolve the EXISTING F2 operation acquired *inside* attach_protected.
+
+    Binding a fixed operation_id before bridge.acquire_6g() would be stale or
+    unavailable. This adapter NEVER calls acquire_fn, writes a row or invents
+    a lock; it reads the already-held bridge identity and checks SQLite.
+    """
+    bridge: object
+
+    def for_request(self, request: UIDPolicyRequest) -> bool:
+        op = getattr(self.bridge, "operation_id", None)
+        source = getattr(self.bridge, "source", None)
+        target = getattr(self.bridge, "target", None)
+        if (type(op) is not int or op <= 0
+                or not isinstance(source, str) or not source
+                or not isinstance(target, str) or not target):
+            return False
+        try:
+            probe = Existing6GR1LeaseProbe(
+                self.bridge.db_conn, op, source, target,
+            )
+            return probe.for_request(request)
+        except (ValueError, TypeError, AttributeError):
+            return False
+
+
 @dataclass
 class R1Lab6GShadow:
     """Concrete RuntimeShadowPort: injected as Existing6GUIDRuntimeBridge.shadow.
@@ -144,7 +171,7 @@ class R1Lab6GShadow:
     SQLite schema, lock, journaling or cleanup is provided here.
     """
     spec: EgressSpec
-    shared_lease: Existing6GR1LeaseProbe
+    shared_lease: Existing6GR1LeaseProbe | CurrentBridge6GLease
     guard_check: Callable[[UIDPolicyRequest], bool]
     edge: LabHost
     core: LabHost
@@ -196,3 +223,38 @@ class R1Lab6GShadow:
             # F2 owns HOLD journal and freezes the protected route. Do not
             # issue down.sh, stop units or restore Core egress on uncertainty.
             raise R1LabUnsafe("R1_DUAL_HOST_START_UNCERTAIN_HOLD") from exc
+
+
+def bind_disposable_lab_shadow(bridge, *, spec: EgressSpec,
+                               guard_check: Callable[[UIDPolicyRequest], bool],
+                               edge: LabHost, core: LabHost,
+                               ssh: LabSSHExecutor,
+                               explicitly_enabled: bool = False,
+                               disposable_vps: bool = False) -> R1Lab6GShadow:
+    """Wire an Existing6GUIDRuntimeBridge to this F2 transport port.
+
+    The bridge must have its genuine kernel, PAM gate and existing-session
+    probes injected separately. Do not replace a running/foreign shadow.
+    The existing controller acquires and journals the 6G operation; the
+    CurrentBridge6GLease reads that CURRENT operation at activation time.
+    """
+    from edge_egress_uid_runtime_bridge import Existing6GUIDRuntimeBridge
+
+    if not isinstance(bridge, Existing6GUIDRuntimeBridge):
+        raise R1LabUnsafe("EXISTING_F2_BRIDGE_REQUIRED")
+    if (bridge.shadow is not None or bridge.operation_id is not None
+            or bridge.kernel is None or bridge.session_gate_probe is None
+            or bridge.existing_sessions_probe is None):
+        raise R1LabUnsafe("BRIDGE_NOT_FRESH_OR_GUARDS_UNAVAILABLE")
+    if not callable(guard_check):
+        raise R1LabUnsafe("EXTERNAL_UID_GUARD_PROBE_REQUIRED")
+    spec.validate()
+    edge.validate(spec)
+    core.validate(spec)
+    port = R1Lab6GShadow(
+        spec, CurrentBridge6GLease(bridge), guard_check, edge, core, ssh,
+        explicitly_enabled=explicitly_enabled,
+        disposable_vps=disposable_vps,
+    )
+    bridge.shadow = port
+    return port

@@ -116,7 +116,7 @@ class Phase2ReviewCallbackTests(unittest.TestCase):
         self.assertIn("HOLD",self.query.edit_message_text.await_args.args[0])
 
     def test_non_admin_cannot_even_prepare_a_review(self):
-        self.ctx.user_data["role"]="agent"
+        self.ctx.user_data["role"]="accountant"
         self.invoke()
         self.msg.reply_text.assert_awaited_once()
         self.assertEqual(self.calls,[])

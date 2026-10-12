@@ -1,3 +1,5 @@
+> **LATEST K2 PRODUCTION MEMORY — 2026-10-13 (supersedes older "K2 not started" / Miami-only status):** Before touching live SSH egress, read [the K2 New York e7 / iPhone E2E memory](docs/SSH_EGRESS_K2_E7_MEMORY_2026-10-13.md). Operator-confirmed iPhone same-ingress/same-egress public SSH `nvl0557` / UID1644 → Edge `172.86.105.67` returned matching `ip=172.86.105.67`; Core namespace Internet proof and dedicated e7 transport also PASS. **Not F4 READY**: live UID state and 20-minute auto-fence require fresh read-only reconciliation; protected PAM/roster/boot, DNS/IPv6, WireGuard-loss fail-closed and persistence remain unproved. A trailing-whitespace fix in `BootGuardApplier.verify` was hotfixed **only in Core /root**; upstream it with regression before code redeploy. SFTP exclusive-create fix was already merged in PR #103. Do not rerun e7 wizard/stage, unfreeze or reroute UID blindly, reboot Production, enable protected 6H/global mode, edit DNS/default or migrate customers. The rest of this file contains historical stages where contradicted by the new checkpoint.
+
 # Repository guidance — NVL
 
 ## CURRENT PRIORITY — SSH Egress V1 (2026-10-12)

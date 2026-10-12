@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -22,6 +23,7 @@ from edge_egress_r1_transport import _stage_owned, inspect_linux
 from ops.edge_egress_provision import EgressSpec
 
 _STAGE_ROOT = Path("/root/nvl-egress-staging")
+_SOURCE_ROOT = Path("/root/nvl-egress-lab1-source")
 
 
 class LabAgentUnsafe(ValueError):
@@ -36,25 +38,44 @@ def _request(encoded: str) -> R1BootContract:
     except (ValueError, TypeError) as exc:
         raise LabAgentUnsafe("INVALID_REQUEST") from exc
     if (not isinstance(payload, dict) or set(payload) != {
-        "mode", "spec", "role", "machine_id",
+        "mode", "spec", "role", "machine_id", "source_commit",
         "marker_sha256", "stage_sha256",
     }):
         raise LabAgentUnsafe("INVALID_REQUEST_FIELDS")
+    if not isinstance(payload["source_commit"], str) or not re.fullmatch(r"[a-f0-9]{40}", payload["source_commit"]):
+        raise LabAgentUnsafe("UNPINNED_AGENT_COMMIT")
     contract = R1BootContract.parse({
         "spec": payload["spec"], "role": payload["role"],
         "machine_id": payload["machine_id"],
         "disposable_marker_sha256": payload["marker_sha256"],
         "stage_sha256": payload["stage_sha256"], "mode": payload["mode"],
     })
-    return contract
+    return contract, payload["source_commit"]
 
 
-def _assert_local_host(contract: R1BootContract) -> None:
+def _assert_local_host(contract: R1BootContract, source_commit: str) -> None:
     if os.geteuid() != 0:
         raise LabAgentUnsafe("ROOT_REQUIRED")
     # An independently prepared root-only marker AND machine-id pin are
     # mandatory; a staging directory alone cannot turn production into a lab.
     assert_disposable_identity(contract)
+    if _SOURCE_ROOT.is_symlink() or not (_SOURCE_ROOT / ".git").is_dir():
+        raise LabAgentUnsafe("UNTRUSTED_AGENT_SOURCE")
+    st = _SOURCE_ROOT.stat()
+    if st.st_uid != 0 or st.st_mode & 0o022:
+        raise LabAgentUnsafe("UNTRUSTED_AGENT_OWNER")
+    revision = subprocess.run(
+        ["git", "-C", str(_SOURCE_ROOT), "rev-parse", "HEAD"],
+        capture_output=True, text=True, timeout=8, check=True,
+    )
+    if revision.stdout.strip() != source_commit:
+        raise LabAgentUnsafe("AGENT_COMMIT_MISMATCH")
+    dirty = subprocess.run(
+        ["git", "-C", str(_SOURCE_ROOT), "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True, text=True, timeout=8, check=True,
+    )
+    if dirty.stdout.strip():
+        raise LabAgentUnsafe("AGENT_SOURCE_DIRTY")
     role = contract.role
     public = (contract.spec.core_public_ipv4 if role == "core"
               else contract.spec.edge_public_ipv4)
@@ -75,8 +96,8 @@ def _assert_local_host(contract: R1BootContract) -> None:
 def execute(action: str, encoded: str) -> dict:
     if action not in ("probe", "start"):
         raise LabAgentUnsafe("ACTION_NOT_ALLOWED")
-    contract = _request(encoded)
-    _assert_local_host(contract)
+    contract, source_commit = _request(encoded)
+    _assert_local_host(contract, source_commit)
     # This catches collision, port reuse and legacy unscoped NAT without
     # treating 'not found' or an unknown command failure as permission.
     _no_previous_resources(contract)

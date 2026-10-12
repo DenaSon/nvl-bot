@@ -36,3 +36,24 @@ python3 -m unittest -v tests.test_edge_egress_r1_transport
 GitHub's normal changed-path matrix can also execute; it is **not** VPS boot verification. Record actual job results before claiming checks passed. Do not rerun earlier isolated SOCKS/staging experiments simply to validate this file.
 
 **Issue #88 stays OPEN.** After completing this safe ownership foundation, finish durable R1 transport start/stop/freeze/reconcile and disposable VPS acceptance *within R1*, then proceed to R2. No protected cutover until R1–R6 are accepted.
+
+
+## R1 systemd/boot checkpoint — 2026-10-12, code-only
+
+Two additional modules are implemented on the **same Draft PR #92**:
+
+- `edge_egress_r1_systemd.py`: offline `nvl-egress-EDGEID-transport.service` unit renderer and explicit **DISPOSABLE_ONLY** start boundary. The unit is **not installed or enabled by repository import or CI**. It has `Type=oneshot`, `RemainAfterExit=yes`, `Restart=no`, `After=network-online.target`, no `ExecStop` and no dependency on global SSH or customer UID guards. On a newly prepared disposable host only, an operator may separately choose to install/enable it; startup still requires a SHA-256-pinned root-only boot contract, exact reviewed stage file SHA-256 set, matching host `/etc/machine-id`, a root-only disposable-host marker with independently reviewed digest, empty dedicated transport resource preflight and no unscoped legacy NAT on Edge. The existing stage `up.sh` then runs; uncertainty is HOLD and is **not** a request to blindly tear down networks or release the 6G lease.
+- `edge_egress_r1_reconcile.py`: **read-only deny-first** reconciliation against the observed transport identity, shared existing 6G RUNNING lock, protected UID mapping count, UID guard/gate attestation and outstanding recovery marker. Missing DB/journal evidence or any old protected binding, even with an apparently healthy transport, is HOLD until independently reviewed F2 reconciliation. Every result has `network_mutation_allowed=false`, `uid_attach_allowed=false` and `customer_ready=false`. No new lock or persistence database is introduced.
+- `edge_egress_r1_transport.py` now uses a validated Python regex for the staged WireGuard **public peer key** instead of a double-escaped pattern; a positive fake-kernel regression exercises the actual parser. No WG private keys or staging material are emitted by the diagnostics.
+
+### Installation boundary remains closed
+
+These additions are **not production deployment instructions**. In particular, do not copy the boot marker, install/enable this unit on the running production Core/Edge pair, assume an old `stg1` interface is owned or rely on `systemd active` as proof of secure customer Egress. The disposable marker and machine-id are an operator-controlled lab interlock, **not cryptographic proof that the host is disposable**. R1 still needs a reviewed host installer/rollback plan, live independent Core↔Edge pinned transport start/freeze/reconcile across reboot, plus a full disposable VPS acceptance with independent console. R2–R6 remain blocked; do not migrate Production DB or attach protected UIDs here.
+
+Relevant focused tests:
+
+```bash
+python3 -m unittest -v tests.test_edge_egress_r1_transport tests.test_edge_egress_r1_systemd
+```
+
+Do not mark CI PASS until the new PR-head workflow jobs have reported completion.

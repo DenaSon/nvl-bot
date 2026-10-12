@@ -72,7 +72,9 @@ def uid_deny_rule(uid: int, action: str = "-C") -> tuple[str, ...]:
     prefix = ("iptables", "-w", action, "OUTPUT")
     if action == "-I":
         prefix += ("1",)
-    return prefix + ("-m", "owner", "--uid-owner", str(uid), "-j", "REJECT")
+    return prefix + ("-m", "owner", "--uid-owner", str(uid),
+                     "-m", "comment", "--comment", "nvl-egress-uid-" + str(uid),
+                     "-j", "REJECT")
 
 
 def uid_deny_present(run: Callable, uid: int) -> bool:

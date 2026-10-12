@@ -107,3 +107,11 @@
 4. **R4–R6 remain unproven:** external normal SSH + SOCKS IP proof, DNS/NSS UDP/TCP/IPv6 and BadVPN packet captures, Edge-loss leak proof, active-session drain, multi-user/shared-table behavior, offsite restore and signed acceptance. Only then a single-UID `nvl0557` canary following explicit operator approval.
 
 **Evidence quality:** Operator-copied real terminal outputs; not independently signed or recorded as kernel packet captures. This section supersedes historical assumptions about stage service persistence, but does **not** change Issue #88 release status.
+
+### Supplemental Core legacy-rule inventory — 2026-10-12 (read-only)
+
+Operator-provided follow-up confirmed that previously used experimental priority `7681`, routes in table `178`, and `veth-nvl-h` are **absent** from the Core snapshot. No `uidrange` selector or protected table `1790` appeared in the filtered report. Thus the removal of that legacy route does **not** contradict the successful `nvl-egress-stg1` isolated SSHD/SOCKS proof: the normal `uid 1644` host-path still selecting Core `eth0` is the expected current unprotected production configuration.
+
+Old, **separate** policy remains: `7700: from all fwmark 0x77 lookup 77`, table `77` has `default dev wg0`; the Core `iptables -t mangle -S OUTPUT` lists **two identical** `--uid-owner 1658 -j MARK --set-xmark 0x77/0xffffffff` entries; and `iptables -t nat -S POSTROUTING` lists **two identical** `-o wg0 -m mark --mark 0x77 -j MASQUERADE` entries. UID `1658` is the historical test UID, distinct from Canary `nvl0557` UID `1644`. No current evidence shows that these old explicit UID rules redirect UID `1644`. Their present ownership, persistence, active sessions, rule counters and impact of any removal remain **unverified**. **Do not delete/reorder** those rules or touch `wg0` as part of R1. Duplicate lines are evidence of redundant installed entries, not authorization for live firewall mutation.
+
+Next: focus on the missing dedicated transport lifecycle/reconcile, PAM/boot acceptance and shared 6G bridge; legacy-rule cleanup is a separately owned, deliberately scoped maintenance decision and not a prerequisite to re-running prior staging tests.

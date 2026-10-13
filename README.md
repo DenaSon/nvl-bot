@@ -1,5 +1,15 @@
 # NVL Bot
 
+## Current K2 status — 2026-10-13
+
+**Start here:** [Agent Handoff / Release Readiness](docs/NVL_K2_AGENT_HANDOFF_2026-10-13.md) → [AGENTS.md](AGENTS.md) → [Project Memory](docs/NVL_PROJECT_MEMORY.md).
+
+GitHub `master` at the last verified feature baseline `22eba3cda13c0c72407bd3d55d7328ae93496d25` contains merged K2 Phase2 and **P3-A through P3-F** (PRs #112–#118). Admin Edge Telegram UX is minimal/two-column Persian, but the **latest P3 features have NOT been deployed to Production**. P3-A–E still lack a reviewed concrete live privileged worker and release authorization. Independent disposable full-VPS **F4/PAM/boot/DNS/IPv6/tunnel-loss acceptance [#106](https://github.com/DenaSon/nvl-bot/issues/106)** and guarded rollout/integration [#108](https://github.com/DenaSon/nvl-bot/issues/108) remain OPEN. Do not enable protected-mode, automatic 6H, Cloudflare cutover or kernel teardown from merged source alone.
+
+The New York `e7` VPS was removed; its ingress registry/F3 metadata were manually retired with backup, **not** its Core kernel resources. Never unfence test UID1644 or modify the working Core ingress/default/other UID routes without independent fresh read-only audit.
+
+## Historical repository introduction (superseded next-step notes below)
+
 Private production repository for the NVL Telegram bot and its server-management tooling.
 
 ## 🔖 Current priority — SSH Egress V1 (2026-10-12)

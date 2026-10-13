@@ -25,7 +25,7 @@ def _state(card) -> str:
     if card.allocation == "IDENTITY_CONFLICT" or not card.ingress_verified:
         return "⛔ نیاز به بررسی"
     if card.f4_valid and card.pool_active:
-        return "✅ آماده"
+        return "✅ بررسی‌شده"
     if card.pool_active:
         return "🟡 در انتظار بررسی"
     return "⚪️ غیرفعال"
@@ -135,7 +135,7 @@ def actions_html(card,status) -> str:
     return "\n".join((
         "🧭 <b>وضعیت سرور</b>", "",
         f"سرور: <code>{_safe(card.edge_id)}</code>",
-        "وضعیت: " + ("✅ آماده" if not reasons else "🟡 نیاز به بررسی"),
+        "وضعیت: " + ("✅ بررسی‌شده" if not reasons else "🟡 نیاز به بررسی"),
         *(("\nموارد قابل بررسی: "+ "، ".join(reasons),) if reasons else ()),
         "\nعملیات حساس فعلاً در دسترس نیست.",
     ))
@@ -244,3 +244,11 @@ def wizard_result(edge_ip: str, result: dict) -> tuple[str,str]:
         "برای استفاده، وضعیت اتصال را بررسی کنید.",
         eid,
     )
+
+
+def probe_html(result) -> str:
+    state="✅ نشانی خروجی درست است" if result.matches else "⛔ نشانی خروجی متفاوت است"
+    return ("🌍 <b>تست IP خروجی</b>\n\n"
+            f"مورد انتظار: <code>{_safe(result.expected_ip)}</code>\n"
+            f"مشاهده‌شده: <code>{_safe(result.observed_ip)}</code>\n\n"
+            f"{state}")

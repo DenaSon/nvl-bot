@@ -48,6 +48,8 @@ class StagePin:
     ssh_host_key: str
     ssh_port: int
     customer_port: int = 0  # 0 denotes an older pin: forbidden for unlisted cutover
+    core_wg_pub: str = ""  # Original public keys, never private secrets
+    edge_wg_pub: str = ""
 
     def validate(self):
         if not _EDGE.fullmatch(self.edge_id):
@@ -73,6 +75,17 @@ class StagePin:
         if any(not isinstance(v, str) or not _HEX.fullmatch(v)
                for v in (self.core_sha, self.edge_sha)):
             raise Phase1Hold("STAGE_DIGEST_REQUIRED")
+        if bool(self.core_wg_pub) != bool(self.edge_wg_pub):
+            raise Phase1Hold("INCOMPLETE_ORIGINAL_WG_PUBLIC_PINS")
+        if self.core_wg_pub:
+            from ops.edge_egress_provision import validated_key
+            try:
+                validated_key(self.core_wg_pub,"original_core_public_key")
+                validated_key(self.edge_wg_pub,"original_edge_public_key")
+                if self.core_wg_pub == self.edge_wg_pub:
+                    raise Phase1Hold("DUPLICATED_ORIGINAL_WG_PUBLIC_KEY")
+            except ValueError as exc:
+                raise Phase1Hold("UNTRUSTED_ORIGINAL_WG_PUBLIC_KEY") from exc
         try:
             import paramiko
             raw = base64.b64decode(self.ssh_host_key, validate=True)
@@ -295,12 +308,80 @@ def _prove_ipv4(spec, *, run=subprocess.run, sleep=time.sleep) -> str:
     raise Phase1Hold("DEDICATED_EGRESS_IP_NOT_PROVEN")
 
 
+def register_stage_allocation(db_conn: Callable, operation_id: int,
+                              source: str, pin: StagePin, spec, peer: str) -> None:
+    """Link original Wizard Stages to the EXISTING F3 allocation under 6G.
+
+    This never mints READY or installs an OS/PAM/UID route. Fail closed if
+    migrations, original key witnesses, ownership or 6G intent are missing.
+    Call ONLY after the Phase1 Worker proved the dedicated Edge public IP.
+    """
+    from edge_egress_inventory import reserve_allocation, mark_stage_only
+    from edge_egress_f3_readiness import (
+        _shared_lock, stage_in_existing_6g_transaction,
+    )
+    from ops.edge_egress_provision import validated_key
+    if (not pin.core_wg_pub or not pin.edge_wg_pub
+            or pin.edge_wg_pub != peer
+            or pin.edge_id != spec.edge_id
+            or pin.edge_ipv4 != spec.edge_public_ipv4
+            or pin.core_ipv4 != spec.core_public_ipv4):
+        raise Phase1Hold("ORIGINAL_STAGE_WG_IDENTITY_REQUIRED")
+    validated_key(pin.core_wg_pub,"core_public")
+    validated_key(pin.edge_wg_pub,"edge_public")
+    spec.validate()
+    with db_conn() as db:
+        db.execute("BEGIN IMMEDIATE")
+        _shared_lock(db,operation_id,source,pin.edge_ipv4)
+        names={row[0] for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND "
+            "name IN ('edge_egress_allocations','edge_egress_readiness')"
+        ).fetchall()}
+        if names != {"edge_egress_allocations","edge_egress_readiness"}:
+            raise Phase1Hold("F3_SCHEMAS_NOT_INSTALLED")
+        latest=db.execute(
+            "SELECT detail_json FROM failover_operations WHERE id=?",
+            (operation_id,),
+        ).fetchone()
+        try:
+            intent=json.loads(latest[0])
+        except (ValueError,TypeError,KeyError,IndexError) as exc:
+            raise Phase1Hold("PHASE1_INTENT_NOT_DURABLE") from exc
+        if (intent.get("kind")!="K2_P1" or intent.get("phase")!=INTENT
+                or intent.get("edge_id")!=pin.edge_id
+                or intent.get("core_sha")!=pin.core_sha
+                or intent.get("edge_sha")!=pin.edge_sha
+                or intent.get("customers_moved")!=0):
+            raise Phase1Hold("PHASE1_INTENT_NOT_DURABLE")
+        default=db.execute(
+            "SELECT host FROM host_pool WHERE active=1 AND is_default=1",
+        ).fetchall()
+        collision=db.execute(
+            "SELECT 1 FROM host_pool WHERE host=?",(pin.edge_ipv4,),
+        ).fetchone()
+        if default != [(source,)] or collision is not None:
+            raise Phase1Hold("RELAY_CHANGED_DURING_F3")
+        reservation=reserve_allocation(
+            db,spec,core_public_key=pin.core_wg_pub,
+            edge_public_key=pin.edge_wg_pub,
+        )
+        if not reservation.created or reservation.status!="RESERVED":
+            raise Phase1Hold("EXISTING_ALLOCATION_NEEDS_RECONCILIATION")
+        mark_stage_only(db,pin.edge_id)
+        stage_in_existing_6g_transaction(
+            db,operation_id,source=source,
+            edge_id=pin.edge_id,target=pin.edge_ipv4,
+        )
+        _shared_lock(db,operation_id,source,pin.edge_ipv4)
+
+
 def activate_phase1(edge_id: str, *, db_conn: Callable,
                     acquire: Callable, journal: Callable,
                     load_pin: Callable = load_stage_pin,
                     remote_transport: Callable = _remote_transport,
                     core_ensure: Callable = ensure,
-                    ipv4_proof: Callable = _prove_ipv4) -> dict:
+                    ipv4_proof: Callable = _prove_ipv4,
+                    register_f3: Callable = register_stage_allocation) -> dict:
     """Exact operator-confirmed single-Edge transport start, never customer move.
 
     Persist the protected intent BEFORE host network mutation. An uncertain
@@ -356,9 +437,12 @@ def activate_phase1(edge_id: str, *, db_conn: Callable,
         if observed != pin.edge_ipv4:
             raise Phase1Hold("DEDICATED_EGRESS_IP_NOT_PROVEN")
         _check_lease(db_conn, op_id, source, pin.edge_ipv4, pin=pin)
+        register_f3(db_conn, op_id, source, pin, spec, peer)
+        _check_lease(db_conn, op_id, source, pin.edge_ipv4, pin=pin)
         journal(op_id, status="SUCCEEDED", detail={
             **intent, "phase":"EGRESS_P1_TRANSPORT_PROVEN",
-            "observed_ipv4":observed, "customer_ready":False,
+            "observed_ipv4":observed, "f3_stage":"STAGED",
+            "customer_ready":False,
         }, finished=True, require_running=True)
         return {"edge_id":pin.edge_id, "edge_ip":pin.edge_ipv4,
                 "observed_ipv4":observed, "transport_up":True,

@@ -82,6 +82,7 @@ class Phase1TransportActivationTests(unittest.TestCase):
         return EDGE
 
     def start(self,**kwargs):
+        kwargs.setdefault("register_f3",lambda *args:self.events.append("f3:stage"))
         with patch(
             "edge_egress_k2_p1_worker._check_stage",
             return_value=(self.spec,"wg-peer",Path("/root/nvl-egress-v1/core-e8")),
@@ -101,6 +102,7 @@ class Phase1TransportActivationTests(unittest.TestCase):
         self.assertFalse(result["customer_ready"])
         self.assertLess(self.events.index("edge:ensure"),self.events.index("core:ensure"))
         self.assertLess(self.events.index("core:ensure"),self.events.index("ip:prove"))
+        self.assertLess(self.events.index("ip:prove"),self.events.index("f3:stage"))
         self.assertEqual(self.events[-1],"EGRESS_P1_TRANSPORT_PROVEN")
         self.assertEqual(self.conn.execute(
             "SELECT host FROM ssh_accounts").fetchone()[0],SOURCE)

@@ -125,7 +125,7 @@ def review_relay_cohort(db_conn: Callable, edge_id: str,
             pin = pin_loader(edge_id)
             if pin.edge_id != edge_id or pin.edge_ipv4 != target or pin.core_ipv4 != allocations[0][1]:
                 blockers.append("ORIGINAL_STAGE_IDENTITY_DRIFT")
-            pin_hash = _fingerprint((pin.core_sha,pin.edge_sha,pin.ssh_host_key,pin.ssh_port,pin.customer_port))
+            pin_hash = _fingerprint((pin.core_sha,pin.edge_sha,pin.ssh_host_key,pin.ssh_port,pin.customer_port, getattr(pin,"core_wg_pub",""),getattr(pin,"edge_wg_pub","")))
             target_pool = db.execute(
                 "SELECT active,is_default,is_standby,service_port FROM host_pool WHERE host=?",
                 (target,)

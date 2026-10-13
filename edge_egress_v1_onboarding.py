@@ -330,6 +330,7 @@ def onboard_after_ingress(*, edge_ip: str, core_ip: str, ingress_ip: str,
         core_sha=stage_hash(core_stage), edge_sha=edge_digest,
         ssh_host_key=ssh_host_key.get_base64(), ssh_port=ssh_port,
         customer_port=customer_port,
+        core_wg_pub=core_pub, edge_wg_pub=edge_pub,
     ))
     # Publish H registry last; a half-pinned Stage stays unavailable.
     _publish_registry(peer)

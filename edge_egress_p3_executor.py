@@ -255,6 +255,15 @@ class Existing6GGuardedExecutor:
     def _lease(self, operation_id, scope, nonce_hash=None):
         with self.db_conn() as conn:
             _locked(conn, operation_id, scope, nonce_hash=nonce_hash)
+            if scope.action == "UID_ATTACH":
+                # Match the established positive 6G handoff adapter: never
+                # turn on a protected UID while global mode remains legacy.
+                mode = conn.execute(
+                    "SELECT value FROM settings "
+                    "WHERE key='edge_egress_protected_mode'"
+                ).fetchone()
+                if mode != ("1",):
+                    raise ExecutorHold("PROTECTED_MODE_REQUIRED_FOR_UID_ATTACH")
 
     async def execute(self, scope: ExecutionScope, ticket: ExecutionTicket, *,
                       actor_id: int, chat_id: int) -> ExecutionReceipt:

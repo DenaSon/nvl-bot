@@ -158,10 +158,41 @@ class Existing6GProtectedHandoffAdapter:
                 "SELECT active,is_default,is_standby,service_port FROM host_pool "
                 "WHERE host=?", (target,),
             ).fetchone()
-            if not s or not t:
-                raise PositiveHandoffHold("HOST_POOL_INCOMPLETE")
+            if not s:
+                raise PositiveHandoffHold("SOURCE_HOST_POOL_INCOMPLETE")
             source_port = int(s[2] or 0)
-            target_port = int(t[3] or 0)
+            target_unlisted = t is None
+            target_admin_port = 22
+            if target_unlisted:
+                # The new wizard intentionally never enrolled an unverified
+                # candidate into the Legacy/automatic-Failover customer pool.
+                # Only a root-owned original Stage pin can authorize insertion
+                # INSIDE the final guarded 6G DB cutover, after F4/UID proofs.
+                from edge_egress_k2_p1_worker import (
+                    load_stage_pin, _check_stage, Phase1Hold,
+                )
+                from edge_egress_v1_ingress import load_registry
+                candidate = conn.execute(
+                    "SELECT edge_id,status,core_public_ipv4 "
+                    "FROM edge_egress_allocations WHERE edge_public_ipv4=?",
+                    (target,),
+                ).fetchall()
+                if len(candidate) != 1 or candidate[0][1:] != ("STAGED", self.core_ip):
+                    raise PositiveHandoffHold("UNLISTED_EDGE_NOT_F3_STAGED")
+                try:
+                    pin = load_stage_pin(candidate[0][0])
+                    if (pin.edge_ipv4 != target
+                            or pin.core_ipv4 != self.core_ip
+                            or pin.customer_port != source_port):
+                        raise PositiveHandoffHold("UNLISTED_EDGE_PORT_OR_IDENTITY_HOLD")
+                    _check_stage(pin)  # root-only stage SHA + live wg0 H identity
+                    target_admin_port = pin.ssh_port
+                except (OSError, ValueError) as exc:
+                    raise PositiveHandoffHold("UNLISTED_EDGE_ORIGINAL_PIN_HOLD") from exc
+                target_port = pin.customer_port
+            else:
+                target_port = int(t[3] or 0)
+                target_admin_port = 22
             accounts = conn.execute(
                 "SELECT username,host FROM ssh_accounts "
                 "WHERE service_type='ssh' AND status LIKE '%فعال%' "
@@ -205,7 +236,10 @@ class Existing6GProtectedHandoffAdapter:
                                       for (u, _), rr in zip(accounts, runtime)),
                 other_explicit_active_accounts=0,
                 source_is_default=(s[0], s[1]) == (1, 1),
-                target_is_active_standby=tuple(t[:3]) == (1, 0, 1),
+                target_is_active_standby=(
+                    tuple(t[:3]) == (1, 0, 1) if t is not None else False
+                ),
+                target_unlisted_f4=target_unlisted,
                 source_service_port=source_port,
                 target_service_port=target_port,
                 target_egress_identity_unique=True,
@@ -373,7 +407,39 @@ class Existing6GProtectedHandoffAdapter:
                     (record.source_host,),
                 ).rowcount != 1:
                     raise PositiveHandoffHold("SOURCE_DEFAULT_CAS_LOST")
-                if conn.execute(
+                if record.target_unlisted_f4:
+                    # Insert only AFTER all protected UIDs were frozen and
+                    # proven on the new Edge and public DNS was verified.
+                    # Never make this Edge eligible for automatic Failover
+                    # before the guarded switch actually commits.
+                    if conn.execute(
+                        "SELECT 1 FROM host_pool WHERE host=?",
+                        (record.target_host,),
+                    ).fetchone():
+                        raise PositiveHandoffHold("UNLISTED_EDGE_BECAME_LISTED")
+                    from edge_egress_k2_p1_worker import load_stage_pin
+                    from edge_egress_f3_readiness import read_readiness, admission_eligible
+                    alloc = conn.execute(
+                        "SELECT edge_id FROM edge_egress_allocations "
+                        "WHERE edge_public_ipv4=? AND status='STAGED'",
+                        (record.target_host,),
+                    ).fetchone()
+                    if alloc is None or not admission_eligible(
+                        read_readiness(conn, alloc[0])
+                    ):
+                        raise PositiveHandoffHold("UNLISTED_EDGE_F4_EXPIRED")
+                    pin = load_stage_pin(alloc[0])
+                    if (pin.edge_ipv4 != record.target_host
+                            or pin.customer_port != record.target_service_port):
+                        raise PositiveHandoffHold("UNLISTED_EDGE_PORT_CHANGED")
+                    conn.execute(
+                        "INSERT INTO host_pool "
+                        "(host,active,is_default,is_standby,service_port,"
+                        "ssh_port,admin_ssh_port) VALUES (?,1,1,0,?,?,?)",
+                        (record.target_host, record.target_service_port,
+                         record.target_service_port, pin.ssh_port),
+                    )
+                elif conn.execute(
                     "UPDATE host_pool SET is_default=1,is_standby=0 "
                     "WHERE host=? AND active=1 AND is_default=0 AND is_standby=1",
                     (record.target_host,),
@@ -385,6 +451,22 @@ class Existing6GProtectedHandoffAdapter:
                     (record.target_host, record.source_host),
                 ).rowcount != 1:
                     raise PositiveHandoffHold("DNS_SETTING_CAS_LOST")
+                # Keep the legacy public-host list consistent with the
+                # authoritative default host_pool in the SAME 6G transaction.
+                # Legacy _db_rebuild_hosts_from_pool() cannot be used because
+                # its protective veto rightly forbids ungated mutations.
+                active = [
+                    row[0] for row in conn.execute(
+                        "SELECT host FROM host_pool WHERE active=1 "
+                        "ORDER BY is_default DESC, host"
+                    ).fetchall()
+                ]
+                if not active or active[0] != record.target_host:
+                    raise PositiveHandoffHold("ACTIVE_HOST_LIST_DRIFT")
+                conn.execute(
+                    "INSERT OR REPLACE INTO settings(key,value) VALUES('hosts',?)",
+                    (",".join(active),),
+                )
         await asyncio.to_thread(commit_default)
 
     async def verify_final(self, record):

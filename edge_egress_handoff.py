@@ -124,6 +124,7 @@ class HandoffSnapshot:
     source_service_port: int
     target_service_port: int
     target_egress_identity_unique: bool
+    target_unlisted_f4: bool = False
 
     def validate(self) -> None:
         try:
@@ -143,8 +144,10 @@ class HandoffSnapshot:
             raise HandoffUnsafe("DNS_NOT_AT_SOURCE_EDGE")
         if not self.source_is_default:
             raise HandoffUnsafe("SOURCE_NOT_CURRENT_DEFAULT")
-        if not self.target_is_active_standby:
-            raise HandoffUnsafe("TARGET_NOT_ACTIVE_STANDBY")
+        if not (self.target_is_active_standby or self.target_unlisted_f4):
+            raise HandoffUnsafe("TARGET_NOT_ACTIVE_STANDBY_OR_PINNED_NEW_EDGE")
+        if self.target_is_active_standby and self.target_unlisted_f4:
+            raise HandoffUnsafe("CONFLICTING_TARGET_POOL_STATE")
         if type(self.other_explicit_active_accounts) is not int or self.other_explicit_active_accounts != 0:
             raise HandoffUnsafe("GLOBAL_DOMAIN_MULTI_EDGE_CONFLICT")
         if type(self.source_service_port) is not int or type(self.target_service_port) is not int or not (

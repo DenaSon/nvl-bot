@@ -254,6 +254,7 @@ def _remote_stage_digest(ssh, directory: str) -> str:
 def onboard_after_ingress(*, edge_ip: str, core_ip: str, ingress_ip: str,
                           public_key: str, ssh_host_key, ssh_port: int,
                           root_password: str | None,
+                          customer_port: int = 0,
                           private_key_path: str | None = None,
                           core_stage_root: Path = STAGE_HOME,
                           ssh_client_factory=None) -> dict:
@@ -328,6 +329,7 @@ def onboard_after_ingress(*, edge_ip: str, core_ip: str, ingress_ip: str,
         core_ipv4=spec.core_public_ipv4, ingress_ipv4=peer.ingress_ipv4,
         core_sha=stage_hash(core_stage), edge_sha=edge_digest,
         ssh_host_key=ssh_host_key.get_base64(), ssh_port=ssh_port,
+        customer_port=customer_port,
     ))
     # Publish H registry last; a half-pinned Stage stays unavailable.
     _publish_registry(peer)

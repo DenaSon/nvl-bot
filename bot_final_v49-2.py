@@ -379,6 +379,10 @@ from edge_egress_k2_final_integration import (
 from edge_egress_k2_p1_worker import (
     Phase1Hold, inspect_phase1, activate_phase1, probe_phase1,
 )
+from edge_egress_k2_phase2_operator import (
+    review_relay_cohort, render_cohort_review, relay_cohort_buttons,
+    make_switch_ticket, execute_relay_switch, RelaySwitchTicket,
+)
 from edge_egress_k2_phase1_wizard import (
     assert_isolated_new_edge_candidate, K2WizardHold,
 )
@@ -24080,33 +24084,130 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("⛔️ فقط مدیر")
             return
         edge_id = d[len("hpeg_relay_"):]
+        context.user_data.pop("k2_p2_switch_ticket", None)
         try:
             edge_id_checked(edge_id)
-            board = await asyncio.to_thread(
-                read_egress_dashboard, db_conn, only_edge=edge_id,
+            review = await asyncio.to_thread(
+                review_relay_cohort, db_conn, edge_id,
             )
-            card = get_egress_card(board, edge_id)
-            transport = await asyncio.to_thread(inspect_egress_transport, card)
-            transfer = await asyncio.to_thread(
-                read_k2_transfer_preview, db_conn, card, transport,
-            )
-            review = k2_review_relay_traffic(board, card, transfer)
             buttons = [
-                [InlineKeyboardButton(label, callback_data=callback)
-                 for label, callback in row]
-                for row in k2_relay_traffic_buttons(review)
+                [InlineKeyboardButton(label,callback_data=callback)
+                 for label,callback in row]
+                for row in relay_cohort_buttons(review)
             ]
             await query.edit_message_text(
-                k2_relay_traffic_html(review), parse_mode="HTML",
+                render_cohort_review(review), parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
         except Exception:
-            log.exception("K2 relay traffic review failed")
+            log.exception("K2 guarded relay cohort review HOLD")
             await query.edit_message_text(
-                "⛔️ بررسی تغییر مسیر ممکن نیست؛ هیچ تغییری انجام نشد.",
+                "⛔️ بررسی تغییر مسیر کامل نیست؛ هیچ تغییری انجام نشد.",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("◀️ سرورها", callback_data="hpeg_status")
                 ]]),
+            )
+        return
+
+    elif d.startswith("hpeg_p2_open_"):
+        if role != 'admin':
+            await query.message.reply_text("⛔️ فقط مدیر")
+            return
+        edge_id=d[len("hpeg_p2_open_"):]
+        context.user_data.pop("k2_p2_switch_ticket",None)
+        try:
+            edge_id_checked(edge_id)
+            review=await asyncio.to_thread(
+                review_relay_cohort,db_conn,edge_id,
+            )
+            if not review.ready:
+                raise ValueError("COHORT_NOT_READY")
+            ticket=await asyncio.to_thread(
+                make_switch_ticket,review,actor_id=update.effective_user.id,
+                chat_id=update.effective_chat.id,cf_config_loader=_cf_get_config,
+            )
+            context.user_data["k2_p2_switch_ticket"]=ticket
+            keyboard=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ انتقال محافظت‌شده",
+                    callback_data=f"hpeg_p2_yes_{edge_id}_{ticket.nonce}")],
+                [InlineKeyboardButton("❌ انصراف",
+                    callback_data=f"hpeg_relay_{edge_id}")],
+            ])
+            await query.edit_message_text(
+                "🔀 <b>تأیید نهایی تغییر رله</b>\n\n"
+                f"رله فعلی: <code>{esc(ticket.source)}</code>\n"
+                f"رله جدید: <code>{esc(ticket.target)}</code>\n"
+                f"کاربران مشمول: <b>{review.active_accounts}</b>\n\n"
+                "این عملیات شامل تغییر مسیر اینترنت هر کاربر و "
+                "نشانی دامنه است. کاربران روی Core باقی می‌مانند.\n"
+                "در صورت خطا، دسترسی کاربران مربوطه ممکن است تا "
+                "بررسی دستی متوقف بماند.\n\n"
+                "برای شروع، تأیید نهایی را انتخاب کنید.",
+                parse_mode="HTML",reply_markup=keyboard,
+            )
+        except Exception:
+            log.exception("K2 guarded relay confirmation preflight HOLD")
+            await query.edit_message_text(
+                "⛔️ شرایط انتقال تأیید نشد؛ هیچ حساب یا دامنه‌ای تغییر نکرده است.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("◀️ بررسی مجدد",
+                                         callback_data=f"hpeg_relay_{edge_id}")
+                ]]),
+            )
+        return
+
+    elif d.startswith("hpeg_p2_yes_"):
+        if role != 'admin':
+            await query.message.reply_text("⛔️ فقط مدیر")
+            return
+        raw=d[len("hpeg_p2_yes_"):]
+        edge_id,sep,nonce=raw.rpartition("_")
+        # Consume BEFORE any await; a forwarded/stale callback cannot replay.
+        ticket=context.user_data.pop("k2_p2_switch_ticket",None)
+        if (not sep or not isinstance(ticket,RelaySwitchTicket)
+                or edge_id != ticket.edge_id or nonce != ticket.nonce
+                or update.effective_user.id != ticket.actor_id
+                or update.effective_chat.id != ticket.chat_id
+                or time.time() >= ticket.expires_at):
+            await query.message.reply_text(
+                "⛔️ تأیید نامعتبر یا منقضی است؛ دوباره وضعیت را بررسی کنید."
+            )
+            return
+        try:
+            await query.edit_message_text(
+                "⏳ در حال بررسی مسیر و انتقال محافظت‌شده..."
+            )
+            outcome=await execute_relay_switch(
+                ticket,db_conn=db_conn,acquire=_db_acquire_failover_lock,
+                journal=_db_update_failover_operation,
+                cf_config_loader=_cf_get_config,
+                actor_id=update.effective_user.id,
+                chat_id=update.effective_chat.id,
+            )
+            if outcome.ok:
+                await query.message.reply_text(
+                    "✅ <b>مسیر کاربران تغییر کرد</b>\n\n"
+                    f"🌐 رله جدید: <code>{esc(ticket.target)}</code>\n"
+                    "کاربران و رمزهای SSH روی Core باقی مانده‌اند.\n"
+                    "مسیر خروجی کاربران مشمول به Edge انتخابی منتقل شد.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("◀️ جزئیات سرور",
+                                             callback_data=f"hpeg_edge_{edge_id}")
+                    ]]),
+                )
+            else:
+                log.warning("K2 protected relay returned HOLD op=%s reason=%s",
+                            outcome.operation_id,outcome.reason)
+                await query.message.reply_text(
+                    "⛔️ عملیات کامل نشد. وضعیت مسیر ممکن است نیازمند "
+                    "بررسی دستی باشد؛ بدون بررسی قفل 6G، عملیات را تکرار نکنید."
+                )
+        except Exception:
+            log.exception("K2 protected relay guarded operation HOLD")
+            await query.message.reply_text(
+                "⛔️ عملیات به نتیجه قطعی نرسید؛ تا بررسی قفل 6G و "
+                "وضعیت کاربران، اجرای مجدد ممنوع است."
             )
         return
 

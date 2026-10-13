@@ -206,6 +206,7 @@ class LiveDriverConfig:
     core_digest: str
     edge: RemotePinnedEdge
     acceptance_enabled: bool = False
+    dns_plan: object | None = None  # optional immutable Cloudflare preview from operator ticket
 
 
 class ProtectedLiveHostActions:
@@ -507,7 +508,8 @@ class ProtectedLiveHostActions:
         # Never rely on one pre-cutover 6G snapshot: the provider may make
         # several non-atomic updates. Recheck the shared lease before EACH.
         await asyncio.to_thread(
-            self.cf.switch_edge_to_edge, source, target, guard=self._lease,
+            self.cf.switch_edge_to_edge, source, target,
+            pinned_plan=self.config.dns_plan, guard=self._lease,
         )
 
     async def assert_dns_target(self, target):

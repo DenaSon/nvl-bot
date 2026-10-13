@@ -197,6 +197,9 @@ class PositiveAdapterTests(unittest.TestCase):
         self.assertTrue(result.ok, result.reason)
         self.assertEqual(host.dns, TARGET)
         self.assertEqual(self.db.execute(
+            "SELECT value FROM settings WHERE key='hosts'"
+        ).fetchone()[0].split(",")[0],TARGET)
+        self.assertEqual(self.db.execute(
             "SELECT value FROM settings WHERE key='dns_current_ip'"
         ).fetchone(), (TARGET,))
         self.assertEqual(self.db.execute(
@@ -222,6 +225,67 @@ class PositiveAdapterTests(unittest.TestCase):
         self.assertLess(host.events.index("drain"), host.events.index("repin"))
         self.assertLess(host.events.index("repin"), host.events.index("dns"))
         self.assertFalse(host.blocked)
+
+    def test_new_wizard_edge_is_atomically_admitted_only_at_cutover(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        self.db.execute("DELETE FROM host_pool WHERE host=?", (TARGET,))
+        pin = SimpleNamespace(
+            edge_id="e9",edge_ipv4=TARGET,core_ipv4=CORE,
+            customer_port=2252,ssh_port=22,
+        )
+        with patch("edge_egress_k2_p1_worker.load_stage_pin",
+                   return_value=pin), \
+             patch("edge_egress_k2_p1_worker._check_stage"):
+            outcome=self.run_it(Host())
+        self.assertTrue(outcome.ok,outcome.reason)
+        self.assertEqual(self.db.execute(
+            "SELECT active,is_default,is_standby,service_port "
+            "FROM host_pool WHERE host=?", (TARGET,)
+        ).fetchone(),(1,1,0,2252))
+        self.assertEqual(self.db.execute(
+            "SELECT value FROM settings WHERE key='hosts'"
+        ).fetchone()[0].split(",")[0],TARGET)
+        self.assertEqual(self.db.execute(
+            "SELECT value FROM settings WHERE key='dns_current_ip'"
+        ).fetchone(),(TARGET,))
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM ssh_accounts WHERE host=?",(TARGET,)
+        ).fetchone()[0],2)
+
+    def test_unlisted_edge_without_original_pinned_service_port_is_held(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        self.db.execute("DELETE FROM host_pool WHERE host=?", (TARGET,))
+        pin = SimpleNamespace(
+            edge_id="e9",edge_ipv4=TARGET,core_ipv4=CORE,
+            customer_port=0,ssh_port=22,
+        )
+        host=Host()
+        with patch("edge_egress_k2_p1_worker.load_stage_pin",
+                   return_value=pin), \
+             patch("edge_egress_k2_p1_worker._check_stage"):
+            result=self.run_it(host)
+        self.assertFalse(result.ok)
+        self.assertNotIn("dns",host.events)
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM host_pool WHERE host=?",(TARGET,)
+        ).fetchone()[0],0)
+
+    def test_mixed_unprotected_cohort_never_reaches_uid_or_dns(self):
+        self.db.execute(
+            "INSERT INTO ssh_accounts VALUES('nvl_legacy',?,?,?)",
+            (SOURCE,"ssh","🟢 فعال"),
+        )
+        host=Host()
+        outcome=self.run_it(host)
+        self.assertFalse(outcome.ok)
+        self.assertNotIn("freeze",host.events)
+        self.assertNotIn("repin",host.events)
+        self.assertNotIn("dns",host.events)
+        self.assertEqual(self.db.execute(
+            "SELECT host FROM ssh_accounts WHERE username='nvl_legacy'"
+        ).fetchone(),(SOURCE,))
 
     def test_active_session_holds_without_repin_or_dns_change(self):
         host = Host(busy=True)

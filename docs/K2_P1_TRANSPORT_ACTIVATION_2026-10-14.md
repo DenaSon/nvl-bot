@@ -105,3 +105,15 @@ Phase 1 namespace IP probe.
 At feature SHA `b48cf3989d42c24d9136e316d17589251e0e1de2`, PR #125 added exact, repeated 6G lock checks against the public source default, candidate absence from customer host pool, edge identity and **both Stage digests**. Lock recovery markers are rejected for execution; after acquiring the single lease, the exact Core Stage and live wg0 ingress peer are re-read before host changes. The actual SSH Edge transport and local Core namespace must explicitly report success, then both independent pinned peers are freshly observed UP **before** the exact namespace external public Edge IPv4 is accepted. On uncertainty the existing 6G journal remains RUNNING/RECOVERY_REQUIRED, with no automated retry or customer/Core fallback.
 
 **CI:** 1,352 Python tests PASS; independent Stage-only regressions Python 3.11 and 3.12 PASS. That proves the source behavior against mocked/offline cases, **not** a successful VPS install. `master` and Production were not updated. The only released Phase 1 result is `TRANSPORT PROVEN, NO CUSTOMERS MOVED`; per-UID protection, DNS/IPv6 proof, boot restoration and full real-world failure acceptance remain future/operator gates.
+
+## Phase2 discovered missing F3 bridge (#128, feature branch only)
+
+The initial Phase1 Worker did not register a dedicated F3 allocation, which
+prevented a new isolated Edge from ever reaching the protected relay switch.
+Phase1 onboarding now pins both original WG **public** keys (plus original
+Stage/SSH key and customer port); after the dedicated Edge IP is verified,
+Phase1 activation reserves and marks its existing F3 allocation and readiness
+`STAGED` under the same Phase6G RUNNING intent. This does NOT create F4
+READY, install protected PAM/UID routes, add the Edge to host_pool, change DNS
+or move subscribers. Existing F3 migrations must be present. Partial failure
+keeps the protected 6G HOLD for manual reconciliation.

@@ -93,3 +93,25 @@ SOCKS through Edge and exact customer public IPv4 from outside, UDP/TCP DNS,
 IPv6, WG loss/restore, cold boot/persistence, session drain and HOLD/manual
 recovery; verify the unaffected Legacy cohort. Do not merge feature #120 to
 `master` until Phase 3 and acceptance are complete.
+
+## Final Phase1→F3 registration bridge (#128)
+
+A missing integration was found during Phase2 review: the Phase1 pinned
+transport activation previously returned successful dedicated WG/IP evidence
+without publishing a formal F3 reservation, so a newly onboarded Edge could
+never pass the guarded protected cutover. The original Wizard now stores both
+**public** WireGuard peer keys in its immutable root-only StagePin. After the
+Core namespace independently observes the exact Edge public IPv4, the Phase1
+Worker validates those original keys against the Core Stage, claims the
+**existing** F3 allocation under the same 6G RUNNING intent and stages F3
+readiness as `STAGED` in the **same** SQLite transaction. It does not mint
+production F4 READY, touch subscribers or enroll early in active host_pool.
+Migrations for F3 allocation/readiness must already be installed and backed
+up; a missing table or an older pin without original WG public keys yields
+protected HOLD and requires operator reconciliation, not an ad-hoc shortcut.
+
+This completes the **source wiring** for new Edge Stage → F3 STAGED →
+independent real F4 acceptance → all-PROTECTED guarded manual cutover.
+A mixed Legacy/Protected cohort is still blocked. No live tests or production
+release have been performed by this change. The user-facing Telegram source
+interface does not automatically enroll Legacy customers or recover a 6G HOLD.

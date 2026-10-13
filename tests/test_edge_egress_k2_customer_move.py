@@ -102,7 +102,7 @@ class GuardedCustomerBindingTests(unittest.TestCase):
         return GuardedCustomerIngressBindingPort(
             db_conn=self.db,scope=self.scope,ticket=self.ticket,
             uid_port=self.uid, independent_ingress_proof=lambda _: True,
-            **options,
+            geteuid=lambda: 0, **options,
         )
 
     def host(self, user="canary"):
@@ -118,6 +118,17 @@ class GuardedCustomerBindingTests(unittest.TestCase):
         self.assertEqual(self.host(),self.scope.source_host)
         self.assertEqual(self.uid.calls,[])
 
+    def test_nonroot_cannot_bind_even_when_release_flag_is_true(self):
+        p = GuardedCustomerIngressBindingPort(
+            db_conn=self.db,scope=self.scope,ticket=self.ticket,
+            uid_port=self.uid,independent_ingress_proof=lambda _: True,
+            release_enabled=True, geteuid=lambda: 1000,
+        )
+        with self.assertRaisesRegex(CustomerBindingHold, "NOT_RELEASED"):
+            asyncio.run(p.apply(self.scope))
+        self.assertEqual(self.host(), self.scope.source_host)
+        self.assertEqual(self.uid.calls, [])
+
     def test_verified_uid_route_then_exact_host_cas(self):
         p = self.make(release_enabled=True)
         asyncio.run(p.apply(self.scope))
@@ -132,7 +143,7 @@ class GuardedCustomerBindingTests(unittest.TestCase):
         p = GuardedCustomerIngressBindingPort(
             db_conn=self.db,scope=self.scope,ticket=self.ticket,
             uid_port=self.uid,independent_ingress_proof=lambda _:False,
-            release_enabled=True,
+            release_enabled=True, geteuid=lambda: 0,
         )
         with self.assertRaisesRegex(CustomerBindingHold,"INGRESS_NOT_ATTESTED"):
             asyncio.run(p.apply(self.scope))

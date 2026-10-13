@@ -366,6 +366,11 @@ from edge_egress_p3_telegram import (
     wizard_prompt as egress_new_edge_prompt,
     wizard_result as egress_staged_edge_result,
 )
+from edge_egress_k2_relay_switch import (
+    review_relay_traffic as k2_review_relay_traffic,
+    relay_traffic_html as k2_relay_traffic_html,
+    relay_traffic_buttons as k2_relay_traffic_buttons,
+)
 from edge_egress_k2_final_integration import (
     read_transfer_preview as read_k2_transfer_preview,
     transfer_preview_html as k2_transfer_preview_html,
@@ -3920,7 +3925,7 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
         html, edge_id = egress_staged_edge_result(edge_ip, result)
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔎 بررسی اتصال", callback_data=f"hpeg_stage_{edge_id}"),
-             InlineKeyboardButton("👥 انتقال کاربران", callback_data=f"hpeg_transfer_{edge_id}")],
+             InlineKeyboardButton("🔀 تغییر مسیر ترافیک", callback_data=f"hpeg_relay_{edge_id}")],
             [InlineKeyboardButton("📋 بررسی آماده‌سازی",
                                   callback_data=f"hpeg_review_edge_{edge_id}")],
             [InlineKeyboardButton("◀️ سرورها", callback_data="hpeg_status")],
@@ -23869,6 +23874,41 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.exception("K2 guarded account transfer failed or unavailable")
             await query.message.reply_text(
                 "⛔️ انتقال کامل نشد؛ وضعیت را بدون اقدام تکراری بررسی کنید."
+            )
+        return
+
+    elif d.startswith("hpeg_relay_"):
+        if role != 'admin':
+            await query.message.reply_text("⛔️ فقط مدیر")
+            return
+        edge_id = d[len("hpeg_relay_"):]
+        try:
+            edge_id_checked(edge_id)
+            board = await asyncio.to_thread(
+                read_egress_dashboard, db_conn, only_edge=edge_id,
+            )
+            card = get_egress_card(board, edge_id)
+            transport = await asyncio.to_thread(inspect_egress_transport, card)
+            transfer = await asyncio.to_thread(
+                read_k2_transfer_preview, db_conn, card, transport,
+            )
+            review = k2_review_relay_traffic(board, card, transfer)
+            buttons = [
+                [InlineKeyboardButton(label, callback_data=callback)
+                 for label, callback in row]
+                for row in k2_relay_traffic_buttons(review)
+            ]
+            await query.edit_message_text(
+                k2_relay_traffic_html(review), parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        except Exception:
+            log.exception("K2 relay traffic review failed")
+            await query.edit_message_text(
+                "⛔️ بررسی تغییر مسیر ممکن نیست؛ هیچ تغییری انجام نشد.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("◀️ سرورها", callback_data="hpeg_status")
+                ]]),
             )
         return
 

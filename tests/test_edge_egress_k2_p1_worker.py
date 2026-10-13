@@ -44,6 +44,8 @@ class Phase1TransportActivationTests(unittest.TestCase):
         )
         self.events=[]
         self.next_id=0
+        self.edge_running=False
+        self.core_running=False
 
     def acquire(self,source,target):
         self.events.append("lock")
@@ -65,10 +67,14 @@ class Phase1TransportActivationTests(unittest.TestCase):
 
     def remote(self,pin,action):
         self.events.append("edge:"+action)
-        return "ABSENT" if action == "inspect" else "TRANSPORT_STARTED"
+        if action == "inspect":
+            return "UP" if self.edge_running else "ABSENT"
+        self.edge_running=True
+        return "TRANSPORT_STARTED"
 
     def core(self,*args):
         self.events.append("core:ensure")
+        self.core_running=True
         return "TRANSPORT_STARTED"
 
     def prove(self,spec):
@@ -79,7 +85,8 @@ class Phase1TransportActivationTests(unittest.TestCase):
         with patch(
             "edge_egress_k2_p1_worker._check_stage",
             return_value=(self.spec,"wg-peer",Path("/root/nvl-egress-v1/core-e8")),
-        ),patch("edge_egress_k2_p1_worker.observe",return_value="ABSENT"):
+        ),patch("edge_egress_k2_p1_worker.observe",
+                side_effect=lambda *args: "UP" if self.core_running else "ABSENT"):
             return activate_phase1(
                 "e8",db_conn=lambda:self.conn,
                 acquire=self.acquire,journal=self.journal,
@@ -180,6 +187,70 @@ class Phase1TransportActivationTests(unittest.TestCase):
         with self.assertRaisesRegex(Phase1Hold,"IP_NOT_PROVEN"):
             _prove_ipv4(spec,run=wrong,sleep=lambda n:None)
 
+
+    def test_wrong_injected_public_proof_must_not_signal_success(self):
+        self.prove=lambda _spec: CORE
+        with self.assertRaisesRegex(Phase1Hold,"HELD_FOR_REVIEW"):
+            self.start()
+        status,detail=self.conn.execute(
+            "SELECT status,detail_json FROM failover_operations").fetchone()
+        self.assertEqual(status,"RUNNING")
+        self.assertEqual(json.loads(detail)["phase"],RECOVERY)
+        self.assertNotIn("EGRESS_P1_TRANSPORT_PROVEN",self.events)
+
+    def test_ownership_change_after_remote_activation_holds_before_core(self):
+        original=self.remote
+        def changed(pin,action):
+            value=original(pin,action)
+            if action == "ensure":
+                self.conn.execute(
+                    "UPDATE host_pool SET is_default=0 WHERE host=?", (SOURCE,))
+                self.conn.commit()
+            return value
+        self.remote=changed
+        with self.assertRaisesRegex(Phase1Hold,"HELD_FOR_REVIEW"):
+            self.start()
+        self.assertNotIn("core:ensure",self.events)
+        detail=self.conn.execute(
+            "SELECT detail_json FROM failover_operations").fetchone()[0]
+        self.assertEqual(json.loads(detail)["phase"],RECOVERY)
+
+    def test_core_start_that_does_not_report_success_holds(self):
+        self.core=lambda *args: "ABSENT"
+        with self.assertRaisesRegex(Phase1Hold,"HELD_FOR_REVIEW"):
+            self.start()
+        self.assertNotIn("ip:prove",self.events)
+
+    def test_post_start_remote_verification_requires_actual_up(self):
+        original=self.remote
+        def no_up(pin,action):
+            result=original(pin,action)
+            return "ABSENT" if action=="inspect" else result
+        self.remote=no_up
+        with self.assertRaisesRegex(Phase1Hold,"HELD_FOR_REVIEW"):
+            self.start()
+        self.assertNotIn("ip:prove",self.events)
+
+    def test_recovery_marker_does_not_authorize_continuing_activation(self):
+        original=self.remote
+        def tamper_intent(pin,action):
+            result=original(pin,action)
+            if action == "ensure":
+                row=self.conn.execute(
+                    "SELECT id,detail_json FROM failover_operations").fetchone()
+                data=json.loads(row[1])
+                data["phase"]=RECOVERY
+                self.conn.execute(
+                    "UPDATE failover_operations SET detail_json=? WHERE id=?",
+                    (json.dumps(data),row[0]),
+                )
+                self.conn.commit()
+            return result
+        self.remote=tamper_intent
+        with self.assertRaisesRegex(Phase1Hold,"HELD_FOR_REVIEW"):
+            self.start()
+        self.assertNotIn("core:ensure",self.events)
+
     def test_source_wizard_pins_both_stages_no_fake_ready(self):
         txt=Path("edge_egress_v1_onboarding.py").read_text(encoding="utf-8")
         self.assertIn("edge_digest = _remote_stage_digest(ssh, remote_dir)",txt)
@@ -192,7 +263,7 @@ class Phase1TransportActivationTests(unittest.TestCase):
     def test_bot_requires_admin_confirmation_and_opt_in_no_users(self):
         src=Path("bot_final_v49-2.py").read_text(encoding="utf-8")
         for marker in (
-            "hpeg_p1_open_", "hpeg_p1_yes_",
+            "hpeg_p1_open_", "hpeg_p1_yes_", "hpeg_p1_status_",
             "k2_p1_activation_ticket", "role != 'admin'",
             "k2_p1_transport_activation_enabled",
             "activate_phase1, edge_id, db_conn=db_conn",
@@ -200,6 +271,10 @@ class Phase1TransportActivationTests(unittest.TestCase):
             self.assertIn(marker,src)
         self.assertIn("hpeg_p1_open_",Path(
             "edge_egress_p3_telegram.py").read_text(encoding="utf-8"))
+        self.assertIn("hpeg_p1_status_",Path(
+            "edge_egress_p3_telegram.py").read_text(encoding="utf-8"))
+        self.assertIn("اثبات IP عمومی فقط",src)
+        self.assertIn("Edge هنوز F4 READY نیست",src)
 
     def test_pin_file_rejects_invalid_fields_before_network(self):
         for value in ("bad/ip", "10.0.0.1", "1.2.3.999"):

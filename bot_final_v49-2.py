@@ -23929,6 +23929,43 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
+    elif d.startswith("hpeg_p1_status_"):
+        if role != 'admin':
+            await query.message.reply_text("⛔️ فقط مدیر")
+            return
+        edge_id = d[len("hpeg_p1_status_"):]
+        try:
+            edge_id_checked(edge_id)
+            state = await asyncio.to_thread(
+                inspect_phase1, edge_id, db_conn=db_conn,
+            )
+            core_state = "✅ برقرار" if state["core"] == "UP" else "⚪️ غیرفعال"
+            edge_state = "✅ برقرار" if state["edge"] == "UP" else "⚪️ غیرفعال"
+            await query.edit_message_text(
+                "📊 <b>وضعیت خروجی اختصاصی</b>\n\n"
+                f"🖥 سرور: <code>{esc(state['edge_id'])}</code>\n"
+                f"🌐 IP هدف: <code>{esc(state['edge_ip'])}</code>\n"
+                f"🔸 Core: {core_state}\n"
+                f"🔸 Edge: {edge_state}\n\n"
+                "این نمایش، وضعیت فعلی دو تونل است؛ اثبات IP عمومی فقط "
+                "پس از تست فعال‌سازی معتبر خواهد بود.\n"
+                "🔐 کاربران منتقل نشده‌اند و Edge هنوز F4 READY نیست.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("◀️ جزئیات سرور",
+                                         callback_data=f"hpeg_edge_{edge_id}")
+                ]]),
+            )
+        except Exception:
+            await query.edit_message_text(
+                "⛔️ وضعیت خروجی قابل تأیید نیست؛ اطلاعات Stage، اتصال SSH "
+                "یا قفل عملیات را بررسی کنید. هیچ تغییری انجام نشد.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("◀️ سرورها", callback_data="hpeg_status")
+                ]]),
+            )
+        return
+
     elif d.startswith("hpeg_p1_open_"):
         if role != 'admin':
             await query.message.reply_text("⛔️ فقط مدیر")

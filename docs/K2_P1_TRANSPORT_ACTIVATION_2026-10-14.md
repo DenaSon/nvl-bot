@@ -59,3 +59,42 @@ requires fresh disposable VPS boot, DNS/IPv6/leak/failure evidence before
 real users are permitted.
 
 No production actions were performed while developing this change.
+
+## Final Phase 1 source closure — additional safety review
+
+- Existing Worker/Stage/onboarding/Telegram wiring was found at PR #120's original
+  source SHA `fffa426c9fbe479e8c27746889a8f803ca7d01a2`. No parallel
+  provisioning engine was introduced.
+- The final activation rechecks **exact shared 6G intent (edge ID + both
+  Stage SHAs), current source default, absent target customer-pool entry,
+  live wg0/Ingress identity and Core Stage after acquiring its 6G lease**.
+  A RECOVERY state cannot be treated as permission to resume the installer.
+- The remote Edge and local Core `ensure` must return known success
+  responses. Both peers must be observed `UP` afterwards, then a fresh
+  namespace IPv4 probe must equal the exact candidate public IPv4.
+  Injected/fake positive probes cannot override the equality check.
+- The existing Edge panel now has **📊 وضعیت خروجی**: read-only pinned
+  observation of Core and Edge (or HOLD). This deliberately does **not**
+  advertise F4 customer readiness or an assumed public IP without proof.
+- Failure or drift during activation holds the existing 6G operation for
+  reconciliation without touching wg0, SSH users, default DNS or Failover.
+- Focused mock/SQLite tests cover actual call ordering, no customer writes,
+  wrong IP, ownership change after Edge start, missing UP state, and
+  recovery-marker interruption. No extra hard-gates unrelated to Phase 1.
+
+### Completion and deployment boundary
+
+The **Phase 1 source workflow** is implemented and CI-validated:
+`Telegram -> Add Edge -> Stage+pin -> admin preview -> confirm
+-> ensure Edge -> ensure Core -> observe UP -> public IPv4 proof`.
+It remains **OFF by default** through
+`k2_p1_transport_activation_enabled=0`. A controlled disposable VPS
+deploy/real network acceptance is still required before treating Phase 1
+as validated on actual hosts. Never flip this setting on the live Core
+without independently checked backups, pinned SSH, rescue access, and a
+dedicated test VPS. The Worker does not install a persistent boot unit or
+protected PAM/UID guard; those and F3/F4 readiness are deliberately NOT
+inferred from a transport-only IPv4 probe. Existing Issue #106 records
+later protected-customer acceptance requirements. Production/master remain
+unchanged until the full 3-phase release is authorized.
+

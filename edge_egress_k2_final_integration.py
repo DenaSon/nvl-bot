@@ -1,4 +1,4 @@
-"""K2 final integration: read-only cohort transfer admission in the existing Telegram Edge panel.
+"""K2 final integration: read-only traffic-route readiness in the existing Telegram Edge panel.
 
 This is deliberately NOT the migration executor. The legacy bulk-host/DNS writer
 never establishes per-UID Egress. No UI path in this module writes host, routes,
@@ -89,7 +89,7 @@ def read_transfer_preview(db_conn: Callable, card, transport) -> TransferPreview
 
 def transfer_preview_html(preview: TransferPreview) -> str:
     body = [
-        "👥 <b>انتقال کاربران به Edge</b>", "",
+        "👥 <b>مسیر ترافیک کاربران</b>", "",
         "سرور: <code>" + escape(preview.edge_id, quote=True) + "</code>",
         "IP مقصد: <code>" + escape(preview.edge_ip, quote=True) + "</code>",
         f"حساب‌های SSH فعال: <b>{preview.ssh_accounts}</b>", "",
@@ -97,9 +97,9 @@ def transfer_preview_html(preview: TransferPreview) -> str:
     if preview.can_execute:
         body.append("✅ آماده تأیید انتقال محافظت‌شده")
     else:
-        body.append("⛔ <b>انتقال فعلاً متوقف است.</b>")
+        body.append("⛔ <b>تغییر مسیر فعلاً متوقف است.</b>")
         body.extend("• " + escape(x, quote=True) for x in preview.blockers)
-        body.extend(("", "تغییر هاست حساب به‌تنهایی IP خروجی را تغییر نمی‌دهد."))
+        body.extend(("", "حساب‌ها روی Core می‌مانند؛ تغییر IP اتصال بدون مسیر خروجی محافظت‌شده کافی نیست."))
     return "\n".join(body)
 
 

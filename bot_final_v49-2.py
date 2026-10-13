@@ -337,6 +337,10 @@ from edge_egress_phase2_console import (
     preview_uid_html as egress_uid_preview_html,
     MAX_EDGES as EGRESS_PAGE_SIZE,
 )
+from edge_egress_phase2_wizard import (
+    new_edge_prompt as egress_new_edge_prompt,
+    staged_edge_result as egress_staged_edge_result,
+)
 from edge_egress_phase2_review import (
     build_review as build_egress_operator_review,
     review_html as egress_review_html,
@@ -3773,7 +3777,8 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
 
 
 async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, chat_id, app,
-                               private_key_path=None, connect_retries=1, provider=None, provider_instance_id=None):
+                               private_key_path=None, connect_retries=1, provider=None, provider_instance_id=None,
+                               *, egress_stage_requested=False):
     """رَپِر async: کار سنگین را در thread جدا اجرا می‌کند تا event loop ربات بلاک نشود.
     🆕 private_key_path/connect_retries برای VPSهایی که از «ساخت VPS ابری خودکار» می‌آیند (بدون
     رمز روت، فقط کلید، و تازه بوت شده پس ممکن است SSHـش چند ثانیه دیرتر آماده شود).
@@ -3786,6 +3791,8 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
     # 🐛🔧 سقفِ زمانیِ بیرونی: حتی اگه thread (به هر دلیلِ پیش‌بینی‌نشده‌ای) گیر کنه، ربات بعد از
     # این مهلت خودش کنترل رو پس می‌گیره به‌جای اینکه برای همیشه بی‌پاسخ بمونه.
     # connect_retries می‌تونه چند بار با فاصلهٔ ۱۰ ثانیه تلاش کنه، پس سقف باید فضای کافی بده.
+    if type(egress_stage_requested) is not bool:
+        raise ValueError("INVALID_EGRESS_STAGE_WIZARD_OPT_IN")
     # D1-C1: legacy installer builds ingress-only Relay and immediately activates
     # it in host_pool. Protected mode must deny that before remote side effects.
     egress_gate = legacy_new_edge_gate(await asyncio.to_thread(
@@ -3831,9 +3838,11 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
     # Default OFF: preserve legacy behavior. STAGED never means READY.
     # A partial stage/H registry is held for operator reconciliation, never
     # advertised as protected Egress or used to rebind customer UID routes.
-    _i_enabled = (await asyncio.to_thread(
-        _db_get_setting, 'edge_egress_v1_onboard_enabled', '0'
-    )) == '1'
+    _i_enabled = (
+        egress_stage_requested or (await asyncio.to_thread(
+            _db_get_setting, 'edge_egress_v1_onboard_enabled', '0'
+        )) == '1'
+    )
     if _i_enabled:
         try:
             from edge_egress_v1_onboarding import onboard_after_ingress
@@ -3848,6 +3857,8 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
                 root_password=root_password,
                 private_key_path=private_key_path,
             )
+            if egress_stage_requested:
+                egress_staged_edge_result(edge_ip, result)
         except Exception:
             log.exception('I dedicated Egress stage HOLD for Edge %s', edge_ip)
             await app.bot.send_message(
@@ -3876,21 +3887,34 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
         # Ingress succeeded regardless; never pretend the Egress tunnel was
         # automatically provisioned.
 
-    status = "✅ پینگ داخل تونل جواب داد." if result["tunnel_ok"] else "⚠️ تونل بالا آمد ولی پینگ داخلی جواب نداد — دستی با «wg show» چک کنید."
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("⭐ این IP را پیش‌فرض کل سیستم کن", callback_data=f"hpdef_{edge_ip}")],
-                               [InlineKeyboardButton("🛡 وضعیت و مسدودسازی IPها", callback_data="hp_menu")]])
-    await app.bot.send_message(
-        chat_id,
-        f"🎉 <b>Edge جدید با موفقیت راه‌اندازی شد</b>\n\n"
-        f"🌐 IP عمومی: <code>{esc(edge_ip)}</code>\n"
-        f"🔒 IP داخلی تونل: <code>{result['edge_wg_ip']}</code>\n"
-        f"🔑 کلید عمومی Edge: <code>{esc(result['edge_pubkey'])}</code>\n"
-        f"{status}\n\n"
-        f"این IP هم‌اکنون به «🌐 سرویس IP» اضافه و فعال شد.\n"
-        f"🛡 Egress خروجی: "
-        f"{'Stage ثبت شد، هنوز READY نیست.' if result.get('egress_v1') else 'هنوز تأیید نشده؛ ثبت ورودی به‌معنای خروج کاربران از Edge نیست.'}",
-        parse_mode="HTML", reply_markup=kb
-    )
+    if egress_stage_requested:
+        # No default/DNS/UID switch on the new protected-aware entrypoint.
+        html, edge_id = egress_staged_edge_result(edge_ip, result)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📦 بازرسی Stage خروجی", callback_data=f"hpeg_stage_{edge_id}")],
+            [InlineKeyboardButton("🧭 طرح آماده‌سازی (بدون اجرا)",
+                                  callback_data=f"hpeg_review_edge_{edge_id}")],
+            [InlineKeyboardButton("🔙 مرکز کنترل Egress", callback_data="hpeg_status")],
+        ])
+        await app.bot.send_message(
+            chat_id, html, parse_mode="HTML", reply_markup=kb,
+        )
+    else:
+        status = "✅ پینگ داخل تونل جواب داد." if result["tunnel_ok"] else "⚠️ تونل بالا آمد ولی پینگ داخلی جواب نداد — دستی با «wg show» چک کنید."
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⭐ این IP را پیش‌فرض کل سیستم کن", callback_data=f"hpdef_{edge_ip}")],
+                                   [InlineKeyboardButton("🛡 وضعیت و مسدودسازی IPها", callback_data="hp_menu")]])
+        await app.bot.send_message(
+            chat_id,
+            f"🎉 <b>Edge جدید با موفقیت راه‌اندازی شد</b>\n\n"
+            f"🌐 IP عمومی: <code>{esc(edge_ip)}</code>\n"
+            f"🔒 IP داخلی تونل: <code>{result['edge_wg_ip']}</code>\n"
+            f"🔑 کلید عمومی Edge: <code>{esc(result['edge_pubkey'])}</code>\n"
+            f"{status}\n\n"
+            f"این IP هم‌اکنون به «🌐 سرویس IP» اضافه و فعال شد.\n"
+            f"🛡 Egress خروجی: "
+            f"{'Stage ثبت شد، هنوز READY نیست.' if result.get('egress_v1') else 'هنوز تأیید نشده؛ ثبت ورودی به‌معنای خروج کاربران از Edge نیست.'}",
+            parse_mode="HTML", reply_markup=kb
+        )
     return True, edge_ip, result
 # ============================================================================
 # پایان بخش «افزودن خودکار Edge جدید»
@@ -12924,6 +12948,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             safe_clear_context(context)
             return
         edge_name = f"edge-{edge_ip.replace('.', '-')}"
+        stage_for_this_edge = (context.user_data.get('egress_new_edge_requested') is True)
         safe_clear_context(context)
         await update.message.reply_text(
             f"⏳ در حال راه‌اندازی کامل Edge روی <code>{esc(edge_ip)}</code>... "
@@ -12932,13 +12957,17 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         async def _provision_task_guarded():
             try:
-                await _provision_new_edge(edge_ip, root_pass, customer_port, edge_name, chat_id, context.application)
+                await _provision_new_edge(
+                    edge_ip, root_pass, customer_port, edge_name, chat_id,
+                    context.application, egress_stage_requested=stage_for_this_edge,
+                )
             except Exception:
                 log.exception("خطای غیرمنتظره در تسک پس‌زمینهٔ راه‌اندازی Edge")
-                tb = traceback.format_exc()[-3000:]
                 with contextlib.suppress(Exception):
                     await context.application.bot.send_message(
-                        chat_id, f"❌ <b>خطای غیرمنتظره حین راه‌اندازی Edge:</b>\n\n<code>{esc(tb)}</code>", parse_mode="HTML")
+                        chat_id, "⛔️ نصب Edge با خطای غیرمنتظره متوقف شد؛ "
+                        "ممکن است تغییرات ورودی یا Stage نیمه‌کاره باقی مانده باشد. "
+                        "بدون بررسی وضعیت، Wizard را مجدداً اجرا نکنید.")
 
         spawn_bg_task(_provision_task_guarded())
 
@@ -23686,7 +23715,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 buttons.append(pager)
             buttons.extend([
                 [InlineKeyboardButton("🔄 بروزرسانی وضعیت", callback_data=f"hpeg_page_{page}")],
-                [InlineKeyboardButton("🚀 افزودن Edge", callback_data="hp_addedge")],
+                [InlineKeyboardButton("🚀 افزودن Edge (Ingress + Egress)", callback_data="hpeg_wizard")],
                 [InlineKeyboardButton("🧭 مراحل راه‌اندازی", callback_data="hpeg_steps")],
                 [InlineKeyboardButton("🔙 بازگشت", callback_data="hp_menu")],
             ])
@@ -23706,7 +23735,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             instructions_html(), parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🚀 افزودن Edge", callback_data="hp_addedge")],
+                [InlineKeyboardButton("🚀 افزودن Edge (Ingress + Egress)", callback_data="hpeg_wizard")],
                 [InlineKeyboardButton("🔙 مدیریت Egress", callback_data="hpeg_status")],
             ]),
         )
@@ -24276,7 +24305,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("➕ آدرس/دامنهٔ IP جدید را بفرستید (بدون فاصله، فقط یک مورد):")
         return
 
-    elif d == "hp_addedge":
+    elif d in ("hp_addedge", "hpeg_wizard"):
         # 🔧 رفع باگ اصلی: چون بالای callback_handler همیشه یک‌بار await query.answer() خالی زده
         # می‌شود، هر تلاش دوم برای answer-کردن همان کوئری (حتی با show_alert=True) توسط تلگرام
         # نادیده گرفته می‌شود — API با 200 OK برمی‌گردد ولی هیچ popup ای به کاربر نشان داده
@@ -24289,18 +24318,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if paramiko is None:
                 await query.message.reply_text("❌ کتابخانهٔ paramiko روی Core نصب نیست.")
                 return
+            # Per-session opt-in only; the global onboarding toggle is unchanged.
+            integrated = (d == "hpeg_wizard")
+            context.user_data['egress_new_edge_requested'] = integrated
             context.user_data['state'] = 'EDGE_NEW_IP'
             await query.message.reply_text(
-                "🚀 <b>افزودن خودکار Edge جدید</b>\n\n"
-                "این کار یک VPS خام (که خودتان جداگانه خریده‌اید و فقط IP + رمز روتش را دارید) را "
-                "به‌طور کامل به یک رلهٔ WireGuard تبدیل می‌کند: نصب، ساخت کلید، اتصال به Core، و افزودن "
-                "خودکار به «سرویس IP» — بدون نیاز به ترمینال دستی.\n\n"
-                "۱) آی‌پی عمومی سرور Edge جدید (خام و تازه‌خریداری‌شده) را بفرستید:",
+                egress_new_edge_prompt(integrated=integrated),
                 parse_mode="HTML")
         except Exception:
             log.exception("خطای غیرمنتظره در دکمهٔ hp_addedge")
-            tb = traceback.format_exc()[-3000:]
-            await query.message.reply_text(f"❌ <b>خطای داخلی هنگام باز کردن «افزودن Edge»:</b>\n\n<code>{esc(tb)}</code>", parse_mode="HTML")
+            # Avoid echoing exception details or remote credentials into Telegram.
+            await query.message.reply_text("⛔️ بازکردن Wizard ممکن نشد؛ هیچ عملیات نصب جدیدی شروع نشد.")
         return
 
     elif d.startswith("hpdef_migrate_") and role == 'admin':

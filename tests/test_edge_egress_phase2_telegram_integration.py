@@ -23,7 +23,7 @@ class Phase2CallbackContracts(unittest.TestCase):
         self.assertIn('read_egress_dashboard, db_conn, page=page',
                       self.handler)
         self.assertIn('egress_dashboard_html(board)', self.handler)
-        self.assertIn('callback_data="hp_addedge"', self.handler)
+        self.assertIn('callback_data="hpeg_wizard"', self.handler)
         self.assertIn('callback_data=f"hpeg_page_{page}"', self.handler)
 
     def test_all_phase2_inspection_callbacks_are_admin_only(self):

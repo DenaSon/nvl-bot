@@ -23,7 +23,7 @@ EXECUTOR_ENABLED = False
 TICKET_TTL_SECONDS = 120
 INTENT_PHASE = "EGRESS_P3_EXECUTE_INTENT"
 RECOVERY_PHASE = "EGRESS_P3_RECOVERY_REQUIRED"
-ALLOWED_ACTIONS = frozenset({"EDGE_PREPARE", "UID_ATTACH", "UID_FREEZE"})
+ALLOWED_ACTIONS = frozenset({"EDGE_PREPARE", "UID_ATTACH", "UID_FREEZE", "EDGE_RETIRE"})
 BASE_GATES = frozenset({
     "OPERATOR_RESCUE", "STAGE_PIN", "SSH_HOST_PIN",
     "RESOURCE_OWNERSHIP", "NO_CORE_FALLBACK",
@@ -31,6 +31,10 @@ BASE_GATES = frozenset({
 ATTACH_GATES = frozenset({
     "F4_ACCEPTED", "PAM_ADMISSION", "BOOT_DENY_BEFORE_SSH",
     "DNS_IPV6_NO_LEAK", "UID_IDLE_AND_FROZEN",
+})
+RETIRE_GATES = frozenset({
+    "BACKUP_VERIFIED", "ORPHAN_OWNERSHIP", "NO_CUSTOMER_DEPENDENCIES",
+    "UID_FENCES_PRESERVED", "PERSISTENCE_AUDITED", "WG0_UNTOUCHED",
 })
 
 
@@ -67,7 +71,7 @@ class ExecutionScope:
                     or type(self.uid) is not int or not 1000 <= self.uid < 60000):
                 raise ExecutorHold("EXACT_UID_IDENTITY_REQUIRED")
         elif self.username or self.uid is not None:
-            raise ExecutorHold("UNEXPECTED_UID_FOR_EDGE_PREPARE")
+            raise ExecutorHold("UNEXPECTED_UID_FOR_EDGE_ACTION")
 
 
 @dataclass(frozen=True)
@@ -85,7 +89,9 @@ class FreshEvidence:
                 or any(not isinstance(g, str) for g in self.gates)
                 or self.blockers):
             raise ExecutorHold("FRESH_EVIDENCE_NOT_ACCEPTED")
-        required = BASE_GATES | (ATTACH_GATES if scope.action == "UID_ATTACH" else frozenset())
+        required = BASE_GATES | (ATTACH_GATES if scope.action == "UID_ATTACH"
+                                 else RETIRE_GATES if scope.action == "EDGE_RETIRE"
+                                 else frozenset())
         if not required <= self.gates:
             raise ExecutorHold("MISSING_ACCEPTANCE_GATES")
 

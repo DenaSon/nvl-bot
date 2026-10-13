@@ -123,7 +123,7 @@ class ExecutorTests(unittest.TestCase):
             actor_id=18, chat_id=35, now=self.now,
         )
 
-    def run(self, engine=None, ticket=None, scope=None):
+    def run_exec(self, engine=None, ticket=None, scope=None):
         return asyncio.run((engine or self.engine()).execute(
             scope or self.scope, ticket or self.ticket(),
             actor_id=18, chat_id=35,
@@ -139,7 +139,7 @@ class ExecutorTests(unittest.TestCase):
         for enabled,root,host in ((False,True,True),(True,False,True),(True,True,False)):
             with self.subTest(enabled=enabled,root=root,host=host):
                 with self.assertRaises(ExecutorHold):
-                    self.run(engine=self.engine(enabled=enabled,root=root,host=host))
+                    self.run_exec(engine=self.engine(enabled=enabled,root=root,host=host))
         self.assertEqual(self.acquire_count,0)
         self.assertEqual(self.host.applied,0)
 
@@ -176,7 +176,7 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(self.ticket(scope=attach,evidence=valid).evidence_digest,self.digest)
 
     def test_success_has_protected_intent_before_first_mutation_and_terminal_cas(self):
-        result=self.run()
+        result=self.run_exec()
         self.assertTrue(result.allowed)
         self.assertEqual(result.result,"SUCCEEDED")
         self.assertEqual(self.host.observe_phase,INTENT_PHASE)
@@ -188,26 +188,26 @@ class ExecutorTests(unittest.TestCase):
 
     def test_replay_blocked_with_durable_original_journal(self):
         ticket=self.ticket()
-        first=self.run(ticket=ticket)
+        first=self.run_exec(ticket=ticket)
         self.assertTrue(first.allowed)
         with self.assertRaisesRegex(ExecutorHold,"TICKET_REPLAY"):
-            self.run(ticket=ticket)
+            self.run_exec(ticket=ticket)
         self.assertEqual(self.acquire_count,1)
         self.assertEqual(self.host.applied,1)
 
     def test_same_executor_instance_cannot_run_twice(self):
         engine=self.engine()
         ticket=self.ticket()
-        self.assertTrue(self.run(engine=engine,ticket=ticket).allowed)
+        self.assertTrue(self.run_exec(engine=engine,ticket=ticket).allowed)
         with self.assertRaisesRegex(ExecutorHold,"EXECUTOR_ONE_SHOT"):
-            self.run(engine=engine,ticket=self.ticket())
+            self.run_exec(engine=engine,ticket=self.ticket())
 
     def test_shared_running_lock_refuses_second_mutation(self):
         with self.conn() as db:
             db.execute("INSERT INTO failover_operations "
                        "(status,source_host,target_host,detail_json) VALUES(?,?,?,?)",
                        ("RUNNING","9.9.9.9","8.8.8.8",'{"phase":"EGRESS_RECOVERY_REQUIRED"}'))
-        r=self.run()
+        r=self.run_exec()
         self.assertEqual(r.result,"SHARED_6G_BUSY")
         self.assertEqual(self.host.applied,0)
 
@@ -215,7 +215,7 @@ class ExecutorTests(unittest.TestCase):
         original=self.ticket()
         self.evidence=replace(self.evidence,digest=sha256(b"changed").hexdigest())
         with self.assertRaisesRegex(ExecutorHold,"PREVIEW_STALE"):
-            self.run(ticket=original)
+            self.run_exec(ticket=original)
         self.assertEqual(self.acquire_count,0)
 
     def test_changed_inside_lock_leaves_durable_protected_recovery_marker(self):
@@ -226,7 +226,7 @@ class ExecutorTests(unittest.TestCase):
             if count[0] >= 2:
                 return replace(self.evidence,digest=sha256(b"changed after lock").hexdigest())
             return self.evidence
-        r=self.run(engine=self.engine(reviewer=review),ticket=original)
+        r=self.run_exec(engine=self.engine(reviewer=review),ticket=original)
         self.assertFalse(r.allowed)
         self.assertTrue(r.manual_recovery)
         _,status,detail=self.only()
@@ -237,7 +237,7 @@ class ExecutorTests(unittest.TestCase):
 
     def test_partial_host_write_freezes_holds_and_sanitizes(self):
         self.host.fail_apply=True
-        r=self.run()
+        r=self.run_exec()
         self.assertTrue(r.manual_recovery)
         self.assertEqual(self.host.applied,1)
         self.assertEqual(self.host.frozen,1)
@@ -250,7 +250,7 @@ class ExecutorTests(unittest.TestCase):
 
     def test_post_action_validation_failure_remains_locked(self):
         self.host.fail_verify=True
-        r=self.run()
+        r=self.run_exec()
         self.assertTrue(r.manual_recovery)
         self.assertEqual(self.host.frozen,1)
         self.assertEqual(self.only()[1],"RUNNING")
@@ -258,7 +258,7 @@ class ExecutorTests(unittest.TestCase):
     def test_failed_freeze_never_unlocks_6g(self):
         self.host.fail_apply=True
         self.host.fail_freeze=True
-        r=self.run()
+        r=self.run_exec()
         self.assertTrue(r.manual_recovery)
         self.assertFalse(self.only()[2]["frozen"])
         self.assertEqual(self.only()[1],"RUNNING")
@@ -270,7 +270,7 @@ class ExecutorTests(unittest.TestCase):
                 raise RuntimeError("simulated persistent commit error")
             return self.journal(op,status=status,detail=detail,
                                 finished=finished,require_running=require_running)
-        r=self.run(engine=self.engine(journal=journal),ticket=ticket)
+        r=self.run_exec(engine=self.engine(journal=journal),ticket=ticket)
         self.assertTrue(r.manual_recovery)
         self.assertEqual(self.host.frozen,1)
         self.assertEqual(self.only()[2]["phase"],RECOVERY_PHASE)
@@ -281,7 +281,7 @@ class ExecutorTests(unittest.TestCase):
                 raise RuntimeError("journal outage")
             return self.journal(op,status=status,detail=detail,
                                 finished=finished,require_running=require_running)
-        r=self.run(engine=self.engine(journal=journal))
+        r=self.run_exec(engine=self.engine(journal=journal))
         self.assertTrue(r.manual_recovery)
         self.assertEqual(self.host.applied,0)
         self.assertEqual(self.only()[1],"RUNNING")

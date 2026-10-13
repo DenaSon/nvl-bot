@@ -284,6 +284,30 @@ class BootProvisioningTests(unittest.TestCase):
             asyncio.run(self.port(release_enabled=True).apply(self.scope))
         self.assertEqual(self.transport.ensure_count,0)
 
+    def test_post_review_stage_spec_drift_holds_before_transport(self):
+        self.insert_intent()
+        self.actual_spec=replace(self.actual_spec,route_table=1781)
+        with self.assertRaisesRegex(BootProvisionHold,"STAGE_IDENTITY_CHANGED"):
+            asyncio.run(self.port(release_enabled=True).apply(self.scope))
+        self.assertEqual(self.transport.ensure_count,0)
+
+    def test_tampered_review_unit_names_are_rejected_before_transport(self):
+        self.insert_intent()
+        for change in (
+            {"guard_unit":"tampered"}, {"dns_name":"ssh.service"},
+            {"roster_review":'{"protected":[]}'},
+        ):
+            with self.subTest(change=change):
+                forged=replace(self.review,**change)
+                port=GuardedStageBootPort(
+                    db_conn=self.db,scope=self.scope,ticket=self.ticket,
+                    review=forged,boot_safety=self.safety,
+                    transport=self.transport,stage_reader=self.stage_reader,
+                    release_enabled=True)
+                with self.assertRaisesRegex(BootProvisionHold,"FINGERPRINT_CHANGED"):
+                    asyncio.run(port.apply(self.scope))
+        self.assertEqual(self.transport.ensure_count,0)
+
     def test_end_to_end_p3a_before_transport_intent_and_success(self):
         p=self.port(release_enabled=True)
         receipt=asyncio.run(self.executor(p).execute(

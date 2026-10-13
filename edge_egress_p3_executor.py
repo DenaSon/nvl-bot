@@ -10,6 +10,7 @@ import asyncio
 from dataclasses import dataclass
 from hashlib import sha256
 from hmac import compare_digest
+import ipaddress
 import json
 import re
 import secrets
@@ -49,11 +50,17 @@ class ExecutionScope:
     def __post_init__(self):
         if self.action not in ALLOWED_ACTIONS:
             raise ExecutorHold("ACTION_NOT_ALLOWLISTED")
-        if not isinstance(self.edge_id, str) or not re.fullmatch(r"e[1-9][0-9]{0,4}", self.edge_id):
+        if not isinstance(self.edge_id, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{1,23}", self.edge_id):
             raise ExecutorHold("EDGE_ID_INVALID")
-        if any(not isinstance(v, str) or not v or len(v) > 255
-               for v in (self.source_host, self.target_host)):
-            raise ExecutorHold("HOST_IDENTITY_REQUIRED")
+        for host in (self.source_host, self.target_host):
+            try:
+                canonical = str(ipaddress.IPv4Address(host))
+            except (TypeError, ipaddress.AddressValueError) as exc:
+                raise ExecutorHold("HOST_IDENTITY_REQUIRED") from exc
+            if canonical != host or not ipaddress.IPv4Address(host).is_global:
+                raise ExecutorHold("PUBLIC_IPV4_IDENTITY_REQUIRED")
+        if self.source_host == self.target_host:
+            raise ExecutorHold("SAME_EDGE_OPERATION_NOT_ALLOWED")
         if self.action in ("UID_ATTACH", "UID_FREEZE"):
             if (not isinstance(self.username, str)
                     or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", self.username)
@@ -271,9 +278,16 @@ class Existing6GGuardedExecutor:
             if await self.host_port.verify(scope) is not True:
                 raise ExecutorHold("POST_ACTION_PROOF_MISSING")
             self._lease(operation_id, scope, nonce_hash)
+            last = self.review_fn(scope)
+            if not isinstance(last, FreshEvidence):
+                raise ExecutorHold("FINAL_REVIEW_UNAVAILABLE")
+            last.verify(scope, self.clock())
+            if not compare_digest(ticket.evidence_digest, last.digest):
+                raise ExecutorHold("FINAL_EVIDENCE_CHANGED")
+            self._lease(operation_id, scope, nonce_hash)
             self._journal(operation_id, "SUCCEEDED", "EGRESS_P3_VERIFIED", scope, nonce_hash)
             return ExecutionReceipt(True, "SUCCEEDED", operation_id)
-        except BaseException:
+        except BaseException as exc:
             # Never write FAILED for an ambiguous host action, because 6G
             # interprets it as unlock. Keep RUNNING + recognized HOLD marker.
             frozen = False
@@ -289,5 +303,7 @@ class Existing6GGuardedExecutor:
                                   scope, nonce_hash, frozen=frozen)
                 except BaseException:
                     pass
+            if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+                raise  # preserve cancellation semantics; 6G remains protected
             return ExecutionReceipt(False, "HOLD_RECONCILIATION_REQUIRED",
                                     operation_id, manual_recovery=True)

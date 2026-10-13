@@ -15,7 +15,7 @@ class Phase2BotPatchTests(unittest.TestCase):
         self.assertNotEqual(text, changed)
         ast.parse(changed)
         self.assertEqual(changed.count('elif d.startswith("hpeg_retire_open_")'), 1)
-        self.assertEqual(changed.count('"hpeg_retire_yes_"'), 2)
+        self.assertEqual(changed.count('"hpeg_retire_yes_"'), 3)
         self.assertEqual(changed.count("is_managed_egress_deletion, db_conn, host"), 2)
         self.assertIn('"🗑 حذف ایمن Edge"', changed)
         with self.assertRaises(ValueError):

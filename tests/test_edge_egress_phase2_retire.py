@@ -130,5 +130,66 @@ class Phase2RetireTests(unittest.TestCase):
                             registry_loader=self.read_registry, geteuid=lambda: 0)
 
 
+    def _retire(self, ticket):
+        import os
+        backups = self.base / "backups"
+        backups.mkdir(mode=0o700, exist_ok=True)
+        return retire_metadata(
+            self.conn, ticket, actor_id=42, chat_id=72, edge_id="e7",
+            registry_path=self.registry, registry_loader=self.read_registry,
+            runtime_probe=self.probe, stage_root=self.stage,
+            backup_root=backups, backup_db_path=self.db,
+            backup_owner_uid=os.getuid(), lock_owner_uid=os.getuid(),
+            geteuid=lambda: 0, now=lambda: 101,
+        )
+
+    def test_confirmed_metadata_retire_preserves_other_data_and_backs_up(self):
+        with self.conn() as db:
+            db.execute("INSERT INTO host_pool VALUES('172.86.105.67',0,0)")
+            db.execute("INSERT INTO host_pool VALUES('144.172.84.82',1,1)")
+        p = self.plan()
+        self.assertTrue(p.allowed)
+        ticket = issue_ticket(p,42,72,now=lambda:100)
+        output = Path(self._retire(ticket))
+        self.assertTrue((output / "master_bot.db").is_file())
+        self.assertTrue((output / "ingress-registry.json").is_file())
+        self.assertEqual(self.read_registry(), ())
+        with self.conn() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM edge_egress_f3_ingress_candidates"
+            ).fetchone()[0], 0)
+            self.assertEqual(db.execute(
+                "SELECT host FROM host_pool"
+            ).fetchall(), [("144.172.84.82",)])
+
+    def test_fingerprint_drift_blocks_without_mutation(self):
+        ticket = issue_ticket(self.plan(),42,72,now=lambda:100)
+        with self.conn() as db:
+            db.execute("INSERT INTO host_pool VALUES('172.86.105.67',0,0)")
+        with self.assertRaises(RetireHold):
+            self._retire(ticket)
+        self.assertEqual(len(self.read_registry()), 1)
+        with self.conn() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM edge_egress_f3_ingress_candidates"
+            ).fetchone()[0], 1)
+
+    def test_failed_sqlite_delete_rolls_back_registry(self):
+        ticket = issue_ticket(self.plan(),42,72,now=lambda:100)
+        with self.conn() as db:
+            db.executescript("""
+                CREATE TRIGGER abort_retire BEFORE DELETE
+                ON edge_egress_f3_ingress_candidates
+                BEGIN SELECT RAISE(ABORT,'simulated failure'); END;
+            """)
+        with self.assertRaises(sqlite3.DatabaseError):
+            self._retire(ticket)
+        self.assertEqual(len(self.read_registry()), 1)
+        with self.conn() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM edge_egress_f3_ingress_candidates"
+            ).fetchone()[0], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

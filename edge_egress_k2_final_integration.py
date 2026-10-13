@@ -12,6 +12,7 @@ from ipaddress import IPv4Address
 from typing import Callable
 
 from edge_egress_v1_console import edge_id_checked
+from edge_egress_k2_source_cohort import read_source_cohort, CohortHold
 
 K2_TRANSFER_EXECUTOR_RELEASED = False
 
@@ -23,6 +24,11 @@ class TransferPreview:
     ssh_accounts: int
     blockers: tuple[str, ...]
     can_probe: bool
+    source_host: str = ""
+    other_edge_accounts: int = 0
+    already_target_accounts: int = 0
+    unknown_accounts: int = 0
+    active_total: int = 0
 
     @property
     def can_execute(self) -> bool:
@@ -56,7 +62,16 @@ def read_transfer_preview(db_conn: Callable, card, transport) -> TransferPreview
     if not card.f4_valid:
         reasons.append("آزمون مستقل خروجی تأیید نشده")
 
-    count = 0
+    count = other = already_target = unknown = total = 0
+    source = ""
+    try:
+        cohort = read_source_cohort(db_conn, str(ip))
+        count, source = cohort.source_accounts, cohort.source_ip
+        other, already_target = cohort.other_edge_accounts, cohort.already_target_accounts
+        unknown, total = cohort.unknown_accounts, cohort.active_total
+        reasons.extend(cohort.blockers)
+    except CohortHold:
+        reasons.append("مالکیت حساب‌های مبدأ قابل تأیید نیست")
     with db_conn() as conn:
         if not _table(conn, "settings") or not _table(conn, "ssh_accounts"):
             reasons.append("اطلاعات حساب‌ها کامل نیست")
@@ -66,10 +81,6 @@ def read_transfer_preview(db_conn: Callable, card, transport) -> TransferPreview
             ).fetchone()
             if mode != ("1",):
                 reasons.append("محافظت کاربران فعال یا تأیید نشده")
-            count = conn.execute(
-                "SELECT COUNT(*) FROM ssh_accounts "
-                "WHERE service_type='ssh' AND status='🟢 فعال'"
-            ).fetchone()[0]
         if not _table(conn, "failover_operations"):
             reasons.append("کنترل انتقال در دسترس نیست")
         elif conn.execute(
@@ -83,7 +94,8 @@ def read_transfer_preview(db_conn: Callable, card, transport) -> TransferPreview
         reasons.append("انتقال امن هنوز برای اجرا آزاد نشده")
 
     return TransferPreview(
-        eid, str(ip), count, tuple(dict.fromkeys(reasons)), bool(card.can_probe)
+        eid, str(ip), count, tuple(dict.fromkeys(reasons)), bool(card.can_probe),
+        source, other, already_target, unknown, total,
     )
 
 
@@ -92,7 +104,13 @@ def transfer_preview_html(preview: TransferPreview) -> str:
         "👥 <b>مسیر ترافیک کاربران</b>", "",
         "سرور: <code>" + escape(preview.edge_id, quote=True) + "</code>",
         "IP مقصد: <code>" + escape(preview.edge_ip, quote=True) + "</code>",
-        f"حساب‌های SSH فعال: <b>{preview.ssh_accounts}</b>", "",
+        f"رله مبدأ: <code>{escape(preview.source_host or '—', quote=True)}</code>",
+        f"کاربران مبدأ: <b>{preview.ssh_accounts}</b>",
+        f"کاربران سایر سرورها (بدون تغییر): <b>{preview.other_edge_accounts}</b>",
+        f"کاربران روی مقصد: <b>{preview.already_target_accounts}</b>",
+        *(('⚠️ حساب‌های بدون مالک مشخص: <b>' + str(preview.unknown_accounts) + '</b>',)
+          if preview.unknown_accounts else ()),
+        "",
     ]
     if preview.can_execute:
         body.append("✅ آماده تأیید انتقال محافظت‌شده")

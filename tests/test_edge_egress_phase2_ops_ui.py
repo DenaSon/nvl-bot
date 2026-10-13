@@ -165,6 +165,7 @@ class Phase2UidTextHandlerTests(unittest.TestCase):
             "read_egress_dashboard":lambda *_args,**kw:object(),
             "get_egress_card":lambda *_args:object(),
             "egress_uid_preview_html":lambda *_args:"UID_PREVIEW_HOLD",
+            "egress_user_result_html":lambda edge,user:f"USER:{user}@{edge}",
             "db_conn":lambda:None,
             "re":__import__("re"),
             "InlineKeyboardButton":lambda label,callback_data:(label,callback_data),
@@ -176,7 +177,7 @@ class Phase2UidTextHandlerTests(unittest.TestCase):
 
     def test_admin_username_one_shot_no_uid_changes(self):
         q,context=self.call()
-        self.assertEqual(q.reply_text.await_args.args[0], "UID_PREVIEW_HOLD")
+        self.assertEqual(q.reply_text.await_args.args[0], "USER:nvl0557@e7")
         self.assertEqual(q.reply_text.await_args.kwargs["parse_mode"], "HTML")
         self.assertTrue(q.reply_text.await_args.kwargs["reply_markup"])
         self.assertEqual(context["egress_review_uid_selector"][:2],

@@ -347,6 +347,7 @@ from edge_egress_phase2_review import (
     issue_ticket as issue_egress_review_ticket,
     acknowledge_ticket as acknowledge_egress_review_ticket,
 )
+from edge_egress_phase2_retire import (plan_retirement as plan_egress_retirement, issue_ticket as issue_egress_retire_ticket, retire_metadata as apply_egress_retire_metadata, legacy_delete_managed as is_managed_egress_deletion, plan_html as egress_retire_plan_html, RetireHold)
 from edge_egress_f3_admin import render_assignment_preview
 from edge_egress_f3_readiness import record_ingress_candidate
 from incident_observability import (
@@ -23678,6 +23679,65 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
+    elif d.startswith("hpeg_retire_open_") or d.startswith("hpeg_retire_yes_"):
+        if role != 'admin':
+            await query.message.reply_text("⛔️ فقط مدیر")
+            return
+        is_confirm = d.startswith("hpeg_retire_yes_")
+        edge_id = d[len("hpeg_retire_yes_" if is_confirm else "hpeg_retire_open_"):]
+        try:
+            edge_id_checked(edge_id)
+            actor_id = update.effective_user.id
+            chat_id = update.effective_chat.id
+            if is_confirm:
+                ticket = context.user_data.pop('egress_retire_ticket', None)
+                backup_dir = await asyncio.to_thread(
+                    apply_egress_retire_metadata, db_conn, ticket,
+                    actor_id=actor_id, chat_id=chat_id, edge_id=edge_id,
+                )
+                log.warning("K2 metadata retired edge=%s backup=%s", edge_id, backup_dir)
+                await query.edit_message_text(
+                    "✅ <b>Edge از فهرست NVL حذف شد.</b>\n"
+                    "هیچ مسیر شبکه، کاربر، WG یا DNS تغییر نکرد.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 مدیریت Egress", callback_data="hpeg_status")],
+                    ]),
+                )
+            else:
+                context.user_data.pop('egress_retire_ticket', None)
+                plan = await asyncio.to_thread(plan_egress_retirement, db_conn, edge_id)
+                buttons = []
+                if plan.allowed:
+                    context.user_data['egress_retire_ticket'] = issue_egress_retire_ticket(
+                        plan, actor_id, chat_id,
+                    )
+                    buttons.append([InlineKeyboardButton(
+                        "✅ تأیید حذف از NVL", callback_data=f"hpeg_retire_yes_{edge_id}",
+                    )])
+                buttons.append([InlineKeyboardButton(
+                    "❌ انصراف / جزئیات", callback_data=f"hpeg_edge_{edge_id}",
+                )])
+                await query.edit_message_text(
+                    egress_retire_plan_html(plan), parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+        except (RetireHold, EgressConsoleHold, ValueError, OSError, sqlite3.Error):
+            context.user_data.pop('egress_retire_ticket', None)
+            await query.edit_message_text(
+                "⛔️ <b>HOLD — حذف Edge مجاز نیست.</b>\n"
+                "وابستگی‌ها یا تأیید عملیات تغییر کرده‌اند؛ هیچ عملیاتی اجرا نشد.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 مدیریت Egress", callback_data="hpeg_status")],
+                ]),
+            )
+        except Exception:
+            context.user_data.pop('egress_retire_ticket', None)
+            log.exception("K2 Edge retirement unavailable")
+            await query.message.reply_text("⛔️ حذف Edge متوقف شد؛ وضعیت را بررسی کنید.")
+        return
+
     elif d == "hpeg_status" or d.startswith("hpeg_page_"):
         if role != 'admin':
             await query.message.reply_text("⛔️ فقط مدیر")
@@ -23831,6 +23891,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "🔄 تست مجدد", callback_data=f"hpeg_probe_{edge_id}",
                 )])
             buttons.extend([
+                [InlineKeyboardButton("🗑 حذف ایمن Edge", callback_data=f"hpeg_retire_open_{edge_id}")],
                 [InlineKeyboardButton("📋 جزئیات Edge", callback_data=f"hpeg_edge_{edge_id}")],
                 [InlineKeyboardButton("🔙 مدیریت Egress", callback_data="hpeg_status")],
             ])
@@ -24228,6 +24289,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d.startswith("hpdelconfirm_") and role == 'admin':
         host = d[len("hpdelconfirm_"):]
+        try:
+            if await asyncio.to_thread(is_managed_egress_deletion, db_conn, host):
+                await query.answer("⛔️ حذف Edge جدید فقط از «مدیریت Egress» مجاز است.", show_alert=True)
+                return
+        except Exception:
+            log.exception("K2 legacy host deletion preflight unavailable")
+            await query.answer("⛔️ کنترل ایمنی حذف در دسترس نیست.", show_alert=True)
+            return
         active_now = await asyncio.to_thread(_db_get_active_hosts_from_pool)
         if host in active_now and len(active_now) <= 1:
             await query.answer("⛔️ این تنها IP فعال شماست؛ حذف نمی‌شود.", show_alert=True); return
@@ -24243,6 +24312,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML", reply_markup=kb)
     elif d.startswith("hpdelyes_") and role == 'admin':
         host = d[len("hpdelyes_"):]
+        try:
+            if await asyncio.to_thread(is_managed_egress_deletion, db_conn, host):
+                await query.answer("⛔️ حذف Edge جدید فقط از «مدیریت Egress» مجاز است.", show_alert=True)
+                return
+        except Exception:
+            log.exception("K2 legacy host deletion preflight unavailable")
+            await query.answer("⛔️ کنترل ایمنی حذف در دسترس نیست.", show_alert=True)
+            return
         active_now = await asyncio.to_thread(_db_get_active_hosts_from_pool)
         if host in active_now and len(active_now) <= 1:
             await query.answer("⛔️ این تنها IP فعال شماست؛ حذف نمی‌شود.", show_alert=True); return

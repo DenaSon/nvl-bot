@@ -40,6 +40,7 @@ class EdgeOperation(str, Enum):
 _EXACT_CALLBACKS: dict[str, EdgeOperation] = {
     "hp_add": EdgeOperation.REGISTER,
     "hp_addedge": EdgeOperation.REGISTER,
+    "hpeg_wizard": EdgeOperation.REGISTER,  # opt-in, same underlying ingress installer
     "srv_wiz_promote_start": EdgeOperation.CORE_MIGRATION,
     "srv_run_promote": EdgeOperation.CORE_MIGRATION,
     "srv_run_demote": EdgeOperation.CORE_MIGRATION,

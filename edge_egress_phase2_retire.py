@@ -83,7 +83,7 @@ def _checked(*args):
     return result.stdout
 
 
-def kernel_blockers(edge_id: str, ingress_ipv4: str) -> tuple[str, ...]:
+def kernel_blockers(edge_id: str, ingress_ipv4: str, wg_public_key: str) -> tuple[str, ...]:
     """Fail closed unless *all* dedicated kernel and wg0 references are absent."""
     n = int(edge_id[1:])
     table = str(20000 + n)
@@ -113,6 +113,19 @@ def kernel_blockers(edge_id: str, ingress_ipv4: str) -> tuple[str, ...]:
            ingress_ipv4 + "/32" in words[1].split(",")
            for line in wg.splitlines()):
         issues.append("WG0_INGRESS_PEER_PRESENT")
+    # Verify exact peer key, not only /32 ownership. A peer can retain a
+    # different AllowedIPs set and become reachable again on reload.
+    if wg_public_key in _checked("wg", "show", "wg0", "peers").splitlines():
+        issues.append("WG0_PEER_KEY_PRESENT")
+    wg0_config = Path("/etc/wireguard/wg0.conf")
+    try:
+        statbuf = wg0_config.lstat()
+        if not stat.S_ISREG(statbuf.st_mode) or statbuf.st_uid != 0:
+            raise OSError("untrusted wg0 config")
+        if wg_public_key in wg0_config.read_text(encoding="utf-8"):
+            issues.append("WG0_PERSISTENT_PEER_PRESENT")
+    except (OSError, UnicodeError) as exc:
+        raise RetireHold("WG0_PERSISTENCE_AUDIT_UNAVAILABLE") from exc
     for cmd in (
         ("systemctl", "list-units", "--all", "--no-legend", "--plain", "--no-pager"),
         ("systemctl", "list-unit-files", "--no-legend", "--plain", "--no-pager"),
@@ -176,7 +189,7 @@ def _plan(conn: sqlite3.Connection, edge_id: str, *, peers,
             stage_root / ("core-" + edge_id)).is_symlink():
         issues.append("LOCAL_STAGE_PRESENT")
     try:
-        issues.extend(runtime_probe(edge_id, peer.ingress_ipv4))
+        issues.extend(runtime_probe(edge_id, peer.ingress_ipv4, peer.wg_public_key))
     except (RetireHold, ValueError, OSError):
         issues.append("KERNEL_AUDIT_HOLD")
 
@@ -284,6 +297,7 @@ def retire_metadata(db_conn: Callable, ticket: RetireTicket, *, actor_id: int,
         with sqlite3.connect("file:/root/master_bot.db?mode=ro", uri=True) as source:
             with sqlite3.connect(str(bdir / "master_bot.db")) as copy:
                 source.backup(copy)
+        os.chmod(bdir / "master_bot.db", 0o600)
         new = render_registry([p for p in registry_loader()
                                if p.edge_id != edge_id]).encode()
         tmp = None

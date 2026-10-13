@@ -45,7 +45,7 @@ class Phase2RetireTests(unittest.TestCase):
                 INSERT INTO edge_egress_f3_ingress_candidates VALUES('172.86.105.67','INGRESS_ONLY');
             """)
         self.read_registry = lambda: parse_registry(self.registry.read_bytes())
-        self.probe = lambda eid, src: ()
+        self.probe = lambda eid, src, pubkey: ()
 
     def conn(self):
         return sqlite3.connect(str(self.db))
@@ -80,7 +80,7 @@ class Phase2RetireTests(unittest.TestCase):
         self.assertIn("6G_RUNNING", self.plan().blockers)
 
     def test_live_kernel_routes_hold(self):
-        self.probe = lambda edge, src: ("EGRESS_POLICY_RULE_PRESENT",)
+        self.probe = lambda edge, src, pubkey: ("EGRESS_POLICY_RULE_PRESENT",)
         self.assertIn("EGRESS_POLICY_RULE_PRESENT", self.plan().blockers)
 
     def test_kernel_probe_failure_never_allows_delete(self):

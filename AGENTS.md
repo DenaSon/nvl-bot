@@ -1,3 +1,5 @@
+> **K2 Phase 1 source checkpoint (2026-10-14):** PR #121 merged into draft PR #120 feature branch only; exact head `9ba26865da06d7cae5034ff2c154084b138ba959`, 1,335 Python tests and Egress 3.11/3.12 PASS. Existing admin Edge wizard now stages an isolated candidate (Ingress registry + dedicated Egress Stage), skips password-root SSH override and does NOT enroll unverified IP in active host_pool / settings.hosts, alter DNS/users or touch Failover. **Not production deployed and not the complete Phase 1 activation**: root worker/F3/Boot/PAM/F4 and real VPS proofs are pending. Read `docs/K2_PHASE1_ISOLATED_WIZARD_2026-10-14.md` and `docs/NVL_K2_AGENT_HANDOFF_2026-10-13.md` before further K2 work.
+
 # CURRENT AGENT INSTRUCTIONS — K2 release handoff (2026-10-13)
 
 > **READ FIRST — [Canonical K2 Agent Handoff](docs/NVL_K2_AGENT_HANDOFF_2026-10-13.md).** This supersedes all older "LATEST", "current priority", "next K2 wizard", "K2 not started", and Phase2-only instructions below. Preserve the history but do not execute its obsolete next steps. `docs/NVL_PROJECT_MEMORY.md` is chronological background, not fresh Production acceptance.

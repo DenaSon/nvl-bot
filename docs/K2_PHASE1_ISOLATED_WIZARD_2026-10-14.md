@@ -1,6 +1,6 @@
 # K2 Phase 1 — Isolated new-Edge wizard checkpoint (2026-10-14)
 
-**Branch:** `feat/k2-phase1-isolated-wizard-20261014`, stacked on draft PR #120.
+**Delivery:** PR #121 merged into draft PR #120 feature branch only (not master), source head `9ba26865da06d7cae5034ff2c154084b138ba959`. Python checks **1,335 PASS**, Egress Stage-only checks Python 3.11/3.12 **PASS**. Full Phase 1 transport activation is NOT yet delivered.
 **Scope:** New Edge creation, isolated Ingress and dedicated Egress Stage; NO
 client migration, default relay switch, failover or automatic transport activation.
 

@@ -118,9 +118,12 @@ class PositiveAdapterTests(unittest.TestCase):
                 target_host TEXT, detail_json TEXT
             );
             CREATE TABLE host_pool(host TEXT PRIMARY KEY,active INTEGER,
-              is_default INTEGER,is_standby INTEGER,service_port INTEGER);
-            INSERT INTO host_pool VALUES('144.172.84.76',1,1,0,2252);
-            INSERT INTO host_pool VALUES('144.172.84.82',1,0,1,2252);
+              is_default INTEGER,is_standby INTEGER,service_port INTEGER,
+              ssh_port INTEGER,admin_ssh_port INTEGER);
+            INSERT INTO host_pool(host,active,is_default,is_standby,service_port)
+              VALUES('144.172.84.76',1,1,0,2252);
+            INSERT INTO host_pool(host,active,is_default,is_standby,service_port)
+              VALUES('144.172.84.82',1,0,1,2252);
             CREATE TABLE ssh_accounts(username TEXT PRIMARY KEY,host TEXT,
               service_type TEXT,status TEXT);
             CREATE TABLE edge_egress_allocations(edge_id TEXT PRIMARY KEY,

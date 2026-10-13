@@ -228,13 +228,32 @@ class GuardedProtectedUIDPort:
                     raise ProtectedUIDHold("FOREIGN_UID_MAPPING")
             else:
                 if (not _binding_matches(row, self.plan.request, self.plan.dns_port)
-                        or row.state not in allowed_states
-                        or (self.plan.initial_generation is not None and
-                            row.generation < self.plan.initial_generation)):
+                        or row.state not in allowed_states):
                     raise ProtectedUIDHold("UID_RUNTIME_STATE_DRIFT")
+                if self.plan.purpose == NEW:
+                    generation = {
+                        "BLOCKED": 1,
+                        "ROUTED_UNVERIFIED": 2,
+                        "PROTECTED": 3,
+                    }.get(row.state)
+                elif self.plan.purpose == RESUME:
+                    generation = {
+                        "FROZEN": self.plan.initial_generation,
+                        "ROUTED_UNVERIFIED": self.plan.initial_generation + 1,
+                        "PROTECTED": self.plan.initial_generation + 2,
+                    }.get(row.state)
+                else:
+                    generation = {
+                        "PROTECTED": self.plan.initial_generation,
+                        "FROZEN": self.plan.initial_generation + 1,
+                    }.get(row.state)
+                if row.generation != generation:
+                    raise ProtectedUIDHold("UID_GENERATION_CAS_DRIFT")
                 mapping = _mapping(conn, scope.username)
-                if self.plan.purpose != NEW and mapping != (
-                        scope.uid, scope.edge_id, scope.target_host, "PROTECTED"):
+                expected = (scope.uid, scope.edge_id, scope.target_host, "PROTECTED")
+                if (mapping != expected if
+                        (self.plan.purpose != NEW or row.state == "PROTECTED")
+                        else mapping is not None):
                     raise ProtectedUIDHold("PROTECTED_MAPPING_CHANGED")
         return op
 

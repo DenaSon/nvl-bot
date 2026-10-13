@@ -357,6 +357,7 @@ from edge_egress_p3_telegram import (
     stage_html as egress_stage_html,
     actions_html as egress_actions_html,
     review_html as egress_review_html,
+    probe_html as egress_p3_probe_html,
     retire_html as egress_retire_plan_html,
     steps_html as egress_steps_html,
     user_prompt_html as egress_user_prompt_html,
@@ -3909,10 +3910,10 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
         # No default/DNS/UID switch on the new protected-aware entrypoint.
         html, edge_id = egress_staged_edge_result(edge_ip, result)
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📦 بازرسی Stage خروجی", callback_data=f"hpeg_stage_{edge_id}")],
-            [InlineKeyboardButton("🧭 طرح آماده‌سازی (بدون اجرا)",
+            [InlineKeyboardButton("🔎 بررسی اتصال", callback_data=f"hpeg_stage_{edge_id}")],
+            [InlineKeyboardButton("📋 بررسی آماده‌سازی",
                                   callback_data=f"hpeg_review_edge_{edge_id}")],
-            [InlineKeyboardButton("🔙 مرکز کنترل Egress", callback_data="hpeg_status")],
+            [InlineKeyboardButton("◀️ سرورها", callback_data="hpeg_status")],
         ])
         await app.bot.send_message(
             chat_id, html, parse_mode="HTML", reply_markup=kb,
@@ -23560,10 +23561,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         context.user_data['state'] = 'EGRESS_F3_PLAN_INPUT'
         await query.edit_message_text(
-            "🛡️ <b>پیش‌نمایش تخصیص Egress</b>\n\n"
-            "نام کاربر و شناسه Edge را با فاصله ارسال کنید.\n"
+            "👤 <b>بررسی تخصیص</b>\n\n"
+            "نام کاربر و شناسه سرور را ارسال کنید.\n"
             "مثال: <code>nvl0557 fra1</code>\n\n"
-            "این بررسی فقط خواندنی است و هنوز کاربری منتقل نمی‌شود.",
+            "هیچ تغییری انجام نمی‌شود.",
             parse_mode="HTML",
         )
         return
@@ -23626,12 +23627,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except (EgressConsoleHold, ValueError, AttributeError):
             await query.edit_message_text(
-                "⛔️ <b>HOLD — طرح قابل بررسی نیست.</b>\n"
-                "جلسه یا هویت Edge نامعتبر است. هیچ تغییری انجام نشد.",
+                "⛔️ <b>امکان بررسی وجود ندارد.</b>\n"
+                "سرور یا درخواست معتبر نیست.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton(
-                        "🔙 مدیریت Egress", callback_data="hpeg_status",
+                        "◀️ سرورها", callback_data="hpeg_status",
                     )],
                 ]),
             )
@@ -23675,18 +23676,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton(
-                        "🔙 مدیریت Egress", callback_data="hpeg_status",
+                        "◀️ سرورها", callback_data="hpeg_status",
                     )],
                 ]),
             )
         except (EgressConsoleHold, ValueError, AttributeError):
             await query.edit_message_text(
-                "⛔️ <b>HOLD — طرح منقضی یا تغییر کرده است.</b>\n"
-                "تأییدی ثبت نشد و هیچ عملیات اجرایی انجام نشد.",
+                "⛔️ <b>درخواست منقضی شده است.</b>\n"
+                "لطفاً دوباره بررسی کنید.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton(
-                        "🔙 مدیریت Egress", callback_data="hpeg_status",
+                        "◀️ سرورها", callback_data="hpeg_status",
                     )],
                 ]),
             )
@@ -23719,7 +23720,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "حساب‌ها و اتصال‌های سرور تغییر نکردند.",
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔙 مدیریت Egress", callback_data="hpeg_status")],
+                        [InlineKeyboardButton("◀️ سرورها", callback_data="hpeg_status")],
                     ]),
                 )
             else:
@@ -23747,7 +23748,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "وضعیت سرور تغییر کرده است. دوباره بررسی کنید.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 مدیریت Egress", callback_data="hpeg_status")],
+                    [InlineKeyboardButton("◀️ سرورها", callback_data="hpeg_status")],
                 ]),
             )
         except Exception:
@@ -23856,7 +23857,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not card.can_probe:
                     raise EgressConsoleHold("STAGE_OR_INGRESS_NOT_ATTESTED")
                 result = await asyncio.to_thread(live_ip_probe, db_conn, edge_id)
-                html = probe_html(result)
+                html = egress_p3_probe_html(result)
                 if not result.matches:
                     log.warning("Egress admin live probe mismatch: edge_id=%s", edge_id)
             elif is_stage:
@@ -23884,7 +23885,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "اطلاعات سرور کامل نیست. دوباره تلاش کنید.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 مدیریت Egress", callback_data="hpeg_status")],
+                    [InlineKeyboardButton("◀️ سرورها", callback_data="hpeg_status")],
                 ]),
             )
         except Exception:

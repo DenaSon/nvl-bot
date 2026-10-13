@@ -253,7 +253,9 @@ def retire_metadata(db_conn: Callable, ticket: RetireTicket, *, actor_id: int,
                     chat_id: int, edge_id: str, now=time.time,
                     registry_path: Path = REGISTRY, registry_loader=load_registry,
                     runtime_probe=kernel_blockers, stage_root: Path = STAGE_ROOT,
-                    backup_root: Path = BACKUP_ROOT, geteuid=os.geteuid) -> str:
+                    backup_root: Path = BACKUP_ROOT, geteuid=os.geteuid,
+                    backup_db_path: Path = Path("/root/master_bot.db"),
+                    backup_owner_uid: int = 0) -> str:
     """One-shot, backup-first CAS. Refuses ANY live Edge/UID/network reference.
 
     No user, wg0, namespace, routing, firewall, DNS or remote object is touched.
@@ -267,7 +269,7 @@ def retire_metadata(db_conn: Callable, ticket: RetireTicket, *, actor_id: int,
     if registry_path != REGISTRY and registry_loader is load_registry:
         raise RetireHold("REGISTRY_PATH_NOT_FIXED")
     root_st = backup_root.stat()
-    if (not stat.S_ISDIR(root_st.st_mode) or root_st.st_uid != 0
+    if (not stat.S_ISDIR(root_st.st_mode) or root_st.st_uid != backup_owner_uid
             or stat.S_IMODE(root_st.st_mode) & 0o077):
         raise RetireHold("BACKUP_ROOT_UNTRUSTED")
     lock = registry_path.parent / LOCK_NAME
@@ -294,7 +296,7 @@ def retire_metadata(db_conn: Callable, ticket: RetireTicket, *, actor_id: int,
         os.chmod(bdir, 0o700)
         (bdir / "ingress-registry.json").write_bytes(old)
         os.chmod(bdir / "ingress-registry.json", 0o600)
-        with sqlite3.connect("file:/root/master_bot.db?mode=ro", uri=True) as source:
+        with sqlite3.connect(f"file:{backup_db_path}?mode=ro", uri=True) as source:
             with sqlite3.connect(str(bdir / "master_bot.db")) as copy:
                 source.backup(copy)
         os.chmod(bdir / "master_bot.db", 0o600)

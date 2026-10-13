@@ -230,20 +230,30 @@ def issue_ticket(plan: RetirePlan, actor_id: int, chat_id: int, *,
 
 def legacy_delete_managed(db_conn: Callable, host: str,
                           *, registry_loader=load_registry) -> bool:
-    """Block old host-pool delete on registered K2 Egress, regardless of mode."""
-    ipaddress.IPv4Address(host)
-    if any(p.edge_ipv4 == host for p in registry_loader()):
+    """Block old host-pool delete on K2 assets without breaking legacy-only DBs."""
+    if not isinstance(host, str) or not host.strip():
+        raise RetireHold("INVALID_LEGACY_HOST")
+    # A legacy Core may not have ever enabled/created the K2 registry.
+    if registry_loader is load_registry and not REGISTRY.exists() and not REGISTRY.is_symlink():
+        peers = ()
+    else:
+        peers = registry_loader()  # malformed or untrusted existing file => HOLD
+    if any(p.edge_ipv4 == host for p in peers):
         return True
+    tables = (
+        ("edge_egress_f3_ingress_candidates", "edge_ipv4"),
+        ("edge_egress_allocations", "edge_public_ipv4"),
+        ("edge_egress_readiness", "edge_ipv4"),
+        ("edge_egress_uid_bindings", "edge_ipv4"),
+        ("edge_egress_uid_runtime", "edge_ipv4"),
+    )
     with db_conn() as conn:
-        for table, column in (
-            ("edge_egress_f3_ingress_candidates", "edge_ipv4"),
-            ("edge_egress_allocations", "edge_public_ipv4"),
-            ("edge_egress_readiness", "edge_ipv4"),
-            ("edge_egress_uid_bindings", "edge_ipv4"),
-            ("edge_egress_uid_runtime", "edge_ipv4"),
-        ):
-            if not _table(conn, table):
-                raise RetireHold("REQUIRED_TABLE_MISSING")
+        present = [_table(conn, name) for name, _ in tables]
+        if not any(present):
+            return False  # real legacy-only schema
+        if not all(present):
+            raise RetireHold("PARTIAL_K2_SCHEMA_HOLD")
+        for table, column in tables:
             if _read(conn, f"SELECT 1 FROM {table} WHERE {column}=? LIMIT 1", (host,)):
                 return True
     return False

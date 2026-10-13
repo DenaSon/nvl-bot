@@ -59,6 +59,23 @@ explicitly injected orchestration shell for later **P3-B/C** lifecycle work.
   a read-only preview controller. P3-F may later add a separate reviewed,
   audited and disabled-by-default command endpoint only after B/C/D/E tests.
 
+### Crash / cancellation reconciliation
+`inspect_execution_recovery(db_conn, operation_id)` reads only the existing
+6G `failover_operations` journal, rejects another operation's identity or
+an unknown phase, and distinguishes a verified terminal SUCCEEDED receipt
+from `RUNNING` protected INTENT/RECOVERY_REQUIRED. It has **no** retry,
+rollback, CAS override or unlock API. Process cancellation after a possible
+host mutation still attempts `freeze_or_hold`, records protected recovery,
+then propagates cancellation; an ungraceful power loss leaves the durable
+protected INTENT marker for operator inspection.
+
+The source executor's generic injected HostPort is a **P3-A contract**.
+It must not be instantiated by Telegram or a long-lived bot handler.
+P3-B/P3-C must implement fresh operator-approved host-pinned reviews and
+an independently tested per-resource privileged worker, with lease
+re-validation INSIDE each privileged command. Mocked gate sets only
+exercise the offline protocol, not real F4/boot/packet evidence.
+
 ### Next source phases
 P3-B pinned provisioning/PAM/boot, P3-C per-UID attach/freeze/release,
 P3-D 6G/6H Edge-to-Edge+Cloudflare CAS, P3-E owned decommission,

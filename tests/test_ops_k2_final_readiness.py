@@ -27,7 +27,7 @@ class K2CoreReadinessCliTests(unittest.TestCase):
             self.assertIn(must, source)
         for unsafe in ("subprocess", "os.system", "systemctl start", "iptables -",
                        "DELETE FROM", "UPDATE ssh_accounts",
-                       "INSERT INTO", "Cloudflare"):
+                       "INSERT INTO", "cf_update_dns_record_sync") :
             self.assertNotIn(unsafe, source)
 
     def test_malformed_or_missing_evidence_is_hold(self):

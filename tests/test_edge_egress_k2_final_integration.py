@@ -101,7 +101,7 @@ class K2TelegramWiringTests(unittest.TestCase):
         cls.source = BOT.read_text(encoding="utf-8")
 
     def test_existing_wizard_has_transfer_link_after_staged_success(self):
-        self.assertIn('callback_data=f"hpeg_transfer_{edge_id}"', self.source)
+        self.assertIn('callback_data=f"hpeg_relay_{edge_id}"', self.source)
         self.assertIn('egress_stage_requested=stage_for_this_edge', self.source)
         self.assertIn('onboard_after_ingress,', self.source)
 

@@ -8,6 +8,10 @@ Retain the original SSH Edge onboarding and customer host migration UX. The new 
 
 The target experience is existing `🛡 مدیریت Egress → ➕ افزودن سرور` → trusted ingress → pinned dedicated Stage → operator safety review → bounded per-user/batch transfer → external SSH/SOCKS probes → expansion. Migration must be a 6G-journaled **fence-first** saga; no call to legacy `hpdefmig_yes_`, `_db_set_all_accounts_host` or Cloudflare bulk update can substitute for protected UID routing.
 
+## Verified Legacy vs protected traffic semantics
+
+[Legacy traffic switch analysis](NVL_K2_LEGACY_TRAFFIC_SWITCH_2026-10-13.md) is the canonical explanation. The old `hpdef_` chooses an active relay for new account connection addresses, while the separate `hpdefmig_yes_` updates existing `ssh_accounts.host` + Cloudflare ingress. Neither moves Unix users off Core, and neither proves the real SSH/SOCKS internet Egress IPv4. **The K2 primary operator action is now `🔀 تغییر مسیر ترافیک`**; it presents source default, target Edge and existing DNS read-only. The P3-C isolated UID attach and source-only one-user host CAS in this draft remain a **canary building block**, not a replacement for the final all-affected-user ingress+egress Relay cutover. Do not call emergency 6G Core-fallback Failover for this routine action.
+
 ## Source state and gaps (do not misrepresent)
 
 - Original `hpeg_wizard` invokes real ingress installer, then opt-in `onboard_after_ingress`. It creates `STAGED_NOT_READY` files/registry, not a 6G-committed allocation or independently pinned F4 READY.

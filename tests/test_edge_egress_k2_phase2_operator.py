@@ -169,6 +169,72 @@ class Phase2CohortTests(unittest.TestCase):
         )
         asyncio.run(denied(300,expiry=expired))
 
+    def test_ticket_binds_pinned_cloudflare_record_identity(self):
+        from edge_egress_k2_phase2_operator import make_switch_ticket
+        from edge_egress_v1_cloudflare import PinnedDnsCutover, PinnedDnsRecord
+        self.db.execute(
+            "INSERT INTO settings VALUES('k2_p2_relay_switch_enabled','1')")
+        review=self.review()
+        plan=PinnedDnsCutover(SOURCE,TARGET,"a"*32,(
+            PinnedDnsRecord("vpn.example.com","b"*32,SOURCE,"c"*64),
+        ))
+        with patch("edge_egress_k2_phase2_operator.ProtectedCloudflareDNS") as cls:
+            cls.return_value.preview_edge_to_edge.return_value=plan
+            ticket=make_switch_ticket(
+                review,actor_id=125,chat_id=678,
+                cf_config_loader=lambda:{"zone":"a"*32},
+            )
+        self.assertEqual(ticket.cohort_fingerprint,review.fingerprint)
+        self.assertEqual(ticket.source,SOURCE)
+        self.assertEqual(ticket.target,TARGET)
+        self.assertEqual(len(ticket.nonce),32)
+        self.assertEqual(len(ticket.dns_fingerprint),64)
+
+    def test_worker_calls_existing_6g_saga_only_with_exact_pins(self):
+        from edge_egress_k2_phase2_operator import make_switch_ticket
+        from edge_egress_v1_cloudflare import PinnedDnsCutover, PinnedDnsRecord
+        from unittest.mock import AsyncMock, MagicMock
+        self.db.execute(
+            "INSERT INTO settings VALUES('k2_p2_relay_switch_enabled','1')")
+        review=self.review()
+        plan=PinnedDnsCutover(SOURCE,TARGET,"a"*32,(
+            PinnedDnsRecord("vpn.example.com","b"*32,SOURCE,"c"*64),
+        ))
+        dns_loader=lambda:{"zone":"a"*32}
+        with patch("edge_egress_k2_phase2_operator.ProtectedCloudflareDNS") as dns:
+            dns.return_value.preview_edge_to_edge.return_value=plan
+            ticket=make_switch_ticket(
+                review,actor_id=125,chat_id=678,
+                cf_config_loader=dns_loader,
+            )
+            adapter=object()
+            saga=AsyncMock(return_value=SimpleNamespace(ok=True))
+            with patch("edge_egress_k2_phase2_operator.review_relay_cohort",
+                       return_value=review), \
+                 patch("edge_egress_k2_phase2_operator.load_stage_pin",
+                       return_value=self.pin), \
+                 patch("edge_egress_k2_phase2_operator._check_stage"), \
+                 patch("ops.edge_egress_v1_transport.pinned",
+                       return_value=(SimpleNamespace(edge_public_ipv4=TARGET),"peer")), \
+                 patch("ops.edge_egress_v1_transport.observe",return_value="UP"), \
+                 patch("edge_egress_k2_phase2_operator._remote_transport",
+                       return_value="UP"), \
+                 patch("edge_egress_k2_phase2_operator.make_live_adapter",
+                       return_value=adapter) as factory, \
+                 patch("edge_egress_k2_phase2_operator.execute_protected_switch",
+                       saga):
+                outcome=asyncio.run(execute_relay_switch(
+                    ticket,db_conn=lambda:self.db,acquire=lambda *a:None,
+                    journal=lambda *a:None,cf_config_loader=dns_loader,
+                    actor_id=125,chat_id=678,getuid=lambda:0,
+                ))
+                self.assertTrue(outcome.ok)
+                config=factory.call_args.kwargs["config"]
+                self.assertIs(config.dns_plan,plan)
+                self.assertTrue(config.acceptance_enabled)
+                self.assertEqual(config.edge.ipv4,TARGET)
+                saga.assert_awaited_once_with(adapter,SOURCE,TARGET)
+
     def test_bot_has_explicit_two_step_admin_only_6g_path(self):
         source=Path("bot_final_v49-2.py").read_text(encoding="utf-8")
         a=source.index('    elif d.startswith("hpeg_p2_open_"):')

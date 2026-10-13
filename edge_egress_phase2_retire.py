@@ -173,9 +173,12 @@ def _plan(conn: sqlite3.Connection, edge_id: str, *, peers,
     if _read(conn, "SELECT 1 FROM failover_operations WHERE status='RUNNING' LIMIT 1"):
         issues.append("6G_RUNNING")
     mode = _read(conn, "SELECT value FROM settings WHERE key='edge_egress_protected_mode'")
-    if mode and mode != [("0",)]:
+    if mode != [("0",)]:
         issues.append("PROTECTED_MODE_NOT_LEGACY")
-    if _read(conn, "SELECT value FROM settings WHERE key='dns_current_ip'") == [(peer.edge_ipv4,)]:
+    dns = _read(conn, "SELECT value FROM settings WHERE key='dns_current_ip'")
+    if len(dns) != 1 or not isinstance(dns[0][0], str) or not dns[0][0]:
+        issues.append("PUBLIC_DNS_CONFIG_UNKNOWN")
+    elif dns[0][0] == peer.edge_ipv4:
         issues.append("EDGE_IS_PUBLIC_DNS")
     candidates = _read(conn, "SELECT state FROM edge_egress_f3_ingress_candidates WHERE edge_ipv4=?",
                        (peer.edge_ipv4,))

@@ -297,6 +297,20 @@ class P3ERetirementTests(unittest.TestCase):
         self.assertEqual(self.host.events,[])
         self.assertEqual(self.journal_status()[0],"RUNNING")
 
+    def test_fixed_root_stage_pin_and_review_fingerprint_cannot_be_forged(self):
+        with self.assertRaisesRegex(EdgeRetireHold,"PINNED_CORE_STAGE"):
+            plan_orphan_cleanup(
+                self.db,self.scope,stage=Path("/tmp/core-e7"),
+                stage_sha256=self.pin,host=self.host,
+                registry_loader=self.registry_loader,
+                stage_reader=self.stage_reader,
+            )
+        p=self.preview()
+        forged=replace(p,snapshot=replace(p.snapshot,units_enabled=False))
+        receipt=self.execute_retire(plan=forged)
+        self.assertTrue(receipt.manual_recovery)
+        self.assertEqual(self.host.events,[])
+
     def test_registry_changed_between_preview_and_action_holds(self):
         from edge_egress_v1_ingress import IngressPeer
         plan=self.preview()

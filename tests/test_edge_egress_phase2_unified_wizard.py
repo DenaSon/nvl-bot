@@ -85,6 +85,13 @@ class WizardCallbackRoutingTests(unittest.TestCase):
         self.assertIn('callback_data="hpeg_wizard"',body)
         self.assertIn('callback_data="hp_addedge"',body)
         self.assertNotIn("_db_update_setting, 'edge_egress_v1_onboard_enabled'",body)
+        # Narrow mode-1 exemption: only admin's existing integrated wizard,
+        # never legacy registration, relay switch, user transfer or Failover.
+        self.assertIn('d == "hpeg_wizard" and role == \'admin\'',body)
+        self.assertIn("k2_isolated_wizard_input",body)
+        self.assertIn("state in ('EDGE_NEW_IP', 'EDGE_NEW_ROOTPASS', 'EDGE_NEW_PORT')",body)
+        self.assertIn("role == 'admin'",body)
+        self.assertIn("and not k2_isolated_wizard_input",body)
         self.assertNotIn("_db_set_all_accounts_host",body[body.index(
             'elif d in ("hp_addedge", "hpeg_wizard"):'):body.index(
             'elif d.startswith("hpdef_migrate_")')])
@@ -120,7 +127,7 @@ class IntegratedWizardFunctionTests(unittest.TestCase):
                 "egress_state":"STAGED_NOT_READY",
                 "ingress_ipv4":"10.77.0.7",
             }
-        def fake_sync(*args):
+        def fake_sync(*args, **kwargs):
             events.append(("ingress",args[0]))
             return True, "", outcome.copy()
         fake_module=types.SimpleNamespace(onboard_after_ingress=stage)
@@ -135,6 +142,8 @@ class IntegratedWizardFunctionTests(unittest.TestCase):
             "record_ingress_candidate":lambda *args:events.append(("candidate",)),
             "egress_staged_edge_result":staged_edge_result,
             "db_conn":lambda:None,
+            "assert_isolated_new_edge_candidate":lambda *args:None,
+            "K2WizardHold":__import__("edge_egress_k2_phase1_wizard",fromlist=["K2WizardHold"]).K2WizardHold,
             "InlineKeyboardButton":lambda label,callback_data:(label,callback_data),
             "InlineKeyboardMarkup":lambda rows:rows,
             "esc":lambda s:s,
@@ -153,7 +162,8 @@ class IntegratedWizardFunctionTests(unittest.TestCase):
         self.assertTrue(result[0])
         self.assertEqual(events[0],("ingress","172.86.105.67"))
         self.assertIn(("stage","172.86.105.67","10.77.0.7"),events)
-        self.assertIn(("pool","172.86.105.67"),events)
+        self.assertFalse(any(event[0] in ("pool","setting_write","pool_active")
+                             for event in events))
         self.assertIn("HOLD",messages[-1].args[1])
         self.assertNotIn("DO_NOT_LOG",messages[-1].args[1])
         rows=messages[-1].kwargs["reply_markup"]
@@ -189,11 +199,13 @@ class IntegratedWizardFunctionTests(unittest.TestCase):
         self.assertFalse(any(x[0]=="pool" for x in events))
         self.assertIn("HOLD",messages[-1].args[1])
 
-    def test_protected_mode_rejects_integrated_wizard_before_remote(self):
+    def test_protected_mode_can_stage_new_edge_without_moving_customers(self):
         result,events,messages=self.execute(opt_in=True,protected="1")
-        self.assertEqual(result,(False,None,None))
-        self.assertFalse(events)
-        self.assertIn("محافظت‌شده",messages[-1].args[1])
+        self.assertTrue(result[0])
+        self.assertIn(("stage","172.86.105.67","10.77.0.7"),events)
+        self.assertFalse(any(event[0] in ("pool","setting_write","pool_active")
+                             for event in events))
+        self.assertIn("HOLD",messages[-1].args[1])
 
     def test_invalid_opt_in_is_denied_before_installation(self):
         with self.assertRaisesRegex(ValueError,"INVALID_EGRESS_STAGE_WIZARD_OPT_IN"):

@@ -255,7 +255,7 @@ def inspect_local_stage(card: EdgeCard, *, geteuid=os.geteuid,
     intentional and must not suppress existing operator-staged files.
     """
     stamp = int(now())
-    if not card.ingress_verified or not card.pool_active or (
+    if not card.ingress_verified or (
         card.allocation == "IDENTITY_CONFLICT"
     ):
         return StageInspection("HOLD_IDENTITY", "", "NOT_CHECKED", stamp)

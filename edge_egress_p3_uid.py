@@ -254,12 +254,15 @@ class GuardedProtectedUIDPort:
         )
         op = self._check(scope, first)
         self._operation_id = op
-        self.safety.assert_pam_ingress_boot(req)
-        self._check(scope, first)
-        self.safety.assert_multi_uid_isolation(req)
-        self._check(scope, first)
-        self.safety.assert_account_idle(req)
-        self._check(scope, first)
+        if p.purpose != FREEZE:
+            # Frozen a troubled UID is an emergency containment action.
+            # Do not require healthy PAM/DNS/Edge or idle sessions to deny.
+            self.safety.assert_pam_ingress_boot(req)
+            self._check(scope, first)
+            self.safety.assert_multi_uid_isolation(req)
+            self._check(scope, first)
+            self.safety.assert_account_idle(req)
+            self._check(scope, first)
 
         if p.purpose == FREEZE:
             self._touched = True

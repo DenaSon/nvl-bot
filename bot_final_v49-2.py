@@ -12963,10 +12963,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             except Exception:
                 log.exception("خطای غیرمنتظره در تسک پس‌زمینهٔ راه‌اندازی Edge")
-                tb = traceback.format_exc()[-3000:]
                 with contextlib.suppress(Exception):
                     await context.application.bot.send_message(
-                        chat_id, f"❌ <b>خطای غیرمنتظره حین راه‌اندازی Edge:</b>\n\n<code>{esc(tb)}</code>", parse_mode="HTML")
+                        chat_id, "⛔️ نصب Edge با خطای غیرمنتظره متوقف شد؛ "
+                        "ممکن است تغییرات ورودی یا Stage نیمه‌کاره باقی مانده باشد. "
+                        "بدون بررسی وضعیت، Wizard را مجدداً اجرا نکنید.")
 
         spawn_bg_task(_provision_task_guarded())
 
@@ -24326,8 +24327,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML")
         except Exception:
             log.exception("خطای غیرمنتظره در دکمهٔ hp_addedge")
-            tb = traceback.format_exc()[-3000:]
-            await query.message.reply_text(f"❌ <b>خطای داخلی هنگام باز کردن «افزودن Edge»:</b>\n\n<code>{esc(tb)}</code>", parse_mode="HTML")
+            # Avoid echoing exception details or remote credentials into Telegram.
+            await query.message.reply_text("⛔️ بازکردن Wizard ممکن نشد؛ هیچ عملیات نصب جدیدی شروع نشد.")
         return
 
     elif d.startswith("hpdef_migrate_") and role == 'admin':

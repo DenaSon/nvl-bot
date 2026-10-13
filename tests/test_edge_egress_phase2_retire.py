@@ -114,6 +114,25 @@ class Phase2RetireTests(unittest.TestCase):
         self.assertFalse(legacy_delete_managed(self.conn, "203.0.113.20",
                                                 registry_loader=self.read_registry))
 
+    def test_legacy_only_database_is_not_blocked(self):
+        other = self.base / "legacy.db"
+        with sqlite3.connect(str(other)) as db:
+            db.execute("CREATE TABLE host_pool(host TEXT)")
+        self.assertFalse(legacy_delete_managed(
+            lambda: sqlite3.connect(str(other)), "203.0.113.5",
+            registry_loader=lambda: (),
+        ))
+
+    def test_partial_k2_schema_fails_closed(self):
+        other = self.base / "partial.db"
+        with sqlite3.connect(str(other)) as db:
+            db.execute("CREATE TABLE edge_egress_uid_runtime(edge_ipv4 TEXT)")
+        with self.assertRaises(RetireHold):
+            legacy_delete_managed(
+                lambda: sqlite3.connect(str(other)), "203.0.113.5",
+                registry_loader=lambda: (),
+            )
+
     def test_ticket_binds_actor_chat_edge_and_expiry(self):
         p = self.plan()
         t = issue_ticket(p, actor_id=42, chat_id=72, now=lambda: 100)

@@ -85,6 +85,13 @@ class WizardCallbackRoutingTests(unittest.TestCase):
         self.assertIn('callback_data="hpeg_wizard"',body)
         self.assertIn('callback_data="hp_addedge"',body)
         self.assertNotIn("_db_update_setting, 'edge_egress_v1_onboard_enabled'",body)
+        # Narrow mode-1 exemption: only admin's existing integrated wizard,
+        # never legacy registration, relay switch, user transfer or Failover.
+        self.assertIn('d == "hpeg_wizard" and role == \'admin\'',body)
+        self.assertIn("k2_isolated_wizard_input",body)
+        self.assertIn("state in ('EDGE_NEW_IP', 'EDGE_NEW_ROOTPASS', 'EDGE_NEW_PORT')",body)
+        self.assertIn("role == 'admin'",body)
+        self.assertIn("and not k2_isolated_wizard_input",body)
         self.assertNotIn("_db_set_all_accounts_host",body[body.index(
             'elif d in ("hp_addedge", "hpeg_wizard"):'):body.index(
             'elif d.startswith("hpdef_migrate_")')])

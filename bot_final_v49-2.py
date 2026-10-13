@@ -10768,7 +10768,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # All protected Edge changes will eventually route through the same
     # Phase 6G-locked Egress Manager; none of these legacy paths do so yet.
     edge_action = classify_edge_text(state, text)
-    if edge_action is not None:
+    # The K2 integrated wizard is Stage-only: no customer host/DNS/default
+    # mutation. Keep the legacy protected-mode veto for ALL other operations.
+    k2_isolated_wizard_input = (
+        role == 'admin'
+        and context.user_data.get('egress_new_edge_requested') is True
+        and state in ('EDGE_NEW_IP', 'EDGE_NEW_ROOTPASS', 'EDGE_NEW_PORT')
+    )
+    if edge_action is not None and not k2_isolated_wizard_input:
         edge_mode = await asyncio.to_thread(
             _db_get_setting, PROTECTED_SETTING_KEY, PROTECTED_SETTING_DEFAULT
         )
@@ -15688,7 +15695,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # activation, bulk account moves and removal of operational wg0 peers.
     # In protected mode these legacy commands MUST stop before DB/DNS/SSH.
     edge_action = classify_edge_callback(d)
-    if edge_action is not None:
+    # Admin-only new K2 Stage wizard is not the Legacy REGISTER action;
+    # keep the protected veto for hp_addedge, hpdef and all other callbacks.
+    if edge_action is not None and not (d == "hpeg_wizard" and role == 'admin'):
         edge_mode = await asyncio.to_thread(
             _db_get_setting, PROTECTED_SETTING_KEY, PROTECTED_SETTING_DEFAULT
         )

@@ -40,6 +40,7 @@ class Phase2CohortTests(unittest.TestCase):
                 edge_public_ipv4 TEXT,core_public_ipv4 TEXT,
                 route_table INT,status TEXT);
             INSERT INTO edge_egress_allocations VALUES
+                ('e8','144.172.84.76','209.200.246.198',20008,'STAGED'),
                 ('e9','144.172.84.82','209.200.246.198',20009,'STAGED');
         """)
         install_runtime_schema(self.db)
@@ -116,6 +117,60 @@ class Phase2CohortTests(unittest.TestCase):
         self.assertFalse(any(q.lstrip().upper().startswith(
             ("UPDATE ","INSERT ","DELETE ","REPLACE ","CREATE ")
         ) for q in sql))
+
+    def test_source_protected_allocation_must_match_existing_users(self):
+        self.db.execute(
+            "INSERT INTO settings VALUES('k2_p2_relay_switch_enabled','1')")
+        self.db.execute(
+            "DELETE FROM edge_egress_allocations WHERE edge_id='e8'")
+        review=self.review()
+        self.assertFalse(review.ready)
+        self.assertIn("SOURCE_PROTECTED_EDGE_UNVERIFIED",review.blockers)
+        self.assertIn("MIXED_OR_UNPROTECTED_COHORT",review.blockers)
+        self.assertNotIn(("✅ بررسی نهایی انتقال","hpeg_p2_open_e9"),
+            sum(relay_cohort_buttons(review),[]))
+
+    def test_runtime_and_binding_edge_identity_drift_blocks_all_accounts(self):
+        self.db.execute(
+            "INSERT INTO settings VALUES('k2_p2_relay_switch_enabled','1')")
+        self.db.execute(
+            "UPDATE edge_egress_uid_runtime SET edge_id='e7' "
+            "WHERE username='nvl0557'")
+        view=self.review()
+        self.assertIn("MIXED_OR_UNPROTECTED_COHORT",view.blockers)
+        self.assertFalse(view.ready)
+
+    def test_matching_but_wrong_source_edge_ids_are_not_proof(self):
+        self.db.execute(
+            "INSERT INTO settings VALUES('k2_p2_relay_switch_enabled','1')")
+        self.db.execute(
+            "UPDATE edge_egress_uid_runtime SET edge_id='e7' "
+            "WHERE username='nvl0557'")
+        self.db.execute(
+            "UPDATE edge_egress_uid_bindings SET edge_id='e7' "
+            "WHERE username='nvl0557'")
+        view=self.review()
+        self.assertIn("MIXED_OR_UNPROTECTED_COHORT",view.blockers)
+        self.assertFalse(view.ready)
+
+    def test_retired_source_allocation_cannot_be_used_for_relay_switch(self):
+        self.db.execute(
+            "INSERT INTO settings VALUES('k2_p2_relay_switch_enabled','1')")
+        self.db.execute(
+            "UPDATE edge_egress_allocations SET status='RETIRED' WHERE edge_id='e8'")
+        preview=self.review()
+        self.assertIn("SOURCE_PROTECTED_EDGE_UNVERIFIED",preview.blockers)
+        self.assertFalse(preview.ready)
+
+    def test_source_allocation_core_drift_is_not_ready(self):
+        self.db.execute(
+            "INSERT INTO settings VALUES('k2_p2_relay_switch_enabled','1')")
+        self.db.execute(
+            "UPDATE edge_egress_allocations SET core_public_ipv4='203.0.113.10' "
+            "WHERE edge_id='e8'")
+        view=self.review()
+        self.assertIn("SOURCE_PROTECTED_EDGE_UNVERIFIED",view.blockers)
+        self.assertFalse(view.ready)
 
     def test_stale_f4_witness_blocks_even_with_valid_stage(self):
         self.db.execute(

@@ -130,6 +130,7 @@ class PositiveAdapterTests(unittest.TestCase):
               edge_public_ipv4 TEXT,core_public_ipv4 TEXT,
               route_table INTEGER,status TEXT);
             INSERT INTO edge_egress_allocations VALUES
+              ('e8','144.172.84.76','209.200.246.198',20008,'STAGED'),
               ('e9','144.172.84.82','209.200.246.198',20009,'STAGED');
         """)
         install_readiness_schema(self.db)
@@ -274,6 +275,30 @@ class PositiveAdapterTests(unittest.TestCase):
         self.assertEqual(self.db.execute(
             "SELECT COUNT(*) FROM host_pool WHERE host=?",(TARGET,)
         ).fetchone()[0],0)
+
+    def test_source_f3_allocation_missing_blocks_before_any_uid_or_dns_write(self):
+        self.db.execute(
+            "DELETE FROM edge_egress_allocations WHERE edge_id='e8'")
+        host=Host()
+        result=self.run_it(host)
+        self.assertFalse(result.ok)
+        self.assertNotIn("freeze", host.events)
+        self.assertNotIn("repin", host.events)
+        self.assertNotIn("dns", host.events)
+        self.assertEqual(self.db.execute(
+            "SELECT host FROM ssh_accounts WHERE username='nvl0557'"
+        ).fetchone(),(SOURCE,))
+
+    def test_matching_wrong_runtime_and_mapping_id_blocks_under_6g(self):
+        self.db.execute(
+            "UPDATE edge_egress_uid_runtime SET edge_id='e7' WHERE username='nvl0557'")
+        self.db.execute(
+            "UPDATE edge_egress_uid_bindings SET edge_id='e7' WHERE username='nvl0557'")
+        host=Host()
+        result=self.run_it(host)
+        self.assertFalse(result.ok)
+        self.assertNotIn("repin",host.events)
+        self.assertNotIn("dns",host.events)
 
     def test_mixed_unprotected_cohort_never_reaches_uid_or_dns(self):
         self.db.execute(

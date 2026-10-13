@@ -91,7 +91,7 @@ def detail_buttons(card, current: str = "") -> list[list[tuple[str,str]]]:
     buttons=[
         [("🔎 بررسی اتصال",f"hpeg_health_{eid}"),
          ("🌍 تست IP",f"hpeg_probe_{eid}")],
-        [("👥 انتقال کاربران",f"hpeg_transfer_{eid}"),
+        [("🔀 تغییر مسیر ترافیک",f"hpeg_relay_{eid}"),
          ("👤 کاربران",f"hpeg_user_{eid}")],
         [("🧭 بررسی وضعیت",f"hpeg_actions_{eid}")],
         [("📋 آماده‌سازی",f"hpeg_review_edge_{eid}"),

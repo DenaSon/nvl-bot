@@ -1,36 +1,38 @@
-# K2 Phase 2 — Guarded Edge deletion (source staging)
+# K2 Phase 2 — Guarded Edge retirement (source-integrated)
 
-## Scope
-This branch introduces `edge_egress_phase2_retire.py` and offline tests.
-**Not production-enabled:** the large Telegram bot entrypoint has NOT been
-updated to import or invoke the new controller. Do not merge/announce the
-feature as available until that integration is code-reviewed and CI-green.
+## Implemented
+The existing Telegram Egress Edge detail page now has **🗑 حذف ایمن Edge**.
+The admin-only `hpeg_retire_open_<id>` presents a blocker preview and, only
+when all ownership and safety checks pass, issues a 120-second actor/chat/
+edge/fingerprint-bound confirmation for `hpeg_retire_yes_<id>`.
+The confirmation is removed from Telegram session state before awaiting
+execution. On failure, the UI fails closed as HOLD with internal logging.
 
-This is intentionally a **metadata-only finalizer**, not a live decommission
-executor. Under a current Edge Stage, wg0 peer, namespace, veth, route
-table, UID binding, systemd reference, firewall reference, active host,
-DNS target, SSH host assignment, active 6G lease, missing trusted registry,
-or protected-mode configuration, the controller returns **HOLD**.
-The operator must first use the future guarded Phase-3 executor to
-freeze/detach and remove those owned resources safely and independently.
-No legacy `hpdelyes_` behavior may be reused for protected K2 deletion.
+The source integration gates both legacy `hpdelconfirm_` and
+`hpdelyes_`: K2-registered Edge objects cannot bypass the new lifecycle.
+An old DB with no K2 schema or trusted registry retains legacy behavior,
+but malformed/incomplete K2 state refuses to proceed.
 
-## Required bot integration before Phase 2 can close
-- Import `plan_retirement`, `issue_ticket`, `retire_metadata`,
-  `legacy_delete_managed`, `plan_html`, `RetireHold`.
-- In the existing `hpeg_edge_<id>` panel, add exactly one button
-  `hpeg_retire_open_<id>` → read-only blockers preview.
-- If and only if the preflight is allowed, create a 120-second,
-  actor/chat/edge/fingerprint-bound one-shot confirmation ticket; the
-  `hpeg_retire_yes_<id>` handler consumes it before any await and calls
-  `retire_metadata`, never direct kernel commands.
-- All exception paths display HOLD; full errors logged internally,
-  no private keys sent to Telegram. On success return to `hpeg_status`.
-- Hard-gate legacy `hpdelconfirm_` and `hpdelyes_`: if
-  `legacy_delete_managed(db_conn,host)`, block with a link to K2
-  management; if safety preflight fails, fail closed.
-- Add static integration tests for callback names/role and no
-  unprotected legacy bypass.
+The new `edge_egress_phase2_retire.py` is strictly a **backup-first
+metadata-only finalizer**. It checks exact ingress peer keys, live and
+persistent WG0 peer, namespace, interfaces, route table, systemd/firewall,
+local Stage, protected UID/SSH account bindings, the public DNS/default
+host, global mode and active 6G journal. If anything remains, including
+missing/inconclusive evidence, it returns HOLD. It never alters
+WireGuard, network namespaces, kernel routes, SSH users or Cloudflare.
+This avoids deleting a network component while any subscriber could fall
+back to the Core uplink.
+
+## Deliberately not part of Phase 2
+- Live network decommission/removal of namespace/veth/routing is a
+  Phase-3 executor task with owner-verified detach/freeze.
+- Protected mode 1 deletion stays HOLD until a reviewed guarded
+  transactional executor can coordinate it.
+- Existing e7 Production metadata was manually retired and disappears
+  from the panel. Old e7 routing and UID1644 firewall deny must remain
+  untouched until later approved e7 resource reconciliation.
+- F4 disposable-VPS acceptance still gates production activation.
+- This PR is source-only; no Production install, restart or network edit.
 
 ## Verification / safety
 - Run `python -m unittest tests.test_edge_egress_phase2_retire`

@@ -44,6 +44,8 @@ class Phase1TransportActivationTests(unittest.TestCase):
         )
         self.events=[]
         self.next_id=0
+        self.edge_running=False
+        self.core_running=False
 
     def acquire(self,source,target):
         self.events.append("lock")
@@ -65,10 +67,14 @@ class Phase1TransportActivationTests(unittest.TestCase):
 
     def remote(self,pin,action):
         self.events.append("edge:"+action)
-        return "ABSENT" if action == "inspect" else "TRANSPORT_STARTED"
+        if action == "inspect":
+            return "UP" if self.edge_running else "ABSENT"
+        self.edge_running=True
+        return "TRANSPORT_STARTED"
 
     def core(self,*args):
         self.events.append("core:ensure")
+        self.core_running=True
         return "TRANSPORT_STARTED"
 
     def prove(self,spec):
@@ -79,7 +85,8 @@ class Phase1TransportActivationTests(unittest.TestCase):
         with patch(
             "edge_egress_k2_p1_worker._check_stage",
             return_value=(self.spec,"wg-peer",Path("/root/nvl-egress-v1/core-e8")),
-        ),patch("edge_egress_k2_p1_worker.observe",return_value="ABSENT"):
+        ),patch("edge_egress_k2_p1_worker.observe",
+                side_effect=lambda *args: "UP" if self.core_running else "ABSENT"):
             return activate_phase1(
                 "e8",db_conn=lambda:self.conn,
                 acquire=self.acquire,journal=self.journal,
@@ -174,6 +181,59 @@ class Phase1TransportActivationTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(status, "RUNNING")
         self.assertEqual(json.loads(raw)["phase"], RECOVERY)
+
+
+    def test_source_default_change_after_edge_start_holds_before_core(self):
+        original=self.remote
+        def shift(pin,action):
+            result=original(pin,action)
+            if action == "ensure":
+                self.conn.execute("UPDATE host_pool SET is_default=0 WHERE host=?", (SOURCE,))
+                self.conn.commit()
+            return result
+        self.remote=shift
+        with self.assertRaisesRegex(Phase1Hold, "HELD_FOR_REVIEW"):
+            self.start()
+        self.assertNotIn("core:ensure",self.events)
+        self.assertEqual(self.conn.execute(
+            "SELECT status FROM failover_operations").fetchone()[0],"RUNNING")
+
+    def test_recovery_marker_is_not_a_valid_execution_intent(self):
+        original=self.remote
+        def interrupted(pin,action):
+            result=original(pin,action)
+            if action == "ensure":
+                row=self.conn.execute(
+                    "SELECT id,detail_json FROM failover_operations").fetchone()
+                detail=json.loads(row[1])
+                detail["phase"]=RECOVERY
+                self.conn.execute(
+                    "UPDATE failover_operations SET detail_json=? WHERE id=?",
+                    (json.dumps(detail),row[0]))
+                self.conn.commit()
+            return result
+        self.remote=interrupted
+        with self.assertRaisesRegex(Phase1Hold, "HELD_FOR_REVIEW"):
+            self.start()
+        self.assertNotIn("core:ensure",self.events)
+
+    def test_remote_transport_must_still_be_up_after_start(self):
+        original=self.remote
+        def false_up(pin,action):
+            result=original(pin,action)
+            if action=="inspect" and self.edge_running:
+                return "ABSENT"
+            return result
+        self.remote=false_up
+        with self.assertRaisesRegex(Phase1Hold, "HELD_FOR_REVIEW"):
+            self.start()
+        self.assertNotIn("ip:prove",self.events)
+
+    def test_core_start_must_report_success_not_merely_return(self):
+        self.core=lambda *_args: "ABSENT"
+        with self.assertRaisesRegex(Phase1Hold,"HELD_FOR_REVIEW"):
+            self.start()
+        self.assertNotIn("ip:prove",self.events)
 
     def test_fresh_telegram_ip_probe_readonly(self):
         from edge_egress_k2_p1_worker import probe_phase1

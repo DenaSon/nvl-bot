@@ -233,20 +233,38 @@ def inspect_phase1(edge_id: str, *, db_conn: Callable,
             "customer_ready":False}
 
 
-def _check_lease(db_conn, op_id: int, source: str, target: str):
+def _check_lease(db_conn, op_id: int, source: str, target: str,
+                 *, pin: StagePin) -> None:
+    """Recheck the exact durable 6G intent and ownership on each host step.
+
+    A RECOVERY marker is NOT permission to resume a partially failed start.
+    """
     with db_conn() as db:
         rows = db.execute(
             "SELECT id,source_host,target_host,detail_json "
             "FROM failover_operations WHERE status='RUNNING'"
         ).fetchall()
+        defaults = db.execute(
+            "SELECT host FROM host_pool WHERE is_default=1 AND active=1"
+        ).fetchall()
+        collision = db.execute(
+            "SELECT 1 FROM host_pool WHERE host=?", (target,),
+        ).fetchone()
     if len(rows) != 1 or rows[0][:3] != (op_id, source, target):
         raise Phase1Hold("SHARED_6G_LEASE_LOST")
+    if len(defaults) != 1 or defaults[0] != (source,) or collision:
+        raise Phase1Hold("RELAY_OWNERSHIP_CHANGED")
     try:
         detail = json.loads(rows[0][3])
     except (ValueError, TypeError) as exc:
         raise Phase1Hold("6G_INTENT_MISSING") from exc
-    if (detail.get("kind") != "K2_P1" or detail.get("phase") not in
-            (INTENT, RECOVERY)):
+    if (not isinstance(detail, dict)
+            or detail.get("kind") != "K2_P1"
+            or detail.get("phase") != INTENT
+            or detail.get("edge_id") != pin.edge_id
+            or detail.get("core_sha") != pin.core_sha
+            or detail.get("edge_sha") != pin.edge_sha
+            or detail.get("customers_moved") != 0):
         raise Phase1Hold("6G_INTENT_MISMATCH")
 
 
@@ -289,19 +307,21 @@ def activate_phase1(edge_id: str, *, db_conn: Callable,
     pin = load_pin(edge_id)
     spec, peer, core_path = _check_stage(pin)
     with db_conn() as db:
-        source = db.execute(
+        sources = db.execute(
             "SELECT host FROM host_pool WHERE is_default=1 AND active=1"
-        ).fetchone()
+        ).fetchall()
         collision = db.execute(
             "SELECT 1 FROM host_pool WHERE host=?", (pin.edge_ipv4,)
         ).fetchone()
-    if not source or source[0] in (pin.edge_ipv4, pin.core_ipv4) or collision:
+    if (len(sources) != 1 or sources[0][0] in
+            (pin.edge_ipv4, pin.core_ipv4) or collision):
         raise Phase1Hold("UNSAFE_ACTIVE_RELAY_OWNERSHIP")
+    source = sources[0][0]
     core_state = observe(spec, "core", peer)
     edge_state = remote_transport(pin, "inspect")
     if core_state not in ("ABSENT", "UP") or edge_state not in ("ABSENT", "UP"):
         raise Phase1Hold("UNTRUSTED_PARTIAL_TRANSPORT")
-    op_id, busy = acquire(source[0], pin.edge_ipv4)
+    op_id, busy = acquire(source, pin.edge_ipv4)
     if op_id is None:
         raise Phase1Hold("SHARED_6G_BUSY")
     intent = {"kind":"K2_P1", "phase":INTENT, "edge_id":pin.edge_id,
@@ -309,18 +329,30 @@ def activate_phase1(edge_id: str, *, db_conn: Callable,
               "customers_moved":0}
     try:
         journal(op_id, status="RUNNING", detail=intent, require_running=True)
-        _check_lease(db_conn, op_id, source[0], pin.edge_ipv4)
-        # Start the NAT receiving peer first; then the isolated Core namespace.
-        remote_transport(pin, "ensure")
-        _check_lease(db_conn, op_id, source[0], pin.edge_ipv4)
-        core_ensure(core_path, "core", pin.core_sha)
-        _check_lease(db_conn, op_id, source[0], pin.edge_ipv4)
+        _check_lease(db_conn, op_id, source, pin.edge_ipv4, pin=pin)
+        # The Stage and original wg0 ingress peer must still match after
+        # acquiring the shared operation lease, not just before preview.
+        locked_spec, locked_peer, locked_path = _check_stage(pin)
+        if locked_spec != spec or locked_peer != peer or locked_path != core_path:
+            raise Phase1Hold("STAGE_CHANGED_AFTER_LOCK")
+        # Start the NAT receiving peer first; never touch original wg0.
+        edge_result = remote_transport(pin, "ensure")
+        if edge_result not in ("EXACT_TRANSPORT_ALREADY_UP", "TRANSPORT_STARTED"):
+            raise Phase1Hold("EDGE_START_NOT_CONFIRMED")
+        _check_lease(db_conn, op_id, source, pin.edge_ipv4, pin=pin)
+        core_result = core_ensure(core_path, "core", pin.core_sha)
+        if core_result not in ("EXACT_TRANSPORT_ALREADY_UP", "TRANSPORT_STARTED"):
+            raise Phase1Hold("CORE_START_NOT_CONFIRMED")
+        _check_lease(db_conn, op_id, source, pin.edge_ipv4, pin=pin)
+        if observe(spec, "core", peer) != "UP":
+            raise Phase1Hold("CORE_POST_START_NOT_UP")
+        if remote_transport(pin, "inspect") != "UP":
+            raise Phase1Hold("EDGE_POST_START_NOT_UP")
+        _check_lease(db_conn, op_id, source, pin.edge_ipv4, pin=pin)
         observed = ipv4_proof(spec)
-        # Do not trust an injected/future alternative probe solely because it
-        # returned without throwing. The exact selected Edge IP is mandatory.
         if observed != pin.edge_ipv4:
             raise Phase1Hold("DEDICATED_EGRESS_IP_NOT_PROVEN")
-        _check_lease(db_conn, op_id, source[0], pin.edge_ipv4)
+        _check_lease(db_conn, op_id, source, pin.edge_ipv4, pin=pin)
         journal(op_id, status="SUCCEEDED", detail={
             **intent, "phase":"EGRESS_P1_TRANSPORT_PROVEN",
             "observed_ipv4":observed, "customer_ready":False,

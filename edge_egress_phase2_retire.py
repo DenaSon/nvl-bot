@@ -255,7 +255,8 @@ def retire_metadata(db_conn: Callable, ticket: RetireTicket, *, actor_id: int,
                     runtime_probe=kernel_blockers, stage_root: Path = STAGE_ROOT,
                     backup_root: Path = BACKUP_ROOT, geteuid=os.geteuid,
                     backup_db_path: Path = Path("/root/master_bot.db"),
-                    backup_owner_uid: int = 0) -> str:
+                    backup_owner_uid: int = 0,
+                    lock_owner_uid: int = 0) -> str:
     """One-shot, backup-first CAS. Refuses ANY live Edge/UID/network reference.
 
     No user, wg0, namespace, routing, firewall, DNS or remote object is touched.
@@ -279,7 +280,7 @@ def retire_metadata(db_conn: Callable, ticket: RetireTicket, *, actor_id: int,
     conn = None
     try:
         st = os.fstat(fd)
-        if st.st_uid != 0 or stat.S_IMODE(st.st_mode) & 0o077:
+        if st.st_uid != lock_owner_uid or stat.S_IMODE(st.st_mode) & 0o077:
             raise RetireHold("REGISTRY_LOCK_PERMISSIONS")
         fcntl.flock(fd, fcntl.LOCK_EX)
         conn = db_conn()

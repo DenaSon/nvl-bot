@@ -129,22 +129,22 @@ from edge_egress_f3_admin import render_assignment_preview"""
     )
 
     for prefix in ("hpdelconfirm_", "hpdelyes_"):
-        old = (f'    elif d.startswith("{prefix}") and role == \'admin\':\\n'
-               f'        host = d[len("{prefix}"):]\\n'
+        old = (f'    elif d.startswith("{prefix}") and role == \'admin\':\n'
+               f'        host = d[len("{prefix}"):]\n'
                f'        active_now =')
-        new = (f'    elif d.startswith("{prefix}") and role == \'admin\':\\n'
-               f'        host = d[len("{prefix}"):]\\n'
-               '        try:\\n'
-               '            if await asyncio.to_thread(is_managed_egress_deletion, db_conn, host):\\n'
-               '                await query.answer("⛔️ حذف Edge جدید فقط از «مدیریت Egress» مجاز است.", show_alert=True)\\n'
-               '                return\\n'
-               '        except Exception:\\n'
-               '            log.exception("K2 legacy host deletion preflight unavailable")\\n'
-               '            await query.answer("⛔️ کنترل ایمنی حذف در دسترس نیست.", show_alert=True)\\n'
-               '            return\\n'
+        new = (f'    elif d.startswith("{prefix}") and role == \'admin\':\n'
+               f'        host = d[len("{prefix}"):]\n'
+               '        try:\n'
+               '            if await asyncio.to_thread(is_managed_egress_deletion, db_conn, host):\n'
+               '                await query.answer("⛔️ حذف Edge جدید فقط از «مدیریت Egress» مجاز است.", show_alert=True)\n'
+               '                return\n'
+               '        except Exception:\n'
+               '            log.exception("K2 legacy host deletion preflight unavailable")\n'
+               '            await query.answer("⛔️ کنترل ایمنی حذف در دسترس نیست.", show_alert=True)\n'
+               '            return\n'
                '        active_now =')
-        source = _once(source, old.replace("\\\\n", "\\n"),
-                       new.replace("\\\\n", "\\n"))
+        source = _once(source, old.replace("\\\n", "\n"),
+                       new.replace("\\\n", "\n"))
     return source
 
 

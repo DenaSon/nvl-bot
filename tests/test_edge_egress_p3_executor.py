@@ -60,6 +60,8 @@ class ExecutorTests(unittest.TestCase):
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 status TEXT, source_host TEXT, target_host TEXT, detail_json TEXT
             )""")
+            db.execute("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT)")
+            db.execute("INSERT INTO settings VALUES('edge_egress_protected_mode','0')")
         self.now = 1000
         self.scope = ExecutionScope(
             action="EDGE_PREPARE", edge_id="e7",
@@ -175,6 +177,23 @@ class ExecutorTests(unittest.TestCase):
             self.ticket(scope=attach)
         valid=replace(self.evidence,gates=BASE_GATES|ATTACH_GATES)
         self.assertEqual(self.ticket(scope=attach,evidence=valid).evidence_digest,self.digest)
+
+    def test_uid_attach_requires_global_protected_mode_in_both_gates(self):
+        attach=ExecutionScope(action="UID_ATTACH", edge_id="e7",
+            source_host=self.scope.source_host,target_host=self.scope.target_host,
+            username="nvl0557",uid=1644)
+        acceptable=replace(self.evidence,gates=BASE_GATES|ATTACH_GATES)
+        ticket=self.ticket(scope=attach,evidence=acceptable)
+        self.evidence=acceptable
+        with self.assertRaisesRegex(ExecutorHold,"PROTECTED_MODE_REQUIRED"):
+            self.run_exec(scope=attach,ticket=ticket)
+        self.assertEqual(self.acquire_count,0)
+        self.assertEqual(self.host.applied,0)
+        with self.conn() as db:
+            db.execute("UPDATE settings SET value='1'")
+        result=self.run_exec(scope=attach,ticket=ticket)
+        self.assertTrue(result.allowed)
+        self.assertEqual(self.host.applied,1)
 
     def test_success_has_protected_intent_before_first_mutation_and_terminal_cas(self):
         result=self.run_exec()

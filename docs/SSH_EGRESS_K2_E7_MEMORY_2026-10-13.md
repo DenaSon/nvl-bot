@@ -1,3 +1,5 @@
+> **Later 2026-10-13 e7 retirement update — DO NOT REUSE THIS AS LIVE SETUP INSTRUCTIONS:** The provider deleted New York e7 `172.86.105.67` after the historical iPhone egress-success tests below. The operator manually retired its ingress Registry/F3 metadata (PASS, backup `/root/nvl-backups/e7-retire-pRfWH19n`), with **network kernel resources and UID1644 fencing intentionally unchanged**. F4/PAM/boot/IPv6/reboot was never accepted. P3-E orphan retirement is source-only; no Core teardown has occurred. Read [the current K2 Agent Handoff](NVL_K2_AGENT_HANDOFF_2026-10-13.md) for accurate next actions before using old `e7` Stage/path/SSH instructions. Do not resurrect the VPS, remove its UID REJECT/blackhole, edit `wg0`, or treat the previous IP proof as current F4.
+
 # NVL — K2 New York e7: Production Egress / iPhone E2E Memory
 
 **Operator-observed checkpoint:** 2026-10-13 (Iran local time; collected from operator-pasted Core/Edge terminal outputs and iPhone Cloudflare trace).  

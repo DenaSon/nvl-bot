@@ -1,5 +1,7 @@
 # NVL Architecture Context Map — 2026-09-30
 
+> **2026-10-13 K2 source/release update:** The mind map and subsequent baseline analysis in this document were written 2026-09-30 and describe historical architecture. For current SSH Egress code and release status, read [NVL K2 Agent Handoff](NVL_K2_AGENT_HANDOFF_2026-10-13.md) **first**. Phase2 and P3-A–F source are merged through [PR #118](https://github.com/DenaSon/nvl-bot/pull/118), but no privileged P3 live executor or Production rollout is accepted; F4 [#106](https://github.com/DenaSon/nvl-bot/issues/106) and rollout [#108](https://github.com/DenaSon/nvl-bot/issues/108) are open. This baseline's generic Edge-only relay path must not be mistaken for proof of enabled per-UID dedicated egress. Production runtime state requires new read-only observation.
+
 This document is a compact working context for future development and review. It describes the architecture observed in production plus the current repository state. It is not a claim that every legacy script matches the active production topology.
 
 ## 1. System mind map

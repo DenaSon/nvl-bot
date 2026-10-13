@@ -39,17 +39,27 @@ class CloudflareFake:
         self.calls.append(req)
         if req.get_method() == "GET":
             from urllib.parse import parse_qs, urlsplit
-            name = parse_qs(urlsplit(req.full_url).query)["name"][0]
-            data = [{
+            params = parse_qs(urlsplit(req.full_url).query)
+            name = params["name"][0]
+            kind = params["type"][0]
+            data = ([] if kind == "AAAA" else [{
                 "id": RID, "name": name, "type": "A", "proxied": self.proxied,
                 "content": self.records[name], "ttl": 120,
-            }]
-            return Response({"success": True, "result": data})
+            }])
+            return Response({"success": True, "result": data,
+                             "result_info": {"total_pages": 1,
+                                             "total_count": len(data)}})
         payload = json.loads(req.data)
         if self.partial:
             raise OSError("unknown provider outcome")
-        self.records[payload["name"]] = payload["content"]
-        return Response({"success": True, "result": {"id": RID}})
+        if req.get_method() != "PATCH":
+            raise AssertionError("expected PATCH to pinned record ID")
+        name = next(iter(self.records))
+        self.records[name] = payload["content"]
+        return Response({"success": True, "result": {
+            "id": RID, "name": name, "type": "A",
+            "proxied": False, "content": payload["content"], "ttl": 120,
+        }})
 
 
 def make_cf(provider):
@@ -66,7 +76,7 @@ class CloudflareUnitTests(unittest.TestCase):
         dns.switch_edge_to_edge(SRC, TGT)
         dns.assert_target(TGT)
         self.assertEqual(backend.records[DOMAIN], TGT)
-        self.assertEqual(len([q for q in backend.calls if q.get_method() == "PUT"]), 1)
+        self.assertEqual(len([q for q in backend.calls if q.get_method() == "PATCH"]), 1)
         with self.assertRaisesRegex(DnsHold, "CF_SOURCE_RECORD_CAS_LOST"):
             dns.switch_edge_to_edge(SRC, TGT)
 

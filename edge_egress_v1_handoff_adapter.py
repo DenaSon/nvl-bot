@@ -202,6 +202,17 @@ class Existing6GProtectedHandoffAdapter:
                 raise PositiveHandoffHold("NO_ACTIVE_SSH_ACCOUNTS")
             if any(host not in (source, "", None) for _, host in accounts):
                 raise PositiveHandoffHold("OTHER_EDGE_ACCOUNT_HOST_CONFLICT")
+            # Re-prove the exact source Edge F3 identity UNDER the acquired
+            # shared 6G lease. The Telegram preview alone is not enough:
+            # source allocation/UID ownership could drift before mutation.
+            source_allocations = conn.execute(
+                "SELECT edge_id,core_public_ipv4 FROM edge_egress_allocations "
+                "WHERE edge_public_ipv4=? AND status='STAGED'", (source,),
+            ).fetchall()
+            if (len(source_allocations) != 1 or
+                    source_allocations[0][1] != self.core_ip):
+                raise PositiveHandoffHold("SOURCE_F3_ALLOCATION_IDENTITY_HOLD")
+            source_edge_id = source_allocations[0][0]
             runtime = conn.execute(
                 "SELECT username,uid,edge_id,edge_ipv4,state "
                 "FROM edge_egress_uid_runtime ORDER BY username"
@@ -214,7 +225,8 @@ class Existing6GProtectedHandoffAdapter:
                 raise PositiveHandoffHold("NOT_ALL_ACTIVE_SSH_UIDS_PROTECTED")
             for (username, _host), rr, bb in zip(accounts, runtime, binding):
                 if (rr[0] != username or bb[0] != username
-                        or rr[1:4] != bb[1:4] or rr[3] != source
+                        or rr[1:4] != bb[1:4] or rr[2] != source_edge_id
+                        or rr[3] != source
                         or rr[4] != "PROTECTED" or bb[4] != "PROTECTED"
                         or pwd.getpwnam(username).pw_uid != rr[1]):
                     raise PositiveHandoffHold("UID_MAPPING_SOURCE_UNCERTAIN")

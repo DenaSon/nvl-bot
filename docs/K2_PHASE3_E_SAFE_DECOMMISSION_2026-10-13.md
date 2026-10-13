@@ -31,7 +31,7 @@ After any uncertain action, 6G remains `RUNNING` with protected
 previously owned UID fences for operator-only reconciliation.
 
 Read-only preflight MUST establish:
-- Root-trusted, SHA256-pinned Core Stage using the existing
+- Root-trusted, SHA256-pinned **fixed** Core Stage path\n  `/root/nvl-egress-v1/core-<edge_id>` using the existing
   `ops.edge_egress_v1_transport.pinned` API; exact Edge ID, Core IP and
   public Edge IP. No stage/no pin is HOLD (never infer from `e7` alone).
 - Required K2 schema present. NO active/default host entry, SSH account
@@ -86,11 +86,11 @@ traffic to Core or treat a removed VPS as evidence of an unused route.
 
 ## Tests / continuation
 
-`tests/test_edge_egress_p3_retire.py` exercises 16 fake-host
+`tests/test_edge_egress_p3_retire.py` exercises 17 fake-host
 and real SQLite shared-6G scenarios, including orphan e7, preserving
 UID fence/blackhole and default host, metadata conflict, foreign
 resource, forgotten session, Stage/registry drift, missing 6G gates,
-partial transport failure and unverified finish. This is **not** a real
+partial transport failure and unverified finish, including forged review identity. This is **not** a real
 Linux teardown or proof that a live system is safe.
 
 P3-F should expose a minimal admin preview with explicit

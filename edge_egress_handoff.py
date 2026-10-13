@@ -77,6 +77,7 @@ EGRESS_HOLD_PHASES = frozenset({
     # P3-A journal-before-host-write; RUNNING must survive legacy stale-lock
     # recovery even when the executor is interrupted or host state is unknown.
     "EGRESS_P3_EXECUTE_INTENT", "EGRESS_P3_RECOVERY_REQUIRED",
+    "EGRESS_P1_TRANSPORT_INTENT", "EGRESS_P1_TRANSPORT_RECOVERY_REQUIRED",
 })
 
 

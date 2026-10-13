@@ -170,6 +170,10 @@ class Phase2UidTextHandlerTests(unittest.TestCase):
             "re":__import__("re"),
             "InlineKeyboardButton":lambda label,callback_data:(label,callback_data),
             "InlineKeyboardMarkup":lambda rows:rows,
+            "GuardedK2TelegramTransferService":__import__(
+                "edge_egress_k2_transfer_service",
+                fromlist=["GuardedK2TelegramTransferService"]
+            ).GuardedK2TelegramTransferService,
         }
         fn=get_function("text_handler",globals)
         asyncio.run(fn(update,SimpleNamespace(user_data=data)))

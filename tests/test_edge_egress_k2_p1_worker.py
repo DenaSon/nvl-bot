@@ -165,6 +165,58 @@ class Phase1TransportActivationTests(unittest.TestCase):
             ("INSERT ","UPDATE ","DELETE ","REPLACE ","CREATE ")
         ) for x in trace))
 
+    def test_injected_wrong_ip_must_not_mark_6g_success(self):
+        self.prove=lambda _spec: CORE
+        with self.assertRaisesRegex(Phase1Hold, "HELD_FOR_REVIEW"):
+            self.start()
+        status, raw = self.conn.execute(
+            "SELECT status,detail_json FROM failover_operations"
+        ).fetchone()
+        self.assertEqual(status, "RUNNING")
+        self.assertEqual(json.loads(raw)["phase"], RECOVERY)
+
+    def test_fresh_telegram_ip_probe_readonly(self):
+        from edge_egress_k2_p1_worker import probe_phase1
+        self.remote=lambda pin,action: "UP"
+        traces=[]
+        self.conn.set_trace_callback(traces.append)
+        with patch("edge_egress_k2_p1_worker._check_stage",
+                   return_value=(self.spec,"wg-peer",Path("/root/nvl-egress-v1/core-e8"))), \
+             patch("edge_egress_k2_p1_worker.observe",return_value="UP"):
+            result=probe_phase1(
+                "e8",db_conn=lambda:self.conn,load_pin=lambda _:self.pin,
+                remote_transport=self.remote,ipv4_proof=lambda _:EDGE,
+            )
+        self.assertEqual(result["expected_ipv4"],EDGE)
+        self.assertEqual(result["observed_ipv4"],EDGE)
+        self.assertFalse(result["customer_ready"])
+        self.assertFalse(any(q.lstrip().upper().startswith(
+            ("INSERT ", "UPDATE ", "DELETE ", "REPLACE ", "CREATE ")
+        ) for q in traces))
+
+    def test_fresh_ip_probe_rejects_absent_tunnel_without_probing(self):
+        from edge_egress_k2_p1_worker import probe_phase1
+        with patch("edge_egress_k2_p1_worker._check_stage",
+                   return_value=(self.spec,"wg-peer",Path("/root/nvl-egress-v1/core-e8"))), \
+             patch("edge_egress_k2_p1_worker.observe",return_value="ABSENT"):
+            with self.assertRaisesRegex(Phase1Hold,"TRANSPORT_NOT_UP"):
+                probe_phase1("e8",db_conn=lambda:self.conn,
+                             load_pin=lambda _:self.pin,
+                             remote_transport=self.remote,
+                             ipv4_proof=lambda _:self.fail("IP must not be probed"))
+        self.assertNotIn("edge:ensure",self.events)
+
+    def test_fresh_ip_probe_mismatch_fails_closed(self):
+        from edge_egress_k2_p1_worker import probe_phase1
+        with patch("edge_egress_k2_p1_worker._check_stage",
+                   return_value=(self.spec,"wg-peer",Path("/root/nvl-egress-v1/core-e8"))), \
+             patch("edge_egress_k2_p1_worker.observe",return_value="UP"):
+            with self.assertRaisesRegex(Phase1Hold,"IP_NOT_PROVEN"):
+                probe_phase1("e8",db_conn=lambda:self.conn,
+                             load_pin=lambda _:self.pin,
+                             remote_transport=lambda p,a:"UP",
+                             ipv4_proof=lambda _:CORE)
+
     def test_public_ipv4_proof_requires_exact_edge_and_no_dns_lookup(self):
         spec = SimpleNamespace(namespace="nvleg8", edge_public_ipv4=EDGE)
         calls=[]
@@ -192,13 +244,15 @@ class Phase1TransportActivationTests(unittest.TestCase):
     def test_bot_requires_admin_confirmation_and_opt_in_no_users(self):
         src=Path("bot_final_v49-2.py").read_text(encoding="utf-8")
         for marker in (
-            "hpeg_p1_open_", "hpeg_p1_yes_",
+            "hpeg_p1_open_", "hpeg_p1_yes_", "hpeg_p1_probe_",
             "k2_p1_activation_ticket", "role != 'admin'",
             "k2_p1_transport_activation_enabled",
             "activate_phase1, edge_id, db_conn=db_conn",
         ):
             self.assertIn(marker,src)
         self.assertIn("hpeg_p1_open_",Path(
+            "edge_egress_p3_telegram.py").read_text(encoding="utf-8"))
+        self.assertIn("hpeg_p1_probe_",Path(
             "edge_egress_p3_telegram.py").read_text(encoding="utf-8"))
 
     def test_pin_file_rejects_invalid_fields_before_network(self):

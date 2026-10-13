@@ -329,7 +329,31 @@ async def run_protected_handoff(
         await _record(ports, operation_id, "SUCCEEDED", phase,
                       {"target": target_host, "account_count": len(snapshot.active_accounts)})
         return HandoffResult(True, "SUCCEEDED", operation_id)
-    except Exception as exc:
+    except BaseException as exc:
+        # Async cancellation is a first-class crash boundary. If an Edge
+        # stage or UID/DNS mutation may have begun, retain the shared RUNNING
+        # 6G lock and persist operator-only recovery before re-raising.
+        cancelled = isinstance(
+            exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)
+        )
+        if cancelled:
+            if snapshot is not None and (safety_touched or candidate_touched):
+                frozen = False
+                if safety_touched:
+                    try:
+                        await ports.freeze_customer_egress(snapshot)
+                        frozen = True
+                    except BaseException:
+                        pass
+                try:
+                    await _record(
+                        ports, operation_id, "RUNNING", MANUAL_RECOVERY_PHASE,
+                        {"failed_phase": phase, "frozen": frozen,
+                         "cancelled": True},
+                    )
+                except BaseException:
+                    pass
+            raise
         # Avoid logging raw provider or credential-containing exception text.
         reason = f"{type(exc).__name__}:{str(exc)[:120]}" if isinstance(exc, HandoffUnsafe) else (
             f"{type(exc).__name__}:OPERATION_FAILED"

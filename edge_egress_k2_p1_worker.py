@@ -199,7 +199,8 @@ def _remote_transport(pin: StagePin, action: str) -> str:
             result = stdout.read(128).decode("utf-8").strip()
             code = stdout.channel.recv_exit_status()
             if code != 0 or result not in (
-                "UP", "ABSENT", "EXACT_TRANSPORT_ALREADY_UP", "TRANSPORT_STARTED",
+                ("UP", "ABSENT") if action == "inspect" else
+                ("EXACT_TRANSPORT_ALREADY_UP", "TRANSPORT_STARTED")
             ):
                 raise Phase1Hold("REMOTE_PINNED_TRANSPORT_HOLD")
             return result
@@ -315,6 +316,10 @@ def activate_phase1(edge_id: str, *, db_conn: Callable,
         core_ensure(core_path, "core", pin.core_sha)
         _check_lease(db_conn, op_id, source[0], pin.edge_ipv4)
         observed = ipv4_proof(spec)
+        # Do not trust an injected/future alternative probe solely because it
+        # returned without throwing. The exact selected Edge IP is mandatory.
+        if observed != pin.edge_ipv4:
+            raise Phase1Hold("DEDICATED_EGRESS_IP_NOT_PROVEN")
         _check_lease(db_conn, op_id, source[0], pin.edge_ipv4)
         journal(op_id, status="SUCCEEDED", detail={
             **intent, "phase":"EGRESS_P1_TRANSPORT_PROVEN",
@@ -333,3 +338,36 @@ def activate_phase1(edge_id: str, *, db_conn: Callable,
         except Exception:
             pass
         raise Phase1Hold("PHASE1_ACTIVATION_HELD_FOR_REVIEW") from None
+
+
+def probe_phase1(edge_id: str, *, db_conn: Callable,
+                 load_pin: Callable = load_stage_pin,
+                 remote_transport: Callable = _remote_transport,
+                 ipv4_proof: Callable = _prove_ipv4) -> dict:
+    """Read-only fresh Core-namespace IP check for one dedicated K2 Edge.
+
+    This is NOT a subscriber SSH/SOCKS test and never changes the default
+    relay, 6G journal, users or DNS. Reject any partially active tunnel.
+    """
+    before = inspect_phase1(
+        edge_id, db_conn=db_conn, load_pin=load_pin,
+        remote_transport=remote_transport,
+    )
+    if before["core"] != "UP" or before["edge"] != "UP":
+        raise Phase1Hold("DEDICATED_TRANSPORT_NOT_UP")
+    pin = load_pin(edge_id)
+    spec, _peer, _path = _check_stage(pin)
+    observed = ipv4_proof(spec)
+    if observed != pin.edge_ipv4:
+        raise Phase1Hold("DEDICATED_EGRESS_IP_NOT_PROVEN")
+    after = inspect_phase1(
+        edge_id, db_conn=db_conn, load_pin=load_pin,
+        remote_transport=remote_transport,
+    )
+    if after["core"] != "UP" or after["edge"] != "UP" or after["edge_ip"] != pin.edge_ipv4:
+        raise Phase1Hold("DEDICATED_TRANSPORT_CHANGED_DURING_PROBE")
+    return {
+        "edge_id":pin.edge_id, "expected_ipv4":pin.edge_ipv4,
+        "observed_ipv4":observed, "matches":True,
+        "transport_up":True, "customer_ready":False,
+    }

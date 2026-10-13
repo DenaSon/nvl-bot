@@ -377,7 +377,7 @@ from edge_egress_k2_final_integration import (
     transfer_preview_buttons as k2_transfer_preview_buttons,
 )
 from edge_egress_k2_p1_worker import (
-    Phase1Hold, inspect_phase1, activate_phase1,
+    Phase1Hold, inspect_phase1, activate_phase1, probe_phase1,
 )
 from edge_egress_k2_phase1_wizard import (
     assert_isolated_new_edge_candidate, K2WizardHold,
@@ -23926,6 +23926,43 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.exception("K2 guarded account transfer failed or unavailable")
             await query.message.reply_text(
                 "⛔️ انتقال کامل نشد؛ وضعیت را بدون اقدام تکراری بررسی کنید."
+            )
+        return
+
+    elif d.startswith("hpeg_p1_probe_"):
+        # A fresh namespace->Edge public IPv4 check. It never starts tunnels
+        # or mutates users, DNS, the customer pool or Failover state.
+        if role != 'admin':
+            await query.message.reply_text("⛔️ فقط مدیر")
+            return
+        edge_id = d[len("hpeg_p1_probe_"):]
+        try:
+            edge_id_checked(edge_id)
+            result = await asyncio.to_thread(
+                probe_phase1, edge_id, db_conn=db_conn,
+            )
+            await query.edit_message_text(
+                "🌍 <b>تست IP خروجی سرور</b>\n\n"
+                f"🖥 سرور: <code>{esc(result['edge_id'])}</code>\n"
+                f"🎯 IP مورد انتظار: <code>{esc(result['expected_ipv4'])}</code>\n"
+                f"✅ IP مشاهده‌شده: <code>{esc(result['observed_ipv4'])}</code>\n\n"
+                "✅ تونل خروجی اختصاصی برقرار است.\n"
+                "هیچ کاربری منتقل نشده؛ این تست، تأیید اتصال مشتری نیست.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("◀️ جزئیات سرور",
+                                         callback_data=f"hpeg_edge_{edge_id}")
+                ]]),
+            )
+        except Exception:
+            log.exception("K2 Phase1 read-only Edge IP probe HOLD")
+            await query.edit_message_text(
+                "⛔️ IP خروجی سرور تأیید نشد.\n"
+                "مسیر اختصاصی Core و Edge باید بررسی شود؛ "
+                "مسیر کاربران تغییری نکرده است.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("◀️ سرورها", callback_data="hpeg_status")
+                ]]),
             )
         return
 

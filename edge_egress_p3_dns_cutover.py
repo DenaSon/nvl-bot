@@ -115,13 +115,14 @@ class GuardedIngressCloudflarePort:
             ).fetchone() != (1, 0, 1):
                 raise ProtectedDnsHandoffHold("TARGET_HOST_NO_LONGER_STANDBY")
             edges = conn.execute(
-                "SELECT edge_id FROM edge_egress_allocations "
+                "SELECT edge_id,core_public_ipv4 FROM edge_egress_allocations "
                 "WHERE edge_public_ipv4=? AND status='STAGED'",
                 (a.plan.target,)
             ).fetchall()
-            if len(edges) != 1 or not admission_eligible(
-                    read_readiness(conn, edges[0][0])):
-                raise ProtectedDnsHandoffHold("TARGET_F4_NOT_CURRENT")
+            if (len(edges) != 1 or a.plan.target == edges[0][1]
+                    or a.plan.source == edges[0][1]
+                    or not admission_eligible(read_readiness(conn, edges[0][0]))):
+                raise ProtectedDnsHandoffHold("TARGET_F4_OR_CORE_IDENTITY_INVALID")
             active = tuple(conn.execute(
                 "SELECT username FROM ssh_accounts WHERE service_type='ssh' "
                 "AND status LIKE '%فعال%' AND status NOT LIKE '%غیر%' "

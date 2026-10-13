@@ -133,6 +133,31 @@ class Phase2RetireTests(unittest.TestCase):
                 registry_loader=lambda: (),
             )
 
+    def test_missing_mode_or_dns_setting_holds(self):
+        with self.conn() as db:
+            db.execute("DELETE FROM settings WHERE key='edge_egress_protected_mode'")
+            db.execute("DELETE FROM settings WHERE key='dns_current_ip'")
+        p = self.plan()
+        self.assertIn("PROTECTED_MODE_NOT_LEGACY", p.blockers)
+        self.assertIn("PUBLIC_DNS_CONFIG_UNKNOWN", p.blockers)
+
+    def test_final_telegram_handlers_bound_and_admin_only(self):
+        source = (Path(__file__).resolve().parents[1] /
+                  "bot_final_v49-2.py").read_text(encoding="utf-8")
+        self.assertEqual(source.count('elif d.startswith("hpeg_retire_open_")'), 1)
+        self.assertIn("hpeg_retire_yes_", source)
+        self.assertIn("🗑 حذف ایمن Edge", source)
+        self.assertEqual(source.count("is_managed_egress_deletion, db_conn, host"), 2)
+        start = source.index('    elif d.startswith("hpeg_retire_open_")')
+        end = source.index('    elif d == "hpeg_status"', start)
+        segment = source[start:end]
+        self.assertIn("if role != 'admin':", segment)
+        self.assertIn("context.user_data.pop('egress_retire_ticket', None)", segment)
+        self.assertIn("plan_egress_retirement, db_conn, edge_id", segment)
+        self.assertIn("apply_egress_retire_metadata, db_conn, ticket", segment)
+        self.assertNotIn("systemctl restart", segment)
+        self.assertNotIn("ip route del", segment)
+
     def test_ticket_binds_actor_chat_edge_and_expiry(self):
         p = self.plan()
         t = issue_ticket(p, actor_id=42, chat_id=72, now=lambda: 100)

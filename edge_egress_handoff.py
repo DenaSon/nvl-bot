@@ -74,6 +74,9 @@ EGRESS_HOLD_PHASES = frozenset({
     # protected mutations; stale 6G leases must never auto-unlock these.
     "ADMISSION_FENCE", "DRAIN_SOURCE_SESSIONS",
     "EDGE_ONLY_PROTECTED_DNS_CUTOVER",
+    # P3-A journal-before-host-write; RUNNING must survive legacy stale-lock
+    # recovery even when the executor is interrupted or host state is unknown.
+    "EGRESS_P3_EXECUTE_INTENT", "EGRESS_P3_RECOVERY_REQUIRED",
 })
 
 

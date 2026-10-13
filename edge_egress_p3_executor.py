@@ -293,6 +293,13 @@ class Existing6GGuardedExecutor:
         with self.db_conn() as conn:
             if _nonce_seen(conn, nonce_hash):
                 raise ExecutorHold("TICKET_REPLAY")
+            if scope.action == "UID_ATTACH":
+                mode = conn.execute(
+                    "SELECT value FROM settings "
+                    "WHERE key='edge_egress_protected_mode'"
+                ).fetchone()
+                if mode != ("1",):
+                    raise ExecutorHold("PROTECTED_MODE_REQUIRED_FOR_UID_ATTACH")
 
         operation_id, busy = self.acquire_fn(scope.source_host, scope.target_host)
         if operation_id is None:

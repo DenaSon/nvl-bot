@@ -16,6 +16,9 @@ explicitly injected orchestration shell for later **P3-B/C** lifecycle work.
 - No `subprocess`, SSH, network, systemd, database write or Cloudflare API
   is called by P3-A. Concrete host actions are injected exclusively via
   `GuardedHostPort` and are NOT supplied from Telegram.
+- `UID_ATTACH` is denied while `edge_egress_protected_mode != 1`,
+  checked before acquiring 6G and again **inside** its locked snapshot.
+  Readiness/attestation alone never silently enables global protected mode.
 - The allowlist is limited to `EDGE_PREPARE`, `UID_ATTACH`, `UID_FREEZE`.
   These are contracts, not enabled Production commands. Adding `DECOMMISSION`
   or `EDGE_HANDOFF` requires later bounded review in P3-D/E.

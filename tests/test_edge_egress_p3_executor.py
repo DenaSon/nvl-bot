@@ -16,6 +16,7 @@ from edge_egress_p3_executor import (
     ALLOWED_ACTIONS, ATTACH_GATES, BASE_GATES, EXECUTOR_ENABLED,
     INTENT_PHASE, RECOVERY_PHASE, ExecutionScope, ExecutorHold,
     Existing6GGuardedExecutor, FreshEvidence, issue_execution_ticket,
+    inspect_execution_recovery,
 )
 
 
@@ -316,6 +317,35 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(self.host.frozen,1)
         self.assertEqual(self.only()[1],"RUNNING")
         self.assertEqual(self.only()[2]["phase"],RECOVERY_PHASE)
+
+    def test_crash_recovery_inspection_only_and_no_automatic_unlock(self):
+        self.host.fail_apply=True
+        result=self.run_exec()
+        review=inspect_execution_recovery(self.conn,result.operation_id)
+        self.assertEqual(review.journal_status,"RUNNING")
+        self.assertEqual(review.journal_phase,RECOVERY_PHASE)
+        self.assertTrue(review.requires_manual_recovery)
+        self.assertEqual(self.only()[1],"RUNNING")
+
+    def test_success_recovery_inspection_is_read_only(self):
+        result=self.run_exec()
+        review=inspect_execution_recovery(self.conn,result.operation_id)
+        self.assertFalse(review.requires_manual_recovery)
+        self.assertEqual(review.journal_phase,"EGRESS_P3_VERIFIED")
+        self.assertEqual(self.only()[1],"SUCCEEDED")
+
+    def test_crash_recovery_rejects_unknown_or_legacy_operation(self):
+        with self.assertRaises(ExecutorHold):
+            inspect_execution_recovery(self.conn,3456)
+        with self.conn() as db:
+            cur=db.execute(
+                "INSERT INTO failover_operations "
+                "(status,source_host,target_host,detail_json) VALUES(?,?,?,?)",
+                ("RUNNING","9.9.9.9","8.8.8.8",'{"phase":"LOCKED"}'),
+            )
+            other=cur.lastrowid
+        with self.assertRaises(ExecutorHold):
+            inspect_execution_recovery(self.conn,other)
 
     def test_recovery_phase_never_stale_unlocked(self):
         for p in (INTENT_PHASE, RECOVERY_PHASE):

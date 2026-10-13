@@ -33,6 +33,8 @@ class K2TransferPreviewTests(unittest.TestCase):
         self.conn.executescript("""
         CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT);
         INSERT INTO settings VALUES('edge_egress_protected_mode','0');
+        CREATE TABLE host_pool(host TEXT PRIMARY KEY,active INTEGER,is_default INTEGER);
+        INSERT INTO host_pool VALUES('104.194.144.195',1,1);
         CREATE TABLE ssh_accounts(username TEXT PRIMARY KEY,host TEXT,
                                   service_type TEXT,status TEXT);
         INSERT INTO ssh_accounts VALUES
@@ -86,6 +88,43 @@ class K2TransferPreviewTests(unittest.TestCase):
         )
         self.assertIn("اتصال ورودی تأیید نشده", plan.blockers)
         self.assertIn("تونل خروجی آماده نیست", plan.blockers)
+
+
+    def test_mixed_edges_only_count_source_users_not_all_active_ssh(self):
+        self.conn.execute("INSERT INTO host_pool VALUES('146.190.3.22',1,0)")
+        self.conn.execute(
+            "INSERT INTO ssh_accounts VALUES('foreign','146.190.3.22','ssh','🟢 فعال')"
+        )
+        plan = read_transfer_preview(self.db, card(), self.transport)
+        self.assertEqual(plan.ssh_accounts, 2)
+        self.assertEqual(plan.other_edge_accounts, 1)
+        self.assertEqual(plan.active_total, 3)
+        self.assertIn("حساب‌های سرورهای دیگر", " ".join(plan.blockers))
+        self.assertIn("بدون تغییر", transfer_preview_html(plan))
+        self.assertFalse(plan.can_execute)
+
+    def test_orphan_host_blocks_transfer_without_database_write(self):
+        self.conn.execute(
+            "UPDATE ssh_accounts SET host='198.51.100.9' WHERE username='other'"
+        )
+        sql = []
+        self.conn.set_trace_callback(sql.append)
+        plan = read_transfer_preview(self.db, card(), self.transport)
+        self.assertEqual(plan.ssh_accounts, 1)
+        self.assertEqual(plan.unknown_accounts, 1)
+        self.assertIn("مالکیت برخی حساب‌ها مشخص نیست", plan.blockers)
+        self.assertFalse(any(stmt.lstrip().upper().startswith(
+            ("INSERT ", "UPDATE ", "DELETE ", "CREATE ", "REPLACE ", "DROP ")
+        ) for stmt in sql))
+
+    def test_new_edge_outside_pool_is_not_mistaken_for_default(self):
+        plan = read_transfer_preview(
+            self.db, card(pool_active=False), self.transport,
+        )
+        self.assertEqual(plan.source_host, "104.194.144.195")
+        self.assertEqual(plan.ssh_accounts, 2)
+        self.assertFalse(plan.can_execute)
+        self.assertIn("اتصال ورودی تأیید نشده", plan.blockers)
 
     def test_missing_control_tables_hold(self):
         with sqlite3.connect(":memory:") as db:

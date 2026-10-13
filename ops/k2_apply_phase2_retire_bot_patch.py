@@ -143,8 +143,7 @@ from edge_egress_f3_admin import render_assignment_preview"""
                '            await query.answer("⛔️ کنترل ایمنی حذف در دسترس نیست.", show_alert=True)\n'
                '            return\n'
                '        active_now =')
-        source = _once(source, old.replace("\\\n", "\n"),
-                       new.replace("\\\n", "\n"))
+        source = _once(source, old, new)
     return source
 
 

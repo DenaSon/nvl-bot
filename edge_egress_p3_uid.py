@@ -206,7 +206,8 @@ class GuardedProtectedUIDPort:
 
     def _check(self, scope: ExecutionScope, allowed_states: tuple[str | None, ...]):
         if (scope != self.plan.scope or not self.release_enabled
-                or self.kernel is None or self.safety is None):
+                or self.kernel is None or
+                (self.plan.purpose != FREEZE and self.safety is None)):
             raise ProtectedUIDHold("UID_OPERATION_NOT_RELEASED")
         # Recheck exact P3-A nonce-bearing RUNNING intent BEFORE every
         # kernel/DB operation; no second transaction system is created.
@@ -251,9 +252,11 @@ class GuardedProtectedUIDPort:
                     raise ProtectedUIDHold("UID_GENERATION_CAS_DRIFT")
                 mapping = _mapping(conn, scope.username)
                 expected = (scope.uid, scope.edge_id, scope.target_host, "PROTECTED")
-                if (mapping != expected if
-                        (self.plan.purpose != NEW or row.state == "PROTECTED")
-                        else mapping is not None):
+                requires_mapping = (
+                    self.plan.purpose != NEW or row.state == "PROTECTED"
+                )
+                if ((requires_mapping and mapping != expected)
+                        or (not requires_mapping and mapping is not None)):
                     raise ProtectedUIDHold("PROTECTED_MAPPING_CHANGED")
         return op
 

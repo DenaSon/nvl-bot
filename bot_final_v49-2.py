@@ -371,6 +371,10 @@ from edge_egress_k2_final_integration import (
     transfer_preview_html as k2_transfer_preview_html,
     transfer_preview_buttons as k2_transfer_preview_buttons,
 )
+from edge_egress_k2_transfer_service import (
+    GuardedK2TelegramTransferService, PreparedCustomerTransfer,
+    TransferRegistrationHold,
+)
 from edge_egress_f3_admin import render_assignment_preview
 from edge_egress_f3_readiness import record_ingress_candidate
 from incident_observability import (
@@ -10779,7 +10783,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     eid, username, time.time() + 120,
                     update.effective_user.id, update.effective_chat.id,
                 )
-                buttons = InlineKeyboardMarkup([
+                selection_buttons = [
                     [InlineKeyboardButton(
                         "🔗 بررسی اتصال",
                         callback_data=f"hpeg_review_attach_{eid}"
@@ -10788,7 +10792,19 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "🧊 بررسی توقف",
                         callback_data=f"hpeg_review_freeze_{eid}"
                     )],
-                ])
+                ]
+                # Source-only opt-in: never expose a mutating callback unless
+                # the separately reviewed root execution service is registered.
+                k2_service = getattr(
+                    getattr(context, 'application', None), 'bot_data', {}
+                ).get('k2_transfer_service')
+                if (isinstance(k2_service, GuardedK2TelegramTransferService)
+                        and k2_service.release_enabled is True):
+                    selection_buttons.append([InlineKeyboardButton(
+                        "✅ انتقال محافظت‌شده",
+                        callback_data=f"hpeg_xfer_prepare_{eid}",
+                    )])
+                buttons = InlineKeyboardMarkup(selection_buttons)
         except (EgressConsoleHold, ValueError, AttributeError):
             preview = "⛔️ هویت یا وضعیت Edge قابل تأیید نیست؛ هیچ اقدامی نشد."
         except Exception:
@@ -23761,6 +23777,99 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop('egress_retire_ticket', None)
             log.exception("K2 Edge retirement unavailable")
             await query.message.reply_text("⛔️ حذف Edge متوقف شد؛ وضعیت را بررسی کنید.")
+        return
+
+    elif d.startswith("hpeg_xfer_prepare_"):
+        if role != 'admin':
+            await query.message.reply_text("⛔️ فقط مدیر")
+            return
+        edge_id = d[len("hpeg_xfer_prepare_"):]
+        chosen = context.user_data.pop('egress_review_uid_selector', None)
+        context.user_data.pop('k2_transfer_prepared', None)
+        try:
+            edge_id_checked(edge_id)
+            if not isinstance(chosen, tuple) or len(chosen) != 5:
+                raise TransferRegistrationHold("USER_SELECTION_NOT_CURRENT")
+            eid, username, expiry, owner, chat = chosen
+            if (eid != edge_id or type(expiry) not in (int, float)
+                    or time.time() >= expiry
+                    or owner != update.effective_user.id
+                    or chat != update.effective_chat.id):
+                raise TransferRegistrationHold("USER_SELECTION_EXPIRED")
+            service = context.application.bot_data.get('k2_transfer_service')
+            if (not isinstance(service, GuardedK2TelegramTransferService)
+                    or service.release_enabled is not True):
+                raise TransferRegistrationHold("LIVE_WORKER_NOT_REGISTERED")
+            prepared = await asyncio.to_thread(
+                service.prepare, username=username, edge_id=edge_id,
+                actor_id=owner, chat_id=chat,
+            )
+            context.user_data['k2_transfer_prepared'] = prepared
+            await query.edit_message_text(
+                "🔐 <b>تأیید انتقال یک حساب</b>\n\n"
+                f"کاربر: <code>{esc(username)}</code>\n"
+                f"سرور مقصد: <code>{esc(edge_id)}</code>\n\n"
+                "این درخواست یک‌بارمصرف است. فقط پس از بررسی مجدد "
+                "و تأیید کامل خروجی اجرا می‌شود.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "✅ اجرای انتقال",
+                        callback_data=f"hpeg_xfer_confirm_{prepared.ticket.nonce}",
+                    )],
+                    [InlineKeyboardButton(
+                        "❌ انصراف", callback_data=f"hpeg_edge_{edge_id}",
+                    )],
+                ]),
+            )
+        except Exception:
+            context.user_data.pop('k2_transfer_prepared', None)
+            await query.edit_message_text(
+                "⛔️ <b>انتقال قابل اجرا نیست.</b>\n"
+                "آمادگی سرور یا مجوز عملیات کامل نشده است؛ هیچ تغییری انجام نشد.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("◀️ سرورها", callback_data="hpeg_status")
+                ]]),
+            )
+        return
+
+    elif d.startswith("hpeg_xfer_confirm_"):
+        if role != 'admin':
+            await query.message.reply_text("⛔️ فقط مدیر")
+            return
+        prepared = context.user_data.pop('k2_transfer_prepared', None)
+        try:
+            token = d[len("hpeg_xfer_confirm_"):]
+            service = context.application.bot_data.get('k2_transfer_service')
+            if (not isinstance(prepared, PreparedCustomerTransfer)
+                    or not re.fullmatch(r"[0-9a-f]{32}", token)
+                    or token != prepared.ticket.nonce
+                    or not isinstance(service, GuardedK2TelegramTransferService)
+                    or service.release_enabled is not True):
+                raise TransferRegistrationHold("ONE_SHOT_TRANSFER_NOT_AUTHORIZED")
+            await query.edit_message_text(
+                "⏳ انتقال محافظت‌شده در حال بررسی و اجراست...",
+            )
+            receipt = await service.execute(
+                prepared, actor_id=update.effective_user.id,
+                chat_id=update.effective_chat.id,
+            )
+            if receipt.allowed is not True:
+                await query.message.reply_text(
+                    "⛔️ انتقال تأیید نشد؛ حساب در وضعیت محافظت‌شده "
+                    "یا توقف امن باقی می‌ماند. گزارش را بررسی کنید."
+                )
+            else:
+                await query.message.reply_text(
+                    "✅ انتقال این حساب با تست مسیر خروجی تأیید شد. "
+                    "برای بررسی بقیه کاربران، سرور را مجدداً انتخاب کنید."
+                )
+        except Exception:
+            log.exception("K2 guarded account transfer failed or unavailable")
+            await query.message.reply_text(
+                "⛔️ انتقال کامل نشد؛ وضعیت را بدون اقدام تکراری بررسی کنید."
+            )
         return
 
     elif d.startswith("hpeg_transfer_"):

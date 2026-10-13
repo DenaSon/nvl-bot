@@ -1,5 +1,7 @@
 # K2 P3-F — Telegram Integration & Final UX
 
+> **Merged source checkpoint:** [PR #118](https://github.com/DenaSon/nvl-bot/pull/118) merged into `master` at `22eba3cda13c0c72407bd3d55d7328ae93496d25`, with both exact PR-head CI workflows successful. P3-F UX is source-integrated, **not deployed**, and does not enable P3-A–E privileged execution. Current release/next-agent instructions: [Canonical K2 Handoff](NVL_K2_AGENT_HANDOFF_2026-10-13.md). F4 [#106](https://github.com/DenaSon/nvl-bot/issues/106) and guarded rollout [#108](https://github.com/DenaSon/nvl-bot/issues/108) remain open.
+
 ## Source-only delivery
 P3-F uses the **existing** NVL admin-only `hpeg_*` handlers (no new bot,
 bot token, session store or parallel menu), with `edge_egress_p3_telegram.py`

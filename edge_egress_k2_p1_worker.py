@@ -47,6 +47,7 @@ class StagePin:
     edge_sha: str
     ssh_host_key: str
     ssh_port: int
+    customer_port: int = 0  # 0 denotes an older pin: forbidden for unlisted cutover
 
     def validate(self):
         if not _EDGE.fullmatch(self.edge_id):
@@ -67,6 +68,8 @@ class StagePin:
             raise Phase1Hold("BAD_INGRESS_IP")
         if type(self.ssh_port) is not int or not 1 <= self.ssh_port <= 65535:
             raise Phase1Hold("BAD_SSH_PORT")
+        if type(self.customer_port) is not int or not 0 <= self.customer_port <= 65535:
+            raise Phase1Hold("BAD_CUSTOMER_PORT")
         if any(not isinstance(v, str) or not _HEX.fullmatch(v)
                for v in (self.core_sha, self.edge_sha)):
             raise Phase1Hold("STAGE_DIGEST_REQUIRED")

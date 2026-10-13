@@ -108,18 +108,23 @@ class TelegramRouteWiringTests(unittest.TestCase):
         self.assertIn('callback_data=f"hpeg_relay_{edge_id}"',text)
         self.assertIn('f"hpeg_relay_{eid}"',view)
 
-    def test_relay_readonly_branch_is_admin_before_io(self):
+    def test_relay_manual_branch_is_admin_with_existing_6g_worker_only(self):
         src=BOT.read_text(encoding="utf-8")
         start=src.index('    elif d.startswith("hpeg_relay_"):')
         end=src.index('    elif d.startswith("hpeg_transfer_"):',start)
         callback=src[start:end]
         self.assertLess(callback.index("if role != 'admin':"),
-                        callback.index("read_egress_dashboard"))
-        self.assertIn("k2_relay_traffic_html(review)",callback)
+                        callback.index("review_relay_cohort"))
+        self.assertIn("render_cohort_review(review)",callback)
+        self.assertIn("hpeg_p2_open_",callback)
+        self.assertIn("hpeg_p2_yes_",callback)
+        self.assertIn("execute_relay_switch(",callback)
+        self.assertIn("_db_acquire_failover_lock",callback)
         for mutation in (
             "_db_set_default_host", "_db_set_all_accounts_host",
             "_db_rebuild_hosts_from_pool","_update_cloudflare_dns",
             "set_account_host", "set_hosts_bulk","systemctl",
+            "_safe_manual_failover",
         ):
             self.assertNotIn(mutation,callback)
 

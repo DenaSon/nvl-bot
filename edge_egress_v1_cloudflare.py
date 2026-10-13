@@ -36,7 +36,9 @@ def _domains(config: dict) -> tuple[str, ...]:
     names = [config.get("public_domain")]
     if config.get("tls_passthrough") == "1":
         names.append(config.get("tls_domain"))
-    result = tuple(dict.fromkeys(name for name in names if name))
+    if any(not name for name in names):
+        raise DnsHold("MISSING_REQUIRED_PUBLIC_DOMAIN")
+    result = tuple(dict.fromkeys(names))
     if not result or any(
         not isinstance(name, str)
         or not re.fullmatch(r"[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+", name)
@@ -113,6 +115,16 @@ class ProtectedCloudflareDNS:
             raise DnsHold("CF_REQUEST_UNCERTAIN") from exc
         if not isinstance(output, dict) or output.get("success") is not True:
             raise DnsHold("CF_RESPONSE_UNTRUSTED")
+        if method == "GET" and "/dns_records?" in path:
+            items = output.get("result")
+            info = output.get("result_info")
+            if not isinstance(items, list) or not isinstance(info, dict):
+                raise DnsHold("CF_PAGINATION_UNVERIFIED")
+            if (type(info.get("total_pages")) is not int or
+                    info["total_pages"] != 1 or
+                    type(info.get("total_count")) is not int or
+                    info["total_count"] != len(items)):
+                raise DnsHold("CF_PAGINATED_RECORDS_UNSAFE")
         return output.get("result")
 
     def _records(self, cfg, name):

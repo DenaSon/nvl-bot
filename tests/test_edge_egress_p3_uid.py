@@ -321,6 +321,58 @@ class P3CUIDTests(unittest.TestCase):
         self.assertNotIn("idle",self.safety.events)
         self.assertNotIn("packet",self.safety.events)
 
+    def test_freeze_succeeds_with_missing_optional_safety_provider(self):
+        self.make_binding("PROTECTED")
+        plan,port,engine,ticket=self.setup_action(FREEZE)
+        port.safety=None
+        receipt=self.execute(engine,plan,ticket)
+        self.assertTrue(receipt.allowed)
+        self.assertTrue(self.kernel.deny)
+        self.assertEqual(self.binding().state,"FROZEN")
+
+    def test_shared_edge_second_protected_uid_is_never_mutated(self):
+        second=Member("nvl0558",1645,"b"*64)
+        self.roster["nvl0558"]=second
+        with self.db() as c:
+            c.execute(
+                "INSERT INTO edge_egress_uid_runtime "
+                "(username,uid,edge_id,edge_ipv4,route_table,priority,"
+                "dns_port,state,last_operation_id) "
+                "VALUES('nvl0558',1645,'fra1',?,1780,1781,10554,'PROTECTED',33)",
+                (TARGET,),
+            )
+            c.execute(
+                "INSERT INTO edge_egress_uid_bindings"
+                "(username,uid,edge_id,edge_ipv4,status)"
+                "VALUES('nvl0558',1645,'fra1',?,'PROTECTED')",
+                (TARGET,),
+            )
+        plan,port,engine,ticket=self.setup_action()
+        receipt=self.execute(engine,plan,ticket)
+        self.assertTrue(receipt.allowed)
+        with self.db() as c:
+            row=read_binding(c,"nvl0558")
+            mapping=c.execute(
+                "SELECT status FROM edge_egress_uid_bindings "
+                "WHERE username='nvl0558'",
+            ).fetchone()
+        self.assertEqual((row.uid,row.state,row.generation), (1645,"PROTECTED",1))
+        self.assertEqual(mapping,("PROTECTED",))
+        self.assertEqual(self.binding().state,"PROTECTED")
+
+    def test_stale_generation_after_preview_is_denied(self):
+        self.make_binding("FROZEN")
+        plan,port,engine,ticket=self.setup_action(RESUME)
+        with self.db() as c:
+            c.execute(
+                "UPDATE edge_egress_uid_runtime SET generation=generation+1 "
+                "WHERE username='nvl0557'"
+            )
+        receipt=self.execute(engine,plan,ticket)
+        self.assertTrue(receipt.manual_recovery)
+        self.assertEqual(self.binding().state,"FROZEN")
+        self.assertEqual(self.mapping(),(1644,"fra1",TARGET,"PROTECTED"))
+
     def test_resume_from_frozen_requires_new_proofs_and_keeps_mapping(self):
         self.make_binding("FROZEN")
         plan,port,engine,ticket=self.setup_action(RESUME)

@@ -24,7 +24,8 @@ class Phase2CallbackContracts(unittest.TestCase):
                       self.handler)
         self.assertIn('egress_dashboard_html(board)', self.handler)
         self.assertIn('callback_data="hpeg_wizard"', self.handler)
-        self.assertIn('callback_data=f"hpeg_page_{page}"', self.handler)
+        self.assertIn('egress_dashboard_buttons(board)', self.handler)
+        self.assertIn('hpeg_page_', self.handler)
 
     def test_all_phase2_inspection_callbacks_are_admin_only(self):
         self.assertIn('d.startswith("hpeg_edge_")', self.handler)
@@ -36,7 +37,7 @@ class Phase2CallbackContracts(unittest.TestCase):
         self.assertIn('hpeg_page_', self.handler)
         self.assertIn('d.startswith("hpeg_review_")', self.handler)
         self.assertIn('d.startswith("hpeg_ack_")', self.handler)
-        self.assertIn('hpeg_review_edge_', self.handler)
+        self.assertIn('egress_detail_buttons(card)', self.handler)
         self.assertIn('hpeg_ack_', self.handler)
         self.assertIn('egress_operator_review_ticket', self.handler)
         self.assertIn("ticket = context.user_data.pop(", self.handler)

@@ -15,6 +15,10 @@ from edge_egress_status import (
 from edge_egress_inventory import ensure_schema
 from edge_egress_v1_console import overview_html, edge_id_checked, EgressConsoleHold
 from edge_egress_phase2_console import Dashboard, dashboard_html
+from edge_egress_p3_telegram import (
+    dashboard_html as compact_dashboard_html,
+    dashboard_buttons as compact_dashboard_buttons,
+)
 
 if sys.version_info >= (3, 12):
     from test_edge_egress_bot_integration import get_function
@@ -107,7 +111,8 @@ class AdminStatusCallbackTests(unittest.TestCase):
             "asyncio": asyncio,
             "classify_edge_callback":lambda _:None,
             "read_egress_dashboard": lambda conn, **kw: board,
-            "egress_dashboard_html": dashboard_html,
+            "egress_dashboard_html": compact_dashboard_html,
+            "egress_dashboard_buttons": compact_dashboard_buttons,
             "EGRESS_PAGE_SIZE": 8,
             "log": SimpleNamespace(exception=lambda *a, **kw: None),
             "render_egress_status_html": render_egress_status_html,
@@ -127,7 +132,7 @@ class AdminStatusCallbackTests(unittest.TestCase):
         q=self.run_handler("admin")
         q.answer.assert_awaited_once()
         q.edit_message_text.assert_awaited_once()
-        self.assertIn("مرکز کنترل Egress",q.edit_message_text.await_args.args[0])
+        self.assertIn("مدیریت سرورها",q.edit_message_text.await_args.args[0])
 
     def test_non_admin_gets_denied_without_status_read(self):
         q=self.run_handler("accountant")

@@ -88,11 +88,11 @@ class Phase2ReviewCallbackTests(unittest.TestCase):
         self.query.edit_message_text.reset_mock()
         self.invoke()
         self.assertNotIn("egress_operator_review_ticket",self.ctx.user_data)
-        self.assertIn("REVIEW_ACKNOWLEDGED_NO_EXECUTION",
+        self.assertIn("بررسی ثبت شد",
                       self.query.edit_message_text.await_args.args[0])
         self.query.edit_message_text.reset_mock()
         self.invoke()
-        self.assertIn("HOLD",self.query.edit_message_text.await_args.args[0])
+        self.assertIn("منقضی",self.query.edit_message_text.await_args.args[0])
         self.assertEqual(self.calls,["read","stage","build",
                                      "read","stage","build"])
 
@@ -102,7 +102,7 @@ class Phase2ReviewCallbackTests(unittest.TestCase):
         self.query.data="hpeg_ack_"+ticket.token
         self.update.effective_chat.id=-333
         self.invoke()
-        self.assertIn("HOLD",self.query.edit_message_text.await_args.args[0])
+        self.assertIn("منقضی",self.query.edit_message_text.await_args.args[0])
         self.assertNotIn("egress_operator_review_ticket",self.ctx.user_data)
 
     def test_changed_review_blocks_ack(self):
@@ -113,7 +113,7 @@ class Phase2ReviewCallbackTests(unittest.TestCase):
         })
         self.query.data="hpeg_ack_"+ticket.token
         self.invoke()
-        self.assertIn("HOLD",self.query.edit_message_text.await_args.args[0])
+        self.assertIn("منقضی",self.query.edit_message_text.await_args.args[0])
 
     def test_non_admin_cannot_even_prepare_a_review(self):
         self.ctx.user_data["role"]="accountant"

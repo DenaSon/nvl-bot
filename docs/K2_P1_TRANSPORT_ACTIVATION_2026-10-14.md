@@ -1,0 +1,61 @@
+# K2 Phase 1 — dedicated Edge Egress transport activation (2026-10-14)
+
+**Delivery:** stacked PR on draft #120; source code only, no master/prod deployment.
+
+## One existing Telegram workflow
+
+`➕ افزودن سرور` uses existing `hpeg_wizard` + Legacy Ingress installer
+and the dedicated Core/Edge Egress **Stage** writer. The installer now
+records (atomically, root-only) the original Core and Edge Stage SHA256
+and the observed public Ed25519 SSH host key under
+`/etc/nvl-egress/k2-p1-pins/eN.json`. It reads back remote Stage artifacts
+over that SSH session before pinning. A previous/duplicate Stage is HOLD;
+never silently repin a stale or edited Edge.
+
+Next Telegram buttons: `📤 فعال‌سازی خروجی` -> exact admin-only Stage/
+ingress/host-key and dedicated transport preview -> one-shot confirmation
+(max 120s, bound to user + chat + edge) -> root-only worker.
+
+## Transport Worker
+
+Reuses `ops.edge_egress_v1_transport.pinned/observe/ensure`. The Edge's
+reviewed transport Python sources are streamed over **strictly pinned SSH**
+(no unversioned remote tool installation). Both `up.sh` scripts are already
+root-owned and exact-stage SHA-pinned. It starts Edge NAT/WG receiving peer
+first and then Core dedicated namespace, then probes the public IPv4 through
+`ip netns exec <dedicated-namespace> curl -4 ...`. Success demands exact
+Edge public IPv4, not Core IPv4.
+
+This flow never alters live `wg0`, host_pool, settings.hosts,
+`ssh_accounts.host`, global default route, customer UID, PAM, Cloudflare
+DNS, 6H Failover or automatic migrations.
+
+The **existing** Phase6G operation journal is reused: action intent is
+persisted *before* the first host change; current lease is checked after
+each action. Any uncertain remote state/IP mismatch leaves a protected
+`RUNNING` operation at `EGRESS_P1_TRANSPORT_RECOVERY_REQUIRED`.
+The 6G stale-lock recovery recognizes both Phase1 states. Do NOT blindly
+rerun while HOLD is recorded.
+
+## Deliberate operator rollout gate
+
+`settings.k2_p1_transport_activation_enabled` must be `1` for the
+confirmation to execute. Default missing/0 = read-only/block. A controlled
+test deployment operator enables only after reviewing backups, Core/Edge
+rescue and new disposable VPS ownership. The Telegram button cannot
+silently bypass this gate. Do **not** switch it on for current customers.
+
+## What success means (and does NOT mean)
+
+Success means a dedicated Core namespace exits the internet using the
+candidate Edge IPv4, with the ingress wg0 registry intact. It is
+`TRANSPORT PROVEN / NO CUSTOMERS MOVED`.
+
+It is **not** F3 customer STAGED/READY, not F4 production acceptance,
+not persisted boot service, not protected PAM admission, not a UID
+fail-closed release, and **not** actual SSH/SOCKS subscriber IP proof.
+Phase2/3 must still implement customer route/ingress switching; F4
+requires fresh disposable VPS boot, DNS/IPv6/leak/failure evidence before
+real users are permitted.
+
+No production actions were performed while developing this change.

@@ -172,6 +172,17 @@ def read_dashboard(db_conn: Callable, *,
                     len(stage_pin) == 64
                     and all(c in "0123456789abcdef" for c in stage_pin)
                 ) else None
+                # Phase1's original root-only installer pin is trusted
+                # separately from the eventual F3 allocation/READY witness.
+                # It cannot grant a UID customer route or F4 acceptance.
+                if pin is None and ingress:
+                    try:
+                        from edge_egress_k2_p1_worker import load_stage_pin
+                        original_pin = load_stage_pin(edge_id)
+                        if original_pin.edge_ipv4 == ip:
+                            pin = original_pin.core_sha
+                    except (OSError, ValueError):
+                        pass
                 cards.append(EdgeCard(
                     edge_id=edge_id, ip=ip,
                     ingress_verified=ingress, pool_active=active,

@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import asdict
 import base64
 import fcntl
+import hashlib
+import stat
 import ipaddress
 import json
 import os
@@ -226,6 +228,29 @@ def _remote_stage(ssh, spec: EgressSpec, edge_private: str,
     return remote_dir
 
 
+
+def _remote_stage_digest(ssh, directory: str) -> str:
+    """Read back only our four root-owned Stage files over the pinned SSH."""
+    from ops.edge_egress_v1_transport import FILES
+    h = hashlib.sha256()
+    sftp = ssh.open_sftp()
+    try:
+        for name in FILES:
+            path = directory + "/" + name
+            attrs = sftp.lstat(path)
+            if (not stat.S_ISREG(attrs.st_mode) or attrs.st_uid != 0
+                    or attrs.st_mode & 0o077 or attrs.st_size > 16384):
+                raise OnboardHold("REMOTE_STAGE_FILE_UNTRUSTED")
+            with sftp.file(path, "rb") as handle:
+                data = handle.read(16385)
+            if len(data) != attrs.st_size or len(data) > 16384:
+                raise OnboardHold("REMOTE_STAGE_READBACK_MISMATCH")
+            h.update(name.encode() + b"\0" + len(data).to_bytes(8, "big") + data)
+        return h.hexdigest()
+    finally:
+        sftp.close()
+
+
 def onboard_after_ingress(*, edge_ip: str, core_ip: str, ingress_ip: str,
                           public_key: str, ssh_host_key, ssh_port: int,
                           root_password: str | None,
@@ -282,7 +307,8 @@ def onboard_after_ingress(*, edge_ip: str, core_ip: str, ingress_ip: str,
         ssh.connect(**connect)
         core_priv, core_pub = _wg_keypair()
         edge_priv, edge_pub = _wg_keypair()
-        _remote_stage(ssh, spec, edge_priv, core_pub)
+        remote_dir = _remote_stage(ssh, spec, edge_priv, core_pub)
+        edge_digest = _remote_stage_digest(ssh, remote_dir)
         # Do not permit protected UIDs to attach to an unfinished Core stage.
         stage_files(spec, "core", core_stage, core_priv, edge_pub)
     except OnboardHold:
@@ -292,7 +318,18 @@ def onboard_after_ingress(*, edge_ip: str, core_ip: str, ingress_ip: str,
         raise OnboardHold("EGRESS_STAGE_INCOMPLETE_HOLD") from exc
     finally:
         ssh.close()
-    # Only publish trusted new ingress identity after both stages are written.
+    # Preserve the observed SSH host identity and BOTH file digests while
+    # the installer is still the unique owner of this new Edge. A hash minted
+    # later from unreviewed files must never be treated as an original pin.
+    from edge_egress_k2_p1_worker import StagePin, publish_stage_pin
+    from ops.edge_egress_v1_transport import stage_hash
+    publish_stage_pin(StagePin(
+        edge_id=spec.edge_id, edge_ipv4=peer.edge_ipv4,
+        core_ipv4=spec.core_public_ipv4, ingress_ipv4=peer.ingress_ipv4,
+        core_sha=stage_hash(core_stage), edge_sha=edge_digest,
+        ssh_host_key=ssh_host_key.get_base64(), ssh_port=ssh_port,
+    ))
+    # Publish H registry last; a half-pinned Stage stays unavailable.
     _publish_registry(peer)
     return dict(edge_id=spec.edge_id, egress_state="STAGED_NOT_READY",
                 core_stage=str(core_stage), remote_stage=f"{EDGE_HOME}/edge-{spec.edge_id}",

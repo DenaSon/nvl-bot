@@ -376,6 +376,9 @@ from edge_egress_k2_final_integration import (
     transfer_preview_html as k2_transfer_preview_html,
     transfer_preview_buttons as k2_transfer_preview_buttons,
 )
+from edge_egress_k2_p1_worker import (
+    Phase1Hold, inspect_phase1, activate_phase1,
+)
 from edge_egress_k2_phase1_wizard import (
     assert_isolated_new_edge_candidate, K2WizardHold,
 )
@@ -3751,6 +3754,10 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
     ok_key, err_key = _install_local_pubkey_on_open_ssh(ssh)
     if not ok_key:
         log.warning("نصب کلید SSH دائمی روی Edge %s شکست خورد: %s", edge_ip, err_key)
+        if protected_wizard:
+            with contextlib.suppress(Exception):
+                ssh.close()
+            return False, "⛔️ ثبت دسترسی مدیریتی امن روی Edge کامل نشد.", None
     
     with db_conn() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key='tls_port'").fetchone()
@@ -3959,8 +3966,9 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
         # No default/DNS/UID switch on the new protected-aware entrypoint.
         html, edge_id = egress_staged_edge_result(edge_ip, result)
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔎 بررسی اتصال", callback_data=f"hpeg_stage_{edge_id}"),
-             InlineKeyboardButton("🔀 تغییر مسیر ترافیک", callback_data=f"hpeg_relay_{edge_id}")],
+            [InlineKeyboardButton("📤 فعال‌سازی خروجی", callback_data=f"hpeg_p1_open_{edge_id}"),
+             InlineKeyboardButton("🔎 بررسی اتصال", callback_data=f"hpeg_stage_{edge_id}")],
+            [InlineKeyboardButton("🔀 تغییر مسیر ترافیک", callback_data=f"hpeg_relay_{edge_id}")],
             [InlineKeyboardButton("📋 بررسی آماده‌سازی",
                                   callback_data=f"hpeg_review_edge_{edge_id}")],
             [InlineKeyboardButton("◀️ سرورها", callback_data="hpeg_status")],
@@ -23918,6 +23926,115 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.exception("K2 guarded account transfer failed or unavailable")
             await query.message.reply_text(
                 "⛔️ انتقال کامل نشد؛ وضعیت را بدون اقدام تکراری بررسی کنید."
+            )
+        return
+
+    elif d.startswith("hpeg_p1_open_"):
+        if role != 'admin':
+            await query.message.reply_text("⛔️ فقط مدیر")
+            return
+        edge_id = d[len("hpeg_p1_open_"):]
+        context.user_data.pop("k2_p1_activation_ticket", None)
+        try:
+            edge_id_checked(edge_id)
+            if await asyncio.to_thread(
+                _db_get_setting, "k2_p1_transport_activation_enabled", "0",
+            ) != "1":
+                raise Phase1Hold("OPERATOR_RELEASE_NOT_ENABLED")
+            info = await asyncio.to_thread(
+                inspect_phase1, edge_id, db_conn=db_conn,
+            )
+            if info["core"] not in ("ABSENT", "UP") or info["edge"] not in ("ABSENT", "UP"):
+                raise Phase1Hold("STAGE_NOT_READY")
+            token = __import__("secrets").token_hex(12)
+            context.user_data["k2_p1_activation_ticket"] = (
+                edge_id, token, update.effective_user.id, update.effective_chat.id,
+                time.time() + 120,
+            )
+            buttons = InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "✅ فعال‌سازی خروجی", callback_data=f"hpeg_p1_yes_{edge_id}_{token}"
+                )],
+                [InlineKeyboardButton(
+                    "◀️ سرور", callback_data=f"hpeg_edge_{edge_id}"
+                )],
+            ])
+            await query.edit_message_text(
+                "📤 <b>فعال‌سازی خروجی Edge</b>\n\n"
+                f"سرور: <code>{esc(info['edge_id'])}</code>\n"
+                f"IP هدف: <code>{esc(info['edge_ip'])}</code>\n"
+                "این کار فقط تونل اختصاصی Core و Edge را فعال می‌کند.\n"
+                "کاربران، رله پیش‌فرض و Failover تغییر نمی‌کنند.\n\n"
+                "برای اجرای عملیات تأیید کنید.",
+                parse_mode="HTML", reply_markup=buttons,
+            )
+        except Exception:
+            await query.edit_message_text(
+                "⛔️ آماده‌سازی خروجی قابل تأیید نیست.\n"
+                "اطلاعات نصب یا وضعیت سرور نیازمند بررسی است.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("◀️ سرورها", callback_data="hpeg_status")
+                ]]),
+            )
+        return
+
+    elif d.startswith("hpeg_p1_yes_"):
+        if role != 'admin':
+            await query.message.reply_text("⛔️ فقط مدیر")
+            return
+        raw = d[len("hpeg_p1_yes_"):]
+        parts = raw.split("_")
+        # One-shot: consume ticket BEFORE awaiting external I/O.
+        ticket = context.user_data.pop("k2_p1_activation_ticket", None)
+        valid = (
+            len(parts) == 2
+            and isinstance(ticket, tuple) and len(ticket) == 5
+            and (parts[0], parts[1]) == ticket[:2]
+            and update.effective_user.id == ticket[2]
+            and update.effective_chat.id == ticket[3]
+            and time.time() < ticket[4]
+        )
+        if not valid:
+            await query.message.reply_text(
+                "⛔️ تأیید قبلی معتبر نیست؛ از صفحه سرور دوباره اقدام کنید."
+            )
+            return
+        edge_id = parts[0]
+        try:
+            edge_id_checked(edge_id)
+            if await asyncio.to_thread(
+                _db_get_setting, "k2_p1_transport_activation_enabled", "0",
+            ) != "1":
+                raise Phase1Hold("OPERATOR_RELEASE_NOT_ENABLED")
+            await query.edit_message_text(
+                "⏳ در حال فعال‌سازی و بررسی IP خروجی Edge..."
+            )
+            result = await asyncio.to_thread(
+                activate_phase1, edge_id, db_conn=db_conn,
+                acquire=_db_acquire_failover_lock,
+                journal=_db_update_failover_operation,
+            )
+            await query.message.reply_text(
+                "✅ <b>تونل خروجی Edge برقرار شد</b>\n\n"
+                f"🖥 سرور: <code>{esc(result['edge_id'])}</code>\n"
+                f"🌐 IP خروجی: <code>{esc(result['observed_ipv4'])}</code>\n"
+                "🔐 هنوز هیچ کاربری منتقل نشده است.\n"
+                "برای انتخاب رله و انتقال کاربران از مرحله بعد استفاده کنید.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "◀️ جزئیات سرور", callback_data=f"hpeg_edge_{edge_id}"
+                    )
+                ]]),
+            )
+        except Exception:
+            log.exception("K2 Phase1 pinned activation HOLD")
+            await query.message.reply_text(
+                "⛔️ فعال‌سازی خروجی کامل نشد. وضعیت نیازمند بررسی است؛ "
+                "بدون بررسی منابع و قفل عملیات، مجدداً اجرا نکنید.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("◀️ سرورها", callback_data="hpeg_status")
+                ]]),
             )
         return
 

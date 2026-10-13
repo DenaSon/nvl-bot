@@ -11,7 +11,11 @@ read-only review for an existing root-owned, SHA-pinned Core WireGuard
 stage, an exact protected UID BootGuard manifest (shared-ingress
 return + local DoH + explicit protected mode), isolated guard/DNS
 systemd units, complete protected-identity roster review and proposed
-PAM hook review. The roster and PAM outputs are **not installers**:
+PAM hook review. The review digest covers the full pinned EgressSpec,
+service identities, boot/DNS/transport unit bytes, roster and PAM review.
+Before every external action the adapter checks both the complete Stage
+spec and its unchanged review fingerprint.
+The roster and PAM outputs are **not installers**:
 publishing a one-member roster would silently drop other customers, so
 future P3-C must verify all previously protected members before update.
 

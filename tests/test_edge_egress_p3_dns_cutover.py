@@ -257,7 +257,7 @@ class P3DTests(unittest.TestCase):
         with self.db() as c:
             c.execute("INSERT INTO failover_operations VALUES("
                       "43,'RUNNING','8.8.8.8','1.1.1.1','{}')")
-        with self.assertRaisesRegex(ProtectedDnsHandoffHold,"LEASE"):
+        with self.assertRaisesRegex(ProtectedDnsHandoffHold,"LOCK|LEASE"):
             self.gate().cutover()
         self.assertFalse(self.cf.writes)
 

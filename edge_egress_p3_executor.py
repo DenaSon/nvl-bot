@@ -175,6 +175,32 @@ def _nonce_seen(conn, nonce_hash: str) -> bool:
     return False
 
 
+def assert_guarded_6g_intent(db_conn: Callable, scope: ExecutionScope,
+                             ticket: ExecutionTicket) -> int:
+    """Read the ONE existing durable P3-A 6G lease before an owned action.
+
+    No alternative transaction/lease authority. Throws HOLD if a lease was
+    replaced, the P3 intent changed, or the confirmation is for a different
+    scope. Host ports must call again before each privileged step.
+    """
+    if (not isinstance(scope, ExecutionScope)
+            or not isinstance(ticket, ExecutionTicket)
+            or not isinstance(ticket.nonce, str)
+            or not re.fullmatch(r"[a-f0-9]{32}", ticket.nonce)
+            or not compare_digest(ticket.scope_digest, _scope_digest(scope))):
+        raise ExecutorHold("P3_INTENT_TICKET_INVALID")
+    nonce_hash = sha256(ticket.nonce.encode("ascii")).hexdigest()
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT id FROM failover_operations WHERE status='RUNNING'"
+        ).fetchall()
+        if len(rows) != 1 or type(rows[0][0]) is not int:
+            raise ExecutorHold("SHARED_6G_LEASE_AMBIGUOUS")
+        op = rows[0][0]
+        _locked(conn, op, scope, nonce_hash=nonce_hash)
+    return op
+
+
 @dataclass(frozen=True)
 class RecoveryInspection:
     operation_id: int

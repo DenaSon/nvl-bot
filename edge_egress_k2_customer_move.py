@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 from hmac import compare_digest
+import os
 import sqlite3
 from typing import Callable, Protocol
 
@@ -40,7 +41,8 @@ class GuardedCustomerIngressBindingPort:
     def __init__(self, *, db_conn: Callable, scope: ExecutionScope,
                  ticket: ExecutionTicket, uid_port: VerifiedUIDPort | None,
                  independent_ingress_proof: Callable | None,
-                 release_enabled: bool = False):
+                 release_enabled: bool = False,
+                 geteuid: Callable[[], int] = os.geteuid):
         if (not isinstance(scope, ExecutionScope) or scope.action != "UID_ATTACH"
                 or not isinstance(ticket, ExecutionTicket)
                 or not compare_digest(ticket.scope_digest, _scope_digest_checked(scope))):
@@ -48,11 +50,13 @@ class GuardedCustomerIngressBindingPort:
         self.db_conn, self.scope, self.ticket = db_conn, scope, ticket
         self.uid_port, self.ingress_proof = uid_port, independent_ingress_proof
         self.release_enabled = release_enabled
+        self.geteuid = geteuid
         self._started = False
 
     def _gate(self, scope: ExecutionScope):
         if (scope != self.scope or self.release_enabled is not True
-                or self.uid_port is None or self.ingress_proof is None):
+                or self.uid_port is None or self.ingress_proof is None
+                or self.geteuid() != 0):
             raise CustomerBindingHold("REVIEWED_ROOT_WORKER_NOT_RELEASED")
         # A validated RUNNING P3-A intent is required before each side effect.
         return assert_guarded_6g_intent(self.db_conn, scope, self.ticket)

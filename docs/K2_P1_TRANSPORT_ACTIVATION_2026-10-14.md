@@ -99,3 +99,9 @@ live deployment/boot acceptance item), DNS/IPv6/fail-closed behavior
 and SSH/SOCKS per-UID routing in future protected customer phases.
 Never advertise `F4 READY` or switch production traffic based on the
 Phase 1 namespace IP probe.
+
+## Final Worker proof gate (2026-10-14)
+
+At feature SHA `b48cf3989d42c24d9136e316d17589251e0e1de2`, PR #125 added exact, repeated 6G lock checks against the public source default, candidate absence from customer host pool, edge identity and **both Stage digests**. Lock recovery markers are rejected for execution; after acquiring the single lease, the exact Core Stage and live wg0 ingress peer are re-read before host changes. The actual SSH Edge transport and local Core namespace must explicitly report success, then both independent pinned peers are freshly observed UP **before** the exact namespace external public Edge IPv4 is accepted. On uncertainty the existing 6G journal remains RUNNING/RECOVERY_REQUIRED, with no automated retry or customer/Core fallback.
+
+**CI:** 1,352 Python tests PASS; independent Stage-only regressions Python 3.11 and 3.12 PASS. That proves the source behavior against mocked/offline cases, **not** a successful VPS install. `master` and Production were not updated. The only released Phase 1 result is `TRANSPORT PROVEN, NO CUSTOMERS MOVED`; per-UID protection, DNS/IPv6 proof, boot restoration and full real-world failure acceptance remain future/operator gates.

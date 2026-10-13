@@ -99,8 +99,9 @@ class P3DTests(unittest.TestCase):
                 CREATE TABLE ssh_accounts(username TEXT PRIMARY KEY,host TEXT,
                     service_type TEXT,status TEXT);
                 CREATE TABLE edge_egress_allocations(edge_id TEXT PRIMARY KEY,
-                    edge_public_ipv4 TEXT,status TEXT);
-                INSERT INTO edge_egress_allocations VALUES('fra1','{TARGET}','STAGED');
+                    edge_public_ipv4 TEXT,core_public_ipv4 TEXT,status TEXT);
+                INSERT INTO edge_egress_allocations VALUES(
+                    'fra1','{TARGET}','{CORE}','STAGED');
                 CREATE TABLE edge_egress_uid_runtime(
                     username TEXT PRIMARY KEY,uid INTEGER,edge_ipv4 TEXT,state TEXT);
                 CREATE TABLE edge_egress_uid_bindings(

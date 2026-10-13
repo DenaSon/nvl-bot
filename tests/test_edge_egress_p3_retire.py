@@ -53,9 +53,8 @@ class FakeOwnedHost:
     def _mark(self,step):
         self.events.append(step)
         if self.on_action is not None:
-            f=self.on_action
-            self.on_action=None
-            f(step)
+            # Fault injection at the intended step, not the first setup step.
+            self.on_action(step)
         if self.fail==step:
             raise RuntimeError("fake host failure contains no credentials")
 

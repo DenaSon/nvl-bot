@@ -254,13 +254,19 @@ def _prove_ipv4(spec, *, run=subprocess.run, sleep=time.sleep) -> str:
         try:
             p = run(
                 ["ip", "netns", "exec", spec.namespace,
-                 "curl", "-4", "-fsS", "--noproxy", "*", "--max-time", "12",
-                 "https://api.ipify.org"],
+                 "curl", "-4", "-fsS", "--noproxy", "*",
+                 "--connect-timeout", "5", "--max-time", "12",
+                 "--resolve", "one.one.one.one:443:1.1.1.1",
+                 "https://one.one.one.one/cdn-cgi/trace"],
                 capture_output=True, text=True, timeout=16,
             )
-            value = p.stdout.strip()
-            if p.returncode == 0 and value == spec.edge_public_ipv4:
-                return value
+            ip_line = re.search(
+                r"(?m)^ip=(\d{1,3}(?:\.\d{1,3}){3})\s*$", p.stdout,
+            )
+            if p.returncode == 0 and ip_line:
+                value = ip_line.group(1)
+                if value == spec.edge_public_ipv4:
+                    return value
         except (OSError, subprocess.SubprocessError):
             pass
         sleep(2)

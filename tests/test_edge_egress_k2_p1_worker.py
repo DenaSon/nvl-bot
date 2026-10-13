@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from edge_egress_k2_p1_worker import (
-    StagePin, Phase1Hold, activate_phase1, inspect_phase1, INTENT, RECOVERY,
+    StagePin, Phase1Hold, activate_phase1, inspect_phase1, _prove_ipv4, INTENT, RECOVERY,
 )
 from edge_egress_handoff import is_egress_recovery_hold
 
@@ -164,6 +164,21 @@ class Phase1TransportActivationTests(unittest.TestCase):
         self.assertFalse(any(x.lstrip().upper().startswith(
             ("INSERT ","UPDATE ","DELETE ","REPLACE ","CREATE ")
         ) for x in trace))
+
+    def test_public_ipv4_proof_requires_exact_edge_and_no_dns_lookup(self):
+        spec = SimpleNamespace(namespace="nvleg8", edge_public_ipv4=EDGE)
+        calls=[]
+        def response(cmd,**kw):
+            calls.append(cmd)
+            return SimpleNamespace(returncode=0, stdout="fl=example\nip="+EDGE+"\n")
+        self.assertEqual(_prove_ipv4(spec,run=response,sleep=lambda n:None), EDGE)
+        self.assertIn("--resolve", calls[0])
+        self.assertIn("one.one.one.one:443:1.1.1.1", calls[0])
+        self.assertEqual(calls[0][0:4], ["ip","netns","exec","nvleg8"])
+        def wrong(cmd,**kw):
+            return SimpleNamespace(returncode=0,stdout="ip="+CORE+"\n")
+        with self.assertRaisesRegex(Phase1Hold,"IP_NOT_PROVEN"):
+            _prove_ipv4(spec,run=wrong,sleep=lambda n:None)
 
     def test_source_wizard_pins_both_stages_no_fake_ready(self):
         txt=Path("edge_egress_v1_onboarding.py").read_text(encoding="utf-8")

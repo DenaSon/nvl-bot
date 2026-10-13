@@ -6,7 +6,7 @@ A future root-only release adapter must supply independently verified gates.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 from pathlib import Path
@@ -38,6 +38,7 @@ class BootProvisionHold(ValueError):
 class StageBootReview:
     stage: Path
     stage_sha256: str
+    spec_sha256: str
     edge_id: str
     core_ipv4: str
     edge_ipv4: str
@@ -51,6 +52,25 @@ class StageBootReview:
     pam_review: str
     roster_review: str
     digest: str
+
+
+def _digest_object(payload: dict) -> str:
+    return hashlib.sha256(json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode()).hexdigest()
+
+
+def _review_payload(review: StageBootReview) -> dict:
+    return {
+        "stage": str(review.stage), "stage_sha256": review.stage_sha256,
+        "spec_sha256": review.spec_sha256,
+        "edge": review.edge_id, "edge_ip": review.edge_ipv4,
+        "core_ip": review.core_ipv4, "username": review.username,
+        "uid": review.uid, "guard_unit": review.guard_unit,
+        "dns_unit": review.dns_unit,
+        "transport_unit": review.transport_unit, "roster": review.roster_review,
+        "pam_review": review.pam_review,
+    }
 
 
 def build_stage_boot_review(stage: Path, stage_sha256: str,
@@ -106,23 +126,19 @@ def build_stage_boot_review(stage: Path, stage_sha256: str,
             raise BootProvisionHold("PAM_REVIEW_REQUIRED")
     except (KeyError, TypeError, ValueError, StopIteration) as exc:
         raise BootProvisionHold("INVALID_PROTECTED_BOOT_BUNDLE") from exc
-    payload = {
-        "stage": str(stage), "stage_sha256": stage_sha256,
-        "edge": spec.edge_id, "edge_ip": spec.edge_public_ipv4,
-        "core_ip": spec.core_public_ipv4, "username": manifest.request.username,
-        "uid": manifest.request.uid,
-        "guard_unit": guard, "dns_unit": isolated.dns_unit,
-        "transport_unit": transport, "roster": protected,
-        "pam_review": pam,
-    }
-    digest = hashlib.sha256(json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
-    ).encode()).hexdigest()
-    return StageBootReview(
-        stage, stage_sha256, spec.edge_id, spec.core_public_ipv4,
+    spec_digest = _digest_object(asdict(spec))
+    result = StageBootReview(
+        stage, stage_sha256, spec_digest, spec.edge_id, spec.core_public_ipv4,
         spec.edge_public_ipv4, manifest.request.username,
         manifest.request.uid, isolated.guard_name, isolated.dns_name,
-        guard, isolated.dns_unit, transport, pam, protected, digest,
+        guard, isolated.dns_unit, transport, pam, protected, "",
+    )
+    return StageBootReview(
+        stage, stage_sha256, spec_digest, spec.edge_id, spec.core_public_ipv4,
+        spec.edge_public_ipv4, manifest.request.username,
+        manifest.request.uid, isolated.guard_name, isolated.dns_name,
+        guard, isolated.dns_unit, transport, pam, protected,
+        _digest_object(_review_payload(result)),
     )
 
 
@@ -219,10 +235,13 @@ class GuardedStageBootPort:
                 self.transport is None or scope != self.scope):
             raise BootProvisionHold("OPERATOR_RELEASE_OR_HOST_PORT_MISSING")
         assert_shared_6g_intent(self.db_conn, scope, self.ticket)
+        if self.review.digest != _digest_object(_review_payload(self.review)):
+            raise BootProvisionHold("BOOT_REVIEW_FINGERPRINT_CHANGED")
         spec, _ = self.stage_reader(
             self.review.stage, STAGE_ROLE, self.review.stage_sha256)
-        if (spec.edge_id, spec.core_public_ipv4, spec.edge_public_ipv4) != (
-            self.review.edge_id, self.review.core_ipv4, self.review.edge_ipv4):
+        if (_digest_object(asdict(spec)) != self.review.spec_sha256 or
+                (spec.edge_id, spec.core_public_ipv4, spec.edge_public_ipv4) != (
+                self.review.edge_id, self.review.core_ipv4, self.review.edge_ipv4)):
             raise BootProvisionHold("STAGE_IDENTITY_CHANGED")
 
     async def apply(self, scope: ExecutionScope) -> None:

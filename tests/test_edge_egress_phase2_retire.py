@@ -146,7 +146,10 @@ class Phase2RetireTests(unittest.TestCase):
                   "bot_final_v49-2.py").read_text(encoding="utf-8")
         self.assertEqual(source.count('elif d.startswith("hpeg_retire_open_")'), 1)
         self.assertIn("hpeg_retire_yes_", source)
-        self.assertIn("🗑 حذف ایمن Edge", source)
+        ui = (Path(__file__).resolve().parents[1] /
+              "edge_egress_p3_telegram.py").read_text(encoding="utf-8")
+        self.assertIn('("🗑 حذف سرور",f"hpeg_retire_open_{eid}")', ui)
+        self.assertIn("egress_detail_buttons(card)", source)
         self.assertEqual(source.count("is_managed_egress_deletion, db_conn, host"), 2)
         start = source.index('    elif d.startswith("hpeg_retire_open_")')
         end = source.index('    elif d == "hpeg_status"', start)

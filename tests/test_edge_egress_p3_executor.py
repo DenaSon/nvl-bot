@@ -286,6 +286,37 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(self.host.applied,0)
         self.assertEqual(self.only()[1],"RUNNING")
 
+    def test_rejects_private_or_noncanonical_host_scope(self):
+        for value in ("127.0.0.1", "10.0.0.1", "172.86.105.067", "not.an.ip"):
+            with self.subTest(value=value), self.assertRaises(ExecutorHold):
+                ExecutionScope(action="EDGE_PREPARE",edge_id="e7",
+                    source_host=self.scope.source_host,target_host=value)
+
+    def test_final_evidence_cas_change_freezes_before_success(self):
+        ticket=self.ticket()
+        calls=[0]
+        def review(_scope):
+            calls[0]+=1
+            if calls[0] >= 3:
+                return replace(self.evidence,digest=sha256(b"post-write drift").hexdigest())
+            return self.evidence
+        result=self.run_exec(engine=self.engine(reviewer=review),ticket=ticket)
+        self.assertTrue(result.manual_recovery)
+        self.assertEqual((self.host.applied,self.host.verified,self.host.frozen),(1,1,1))
+        self.assertEqual(self.only()[1],"RUNNING")
+        self.assertEqual(self.only()[2]["phase"],RECOVERY_PHASE)
+
+    def test_cancel_during_mutation_still_attempts_freeze_and_keeps_6g(self):
+        async def interrupted(scope):
+            self.host.applied+=1
+            raise asyncio.CancelledError()
+        self.host.apply=interrupted
+        with self.assertRaises(asyncio.CancelledError):
+            self.run_exec()
+        self.assertEqual(self.host.frozen,1)
+        self.assertEqual(self.only()[1],"RUNNING")
+        self.assertEqual(self.only()[2]["phase"],RECOVERY_PHASE)
+
     def test_recovery_phase_never_stale_unlocked(self):
         for p in (INTENT_PHASE, RECOVERY_PHASE):
             self.assertTrue(is_egress_recovery_hold(json.dumps({"phase":p})))

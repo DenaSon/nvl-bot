@@ -67,6 +67,29 @@ class PureUnifiedWizardTests(unittest.TestCase):
 
 
 @unittest.skipIf(sys.version_info < (3,12), "NVL bot requires Python 3.12")
+class WizardCallbackRoutingTests(unittest.TestCase):
+    def test_one_shared_wizard_callback_and_session_only_opt_in(self):
+        from test_edge_egress_bot_integration import source_tree
+        source = (source_tree().body)
+        fnames = [n.name for n in source if hasattr(n,"name")]
+        self.assertEqual(fnames.count("callback_handler"),1)
+        self.assertEqual(fnames.count("text_handler"),1)
+        from pathlib import Path
+        body=(Path(__file__).resolve().parents[1]
+              / "bot_final_v49-2.py").read_text(encoding="utf-8")
+        self.assertIn('elif d in ("hp_addedge", "hpeg_wizard"):',body)
+        self.assertIn("integrated = (d == \"hpeg_wizard\")",body)
+        self.assertIn("context.user_data['egress_new_edge_requested'] = integrated",body)
+        self.assertIn("context.user_data.get('egress_new_edge_requested') is True",body)
+        self.assertIn("egress_stage_requested=stage_for_this_edge",body)
+        self.assertIn('callback_data="hpeg_wizard"',body)
+        self.assertIn('callback_data="hp_addedge"',body)
+        self.assertNotIn("_db_update_setting, 'edge_egress_v1_onboard_enabled'",body)
+        self.assertNotIn("_db_set_all_accounts_host",body[body.index(
+            'elif d in ("hp_addedge", "hpeg_wizard"):'):body.index(
+            'elif d.startswith("hpdef_migrate_")')])
+
+@unittest.skipIf(sys.version_info < (3,12), "NVL bot requires Python 3.12")
 class IntegratedWizardFunctionTests(unittest.TestCase):
     def execute(self, *, opt_in, global_toggle="0", protected="0",
                 stage_error=None, stage_payload=None):

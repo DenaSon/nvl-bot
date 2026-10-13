@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from hashlib import sha256
 import json
+import re
 from pathlib import Path
 from typing import Callable, Protocol
 
@@ -179,8 +180,11 @@ def plan_orphan_cleanup(db_conn: Callable, scope: ExecutionScope, *,
                         stage_reader: Callable = pinned) -> OrphanRetirePlan:
     """Read-only. Requires a trusted staged manifest; no blind name-based del."""
     if (not isinstance(scope, ExecutionScope) or scope.action!="EDGE_RETIRE"
-            or not isinstance(stage, Path) or not stage.is_absolute()):
-        raise EdgeRetireHold("EXPLICIT_EDGE_RETIRE_SCOPE_REQUIRED")
+            or not isinstance(stage, Path)
+            or stage!=Path("/root/nvl-egress-v1")/("core-"+scope.edge_id)
+            or not isinstance(stage_sha256,str)
+            or not re.fullmatch(r"[0-9a-f]{64}",stage_sha256)):
+        raise EdgeRetireHold("PINNED_CORE_STAGE_REQUIRED")
     spec,_peer=stage_reader(stage,"core",stage_sha256)
     if (not isinstance(spec,EgressSpec) or
             (spec.edge_id,spec.core_public_ipv4,spec.edge_public_ipv4)!=
@@ -228,6 +232,10 @@ class GuardedOrphanRetirePort:
                 self.registry_loader is None or scope!=p.scope):
             raise EdgeRetireHold("RETIRE_HOST_RELEASE_MISSING")
         assert_guarded_6g_intent(self.db_conn,scope,self.ticket)
+        if (p.fingerprint != _digest(p.stage,p.stage_sha256,p.spec,
+                                    p.snapshot,p.registry_has_edge)
+                or self.ticket.evidence_digest != p.fingerprint):
+            raise EdgeRetireHold("ORPHAN_REVIEW_FINGERPRINT_CHANGED")
         spec,_peer=self.stage_reader(p.stage,"core",p.stage_sha256)
         if spec!=p.spec:
             raise EdgeRetireHold("PINNED_STAGE_CHANGED")

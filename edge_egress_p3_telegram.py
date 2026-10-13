@@ -77,7 +77,8 @@ def edge_html(card) -> str:
         f"🖥 <b>سرور {_safe(card.edge_id)}</b>", "",
         f"🌐 نشانی: <code>{_safe(card.ip)}</code>",
         f"📡 وضعیت: {_state(card)}",
-        "📥 ورودی: " + ("✅ ثبت‌شده" if card.ingress_verified and card.pool_active
+        "📥 ورودی: " + ("✅ فعال" if card.ingress_verified and card.pool_active
+                     else "🟡 ثبت‌شده؛ در انتظار فعال‌سازی" if card.ingress_verified
                      else "⚪️ نیازمند بررسی"),
         "📤 خروجی: " + ("✅ بررسی‌شده" if card.f4_valid else "🟡 تأییدنشده"),
         "⭐ پیش‌فرض: " + ("بله" if card.pool_default else "خیر"),
@@ -242,7 +243,8 @@ def wizard_result(edge_ip: str, result: dict) -> tuple[str,str]:
         "✅ <b>سرور اضافه شد</b>\n\n"
         f"شناسه: <code>{_safe(eid)}</code>\n"
         f"نشانی: <code>{_safe(edge_ip)}</code>\n\n"
-        "برای استفاده، وضعیت اتصال را بررسی کنید.",
+        "📦 آماده‌سازی اولیه ثبت شد. مسیر خروجی کاربران هنوز فعال نیست.\\n"
+        "برای ادامه، اطلاعات اتصال را بررسی کنید.",
         eid,
     )
 

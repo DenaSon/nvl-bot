@@ -376,6 +376,9 @@ from edge_egress_k2_final_integration import (
     transfer_preview_html as k2_transfer_preview_html,
     transfer_preview_buttons as k2_transfer_preview_buttons,
 )
+from edge_egress_k2_phase1_wizard import (
+    assert_isolated_new_edge_candidate, K2WizardHold,
+)
 from edge_egress_k2_transfer_service import (
     GuardedK2TelegramTransferService, PreparedCustomerTransfer,
     TransferRegistrationHold,
@@ -3639,7 +3642,7 @@ def _next_edge_wg_ip():
     return f"10.77.0.{n}"
 
 
-def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, private_key_path=None, connect_retries=1):
+def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, private_key_path=None, connect_retries=1, *, protected_wizard=False):
     """
     تابع مسدودکننده (blocking، به‌خاطر paramiko و subprocess). باید حتماً با
     asyncio.to_thread صدا زده شود، نه مستقیم داخل event loop.
@@ -3726,19 +3729,21 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
     # 🔧 راه‌حل قوی‌تر از sed ساده: به‌جای ویرایش فایل‌های موجود (که فقط یک الگوی خاص را می‌شناسد)،
     # یک فایل override با نام «99-» می‌سازیم که چون آخر همه خوانده می‌شود، همیشه برنده است — فارغ
     # از اینکه فایل‌های ۵۰/۶۰ چه چیز دیگری بگویند یا در آینده اضافه شوند.
-    try:
-        _fix_cmd = (
-            "cat > /etc/ssh/sshd_config.d/99-nvlbot-force-password-auth.conf << 'INNER'\n"
-            "PasswordAuthentication yes\n"
-            "PermitRootLogin yes\n"
-            "KbdInteractiveAuthentication yes\n"
-            "INNER\n"
-            "sshd -t && (systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true)"
-        )
-        _stdin, _stdout, _stderr = ssh.exec_command(_fix_cmd, timeout=20)
-        _stdout.channel.recv_exit_status()  # منتظر پایان واقعی دستور می‌مانیم
-    except Exception as _e:
-        log.warning("رفع خودکار تناقض PasswordAuthentication/PermitRootLogin روی Edge %s شکست خورد (غیربحرانی): %s", edge_ip, _e)
+    # The integrated K2 wizard must never enable password-root SSH or restart SSHD.
+    if not protected_wizard:
+        try:
+            _fix_cmd = (
+                "cat > /etc/ssh/sshd_config.d/99-nvlbot-force-password-auth.conf << 'INNER'\n"
+                "PasswordAuthentication yes\n"
+                "PermitRootLogin yes\n"
+                "KbdInteractiveAuthentication yes\n"
+                "INNER\n"
+                "sshd -t && (systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true)"
+            )
+            _stdin, _stdout, _stderr = ssh.exec_command(_fix_cmd, timeout=20)
+            _stdout.channel.recv_exit_status()  # منتظر پایان واقعی دستور می‌مانیم
+        except Exception as _e:
+            log.warning("رفع خودکار تناقض PasswordAuthentication/PermitRootLogin روی Edge %s شکست خورد (غیربحرانی): %s", edge_ip, _e)
 
     # 🆕 نصب کلید عمومی دائمیِ Core روی این Edge (idempotent) — تا از این به بعد Core بدون نیاز
     # به رمز روت بتواند دوباره SSH بزند (مثلاً برای گرفتن CPU/RAM واقعی این سرور). اگر این مرحله
@@ -3826,33 +3831,48 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
     # connect_retries می‌تونه چند بار با فاصلهٔ ۱۰ ثانیه تلاش کنه، پس سقف باید فضای کافی بده.
     if type(egress_stage_requested) is not bool:
         raise ValueError("INVALID_EGRESS_STAGE_WIZARD_OPT_IN")
-    # D1-C1: legacy installer builds ingress-only Relay and immediately activates
-    # it in host_pool. Protected mode must deny that before remote side effects.
-    egress_gate = legacy_new_edge_gate(await asyncio.to_thread(
-        _db_get_setting, PROTECTED_SETTING_KEY, PROTECTED_SETTING_DEFAULT
-    ))
-    if not egress_gate.allowed:
-        await app.bot.send_message(
-            chat_id,
-            "⛔️ <b>افزودن Edge در حالت Egress محافظت‌شده متوقف شد.</b>\n"
-            f"علت: <code>{esc(egress_gate.reason)}</code>\n"
-            "ابتدا Provisioning خروجی و بررسی IP واقعی Edge باید در چرخهٔ ربات تکمیل شوند.",
-            parse_mode="HTML",
-        )
-        return False, None, None
+    # K2 opt-in is a non-customer, unlisted Ingress+Stage candidate. Do not
+    # unlock Legacy host selection or mutate any protected UID while staging.
+    if egress_stage_requested:
+        try:
+            await asyncio.to_thread(
+                assert_isolated_new_edge_candidate, db_conn, edge_ip, customer_port,
+            )
+        except (K2WizardHold, sqlite3.Error):
+            await app.bot.send_message(
+                chat_id,
+                "⛔️ سرور جدید قابل آماده‌سازی نیست؛ نشانی، وضعیت عملیات و سرورها را بررسی کنید.",
+            )
+            return False, None, None
+    else:
+        # D1-C1: legacy installer builds ingress-only Relay and immediately activates
+        # it in host_pool. Protected mode must deny that before remote side effects.
+        egress_gate = legacy_new_edge_gate(await asyncio.to_thread(
+            _db_get_setting, PROTECTED_SETTING_KEY, PROTECTED_SETTING_DEFAULT
+        ))
+        if not egress_gate.allowed:
+            await app.bot.send_message(
+                chat_id,
+                "⛔️ <b>افزودن Edge در حالت Egress محافظت‌شده متوقف شد.</b>\n"
+                f"علت: <code>{esc(egress_gate.reason)}</code>\n"
+                "ابتدا Provisioning خروجی و بررسی IP واقعی Edge باید در چرخهٔ ربات تکمیل شوند.",
+                parse_mode="HTML",
+            )
+            return False, None, None
 
-    if await asyncio.to_thread(any_protected_bindings, db_conn):
-        await app.bot.send_message(
-            chat_id,
-            "⛔️ Edge جدید در حضور کاربران Egress محافظت‌شده از مسیر Legacy قابل نصب نیست.",
-        )
-        return False, None, None
+        if await asyncio.to_thread(any_protected_bindings, db_conn):
+            await app.bot.send_message(
+                chat_id,
+                "⛔️ Edge جدید در حضور کاربران Egress محافظت‌شده از مسیر Legacy قابل نصب نیست.",
+            )
+            return False, None, None
     _provision_timeout = 300 + max(0, connect_retries - 1) * 15
     try:
         ok, err, result = await asyncio.wait_for(
             asyncio.to_thread(
                 _provision_new_edge_sync, edge_ip, root_password, customer_port, edge_name,
-                private_key_path, connect_retries
+                private_key_path, connect_retries,
+                protected_wizard=egress_stage_requested,
             ),
             timeout=_provision_timeout,
         )
@@ -3902,23 +3922,38 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
                 parse_mode="HTML",
             )
             return False, edge_ip, result
-    await asyncio.to_thread(_db_add_host_pool, edge_ip)
-    if provider:
-        await asyncio.to_thread(_db_set_host_provider_meta, edge_ip, provider, provider_instance_id)
-    cur_hosts = [h.strip() for h in (await asyncio.to_thread(_db_get_setting, 'hosts', '')).split(',') if h.strip()]
-    if edge_ip not in cur_hosts:
-        cur_hosts.append(edge_ip)
-        await asyncio.to_thread(_db_update_setting, 'hosts', ",".join(cur_hosts))
-    await asyncio.to_thread(_db_set_host_active, edge_ip, True)
-    # F3: legacy ingress onboarding records only an INGRESS_ONLY candidate.
-    # Egress staging requires a separately pinned, explicitly authorized
-    # 6G operation; never reuse this installer password for Egress SSH.
-    try:
-        await asyncio.to_thread(record_ingress_candidate, db_conn, edge_ip)
-    except Exception:
-        log.exception("F3 ingress candidate audit failed for host (redacted)")
-        # Ingress succeeded regardless; never pretend the Egress tunnel was
-        # automatically provisioned.
+    if egress_stage_requested:
+        # Stage is NOT active customer pool admission. H-registry and local
+        # Stage are visible in Telegram; legacy accounts/DNS/default remain intact.
+        # Recheck after remote operations in case the host/6G state changed.
+        try:
+            await asyncio.to_thread(
+                assert_isolated_new_edge_candidate, db_conn, edge_ip, customer_port,
+            )
+        except (K2WizardHold, sqlite3.Error):
+            await app.bot.send_message(
+                chat_id,
+                "⛔️ سرور آماده شد اما ثبت نهایی نیازمند بررسی است؛ نصب را تکرار نکنید.",
+            )
+            return False, edge_ip, result
+    else:
+        await asyncio.to_thread(_db_add_host_pool, edge_ip)
+        if provider:
+            await asyncio.to_thread(_db_set_host_provider_meta, edge_ip, provider, provider_instance_id)
+        cur_hosts = [h.strip() for h in (await asyncio.to_thread(_db_get_setting, 'hosts', '')).split(',') if h.strip()]
+        if edge_ip not in cur_hosts:
+            cur_hosts.append(edge_ip)
+            await asyncio.to_thread(_db_update_setting, 'hosts', ",".join(cur_hosts))
+        await asyncio.to_thread(_db_set_host_active, edge_ip, True)
+        # F3: legacy ingress onboarding records only an INGRESS_ONLY candidate.
+        # Egress staging requires a separately pinned, explicitly authorized
+        # 6G operation; never reuse this installer password for Egress SSH.
+        try:
+            await asyncio.to_thread(record_ingress_candidate, db_conn, edge_ip)
+        except Exception:
+            log.exception("F3 ingress candidate audit failed for host (redacted)")
+            # Ingress succeeded regardless; never pretend the Egress tunnel was
+            # automatically provisioned.
 
     if egress_stage_requested:
         # No default/DNS/UID switch on the new protected-aware entrypoint.

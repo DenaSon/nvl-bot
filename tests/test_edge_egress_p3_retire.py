@@ -138,7 +138,7 @@ class P3ERetirementTests(unittest.TestCase):
             stage_reader=self.stage_reader,
         )
 
-    def run(self,release=True,plan=None,evidence_gates=None):
+    def execute_retire(self,release=True,plan=None,evidence_gates=None):
         plan=plan or self.preview()
         proof=FreshEvidence(
             plan.fingerprint,self.now,
@@ -195,7 +195,7 @@ class P3ERetirementTests(unittest.TestCase):
         self.assertEqual(self.journal_status(),None)
 
     def test_success_preserves_uid_reject_blackhole_and_original_ssh(self):
-        r=self.run()
+        r=self.execute_retire()
         self.assertTrue(r.allowed)
         self.assertEqual(self.host.events,[
             "disable","remove-next-hop","retire-transport"])
@@ -217,7 +217,7 @@ class P3ERetirementTests(unittest.TestCase):
             ).fetchone(),(1,1))
 
     def test_not_released_no_mutation_but_6g_recovery_hold(self):
-        res=self.run(release=False)
+        res=self.execute_retire(release=False)
         self.assertTrue(res.manual_recovery)
         self.assertEqual(self.host.events,[])
         self.assertEqual(self.journal_status()[0],"RUNNING")
@@ -227,7 +227,7 @@ class P3ERetirementTests(unittest.TestCase):
             with self.subTest(gate=gate):
                 evidence=BASE_GATES | (RETIRE_GATES - {gate})
                 with self.assertRaises(ExecutorHold):
-                    self.run(evidence_gates=evidence)
+                    self.execute_retire(evidence_gates=evidence)
                 self.assertEqual(self.host.events,[])
 
     def test_block_foreign_rule_missing_fence_and_sessions(self):
@@ -293,7 +293,7 @@ class P3ERetirementTests(unittest.TestCase):
     def test_stage_changed_between_preview_and_execution_is_held(self):
         plan=self.preview()
         self.stage_spec=replace(SPEC,route_table=20008)
-        receipt=self.run(plan=plan)
+        receipt=self.execute_retire(plan=plan)
         self.assertTrue(receipt.manual_recovery)
         self.assertEqual(self.host.events,[])
         self.assertEqual(self.journal_status()[0],"RUNNING")
@@ -302,13 +302,13 @@ class P3ERetirementTests(unittest.TestCase):
         from edge_egress_v1_ingress import IngressPeer
         plan=self.preview()
         self.reg=(IngressPeer("e7",EDGE,"10.77.0.7","A"*44),)
-        r=self.run(plan=plan)
+        r=self.execute_retire(plan=plan)
         self.assertTrue(r.manual_recovery)
         self.assertEqual(self.host.events,[])
 
     def test_systemd_disable_uncertain_does_not_touch_uid_next_hop(self):
         self.host.fail="disable"
-        r=self.run()
+        r=self.execute_retire()
         self.assertTrue(r.manual_recovery)
         self.assertEqual(self.host.events,["disable","refence"])
         self.assertTrue(self.host.snapshot.owned_uid_fences[0].preferred_edge_route)
@@ -316,7 +316,7 @@ class P3ERetirementTests(unittest.TestCase):
 
     def test_failure_after_next_hop_never_tears_down_transport(self):
         self.host.fail="remove-next-hop"
-        r=self.run()
+        r=self.execute_retire()
         self.assertTrue(r.manual_recovery)
         self.assertNotIn("retire-transport",self.host.events)
         self.assertIn("refence",self.host.events)
@@ -330,14 +330,14 @@ class P3ERetirementTests(unittest.TestCase):
                         replace(USER,ipv4_reject=False),
                     ))
         self.host.on_action=leak
-        r=self.run()
+        r=self.execute_retire()
         self.assertTrue(r.manual_recovery)
         self.assertEqual(self.host.events.count("retire-transport"),0)
         self.assertEqual(self.journal_status()[0],"RUNNING")
 
     def test_partial_transport_failure_keeps_shared_6g_hold(self):
         self.host.fail="retire-transport"
-        r=self.run()
+        r=self.execute_retire()
         self.assertTrue(r.manual_recovery)
         self.assertEqual(self.journal_status()[0],"RUNNING")
         self.assertTrue(self.host.snapshot.owned_uid_fences[0].ipv4_reject)
@@ -351,7 +351,7 @@ class P3ERetirementTests(unittest.TestCase):
         # removes later. Model silent no-op explicitly instead.
         orig=self.host.remove_exact_dedicated_transport
         self.host.remove_exact_dedicated_transport=lambda spec:self.host.events.append("noop")
-        r=self.run()
+        r=self.execute_retire()
         self.assertTrue(r.manual_recovery)
         self.assertEqual(self.journal_status()[0],"RUNNING")
 

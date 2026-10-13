@@ -115,3 +115,7 @@ independent real F4 acceptance → all-PROTECTED guarded manual cutover.
 A mixed Legacy/Protected cohort is still blocked. No live tests or production
 release have been performed by this change. The user-facing Telegram source
 interface does not automatically enroll Legacy customers or recover a 6G HOLD.
+
+## Additional source identity validation (2026-10-14)
+
+PR #130 requires a unique STAGED source F3 Edge allocation on the same Core and matching protected UID Edge IDs in runtime/binding records. Review and the existing guarded 6G handoff independently enforce these checks. A matching public IP alone is not sufficient. Missing or retired source allocation and inconsistent UID identities hold the cutover before any customer write. Legacy/protected mixed cohorts remain blocked; no change to automatic Failover or production. Offline tests cannot prove live SSH/SOCKS behavior on a disposable VPS.

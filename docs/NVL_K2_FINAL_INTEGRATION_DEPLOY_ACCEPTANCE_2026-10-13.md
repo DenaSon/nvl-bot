@@ -31,6 +31,7 @@ The target experience is existing `🛡 مدیریت Egress → ➕ افزودن
 - Use a **new, empty, independently recoverable VPS** with one public IPv4. Confirm provider web console and non-root rescue, correct SSH host fingerprint and Core connectivity.
 - From admin Telegram, open existing `hpeg_wizard`. Provide IP, one-time Root credentials and customer SSH port. Check real ingress WireGuard peer and root-owned Core/Edge dedicated Egress Stage. On partial failure **do not rerun Wizard blindly**.
 - In Edge detail, inspect local Stage and `👥 انتقال کاربران` preview. Expect **HOLD**, not READY, before operator safety acceptance. Check existing Legacy users and default ingress/DNS are unchanged.
+- After a separately authorized pinned **code-only** Core deploy, run the read-only inventory: `python3 -m ops.k2_final_readiness --edge-id <verified-edge-id>`. It opens SQLite in `mode=ro` with `query_only=ON`, reports aggregate (not per-customer) data, and exits nonzero while execution is not released. The report is not F4 packet evidence; NEVER turn nonzero into an automatic release.
 - Perform independent root-only admission/roster/PAM, boot systemd ordering, per-UID IPv4+IPv6 OUTPUT deny and terminal blackhole validation in the disposable lab, with dedicated transport recovery.
 
 ## Gate 2 — actual test account before any batch

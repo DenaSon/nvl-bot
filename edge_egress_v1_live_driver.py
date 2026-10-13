@@ -504,7 +504,11 @@ class ProtectedLiveHostActions:
         # Adapter has already CAS-rebound every UID while keeping PAM FROZEN.
         if target != self.spec.edge_public_ipv4:
             raise LiveHold('DNS_TARGET_NOT_PINNED_EDGE')
-        await asyncio.to_thread(self.cf.switch_edge_to_edge, source, target)
+        # Never rely on one pre-cutover 6G snapshot: the provider may make
+        # several non-atomic updates. Recheck the shared lease before EACH.
+        await asyncio.to_thread(
+            self.cf.switch_edge_to_edge, source, target, guard=self._lease,
+        )
 
     async def assert_dns_target(self, target):
         self._lease()

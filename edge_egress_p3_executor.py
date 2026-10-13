@@ -175,6 +175,45 @@ def _nonce_seen(conn, nonce_hash: str) -> bool:
     return False
 
 
+@dataclass(frozen=True)
+class RecoveryInspection:
+    operation_id: int
+    journal_status: str
+    journal_phase: str
+    requires_manual_recovery: bool
+
+
+def inspect_execution_recovery(db_conn: Callable, operation_id: int) -> RecoveryInspection:
+    """READ ONLY after process crash. This never retries or releases 6G."""
+    if type(operation_id) is not int or operation_id <= 0:
+        raise ExecutorHold("RECOVERY_OPERATION_ID_INVALID")
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT status, detail_json FROM failover_operations WHERE id=?",
+            (operation_id,),
+        ).fetchone()
+    if row is None:
+        raise ExecutorHold("RECOVERY_JOURNAL_NOT_FOUND")
+    status, raw = row
+    try:
+        item = json.loads(raw)
+    except (TypeError, ValueError):
+        raise ExecutorHold("RECOVERY_JOURNAL_UNTRUSTED") from None
+    if not isinstance(item, dict) or item.get("kind") != "K2_P3A":
+        raise ExecutorHold("RECOVERY_OPERATION_IDENTITY_UNVERIFIED")
+    phase = item.get("phase")
+    if (not isinstance(phase, str)
+            or phase not in (INTENT_PHASE, RECOVERY_PHASE, "EGRESS_P3_VERIFIED")):
+        raise ExecutorHold("RECOVERY_PHASE_UNRECOGNIZED")
+    if status == "RUNNING":
+        if phase == "EGRESS_P3_VERIFIED":
+            raise ExecutorHold("RECOVERY_TERMINAL_PHASE_NOT_COMMITTED")
+        return RecoveryInspection(operation_id, status, phase, True)
+    if status == "SUCCEEDED" and phase == "EGRESS_P3_VERIFIED":
+        return RecoveryInspection(operation_id, status, phase, False)
+    raise ExecutorHold("RECOVERY_STATUS_OR_PHASE_UNTRUSTED")
+
+
 class Existing6GGuardedExecutor:
     """Inject EXACT existing 6G acquire/update callbacks and guarded host port.
 

@@ -144,23 +144,42 @@ def review_relay_cohort(db_conn: Callable, edge_id: str,
                 blockers.append("NO_ACTIVE_SSH_USERS")
             if any(host not in (source, "", None) for _,host in rows):
                 blockers.append("SOME_USERS_ON_ANOTHER_EDGE")
+            # Include the source Edge identity, not just a coincidentally
+            # matching public IPv4. A changed Edge ID cannot inherit another
+            # user's protected policy or be hidden by the ticket fingerprint.
             runtime = db.execute(
-                "SELECT username,uid,edge_ipv4,state "
+                "SELECT username,uid,edge_id,edge_ipv4,state "
                 "FROM edge_egress_uid_runtime ORDER BY username"
             ).fetchall()
             binding = db.execute(
-                "SELECT username,uid,edge_ipv4,status "
+                "SELECT username,uid,edge_id,edge_ipv4,status "
                 "FROM edge_egress_uid_bindings ORDER BY username"
             ).fetchall()
+            # Existing protected users must belong to the unique source
+            # allocation, not merely share its apparent public IP.
+            source_allocations = db.execute(
+                "SELECT edge_id,core_public_ipv4 FROM edge_egress_allocations "
+                "WHERE edge_public_ipv4=?", (source,)
+            ).fetchall()
+            source_edge_id = (source_allocations[0][0]
+                              if len(source_allocations) == 1
+                              and source_allocations[0][1] == allocations[0][1]
+                              else None)
+            if source_edge_id is None:
+                blockers.append("SOURCE_PROTECTED_EDGE_UNVERIFIED")
             owners = []
             for name,host in rows:
                 rr = next((r for r in runtime if r[0] == name), None)
                 bb = next((r for r in binding if r[0] == name), None)
                 try:
-                    valid = bool(rr and bb and rr[1] == bb[1] == os_uid(name)
-                                 and rr[2:] == (source,"PROTECTED")
-                                 and bb[2:] == (source,"PROTECTED"))
-                except (KeyError,OSError,ValueError):
+                    valid = bool(
+                        rr and bb and rr[1] == bb[1] == os_uid(name)
+                        and source_edge_id is not None
+                        and rr[2] == bb[2] == source_edge_id
+                        and rr[3:] == (source, "PROTECTED")
+                        and bb[3:] == (source, "PROTECTED")
+                    )
+                except (KeyError, OSError, ValueError, TypeError):
                     valid = False
                 if not valid:
                     owners.append(name)
@@ -294,6 +313,7 @@ def render_cohort_review(review: RelayCohortReview) -> str:
         "TARGET_POOL_NOT_SAFE_STANDBY": "وضعیت سرور مقصد نیازمند بررسی است",
         "NO_ACTIVE_SSH_USERS": "کاربری برای انتقال وجود ندارد",
         "SOME_USERS_ON_ANOTHER_EDGE": "برخی کاربران از رله دیگری استفاده می‌کنند",
+        "SOURCE_PROTECTED_EDGE_UNVERIFIED": "هویت خروجی محافظت‌شده سرور فعلی معتبر نیست",
         "MIXED_OR_UNPROTECTED_COHORT": "بعضی کاربران هنوز خروجی محافظت‌شده ندارند",
         "TARGET_INGRESS_IDENTITY_MISSING": "مسیر ورودی مقصد تأیید نشده",
     }

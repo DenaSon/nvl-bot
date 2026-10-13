@@ -158,12 +158,13 @@ def review_relay_cohort(db_conn: Callable, edge_id: str,
             # Existing protected users must belong to the unique source
             # allocation, not merely share its apparent public IP.
             source_allocations = db.execute(
-                "SELECT edge_id,core_public_ipv4 FROM edge_egress_allocations "
+                "SELECT edge_id,core_public_ipv4,status FROM edge_egress_allocations "
                 "WHERE edge_public_ipv4=?", (source,)
             ).fetchall()
             source_edge_id = (source_allocations[0][0]
                               if len(source_allocations) == 1
                               and source_allocations[0][1] == allocations[0][1]
+                              and source_allocations[0][2] == "STAGED"
                               else None)
             if source_edge_id is None:
                 blockers.append("SOURCE_PROTECTED_EDGE_UNVERIFIED")

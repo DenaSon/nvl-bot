@@ -153,6 +153,15 @@ class Phase2CohortTests(unittest.TestCase):
         self.assertIn("MIXED_OR_UNPROTECTED_COHORT",view.blockers)
         self.assertFalse(view.ready)
 
+    def test_retired_source_allocation_cannot_be_used_for_relay_switch(self):
+        self.db.execute(
+            "INSERT INTO settings VALUES('k2_p2_relay_switch_enabled','1')")
+        self.db.execute(
+            "UPDATE edge_egress_allocations SET status='RETIRED' WHERE edge_id='e8'")
+        preview=self.review()
+        self.assertIn("SOURCE_PROTECTED_EDGE_UNVERIFIED",preview.blockers)
+        self.assertFalse(preview.ready)
+
     def test_source_allocation_core_drift_is_not_ready(self):
         self.db.execute(
             "INSERT INTO settings VALUES('k2_p2_relay_switch_enabled','1')")

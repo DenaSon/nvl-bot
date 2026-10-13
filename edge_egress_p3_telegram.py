@@ -222,3 +222,25 @@ def orphan_html(*, stage_root: Path=Path("/root/nvl-egress-v1"),
         detail="وضعیت منابع قدیمی قابل بررسی نیست."
     return ("🧹 <b>پاکسازی سرورها</b>\n\n"+detail+
             "\n\nحذف منابع باقی‌مانده فقط پس از بررسی ایمنی انجام می‌شود.")
+
+
+def wizard_prompt(*, integrated: bool) -> str:
+    if type(integrated) is not bool:
+        raise ValueError("INVALID_EDGE_WIZARD_MODE")
+    return ("➕ <b>افزودن سرور</b>\n\n"
+            "نشانی IP عمومی سرور جدید را ارسال کنید.\n"
+            "سرور باید تازه و آماده راه‌اندازی باشد.")
+
+
+def wizard_result(edge_ip: str, result: dict) -> tuple[str,str]:
+    # Preserve the strict existing onboarding identity and outcome validator;
+    # change only the human-facing text, never the release state.
+    from edge_egress_phase2_wizard import staged_edge_result
+    _detail,eid=staged_edge_result(edge_ip,result)
+    return (
+        "✅ <b>سرور اضافه شد</b>\n\n"
+        f"شناسه: <code>{_safe(eid)}</code>\n"
+        f"نشانی: <code>{_safe(edge_ip)}</code>\n\n"
+        "برای استفاده، وضعیت اتصال را بررسی کنید.",
+        eid,
+    )

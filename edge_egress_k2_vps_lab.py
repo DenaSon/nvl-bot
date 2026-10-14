@@ -99,7 +99,11 @@ def review_vps_lab(
             if len(match_source)!=1 or (len(match_target)==1 and match_source[0][2]!=match_target[0][2]):
                 blockers.append("SOURCE_F3_IDENTITY_UNVERIFIED")
             s_eid=match_source[0][0] if len(match_source)==1 else ""
-            if len([a for a in allocations if a[1] in (source,card.ip)])!=2:
+            # A pre-migration LEGACY source may not yet have an F3 egress
+            # allocation. That blocks UID enrollment, NOT a harmless test
+            # of the new Edge dedicated namespace's public IPv4.
+            if (len([a for a in allocations if a[1]==card.ip])!=1
+                    or len([a for a in allocations if a[1]==source])>1):
                 blockers.append("SOURCE_TARGET_ALLOCATION_COLLISION")
             s_f4=read_readiness(db,s_eid) if s_eid else None
             t_f4=read_readiness(db,eid)
@@ -154,10 +158,8 @@ def review_vps_lab(
                    and board.registry_trusted and source!=card.ip
                    and board.dns_ip==source and len(sources)==1
                    and len(match_target)==1
-                   and len(match_source)==1
                    and not any(b in blockers for b in (
                        "SOURCE_TARGET_ALLOCATION_COLLISION",
-                       "SOURCE_F3_IDENTITY_UNVERIFIED",
                        "TARGET_F3_IDENTITY_UNVERIFIED",
                        "GLOBAL_MODE_UNTRUSTED",
                    )))

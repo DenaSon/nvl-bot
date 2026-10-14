@@ -36,6 +36,14 @@
 5. **Operator recovery**: normal, known, exact-pinned partial stages now have guarded replay functions; M4 still must expose approved retry/reconcile safely inside Telegram and report genuine external rescue requirements. An unknown compromised/orphaned stage remains `HOLD`, not an automated unsafe cleanup.
 6. **Dependencies**: PR #146 is stacked on unmerged M1 #145; M1–M7 master roadmap is PR #144; M3 experimental branch started earlier must be reconciled **after** M2 code review. Do not merge onto auto-deploying `master` without user authorization.
 
+## Verified source CI checkpoint
+
+- Code/document checkpoint `ec7f6a4cc0fc6776024e697c1685bc3188bec10c`
+- [GitHub Actions Python checks](https://github.com/DenaSon/nvl-bot/actions/runs/38622417576): **1,668 tests PASS**.
+- [GitHub Actions Edge stage-only checks](https://github.com/DenaSon/nvl-bot/actions/runs/38622424673): **926 tests PASS under Python 3.11** and **926 PASS under Python 3.12**.
+- These are synthetic/source CI tests; **not** a real F4/packet witness, deploy confirmation or proof that M2's root service has been bound to Telegram. The documentation-only final checkpoint is independently rerun by GitHub.
+- Implementation code review/CI is ready for PR review; the runtime acceptance remains **HOLD** until M4/M5/M6.
+
 ## Source acceptance and negative regressions
 
 Offline/unprivileged CI exercises first→second→third UID, duplicate UID/priority/DNS port, old manifest drift, stage byte mismatch, PAM-last ordering, root/PAM/WG spoofing, exact /32 key overlap, journal stale/UID reuse, first/next bootstrap 6G-loss, corrupt roster, runtime readiness and no-release defaults. All host ports and independent F4 proof callbacks are synthetic; physical acceptance not asserted.

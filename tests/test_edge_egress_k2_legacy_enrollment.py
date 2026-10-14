@@ -161,7 +161,7 @@ class LegacyEnrollmentInventoryTests(unittest.TestCase):
         self.assertIn("SHARED_6G_BUSY",self.audit().blockers)
 
     def test_invalid_target_and_schema_fail_closed(self):
-        for value in ("", "INVALID", "../e9"):
+        for value in ("", "INVALID", "../e9", None, 125):
             with self.subTest(value=value), self.assertRaises(LegacyEnrollmentHold):
                 inspect_legacy_enrollment(self.db_conn,value)
         self.db.execute("DROP TABLE edge_egress_uid_bindings")

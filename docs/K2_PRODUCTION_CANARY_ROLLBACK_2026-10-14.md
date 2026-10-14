@@ -1,3 +1,6 @@
+> **2026-10-14 CURRENT PRODUCTION CANARY OVERRIDE:** After merged PR #139 (master source checkpoint 331fd86e399bd18e2f524071edb7f14d099e00de), the **source** for a first-UID PAM/BootGuard installer, reviewed Python module staging and original-6G Linux UID worker exists, with flags still OFF and no live Telegram worker binding or physical VPS F4 approval. The legacy final "remaining engineering NO-GO" note below is retained historically and must not be read as claiming those modules are still absent; rather **live independent installation/physical acceptance, multi-UID roster CAS, packet/no-Core-leak observer, reboot/WG failure, and restore drill** remain NO-GO. Snapshot consistency is not a restore proof. Current operator command sequence lives at [NVL K2 SSH deployment](NVL_K2_PRODUCTION_SSH_DEPLOY_RUNBOOK_2026-10-14.md); core/Edge production users stay unchanged.
+
+---
 # K2 — Production canary and rollback contract (2026-10-14)
 
 **Status:** pre-production preparation only. No customer SSH, DB, DNS, Core routing, Edge WireGuard or PAM modifications. No production-safe privileged P3 UID worker is declared complete.

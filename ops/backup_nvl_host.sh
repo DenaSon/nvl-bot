@@ -92,7 +92,8 @@ while IFS= read -r -d '' f; do add_path "$f"; done < <(
 sort -zu "$INV" -o "$INV"
 # Record exactly which input roots are covered, without leaking secret bytes.
 # No claim that this curated archive replaces a full provider disk snapshot.
-tr '\\0' '\\n' < "$INV" > "$DETAILS/archived-roots.txt"
+# Convert NUL-separated roots to newline text for strict membership auditing.
+tr '\0' '\n' < "$INV" > "$DETAILS/archived-roots.txt"
 if [[ "$ROLE" == "core" ]]; then
   for required in etc/ssh etc/pam.d etc/passwd etc/shadow; do
     grep -Fxq "$required" "$DETAILS/archived-roots.txt" || {

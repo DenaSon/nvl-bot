@@ -3,6 +3,9 @@ from contextlib import redirect_stdout
 import io
 import json
 import os
+import re
+import shlex
+import subprocess
 from pathlib import Path
 import sqlite3
 import tarfile
@@ -155,6 +158,20 @@ class CanaryBackupAuditTests(unittest.TestCase):
         self.sign()
         self.assertIn("ARCHIVE_ROOTS_NOT_ACTUALLY_COVERED",
                       self.check().blockers)
+
+    def test_backup_script_nul_inventory_converts_exact_bytes(self):
+        """Exercise actual CLI arguments: two shell slashes preserve NUL by mistake."""
+        script = (Path(__file__).resolve().parents[1] /
+                  "ops/backup_nvl_host.sh").read_text(encoding="utf-8")
+        lines = [line for line in script.splitlines()
+                 if line.startswith("tr ") and "archived-roots.txt" in line]
+        self.assertEqual(len(lines), 1)
+        args = shlex.split(lines[0].split(" < ", 1)[0])[1:]
+        data = b"etc/ssh\x00etc/pam.d\x00etc/passwd\x00etc/shadow\x00"
+        result = subprocess.run(["tr", *args], input=data,
+                                capture_output=True, check=True)
+        self.assertEqual(result.stdout,
+                         b"etc/ssh\netc/pam.d\netc/passwd\netc/shadow\n")
 
     def test_cli_nonroot_rejects_before_reading_any_host_backup(self):
         out=io.StringIO()

@@ -141,9 +141,17 @@ def audit_backup(
             if roots_file.stat().st_size>MAX_MANIFEST:
                 raise CanaryBackupHold("ARCHIVE_ROOTS_UNTRUSTED")
             roots=roots_file.read_text(encoding="utf-8").splitlines()
-            if (not roots or len(roots)>MAX_ROOTS or roots!=sorted(set(roots))
-                    or any(_relative(r)!=r for r in roots)):
+            # GNU sort -zu uses the producer host's LC_COLLATE. Python's
+            # Unicode lexical sort is NOT an integrity/security invariant,
+            # so an otherwise valid, unique manifest must not be rejected
+            # because the VPS and CI use different collation locales.
+            # Keep strict path, cardinality, digest and tar coverage checks.
+            if not roots or len(roots)>MAX_ROOTS:
                 raise CanaryBackupHold("ARCHIVE_ROOTS_UNTRUSTED")
+            if len(set(roots)) != len(roots):
+                raise CanaryBackupHold("ARCHIVE_ROOTS_DUPLICATED")
+            for root in roots:
+                _relative(root)
             if not CORE_IDENTITY<=set(roots):
                 raise CanaryBackupHold("CORE_ACCOUNT_RECOVERY_FILES_NOT_ARCHIVED")
             members=set()

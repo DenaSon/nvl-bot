@@ -1,3 +1,10 @@
+## 2026-10-14 — K2 Phase 2 guarded all-PROTECTED promotion (feature-only)
+
+Nested PR #133 adds `COHORT_PROMOTE` under original P3-A+6G: distinct source/target Edge identity, live source+target F4, exact all-active UID/runtime/binding/OS ownership, complete root-only roster/BootGuard and no foreign/legacy accounts, independent rescue/PAM/packet and failure/boot safety port. It executes a **single** SQLite CAS of `edge_egress_protected_mode: 0→1` only under the exact same original 6G RUNNING nonce/scope/phase and revalidates fingerprint and source/target F4 before/after the write. No host/DNS/host_pool/SSH mutation; no live port factory/Telegram execute registration. The original extracted production `_db_acquire_failover_lock` is exercised for source==target enrollment and protected P3 stale HOLD. See `docs/K2_PHASE2_PROTECTED_PROMOTION_2026-10-14.md`.
+
+**NOT PRODUCTION READY:** rollout/fence failure must never claim a kernel freeze; source-only promotion explicitly leaves `frozen=false` in P3 recovery while holding RUNNING 6G. Real Linux root host safety, PAM/BootGuard and external DNS/IPv6/WG-loss/reboot proofs, source/target F4 and deployment of the runtime are still pending. Do not flip settings, register a mutating Telegram handler, or merge draft PR #120 to master. The existing J protected Edge→Edge handoff is a separate later manual operation.
+
+---
 ## 2026-10-14 — K2 Phase 2 Source enrollment implementation (feature-only)
 
 Nested PR #132 adds guarded **same-Edge Legacy → PROTECTED** source code: explicit P3-A `UID_ENROLL_SOURCE` action (same source/target IP only, global mode must remain `0`), fresh independent safety gates; `SameEdge6GUIDRuntimeStore` checks exact nonce/scope/action of the original 6G RUNNING lease and keeps the base F2 store unchanged; `GuardedSourceEnrollmentPort` rechecks whole-cohort Legacy snapshot under that lease before calling the existing P3-C deny-first UID lifecycle. No Linux accounts, public DNS, host metadata, default relay, global mode or original wg0 are changed by this code path. See `docs/K2_PHASE2_SOURCE_ENROLLMENT_2026-10-14.md`.

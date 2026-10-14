@@ -100,6 +100,17 @@ class Phase2CohortTests(unittest.TestCase):
         buttons=sum(relay_cohort_buttons(ready),[])
         self.assertIn(("✅ بررسی نهایی انتقال","hpeg_p2_open_e9"),buttons)
 
+    def test_all_protected_with_legacy_global_mode_shows_safe_next_stage(self):
+        self.db.execute("UPDATE settings SET value='0' "
+                        "WHERE key='edge_egress_protected_mode'")
+        view=self.review()
+        self.assertIn("PROTECTED_MODE_REQUIRED",view.blockers)
+        self.assertNotIn("MIXED_OR_UNPROTECTED_COHORT",view.blockers)
+        panel=render_cohort_review(view)
+        self.assertIn("تأیید نهایی ایمنی سرور باقی است",panel)
+        self.assertNotIn("hpeg_p2_open_e9",
+                         [x for _,x in sum(relay_cohort_buttons(view),[])])
+
     def test_mixed_existing_legacy_user_blocks_whole_cohort_without_db_write(self):
         self.db.execute(
             "INSERT INTO settings VALUES('k2_p2_relay_switch_enabled','1')")

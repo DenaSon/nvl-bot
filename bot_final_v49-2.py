@@ -3136,6 +3136,7 @@ def _db_rollback_failover_account_state(
 
 def _db_acquire_failover_lock(source_host, target_host, *, mode=FAILOVER_MODE_MANUAL):
     """Legacy wrapper over the ONE shared original Phase 6G lease."""
+    from edge_egress_k2_a_6g_shared import acquire_original_6g
     return acquire_original_6g(
         db_conn,source_host,target_host,mode=mode,
         stale_seconds=FAILOVER_LOCK_STALE_SECONDS,
@@ -3160,6 +3161,7 @@ def _db_update_failover_operation(
     require_running=False,
 ):
     """Legacy wrapper over the same original 6G journal/CAS SQL."""
+    from edge_egress_k2_a_6g_shared import update_original_6g
     return update_original_6g(
         db_conn,operation_id,status=status,account_count=account_count,
         moved_count=moved_count,previous_default_host=previous_default_host,

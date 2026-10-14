@@ -131,6 +131,32 @@ def read_source_bundle(
     return result
 
 
+
+def inspect_installed_module_bundle(
+    reviewed_sha256:dict[str,str], *, installed:Path|None=None,
+) -> str:
+    """READ-ONLY: guard and DoH modules must remain exact at PAM enable time."""
+    root=TARGET if installed is None else installed
+    _owned_dir(root,readable=True)
+    _owned_dir(root/"ops",readable=True)
+    if not isinstance(reviewed_sha256,dict):
+        raise ModuleStageHold("INVALID_REVIEWED_MANIFEST")
+    blobs={}
+    for name,digest in reviewed_sha256.items():
+        if not isinstance(name,str) or not NAME.fullmatch(name):
+            raise ModuleStageHold("UNREVIEWED_MODULE_PATH")
+        path=root.joinpath(*name.split("/"))
+        st=path.lstat()
+        if (not stat.S_ISREG(st.st_mode) or st.st_uid!=0
+                or st.st_mode & 0o022 or not (st.st_mode & 0o004)
+                or st.st_size>600000):
+            raise ModuleStageHold("INSTALLED_MODULE_UNTRUSTED")
+        raw=path.read_bytes()
+        if sha256(raw).hexdigest()!=digest:
+            raise ModuleStageHold("INSTALLED_MODULE_SHA_DRIFT")
+        blobs[name]=raw
+    return validate_module_bundle(blobs,reviewed_sha256)
+
 def stage_module_bundle(
     *, blobs:dict[str,bytes],reviewed_sha256:dict[str,str],
     approved_bundle_digest:str, port:Callable[[Path,bytes],None] | None = None,

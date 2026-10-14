@@ -103,6 +103,16 @@ def plan_next_uid(*, username: str, manifest_bytes: bytes,
                 or not manifest.ingress_return or not manifest.shared_edge
                 or manifest.dns_port is None):
             raise MultiUIDHold("NEW_UID_IDENTITY_OR_MANIFEST_INVALID")
+        # One Linux rule priority and DNS listener per protected UID.
+        # V1 renderer checks UIDs, Edge transport/route-table ownership;
+        # it does not reject priority or DNS-port collisions by itself.
+        existing_guards = [
+            BootGuardManifest.parse(json.loads(raw))
+            for raw in installed_manifests.values()
+        ]
+        if any((x.request.priority == req.priority or
+                x.dns_port == manifest.dns_port) for x in existing_guards):
+            raise MultiUIDHold("UID_PRIORITY_OR_DNS_PORT_COLLISION")
         merged = dict(installed_manifests)
         merged[username] = manifest_bytes
         updated_roster = render_roster(merged).encode("utf-8")
@@ -218,6 +228,21 @@ def apply_next_uid(*, plan: MultiUIDAppendPlan, db_conn: Callable,
     if any(member.uid == plan.uid or member.username == plan.username
            for member in roster.values()):
         raise MultiUIDHold("M2_UID_ALREADY_PROTECTED")
+    # Validate *every* pre-existing manifest against its pinned roster hash
+    # rather than accepting a syntactically correct but stale roster.
+    installed: dict[str, bytes] = {}
+    for old_name, old_member in roster.items():
+        data = _safe_read(GUARD_DIR / (old_name + ".json"), maximum=4096)
+        if sha256(data).hexdigest() != old_member.guard_sha256:
+            raise MultiUIDHold("M2_EXISTING_GUARD_DRIFT")
+        installed[old_name] = data
+    fresh_plan = plan_next_uid(
+        username=plan.username, manifest_bytes=plan.manifest_bytes,
+        current_roster=plan.current_roster, installed_manifests=installed,
+        pam_bytes=pam, module_digest=plan.module_digest, os_uid=os_uid,
+    )
+    if fresh_plan != plan:
+        raise MultiUIDHold("M2_PLAN_CHANGED_OR_FORGED")
     # New guard/unit files must be absent: do not overwrite partial stages.
     paths = (
         GUARD_DIR / (plan.username + ".json"),

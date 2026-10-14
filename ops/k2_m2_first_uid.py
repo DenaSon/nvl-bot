@@ -42,7 +42,9 @@ class Original6GRootPort:
     def replace_exact(self, path, expected, replacement) -> None:
         self.lease()
         from ops.k2_p3_guard_installer import PAM
-        if path == PAM and self.before_pam() is not True:
+        if path != PAM:
+            raise FirstUIDHold("M2_UNREVIEWED_PAM_REPLACEMENT_PATH")
+        if self.before_pam() is not True:
             raise FirstUIDHold("M2_BEFORE_PAM_DNS_IPV6_FENCE_NOT_ATTESTED")
         self.port.replace_exact(path, expected, replacement)
 

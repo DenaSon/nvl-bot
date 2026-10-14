@@ -61,37 +61,33 @@ Specific users:
 
 **Resource risk from comprehensive audit** (server clock `2026-10-14T13:55:42-04:00`): RAM `1.9 GiB`, swap used `878 MiB`, load 1-min `9.46`, `381` sshd processes, `1691` established TCP sockets, `385` SSH service tasks. This is substantial observed load, **not proven as cause** of nvl0555 close. Require reviewed Core headroom and safety window before P3 PAM mutation.
 
-## 5. Committed design direction: K2 Single-User Protected Egress (C1–C5)
+## 5. AUTHORITATIVE DEVELOPMENT PLAN — Unified Single + Batch M1–M7 (2026-10-14)
 
-| Phase | Deliverable / acceptance contract |
+**New operator-approved direction; supersedes old C1–C5 followed by D1–D5.** Implement **both** Single and Batch against the same engine and original 6G/fail-closed guards in parallel, but RELEASE **only Single** to the first real e9 customer test. Batch remains disabled until the Single test and independent batch physical/capacity gates pass. There must be **no leftover product/functionality work and no ordinary operator CLI** after M7 acceptance.
+
+**Canonical specification (READ NEXT): [K2 Unified Migration M1–M7 / zero-CLI release contract](K2_UNIFIED_MIGRATION_M1_M7_RELEASE_CONTRACT_2026-10-14.md).**
+
+| Phase | Output and acceptance |
 | --- | --- |
-| **C1 — preview only** | Per-UID source/ingress identity reconciliation, exact OS UID, DB status, process/session drain, F3 target/peer, protected-map collision, 6G/F4/rescue checks. **No** global all-protected assumption, `ssh_accounts.host` mass update or users silently added to cohort. Branch/tests/CI. |
-| **C2 — protected admission/kernel** | Attested first-canary roster/BootGuard/PAM and DNS/IPv4/IPv6 guards. Per-UID terminal blackhole + reject, no Core fallback. A global `/etc/pam.d/sshd` hook **has system-wide blast radius** even when roster contains one UID. Independently verify mixed Legacy logins and emergency root/non-root access. Actual installed manifest and module exact SHA; no unsafe enablement from a boolean. |
-| **C3 — guarded one-shot worker** | Dedicated `SINGLE_UID_CANARY` execution using the **existing** 6G persisted lease/journal, pinned source+target, nonce/operator revalidation, session check, deny-first, immutable evidence and failed-step **HOLD/fence**, no automatic legacy fallback. Review existing P3-A/P3-C and adapt safely without a parallel DB lock/kernel engine. |
-| **C4 — Telegram operator UI** | Minimal admin-only existing `hpeg_*` UI: read-only preview, explicit one-shot confirmation only after acceptance, status/HOLD/failure reason, recovery view. No developer jargon, no alternative Telegram bot. |
-| **C5 — physical acceptance** | Independently witnessed public client SSH/SOCKS IPv4 e9 exact IP, Core packet capture (TCP/UDP DNS, NSS, IPv6), unaffected neighbour UID(s), guarded tunnel loss/recovery and cold-boot no-leak, out-of-band root rescue, snapshot/restore evidence and exact CI/deployed SHA. A namespace-only curl does not meet C5. |
+| **M1** | Inventory, trusted actual ingress/source owner, `SingleSelection` / `BatchSelection`, 425-row accounting, precise per-user and per-wave preview, actionable in-Telegram HOLD. |
+| **M2** | Shared root-owned, fully automated protected infrastructure: multi-UID Roster CAS, mixed Legacy PAM safety, BootGuard, DNS/NSS/IPv4/IPv6 protections, independent F4 witness, durable dedicated transport and no-CLI provisioning/recovery. |
+| **M3** | Unified Migration Engine: Single as batch-size 1; bounded batch waves on original 6G/journal; idempotent UID lifecycle, source-target pinning, guarded session drain, per-UID freeze/reconcile, no Core fallback. |
+| **M4** | Existing Persian minimal Telegram admin UI for both Single and Batch (preview, approvals, progress, diagnostic evidence, scoped retry/recovery). Batch EXECUTE remains OFF before M7. |
+| **M5** | Automated CI, physical/disposable acceptance and failure-injection for **both** paths, with no manual CLI for routine provisioning/probes and zero unresolved missing-function blockers. |
+| **M6** | One authorized Production canary only: `nvl0555 / UID1636 → e9 45.61.163.75`, real SSH/SOCKS public egress + independent leak/fail-closed/neighbour proof; on failure repair shared code, stay HOLD, repeat M5/M6, no batch. |
+| **M7** | Independently approved progressive batch waves and full fleet operational acceptance: no operator CLI for normal flow, verified per-user results, actionable safe holds, capacity and real ingress/egress coverage. |
 
-**Execution rule:** User wants ONE consolidated preflight/report instead of long iterative one-command SSH debugging. Plan code/offline tests first in a narrow PR. CI success ≠ deployment ≠ real packet/F4 evidence ≠ approval. Do not merge to production master automatically; operator must review intended production action. User prefers testing on live Core, but safe physical loss/reboot cannot be tried there without impact isolation and recovery/acceptance. If no safe physical witness, leave C5 HOLD; don't fabricate `READY`.
+**Definition of Done:** No outstanding *product-side* blockers (including first-UID-only worker, mixed/unpooled source handling, missing P3 execute binding, manual F4/packet tasks, bulk roster, admission, per-user endpoint policy, recovery UI). From fresh Edge onboarding through completed selected users and safe repair, operator acts in Telegram only. Independent emergency provider rescue remains a disaster-safety mechanism, not an expected manual migration step. Honest fail-closed HOLD for genuine external outages or unverifiable accounts is valid; a missing built feature disguised as HOLD is not. A single passing Canary does NOT count as successful group migration.
 
-## 6. Separate roadmap AFTER a successful Canary: K2 Bulk Migration (D1–D5)
+**Historical transition note:** The previous C1–C5 then D1–D5 plan was a **planning predecessor only**. Do not resume it or defer all batch implementation until after M6. Current committed design is unified M1–M7 and is not implemented by this documentation-only update.
 
-**C1–C5 do not complete bulk transfer.** To make the bot capable of transferring the *entire eligible real population*, build, test and operationally accept:
+## 6. Next-chat and implementation instructions
 
-1. **D1 Inventory/reconciliation:** source-of-truth for per-account actual WireGuard ingress edge, historical `ssh_accounts.host`, Linux UID/status/session, unknown/removed Edge mapping and target eligibility; separate the 405+14 unpooled-host accounts and five other-known Edge accounts. Explicit opt-in and no silent reassignment.
-2. **D2 Safe multi-UID lifecycle:** atomic compare-and-swap **roster append/update/remove**, stable priority/table/DNS port per UID, shared Edge route/NAT reference accounting, UID collision/owner guarantees and strict first/second/wave boot/PAM/DoH semantics; avoid per-UID installer only supporting first UID.
-3. **D3 Bounded wave orchestration:** `DRY_RUN`, batch sizing/concurrency limits, idempotent per-UID journal within original 6G, per-account HOLD/quarantine/reconcile/retry after approval, progressive 1→small wave→larger wave; active SSH session drain/notification and monitor. No global all-user cutover until every necessary UID is attested.
-4. **D4 Ingress/DNS topology:** decide **per-user new connection endpoint vs shared Cloudflare/DNS switch** for each source Edge; prove original ingress peer and customer port end-to-end, handle other customers on those IPs. The existing **ALL-PROTECTED** global relay contract cannot simply be reused for a mixed 425-account fleet. Never redirect OTHER Edge customers by changing global default or DNS.
-5. **D5 Production readiness:** Edge e9 capacity/CPU/RAM/conntrack/bandwidth/port/NAT validation; snapshots and independent rescue; sampled and independent packet leak tests per wave and boot/failure drills; controlled rollback/fail-closed recovery; user-visible migration states; customer-support/reconnect plan; final live post-wave reconcile of all enrolled account counts and original 6G idle.
+- Read the **canonical M1–M7 plan** above alongside the concrete evidence in sections 1–4; no further piecemeal diagnostics or repeat of proven e9 Phase1 namespace IP testing.
+- Start M1 in source code on a fresh GitHub feature branch with both Single/Batch selection and no-CLI acceptance tests. Build M2–M5 in parallel against shared components before any new live test.
+- Keep `nvl0555` UID1636, `e9` and existing `nvl0557` UID1644/`e7`, UID1690/`mia1` policy evidence distinct; only exact authorized scope can change.
+- No unconditional PAM/SSH restart, `wg0` modification, global Cloudflare/default switch, unsafe `ip rule` patch, F4 `READY` forgery or bypass of independent packet/root rescue acceptance.
+- Maintain four distinct checkpoints after each phase: **source implemented; CI passing; deployed; physically accepted**. No claim of operational success from code or documentation alone.
+- Operator will approve source merge/deploy separately, as master auto-deploys; this documentation PR is NOT authorization to mutate Production.
 
-Only after these gates can the operator authorize migration of **all eligible** accounts. Some accounts may remain HOLD until ownership/credentials/port/session anomalies are resolved; do not claim a guaranteed `425/425 PASS` in advance. Bulk transfer is a separate deliverable and release, not implied by a successful one-user proof.
-
-## 7. Immediate next-chat instructions / explicit non-actions
-
-- **Start here**; do not ask the operator to repeat the successful e9 wizard, P1 activation, independent IP curl, inventory or repeated unsuccessful SSH password attempts.
-- First engineering deliverable: C1 **source-only, read-only** `nvl0555 / UID 1636 → e9` preview + focused tests; no bot-wide flag toggles or in-place production network commands.
-- Before C2/C3 implementation, explicitly reconcile non-default historical host metadata with actual trusted ingress peer, one-session active PID, F4 source/target scope, per-UID admission; do **not** weaken `MIXED_OR_UNPROTECTED_COHORT`, F4 or ownership safeguards to make the UI green.
-- Installer and worker defaults OFF; V1 PAM hook absent. No `ip rule add/del`, no F4 SQL `READY` patch, no global `edge_egress_protected_mode=1`, no `wg0`/SSH restart, no `down.sh` or deleting 6G records.
-- Development workflow: verified latest master → branch → explicit C1–C5 scope and tests → independently reviewed PR and exact-head CI → separate operator-authorized deploy/acceptance. Then D1–D5 as a separate project.
-- Preserve secret hygiene: never commit/paste SSH passwords, private keys, WireGuard secrets, environment files, live SQLite, personal data or raw auth logs. This sanitized checkpoint contains public host identity and scoped account IDs only.
-
-**Relevant docs:** `NVL_K2_AGENT_HANDOFF_2026-10-13.md`, `NVL_PROJECT_MEMORY.md`, `K2_P3_GUARD_INSTALL_AND_UID_WORKER_2026-10-14.md`, `NVL_K2_PRODUCTION_SSH_DEPLOY_RUNBOOK_2026-10-14.md`, `SSH_EGRESS_K2_E7_MEMORY_2026-10-13.md` (historical); open acceptance/issues #106, #108, #129, #102.
+**Other references:** `NVL_K2_AGENT_HANDOFF_2026-10-13.md`, `NVL_PROJECT_MEMORY.md`, `K2_P3_GUARD_INSTALL_AND_UID_WORKER_2026-10-14.md`, `NVL_K2_PRODUCTION_SSH_DEPLOY_RUNBOOK_2026-10-14.md`, historical `SSH_EGRESS_K2_E7_MEMORY_2026-10-13.md`. Live acceptance Issues #106, #108, #129, #102 remain open.

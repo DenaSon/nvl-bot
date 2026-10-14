@@ -23,7 +23,12 @@ EXECUTOR_ENABLED = False
 TICKET_TTL_SECONDS = 120
 INTENT_PHASE = "EGRESS_P3_EXECUTE_INTENT"
 RECOVERY_PHASE = "EGRESS_P3_RECOVERY_REQUIRED"
-ALLOWED_ACTIONS = frozenset({"EDGE_PREPARE", "UID_ATTACH", "UID_FREEZE", "EDGE_RETIRE"})
+ALLOWED_ACTIONS = frozenset({"EDGE_PREPARE", "UID_ATTACH", "UID_FREEZE", "EDGE_RETIRE", "UID_ENROLL_SOURCE"})
+# Scope-specific source enrollment: no global mode toggle or DNS/host mutation.
+SOURCE_ENROLL_GATES = frozenset({
+    "SOURCE_EDGE_F4", "MIXED_PAM_COMPATIBILITY",
+    "SOURCE_INGRESS_PIN", "BOOT_ROSTER_PREINSTALLED",
+})
 BASE_GATES = frozenset({
     "OPERATOR_RESCUE", "STAGE_PIN", "SSH_HOST_PIN",
     "RESOURCE_OWNERSHIP", "NO_CORE_FALLBACK",
@@ -63,9 +68,11 @@ class ExecutionScope:
                 raise ExecutorHold("HOST_IDENTITY_REQUIRED") from exc
             if canonical != host or not ipaddress.IPv4Address(host).is_global:
                 raise ExecutorHold("PUBLIC_IPV4_IDENTITY_REQUIRED")
-        if self.source_host == self.target_host:
+        if self.source_host == self.target_host and self.action != "UID_ENROLL_SOURCE":
             raise ExecutorHold("SAME_EDGE_OPERATION_NOT_ALLOWED")
-        if self.action in ("UID_ATTACH", "UID_FREEZE"):
+        if self.action == "UID_ENROLL_SOURCE" and self.source_host != self.target_host:
+            raise ExecutorHold("SOURCE_ENROLLMENT_MUST_STAY_ON_CURRENT_EDGE")
+        if self.action in ("UID_ATTACH", "UID_FREEZE", "UID_ENROLL_SOURCE"):
             if (not isinstance(self.username, str)
                     or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", self.username)
                     or type(self.uid) is not int or not 1000 <= self.uid < 60000):
@@ -89,9 +96,11 @@ class FreshEvidence:
                 or any(not isinstance(g, str) for g in self.gates)
                 or self.blockers):
             raise ExecutorHold("FRESH_EVIDENCE_NOT_ACCEPTED")
-        required = BASE_GATES | (ATTACH_GATES if scope.action == "UID_ATTACH"
+        required = BASE_GATES | (ATTACH_GATES if scope.action in ("UID_ATTACH", "UID_ENROLL_SOURCE")
                                  else RETIRE_GATES if scope.action == "EDGE_RETIRE"
                                  else frozenset())
+        if scope.action == "UID_ENROLL_SOURCE":
+            required = required | SOURCE_ENROLL_GATES
         if not required <= self.gates:
             raise ExecutorHold("MISSING_ACCEPTANCE_GATES")
 
@@ -287,15 +296,17 @@ class Existing6GGuardedExecutor:
     def _lease(self, operation_id, scope, nonce_hash=None):
         with self.db_conn() as conn:
             _locked(conn, operation_id, scope, nonce_hash=nonce_hash)
-            if scope.action == "UID_ATTACH":
-                # Match the established positive 6G handoff adapter: never
-                # turn on a protected UID while global mode remains legacy.
+            if scope.action in ("UID_ATTACH", "UID_ENROLL_SOURCE"):
+                # The new *same-edge* source-enrollment path runs in unchanged
+                # Legacy global mode, with per-UID F2 PAM/roster enforcement.
+                # The existing cross-Edge UID_ATTACH still requires mode 1.
                 mode = conn.execute(
                     "SELECT value FROM settings "
                     "WHERE key='edge_egress_protected_mode'"
                 ).fetchone()
-                if mode != ("1",):
-                    raise ExecutorHold("PROTECTED_MODE_REQUIRED_FOR_UID_ATTACH")
+                expected = ("0",) if scope.action == "UID_ENROLL_SOURCE" else ("1",)
+                if mode != expected:
+                    raise ExecutorHold("UID_ACTION_GLOBAL_MODE_CHANGED")
 
     async def execute(self, scope: ExecutionScope, ticket: ExecutionTicket, *,
                       actor_id: int, chat_id: int) -> ExecutionReceipt:
@@ -325,13 +336,14 @@ class Existing6GGuardedExecutor:
         with self.db_conn() as conn:
             if _nonce_seen(conn, nonce_hash):
                 raise ExecutorHold("TICKET_REPLAY")
-            if scope.action == "UID_ATTACH":
+            if scope.action in ("UID_ATTACH", "UID_ENROLL_SOURCE"):
                 mode = conn.execute(
                     "SELECT value FROM settings "
                     "WHERE key='edge_egress_protected_mode'"
                 ).fetchone()
-                if mode != ("1",):
-                    raise ExecutorHold("PROTECTED_MODE_REQUIRED_FOR_UID_ATTACH")
+                expected = ("0",) if scope.action == "UID_ENROLL_SOURCE" else ("1",)
+                if mode != expected:
+                    raise ExecutorHold("UID_ACTION_GLOBAL_MODE_CHANGED")
 
         operation_id, busy = self.acquire_fn(scope.source_host, scope.target_host)
         if operation_id is None:

@@ -27,6 +27,9 @@ from edge_egress_k2_p1_worker import load_stage_pin, _check_stage, _remote_trans
 from edge_egress_v1_ingress import load_registry
 from edge_egress_v1_live_driver import LiveDriverConfig, make_live_adapter
 from edge_egress_v1_handoff_adapter import execute_protected_switch
+from edge_egress_k2_legacy_enrollment import (
+    LegacyEnrollmentAudit, LegacyEnrollmentHold, inspect_legacy_enrollment,
+)
 
 TTL_SECONDS = 90
 OPERATOR_SETTING = "k2_p2_relay_switch_enabled"
@@ -45,6 +48,7 @@ class RelayCohortReview:
     legacy_accounts: int
     blockers: tuple[str, ...]
     fingerprint: str
+    enrollment_audit: LegacyEnrollmentAudit | None = None
 
     @property
     def ready(self) -> bool:
@@ -198,13 +202,25 @@ def review_relay_cohort(db_conn: Callable, edge_id: str,
         if not isinstance(exc, Phase2Hold):
             raise Phase2Hold("COHORT_EVIDENCE_UNAVAILABLE") from exc
         raise
+    # Legacy users cannot join an ALL-PROTECTED handoff by updating their
+    # SSH host metadata. Report an independent, read-only enrollment audit,
+    # without granting an execute ticket or modifying the global mode.
+    enrollment_audit = None
+    if owners:
+        try:
+            enrollment_audit = inspect_legacy_enrollment(
+                db_conn, edge_id, os_uid=os_uid, now=clock,
+            )
+        except LegacyEnrollmentHold:
+            blockers.append("LEGACY_ENROLLMENT_AUDIT_HOLD")
     fingerprint = _fingerprint((
         edge_id,source,target,accounts,tuple(runtime),tuple(binding),
         pin_hash,f4_marker,
+        enrollment_audit.fingerprint if enrollment_audit else None,
     ))
     return RelayCohortReview(
         edge_id,source,target,len(accounts),len(owners),
-        tuple(dict.fromkeys(blockers)),fingerprint,
+        tuple(dict.fromkeys(blockers)),fingerprint,enrollment_audit,
     )
 
 
@@ -317,6 +333,7 @@ def render_cohort_review(review: RelayCohortReview) -> str:
         "SOURCE_PROTECTED_EDGE_UNVERIFIED": "هویت خروجی محافظت‌شده سرور فعلی معتبر نیست",
         "MIXED_OR_UNPROTECTED_COHORT": "بعضی کاربران هنوز خروجی محافظت‌شده ندارند",
         "TARGET_INGRESS_IDENTITY_MISSING": "مسیر ورودی مقصد تأیید نشده",
+        "LEGACY_ENROLLMENT_AUDIT_HOLD": "وضعیت کاربران قدیمی قابل تأیید نیست",
     }
     body=[
         "🔀 <b>تغییر رله ترافیک</b>", "",
@@ -334,6 +351,14 @@ def render_cohort_review(review: RelayCohortReview) -> str:
         body.extend(("⛔️ <b>انتقال فعلاً مجاز نیست.</b>",))
         for key in review.blockers:
             body.append("• "+escape(reasons.get(key,"نیاز به بررسی ایمنی سرور"),quote=True))
+        if "MIXED_OR_UNPROTECTED_COHORT" in review.blockers:
+            audit = review.enrollment_audit
+            if audit:
+                body.append("")
+                body.append(f"کاربران قدیمیِ شناسایی‌شده: <b>{len(audit.legacy_users)}</b>")
+                if audit.invalid_count:
+                    body.append(f"حساب‌های نیازمند بررسی: <b>{audit.invalid_count}</b>")
+            body.append("ابتدا خروجی کاربران قدیمی باید روی رله فعلی به‌طور امن تأیید شود.")
         body.append("هیچ مسیر، DNS یا حسابی تغییر نکرده است.")
     return "\n".join(body)
 

@@ -34,6 +34,18 @@ class ModuleStageTests(unittest.TestCase):
         with self.assertRaisesRegex(ModuleStageHold,"MISSING_LOCAL_PYTHON_IMPORT"):
             validate_module_bundle(new,dig)
 
+    def test_from_ops_import_and_relative_import_are_not_silent_dependencies(self):
+        variants=(
+            b"from ops import edge_egress_missing_impl\n",
+            b"from .local_sibling import Unsafe\n",
+        )
+        for raw in variants:
+            with self.subTest(raw=raw),self.assertRaises(ModuleStageHold):
+                blobs=dict(self.blobs)
+                blobs["edge_egress_v1_admission.py"]=raw
+                dig={p:sha256(b).hexdigest() for p,b in blobs.items()}
+                validate_module_bundle(blobs,dig)
+
     def test_refuse_secret_or_bot_module_paths(self):
         for bad in ("bot_final_v49-2.py",".env","ops/secrets.py",
                     "../app.py","edge_egress_uid_boot.py/../../pw"):

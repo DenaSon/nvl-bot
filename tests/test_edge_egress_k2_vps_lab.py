@@ -1,5 +1,7 @@
 """K2 P3 VPS trial navigation: real temporary SQLite, no mutation."""
 from dataclasses import replace
+from pathlib import Path
+import re
 import sqlite3
 import unittest
 
@@ -127,6 +129,28 @@ class K2VPSTrialTests(unittest.TestCase):
         self.assertNotIn("<img",lab_html(p))
         with self.assertRaises(Exception):
             lab_buttons(replace(p,edge_id="bad;cmd"))
+
+    def test_existing_bot_hpeg_lab_is_admin_only_and_readonly(self):
+        src=(Path(__file__).resolve().parents[1] /
+             "bot_final_v49-2.py").read_text(encoding="utf-8")
+        self.assertIn("review_vps_lab, lab_html as k2_lab_html",src)
+        self.assertIn('elif d.startswith("hpeg_lab_"):',src)
+        match=re.search(
+            r'    elif d.startswith\("hpeg_lab_"\):(.*?)'
+            r'    elif d.startswith\("hpeg_relay_"\):',
+            src,re.S,
+        )
+        self.assertIsNotNone(match)
+        body=match.group(1)
+        self.assertIn("if role != 'admin':",body)
+        self.assertIn("edge_id_checked(edge_id)",body)
+        self.assertIn("await asyncio.to_thread(",body)
+        self.assertIn("review_vps_lab, db_conn, edge_id",body)
+        self.assertIn("k2_lab_buttons(snapshot)",body)
+        self.assertNotIn("activate_phase1",body)
+        self.assertNotIn("execute_relay_switch",body)
+        self.assertNotIn("_db_update_failover_operation",body)
+        self.assertNotIn("subprocess",body)
 
     def test_only_safe_readonly_callbacks_registered(self):
         names=[callback for row in lab_buttons(self.review())

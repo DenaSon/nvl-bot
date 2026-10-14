@@ -149,6 +149,26 @@ class M2MultiUIDTests(unittest.TestCase):
         self.assertNotIn("ssh.service",self.plan.guard_unit+self.plan.dns_unit)
         self.assertEqual(len(self.plan.fingerprint),64)
 
+    def test_third_uid_append_preserves_previous_two(self):
+        first_two={"nvl0557":self.existing,"nvl0555":self.new}
+        third=json.loads(self.new)
+        third["username"]="nvl0556"
+        third["uid"]=1637
+        third["priority"]=1800
+        third["dns_port"]=10555
+        third_bytes=json.dumps(third,sort_keys=True).encode()
+        next_plan=plan_next_uid(
+            username="nvl0556",manifest_bytes=third_bytes,
+            installed_manifests=first_two,
+            current_roster=render_roster(first_two).encode(),
+            pam_bytes=self.pam,module_digest=MODULE,
+            os_uid=lambda n:1637,
+        )
+        self.assertEqual(
+            [x["username"] for x in json.loads(next_plan.next_roster)["protected"]],
+            ["nvl0555","nvl0556","nvl0557"])
+        self.assertEqual(next_plan.current_roster,render_roster(first_two).encode())
+
     def test_first_uid_must_use_existing_bootstrap(self):
         with self.assertRaisesRegex(MultiUIDHold,"FIRST_UID_REQUIRES_BOOTSTRAP"):
             self.make_plan(installed_manifests={})

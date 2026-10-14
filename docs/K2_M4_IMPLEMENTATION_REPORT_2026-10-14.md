@@ -24,6 +24,24 @@
 - `tests/test_edge_egress_k2_m4_telegram.py`, `tests/test_edge_egress_k2_m4_status.py`, `tests/test_edge_egress_k2_m4_root_portal.py` — admin guard, user validation, source/session evidence HOLD, original-6G busy, no false packet READY, replay/actor/F4 and existing handler binding.
 - `docs/K2_M4_TELEGRAM_UX_CONTRACT_2026-10-14.md` — current identity and planned separate final polish.
 
+## Continued M4 implementation checkpoint (2026-10-14)
+
+**Two new safety capabilities implemented in the same source PR, still default OFF:**
+
+1. `edge_egress_k2_m4_checkpoint.py`: an independent **root-only durable operator projection** stored in the original SQLite Core DB. Its schema is installed explicitly by a reviewed root migration, never from a bot callback. It records immutable plan hash, actor/chat, usernames, approval **hash only**, PREPARED → RUNNING → SUCCEEDED/HOLD, timestamps and per-UID original-6G receipt IDs. Atomic `BEGIN IMMEDIATE`/CAS, one globally RUNNING wave via partial unique index, and a consumed-approval hash persist across root/bot restarts. A crashed RUNNING wave is **UNKNOWN_INFLIGHT**, not silently resumed, unguarded or declared READY. Original `failover_operations` remains the sole migration/lease authority.
+2. `edge_egress_k2_m4_ipc.py`: explicit **Unix AF_UNIX / SO_PEERCRED trusted peer** protocol skeleton for a separately reviewed root daemon. Strong framing (4 KiB), duplicate-field rejection, typed PREPARE/CONFIRM/CANCEL only, peer UID and root process checks, no generic CLI commands, F4 booleans, HMAC tokens or real passwords in Telegram requests. PREPARE returns a short-lived opaque request ID; CONFIRM consumes it before awaiting the original P3/6G executor. Pending IDs exist only in root RAM, so a restart cannot replay them; consumed approvals are checked persistently in the Core checkpoint DB.
+3. `edge_egress_k2_m3_waves.py` and `edge_egress_k2_m4_root_portal.py` now commit each UID's **verified original 6G receipt into that durable operator projection BEFORE starting the next UID**. Checkpoint failure is a stopped wave; final state must reconcile the ordered persisted per-UID prefix. A verified DB receipt is not an independent customer packet/no-leak proof.
+4. Regression fixtures `tests/test_edge_egress_k2_m4_checkpoint.py` and `tests/test_edge_egress_k2_m4_ipc.py`: real local SQLite persistence/restart, double-confirm denial, wrong actor/chat, stale expiration, foreign 6G RUNNING, one wave at a time, preserved 6G on HOLD, source/UI frames, parser injection rejection, and real AF_UNIX socketpair SO_PEERCRED on Linux. **Only synthetic packet/F4 and root executor callbacks.**
+
+**Operational status:** This is a reviewed-API **transport and projection**, **not** a running socket service. No systemd/root socket has been installed, no bot callback invokes CONFIRM, no root secret on disk, no user routed, no Master merge. Adding a real root service without F4/boot/packet rescue would be premature. **Keep the M4 PR Draft.**
+
+### Remaining implementation chain before M4 field closure
+
+- Deploy and validate a **separate reviewed root-side service loop and 0600/0660 AF_UNIX socket** with explicit service UID, systemd sandbox and root-only key read; no shell executor. Expose client PREPARE/CONFIRM/CANCEL from existing bot only after role/chat + physically accepted F4 proof and sound credentials, with two-step operator confirmation UI. Do not expose live execution in this source PR alone.
+- Bind an independent per-user SSH-session counter (current bot preview intentionally always holds when session proof is missing), current PAM/WG proof and original 6G root executor factory; no guess from user process absence.
+- Provide read-only UI inspection of durable checkpoint by root-owned ID/projection after restart; a lost root request cannot be re-used. Unknown RUNNING state must remain HOLD until reviewed original 6G and packet evidence reconciliation.
+- M5/M6: physical F4, actual SSH/SOCKS IPv4/DNS/NSS/IPv6 no-Core-leak, guard boot/WG loss, independent off-host console recovery. For the mixed-Legacy cohort do not flip protected mode globally; direct cross-Edge UID_ATTACH is still guarded HOLD. No PROD enable/merge without approval.
+
 ## Incomplete M4 functional gates — explicit HOLD
 
 1. **Root IPC/privilege boundary**: the real existing production Telegram process has not been connected to a deployed attested root worker/socket. Its live handler intentionally calls **only** the read-only preview/status modules. No execute/confirmation button exists and no secret is passed into Telegram Pickle or callback data. Need root-owned secret file (0600), verified module release hash, authenticated actor/chat binding and exact scoped client-to-worker protocol, no generic shell execution.

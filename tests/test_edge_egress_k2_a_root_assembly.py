@@ -35,7 +35,7 @@ class BotNonrootIdentityTests(unittest.TestCase):
         self.procuid="Name:\tpython\nUid:\t12001\t12001\t12001\t12001\n"
         self.pwd=SimpleNamespace(pw_uid=12001,pw_gid=12001)
 
-    def run(self,args,**kwargs):
+    def command_run(self,args,**kwargs):
         self.seen.append(args)
         self.assertEqual(args[0:3],["systemctl","show","nvlbot.service"])
         self.assertFalse(kwargs.get("shell",False))
@@ -43,7 +43,7 @@ class BotNonrootIdentityTests(unittest.TestCase):
 
     def check(self,**changed):
         opts=dict(
-            run=self.run,read_status=lambda pid:self.procuid,
+            run=self.command_run,read_status=lambda pid:self.procuid,
             getpw=lambda user:self.pwd,
             getgrouplist=lambda name,gid:[gid,12002],
         )

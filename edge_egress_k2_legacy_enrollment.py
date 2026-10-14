@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
+from hmac import compare_digest
 from ipaddress import IPv4Address
 import json
 import pwd
@@ -59,6 +60,7 @@ def inspect_legacy_enrollment(
     db_conn: Callable, target_edge_id: str, *,
     os_uid: Callable[[str], int] = lambda name: pwd.getpwnam(name).pw_uid,
     now: int | None = None,
+    authorized_operation: tuple[int, str, str] | None = None,
 ) -> LegacyEnrollmentAudit:
     """Identify exact Legacy UIDs without changing routing, DB, DNS or PAM.
 
@@ -93,10 +95,33 @@ def inspect_legacy_enrollment(
             ).fetchone()
             if dns != (source,):
                 blockers.append("SOURCE_DNS_NOT_PINNED")
-            if conn.execute(
-                "SELECT 1 FROM failover_operations WHERE status='RUNNING' LIMIT 1"
-            ).fetchone():
-                blockers.append("SHARED_6G_BUSY")
+            running = conn.execute(
+                "SELECT id,source_host,target_host,detail_json "
+                "FROM failover_operations WHERE status='RUNNING'"
+            ).fetchall()
+            if running:
+                authorized = False
+                if len(running) == 1 and authorized_operation is not None:
+                    try:
+                        operation_id, scope_hash, nonce_hash = authorized_operation
+                        row = running[0]
+                        detail = json.loads(row[3])
+                        authorized = (
+                            type(operation_id) is int and operation_id > 0
+                            and row[:3] == (operation_id, source, source)
+                            and isinstance(detail, dict)
+                            and detail.get("kind") == "K2_P3A"
+                            and detail.get("action") == "UID_ENROLL_SOURCE"
+                            and detail.get("phase") == "EGRESS_P3_EXECUTE_INTENT"
+                            and isinstance(scope_hash, str) and len(scope_hash) == 64
+                            and isinstance(nonce_hash, str) and len(nonce_hash) == 64
+                            and compare_digest(detail.get("scope_digest", ""), scope_hash)
+                            and compare_digest(detail.get("nonce_hash", ""), nonce_hash)
+                        )
+                    except (ValueError, TypeError):
+                        authorized = False
+                if not authorized:
+                    blockers.append("SHARED_6G_BUSY")
 
             allocations = tuple(conn.execute(
                 "SELECT edge_id,edge_public_ipv4,core_public_ipv4,status "

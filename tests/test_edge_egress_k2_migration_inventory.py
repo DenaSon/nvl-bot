@@ -124,11 +124,24 @@ class K2M1InventoryTests(unittest.TestCase):
                               self.selected(snap)[0].issues)
                 self.assertFalse(snap.inventory_clear)
 
-    def test_existing_target_ingress_is_not_migrated_to_itself(self):
+    def test_same_target_ingress_allows_legacy_protected_enrollment(self):
         snap=self.preview(ingress_witness=lambda name:LiveIngressWitness(
             name,"e9",TARGET,NOW-1,"INDEPENDENT_LIVE"))
-        self.assertIn("TARGET_ALREADY_CURRENT_INGRESS",
-                      self.selected(snap)[0].issues)
+        self.assertNotIn("TARGET_ALREADY_CURRENT_INGRESS",
+                         self.selected(snap)[0].issues)
+        self.assertTrue(snap.inventory_clear)
+        self.assertFalse(snap.can_execute)
+
+    def test_user_already_protected_on_target_is_hold(self):
+        self.c.execute(
+            "INSERT INTO edge_egress_uid_runtime VALUES"
+            "('nvl0555',1636,'e9',?,'PROTECTED')",(TARGET,))
+        self.c.execute(
+            "INSERT INTO edge_egress_uid_bindings VALUES"
+            "('nvl0555',1636,'e9',?,'PROTECTED')",(TARGET,))
+        snap=self.preview(ingress_witness=lambda name:LiveIngressWitness(
+            name,"e9",TARGET,NOW-1,"INDEPENDENT_LIVE"))
+        self.assertIn("TARGET_ALREADY_PROTECTED",self.selected(snap)[0].issues)
         self.assertFalse(snap.inventory_clear)
 
     def test_missing_and_active_sessions_fail_closed(self):

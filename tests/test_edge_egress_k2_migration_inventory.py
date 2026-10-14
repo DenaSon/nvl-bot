@@ -220,7 +220,7 @@ class K2M1InventoryTests(unittest.TestCase):
                 with self.assertRaises(MigrationInventoryHold):
                     select_migration(mode,names,eid)
         with self.assertRaisesRegex(MigrationInventoryHold,
-                                    "SELECTION_MUTATED"):
+                                    "SINGLE_REQUIRES_ONE_USERNAME"):
             preview_migration(self.db,replace(
                 select_migration("SINGLE",("nvl0555",),"e9"),
                 usernames=("nvl0555","nvl0557")),

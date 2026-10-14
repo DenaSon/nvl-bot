@@ -83,12 +83,16 @@ class K2VPSTrialTests(unittest.TestCase):
         self.assertFalse(r.stage_trial_eligible)
         self.assertIn("PUBLIC_DNS_NOT_CURRENT_SOURCE",r.blockers)
 
-    def test_source_staged_allocation_required(self):
+    def test_legacy_source_without_f3_still_allows_only_safe_new_edge_ip_probe(self):
         with self.fx.db() as c:
             c.execute("DELETE FROM edge_egress_allocations WHERE edge_id='src1'")
         p=self.review()
-        self.assertFalse(p.stage_trial_eligible)
+        self.assertTrue(p.stage_trial_eligible)
         self.assertIn("SOURCE_F3_IDENTITY_UNVERIFIED",p.blockers)
+        self.assertFalse(p.can_execute)
+        self.assertEqual((p.legacy_count,p.protected_count),(1,0))
+        self.assertIn("hpeg_p1_probe_dst1",
+                      [cb for row in lab_buttons(p) for _,cb in row])
 
     def test_missing_pin_or_ingress_does_not_offer_network_probe(self):
         for card in (replace(self.card,stage_pin=None),

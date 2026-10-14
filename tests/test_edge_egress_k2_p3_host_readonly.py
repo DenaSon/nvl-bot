@@ -3,6 +3,7 @@
 These are NOT packet captures, a privileged Linux test or F4 approval.
 """
 from contextlib import redirect_stdout
+from dataclasses import replace
 import io
 import json
 import unittest
@@ -10,7 +11,7 @@ from unittest.mock import patch
 
 from edge_egress_v1_admission import PAM_LINE
 from ops.k2_p3_host_readonly import (
-    HostUIDWitness, inspect_uid_host, trusted_v1_gate_sha, main,
+    HostUIDWitness, inspect_uid_host, trusted_v1_gate_sha, trusted_pam_config, main,
 )
 from tests.test_edge_egress_k2_source_enrollment import SameEdgeEnrollmentTests
 from tests.test_edge_egress_uid_runtime_store import SOURCE, TARGET
@@ -164,6 +165,18 @@ class RootOnlyHostWitnessTests(unittest.TestCase):
                          roster_loader=lambda:{})
         self.assert_hold("HOST_EVIDENCE_UNAVAILABLE",
                          guard_loader=lambda _:None)
+
+    def test_non_protected_boot_guard_is_never_a_valid_witness(self):
+        guard=replace(self.fx.manifest,mode="UNPROTECTED")
+        self.assert_hold("HOST_EVIDENCE_UNAVAILABLE",
+                         guard_loader=lambda _:guard)
+        guard=replace(self.fx.manifest,shared_edge=False)
+        self.assert_hold("HOST_EVIDENCE_UNAVAILABLE",
+                         guard_loader=lambda _:guard)
+
+    def test_pam_file_path_is_fixed_and_cannot_read_arbitrary_file(self):
+        with self.assertRaisesRegex(ValueError,"UNREVIEWED_PAM_PATH"):
+            trusted_pam_config(__import__("pathlib").Path("/tmp/pam-sshd"))
 
     def test_untrusted_global_mode_is_hold(self):
         with self.fx.db() as db:

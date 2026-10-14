@@ -77,7 +77,9 @@ def _response(raw: bytes, action: str) -> dict:
         result = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs)
     except (UnicodeError, ValueError, TypeError) as exc:
         raise M43ClientHold("M43_RESPONSE_INVALID") from exc
-    if not isinstance(result, dict) or (\n        result.get("state") == "HOLD" and action != "CONFIRM"\n    ):
+    if not isinstance(result, dict) or (
+        result.get("state") == "HOLD" and action != "CONFIRM"
+    ):
         raise M43ClientHold("M43_ROOT_HOLD_OR_RESPONSE_INVALID")
     if action == "PREPARE":
         if (set(result) != {"state", "request_id", "edge_id",

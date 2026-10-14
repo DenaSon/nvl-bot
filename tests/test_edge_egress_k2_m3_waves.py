@@ -78,6 +78,7 @@ class M3WaveTests(unittest.IsolatedAsyncioTestCase):
             return scope.username!=fail_commit
         return dict(fresh_inventory=preview,issue_single_ticket=ticket,
                     execute_single=run,committed_6g=committed,
+                    current_protected_mode=lambda:"1",
                     **overrides)
 
     async def execute(self,plan,**kwargs):
@@ -141,6 +142,34 @@ class M3WaveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res.progress[1].status,"DEFERRED")
         self.assertEqual(self.receipts,["nvl0555"])
 
+    async def test_cross_edge_legacy_mode_rejects_before_ticket(self):
+        plan=self.plan(("nvl0555","nvl0557"),"BATCH")
+        args=self.dispatcher()
+        args["current_protected_mode"]=lambda:"0"
+        args.update(dict(actor_id=1001,chat_id=-55,
+                         approval_secret=SECRET,release_enabled=True,
+                         geteuid=lambda:0,clock=lambda:NOW))
+        with patch("edge_egress_k2_m3_waves.M3_WAVE_EXECUTION_ENABLED",True):
+            res=await run_migration_wave(plan,self.approval(plan),**args)
+        self.assertEqual(res.completed,0)
+        self.assertEqual(res.progress[0].status,"HOLD")
+        self.assertEqual(res.progress[1].status,"DEFERRED")
+        self.assertIn("CROSS_EDGE",res.halt_reason)
+        self.assertEqual(self.tickets,[])
+
+    async def test_unrecognized_mode_is_hold_before_ticket(self):
+        plan=self.plan()
+        args=self.dispatcher()
+        args["current_protected_mode"]=lambda:"unknown"
+        args.update(dict(actor_id=1001,chat_id=-55,
+                         approval_secret=SECRET,release_enabled=True,
+                         geteuid=lambda:0,clock=lambda:NOW))
+        with patch("edge_egress_k2_m3_waves.M3_WAVE_EXECUTION_ENABLED",True):
+            res=await run_migration_wave(plan,self.approval(plan),**args)
+        self.assertEqual(res.completed,0)
+        self.assertEqual(res.halt_reason,"M3_PROTECTED_MODE_NOT_ATTESTED")
+        self.assertEqual(self.tickets,[])
+
     async def test_source_uid_drift_halts_before_ticket(self):
         plan=self.plan(("nvl0555","nvl0557"),"BATCH")
         res=await self.execute(plan,stale_name="nvl0555")
@@ -157,6 +186,7 @@ class M3WaveTests(unittest.IsolatedAsyncioTestCase):
         args=self.dispatcher()
         args["fresh_inventory"]=lambda sel:self.fx.preview(
             sel.usernames,sel.mode,ingress_witness=witness)
+        args["current_protected_mode"]=lambda:"0"
         args.update(dict(actor_id=1001,chat_id=-55,
                          approval_secret=SECRET,release_enabled=True,
                          geteuid=lambda:0,clock=lambda:NOW))

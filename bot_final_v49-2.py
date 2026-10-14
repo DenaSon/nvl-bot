@@ -383,6 +383,9 @@ from edge_egress_k2_phase2_operator import (
     review_relay_cohort, render_cohort_review, relay_cohort_buttons,
     make_switch_ticket, execute_relay_switch, RelaySwitchTicket,
 )
+from edge_egress_k2_vps_lab import (
+    review_vps_lab, lab_html as k2_lab_html, lab_buttons as k2_lab_buttons,
+)
 from edge_egress_k2_phase1_wizard import (
     assert_isolated_new_edge_candidate, K2WizardHold,
 )
@@ -24075,6 +24078,38 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "بدون بررسی منابع و قفل عملیات، مجدداً اجرا نکنید.",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("◀️ سرورها", callback_data="hpeg_status")
+                ]]),
+            )
+        return
+
+    elif d.startswith("hpeg_lab_"):
+        # Read-only stage trial navigation. This callback never acquires 6G,
+        # starts/stops a tunnel, changes a UID or grants F4/customer readiness.
+        if role != 'admin':
+            await query.message.reply_text("⛔️ فقط مدیر")
+            return
+        edge_id = d[len("hpeg_lab_"):]
+        try:
+            edge_id_checked(edge_id)
+            snapshot = await asyncio.to_thread(
+                review_vps_lab, db_conn, edge_id,
+            )
+            buttons = [
+                [InlineKeyboardButton(label, callback_data=callback)
+                 for label, callback in row]
+                for row in k2_lab_buttons(snapshot)
+            ]
+            await query.edit_message_text(
+                k2_lab_html(snapshot), parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        except Exception:
+            log.exception("K2 read-only VPS trial inventory HOLD")
+            await query.edit_message_text(
+                "⛔️ بررسی سرور آزمایشی کامل نیست؛ هیچ تغییری انجام نشد.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("◀️ سرورها",
+                                         callback_data="hpeg_status")
                 ]]),
             )
         return

@@ -33,6 +33,7 @@ class M2FirstUIDTests(unittest.TestCase):
             mixed_legacy_pam_ok=lambda:True,
             account_idle_ok=lambda username,uid:True,
             sshd_effective_probe=lambda:"usepam yes\n",
+            guard_frozen_ok=lambda m:True,dns_ipv6_ok=lambda m:True,
             release_enabled=True,geteuid=lambda:0)
         params.update(kw)
         return guarded_first_uid_bootstrap(**params)
@@ -72,7 +73,7 @@ class M2FirstUIDTests(unittest.TestCase):
             self.assertEqual(args["current_pam"],self.fx.pam)
             port.create("/etc/nvl-egress/test","bytes")
             port.command("systemctl","daemon-reload")
-            port.replace_exact("/etc/pam.d/sshd",b"a",b"b")
+            port.replace_exact(__import__("pathlib").Path("/etc/pam.d/sshd"),b"a",b"b")
             self.assertTrue(args["release_enabled"])
         with patch("ops.k2_m2_first_uid.M2_FIRST_UID_ENABLED",True), \
              patch("ops.k2_m2_first_uid.assert_guarded_6g_intent",
@@ -153,6 +154,21 @@ class M2FirstUIDTests(unittest.TestCase):
             current_pam=b"unknown",staged=staged,
             original_6g_running=True).reason,"PAM_CONTENT_UNTRUSTED")
 
+    def test_false_dns_ipv6_witness_denies_first_uid_pam_cas(self):
+        from pathlib import Path
+        def fake_apply(**args):
+            p=args["port"]
+            p.create(Path("/etc/nvl-egress/protected/nvl0557.json"),b"guard")
+            p.replace_exact(Path("/etc/pam.d/sshd"),b"before",b"after")
+        with patch("ops.k2_m2_first_uid.M2_FIRST_UID_ENABLED",True), \
+             patch("ops.k2_m2_first_uid.assert_guarded_6g_intent",
+                   return_value=19), \
+             patch("ops.k2_m2_first_uid.apply_guard_install",
+                   side_effect=fake_apply):
+            with self.assertRaisesRegex(FirstUIDHold,"FENCE_NOT_ATTESTED"):
+                self.call(dns_ipv6_ok=lambda m:False)
+        self.assertEqual([x[0] for x in self.port.actions],["create"])
+
     def test_6g_lost_mid_first_bootstrap_prevents_later_pam(self):
         calls=[0]
         def locked(*args):
@@ -162,7 +178,7 @@ class M2FirstUIDTests(unittest.TestCase):
         def fake_apply(**args):
             p=args["port"]
             p.create("new-guard",b"guard")
-            p.replace_exact("pam",b"pre",b"post")
+            p.replace_exact(__import__("pathlib").Path("/etc/pam.d/sshd"),b"pre",b"post")
         with patch("ops.k2_m2_first_uid.M2_FIRST_UID_ENABLED",True), \
              patch("ops.k2_m2_first_uid.assert_guarded_6g_intent",
                    side_effect=locked), \

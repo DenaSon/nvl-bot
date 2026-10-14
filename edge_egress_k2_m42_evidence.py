@@ -105,7 +105,8 @@ def decode_evidence(raw: bytes, *, now: int) -> SignedExternalEvidence:
         obj = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_pairs)
         keys = {"version", "generation", "observed_at", "expires_at",
                 "target_edge", "target_ipv4", "checks", "accounts"}
-        if not isinstance(obj, dict) or set(obj) != keys or type(obj["version"]) is not int\n            or obj["version"] != 1:
+        if not isinstance(obj, dict) or set(obj) != keys or type(obj["version"]) is not int
+            or obj["version"] != 1:
             raise ValueError()
         timestamp, expires = obj["observed_at"], obj["expires_at"]
         if (type(now) is not int or type(timestamp) is not int

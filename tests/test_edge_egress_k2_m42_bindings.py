@@ -98,7 +98,7 @@ class TrustedRootFactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.bind.physical_f4(plan))
         self.assertEqual(self.called,[])
 
-    def test_real_original_p3_ticket_but_no_fake_port(self):
+    async def test_real_original_p3_ticket_but_no_fake_port(self):
         scope=b.ExecutionScope(
             "UID_ENROLL_SOURCE","e9",TARGET,TARGET,
             username="nvl0555",uid=1636,

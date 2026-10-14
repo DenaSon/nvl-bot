@@ -72,7 +72,8 @@ class DeferredOriginal6GHostPort:
             or not isinstance(ticket, ExecutionTicket)
             or not isinstance(bootstrap, GuardBootstrap)
             or bootstrap.scope != scope or bootstrap.ticket != ticket
-            or not callable(db_conn) or not callable(port_factory)\n            or bootstrap.kwargs.get("db_conn") is not db_conn):
+            or not callable(db_conn) or not callable(port_factory)
+            or bootstrap.kwargs.get("db_conn") is not db_conn):
             raise M42BootstrapHold("M42_DEFERRED_PORT_SCOPE_INVALID")
         self.scope, self.ticket = scope, ticket
         self.db_conn, self.bootstrap = db_conn, bootstrap

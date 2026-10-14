@@ -95,16 +95,22 @@ def inspect_legacy_enrollment(
             ).fetchone()
             if dns != (source,):
                 blockers.append("SOURCE_DNS_NOT_PINNED")
-            running = conn.execute(
-                "SELECT id,source_host,target_host,detail_json "
-                "FROM failover_operations WHERE status='RUNNING'"
+            # Historical 6G SQLite fixtures have only id/status columns.
+            # Read extended journal columns ONLY for a running operation
+            # explicitly bound to the source-enrollment worker.
+            running_ids = conn.execute(
+                "SELECT id FROM failover_operations WHERE status='RUNNING'"
             ).fetchall()
-            if running:
+            if running_ids:
                 authorized = False
-                if len(running) == 1 and authorized_operation is not None:
+                if len(running_ids) == 1 and authorized_operation is not None:
                     try:
                         operation_id, scope_hash, nonce_hash = authorized_operation
-                        row = running[0]
+                        row = conn.execute(
+                            "SELECT id,source_host,target_host,detail_json "
+                            "FROM failover_operations WHERE id=? AND status='RUNNING'",
+                            (running_ids[0][0],),
+                        ).fetchone()
                         detail = json.loads(row[3])
                         authorized = (
                             type(operation_id) is int and operation_id > 0

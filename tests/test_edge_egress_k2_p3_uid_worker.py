@@ -98,8 +98,7 @@ class UIDWorkerTests(unittest.TestCase):
         self.assertTrue(self.kernels[0].enabled)
         self.assertIs(w.executor.host_port.uid_port.store.db_conn,
                       self.fx.conn_factory)
-        self.assertIs(w.executor.acquire_fn,self.fx.acquire.__func__
-                      if False else w.executor.acquire_fn)  # no second lease
+        self.assertTrue(callable(w.executor.acquire_fn))  # original 6G
         self.assertEqual(self.kernels[0].fake.events,[])
         self.assertIsNone(self.fx.state()[0])
 
@@ -120,6 +119,37 @@ class UIDWorkerTests(unittest.TestCase):
         self.safety.source_ipv4=self.fx.request.spec.edge_public_ipv4
         with self.assertRaises(LiveUIDHold):
             self.prepare(kernel_factory=lambda **kw:FakePerUIDKernel())
+
+    def _mock_safety(self):
+        for name in (
+            "assert_account_idle","assert_pam_ingress_boot",
+            "assert_multi_uid_isolation","assert_packet_dns_ipv6_no_core_leak",
+        ):
+            setattr(self.safety,name,lambda request:None)
+
+    def test_actual_guarded_p3_sequence_with_fake_host_and_sqlite(self):
+        import asyncio
+        self._mock_safety()
+        worker=self.prepare()
+        receipt=asyncio.run(worker.execute())
+        self.assertTrue(receipt.allowed,receipt)
+        self.assertEqual(self.fx.state()[0].state,"PROTECTED")
+        self.assertIn("attach",self.kernels[0].fake.events)
+        self.assertEqual(self.fx.state()[-1][0],"SUCCEEDED")
+        with self.assertRaises(Exception):
+            asyncio.run(worker.execute())
+
+    def test_post_attach_bad_edge_ipv4_freezes_only_uid_and_keeps_6g_hold(self):
+        import asyncio
+        self._mock_safety()
+        worker=self.prepare()
+        self.kernels[0].fake.ip="1.1.1.1"
+        receipt=asyncio.run(worker.execute())
+        self.assertFalse(receipt.allowed)
+        self.assertTrue(receipt.manual_recovery)
+        self.assertEqual(self.fx.state()[0].state,"HOLD")
+        self.assertTrue(self.kernels[0].fake.deny)
+        self.assertEqual(self.fx.state()[-1][0],"RUNNING")
 
     def test_full_p3_a_6g_cas_fault_is_not_an_unfenced_success(self):
         worker=self.prepare()

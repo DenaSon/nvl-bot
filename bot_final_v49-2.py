@@ -390,6 +390,10 @@ from edge_egress_k2_m4_telegram import (
 from edge_egress_k2_m4_operator import (
     inspect_telegram_migration as k2_m4_readonly_preview,
 )
+from edge_egress_k2_m4_status import (
+    inspect_telegram_wave_status as k2_m4_readonly_status,
+    status_html as k2_m4_status_html,
+)
 from edge_egress_k2_p1_worker import (
     Phase1Hold, inspect_phase1, activate_phase1, probe_phase1,
 )
@@ -24319,7 +24323,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data['k2_m4_target_edge']=edge_id
                 display=k2_m4_prompt_html(edge_id,mode)
                 rows=k2_m4_cancel_buttons(edge_id)
-            elif action=="refresh":
+            elif action in ("refresh","status"):
                 data=context.user_data.get('k2_m4_selection')
                 if (not isinstance(data,(tuple,list)) or len(data)!=3
                     or data[2]!=edge_id or not isinstance(data[1],(tuple,list))):
@@ -24327,10 +24331,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 selection=k2_m4_select_input(
                     data[0],",".join(data[1]),edge_id,
                 )
-                inventory=await asyncio.to_thread(
-                    k2_m4_readonly_preview,db_conn,selection,
-                )
-                display=k2_m4_preview_html(inventory)
+                if action=="status":
+                    overview=await asyncio.to_thread(
+                        k2_m4_readonly_status,db_conn,selection,
+                    )
+                    display=k2_m4_status_html(overview)
+                else:
+                    inventory=await asyncio.to_thread(
+                        k2_m4_readonly_preview,db_conn,selection,
+                    )
+                    display=k2_m4_preview_html(inventory)
                 rows=k2_m4_preview_buttons(edge_id)
             else:
                 raise M4UIHold("M4_ACTION_UNSUPPORTED")

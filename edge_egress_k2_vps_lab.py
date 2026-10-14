@@ -14,7 +14,7 @@ from typing import Callable
 
 from edge_egress_f3_readiness import admission_eligible, read_readiness
 from edge_egress_phase2_console import Dashboard, EdgeCard, get_card, read_dashboard
-from edge_egress_v1_console import edge_id_checked
+from edge_egress_v1_console import EgressConsoleHold, edge_id_checked
 
 
 class LabReviewHold(ValueError):
@@ -55,8 +55,8 @@ def review_vps_lab(
     dashboard_reader: Callable = read_dashboard,
 ) -> K2LabReview:
     """Uses only the existing 6G, F2/F3/F4, host/SSH records. No OS probes."""
-    eid=edge_id_checked(edge_id)
     try:
+        eid=edge_id_checked(edge_id)
         board=dashboard_reader(db_conn,only_edge=eid)
         if not isinstance(board,Dashboard):
             raise LabReviewHold("DASHBOARD_NOT_TRUSTED")
@@ -171,7 +171,7 @@ def review_vps_lab(
         )
     except LabReviewHold:
         raise
-    except (sqlite3.Error,OSError,ValueError,TypeError,KeyError,IndexError,AttributeError) as exc:
+    except (EgressConsoleHold,sqlite3.Error,OSError,ValueError,TypeError,KeyError,IndexError,AttributeError) as exc:
         raise LabReviewHold("LAB_INVENTORY_NOT_TRUSTED") from exc
 
 

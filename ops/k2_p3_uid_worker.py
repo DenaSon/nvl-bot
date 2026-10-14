@@ -172,7 +172,7 @@ class PreparedLiveUIDWorker:
 
 def prepare_live_source_uid_worker(
     *, db_conn:Callable, acquire_6g:Callable, journal_6g:Callable,
-    target_edge_id:str, request, dns_port:int,
+    candidate_target_edge_id:str, request, dns_port:int,
     safety:IndependentSafety, evidence:FreshEvidence,
     actor_id:int, chat_id:int,
     reviewed_release:bool=False,
@@ -193,13 +193,14 @@ def prepare_live_source_uid_worker(
             or not isinstance(evidence,FreshEvidence)
             or not callable(acquire_6g) or not callable(journal_6g)):
         raise LiveUIDHold("EXPLICIT_ROOT_RELEASE_AND_EXTERNAL_PROOF_REQUIRED")
-    if (safety.target_edge_id!=target_edge_id
-            or safety.source_ipv4!=request.spec.edge_public_ipv4):
+    if (safety.target_edge_id!=request.spec.edge_id
+            or safety.source_ipv4!=request.spec.edge_public_ipv4
+            or candidate_target_edge_id==request.spec.edge_id):
         raise LiveUIDHold("SAFETY_SCOPE_NOT_PINNED")
     if not callable(kernel_factory):
         raise LiveUIDHold("REAL_LINUX_KERNEL_FACTORY_REQUIRED")
     plan=plan_source_enrollment(
-        db_conn,target_edge_id,request,dns_port=dns_port,
+        db_conn,candidate_target_edge_id,request,dns_port=dns_port,
         roster_loader=load_roster,guard_loader=checked_guard,
         os_uid_for_username=os_uid,
     )

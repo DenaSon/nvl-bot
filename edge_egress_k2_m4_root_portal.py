@@ -143,6 +143,9 @@ class RootMigrationPortal:
                 execute_single=self.execute_single,
                 committed_6g=self.committed_6g,
                 current_protected_mode=self.current_protected_mode,
+                on_verified=lambda username,uid,op:
+                    self.checkpoint.record_verified(
+                        plan,approval,username,uid,op),
                 release_enabled=True,geteuid=self.geteuid,clock=self.clock,
             )
             self.checkpoint.finish(plan,approval,report)

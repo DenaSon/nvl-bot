@@ -125,6 +125,19 @@ class M2IngressJournalTests(unittest.TestCase):
         finally:
             fx.doCleanups()
 
+    def test_m1_provider_is_root_readonly_and_does_not_touch_wg_nonroot(self):
+        from edge_egress_k2_m2_ingress_journal import (
+            make_m1_readonly_ingress_provider,
+        )
+        calls=[]
+        def run(*args,**kw):
+            calls.append(args)
+            raise AssertionError("nonroot cannot read wg")
+        with self.assertRaises(DurableIngressHold):
+            make_m1_readonly_ingress_provider(
+                now=NOW,run=run,geteuid=lambda:1000)
+        self.assertEqual(calls,[])
+
     def test_nonroot_cannot_create_or_write_journal(self):
         with self.assertRaises(DurableIngressHold):
             create_root_journal_if_absent(geteuid=lambda:1000)

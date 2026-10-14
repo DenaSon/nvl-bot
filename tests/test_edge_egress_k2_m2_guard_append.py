@@ -106,7 +106,8 @@ class M2MultiUIDTests(unittest.TestCase):
                   independent_f4_ok=lambda scope:True,
                   legacy_pam_ok=lambda:True,
                   sshd_effective=lambda:"usepam yes\n",
-                  guard_verify=lambda m:self.checks.append("FROZEN"),
+                  guard_verify=lambda m:(self.checks.append("FROZEN") or True),
+                  dns_ipv6_verify=lambda m:(self.checks.append("DNS_IPV6") or True),
                   release_enabled=True,geteuid=lambda:0)
         args.update(updates)
         return apply_next_uid(**args)
@@ -234,6 +235,15 @@ class M2MultiUIDTests(unittest.TestCase):
                 self.run_with_mocks(**kw)
             self.assertEqual(self.port.actions,[])
             self.assertEqual(self.host[str(ROSTER)],self.roster)
+
+    def test_false_or_missing_fence_proof_never_updates_roster(self):
+        for param in ("guard_verify","dns_ipv6_verify"):
+            with self.subTest(param=param):
+                self.setUp()
+                with self.assertRaisesRegex(MultiUIDHold,"NOT_PROVEN"):
+                    self.run_with_mocks(**{param:lambda m:False})
+                self.assertEqual(self.host[str(ROSTER)],self.roster)
+                self.assertNotIn(("roster_cas",),self.port.actions)
 
     def test_stale_roster_blocks_before_any_write(self):
         self.host[str(ROSTER)]=b"{}"

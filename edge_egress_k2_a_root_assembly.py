@@ -80,7 +80,7 @@ def assert_nonroot_bot_identity(
         if values["DynamicUser"]!="no" or not re.fullmatch(r"[1-9][0-9]{0,7}",values["MainPID"]):
             raise ValueError("UNIT_DYNAMIC_OR_PID_INVALID")
         username=values["User"]
-        if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,30}",username):
+        if username=="root" or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,30}",username):
             raise ValueError("ROOT_OR_UNVERIFIED_UNIT")
         account=getpw(username)
         if (type(account.pw_uid) is not int or account.pw_uid<=0

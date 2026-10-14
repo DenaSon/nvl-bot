@@ -141,9 +141,6 @@ class M4BotBindingTests(unittest.TestCase):
         from edge_egress_k2_final_integration import (
             transfer_preview_buttons,TransferPreview,
         )
-        from tests.test_edge_egress_k2_final_integration import (
-            K2FinalIntegrationTests,
-        )
         # Binding is part of real imported production presenter.
         import inspect
         self.assertIn("hpeg_m4_home_",inspect.getsource(transfer_preview_buttons))

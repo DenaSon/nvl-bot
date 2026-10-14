@@ -306,7 +306,11 @@ class Existing6GGuardedExecutor:
                 ).fetchone()
                 expected = ("0",) if scope.action == "UID_ENROLL_SOURCE" else ("1",)
                 if mode != expected:
-                    raise ExecutorHold("UID_ACTION_GLOBAL_MODE_CHANGED")
+                    raise ExecutorHold(
+                        "SOURCE_ENROLL_REQUIRES_LEGACY_MODE"
+                        if scope.action == "UID_ENROLL_SOURCE"
+                        else "PROTECTED_MODE_REQUIRED_FOR_UID_ATTACH"
+                    )
 
     async def execute(self, scope: ExecutionScope, ticket: ExecutionTicket, *,
                       actor_id: int, chat_id: int) -> ExecutionReceipt:
@@ -343,7 +347,11 @@ class Existing6GGuardedExecutor:
                 ).fetchone()
                 expected = ("0",) if scope.action == "UID_ENROLL_SOURCE" else ("1",)
                 if mode != expected:
-                    raise ExecutorHold("UID_ACTION_GLOBAL_MODE_CHANGED")
+                    raise ExecutorHold(
+                        "SOURCE_ENROLL_REQUIRES_LEGACY_MODE"
+                        if scope.action == "UID_ENROLL_SOURCE"
+                        else "PROTECTED_MODE_REQUIRED_FOR_UID_ATTACH"
+                    )
 
         operation_id, busy = self.acquire_fn(scope.source_host, scope.target_host)
         if operation_id is None:

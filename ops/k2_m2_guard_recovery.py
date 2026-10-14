@@ -1,0 +1,105 @@
+"""M2 read-only interrupted multi-UID stage recovery inspector.
+
+Do not interpret a staged file, a systemd unit or a ROSTERED marker as a
+verified user route. Only the guarded original-6G root worker may resume a
+byte-exact partial install after independent F4 / idle / rescue checks.
+Never delete the guard or remove a roster member to regain connectivity.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Mapping
+
+from ops.k2_m2_guard_append import MultiUIDAppendPlan
+from edge_egress_v1_admission import GUARD_DIR, ROSTER
+from ops.k2_p3_guard_installer import UNITS, _owned, _safe_read
+
+
+class StageRecoveryHold(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class StageRecovery:
+    state: str
+    may_request_replay: bool
+    needs_worker_review: bool
+    missing: tuple[str, ...] = ()
+    reason: str = ""
+
+    @property
+    def customer_ready(self) -> bool:
+        # No staged root artifact or PAM review proves egress packet safety.
+        return False
+
+
+def inspect_append_stage(plan: MultiUIDAppendPlan, *,
+                         roster_bytes: bytes,
+                         staged: Mapping[str, bytes | None],
+                         pam_unchanged: bool,
+                         original_6g_running: bool) -> StageRecovery:
+    """Pure snapshot; no mutations and no automatic replay authorization."""
+    if not isinstance(plan, MultiUIDAppendPlan) or not isinstance(staged, Mapping):
+        raise StageRecoveryHold("REVIEW_INPUT_UNTRUSTED")
+    expected = {
+        "guard": plan.manifest_bytes,
+        "guard_unit": plan.guard_unit.encode(),
+        "dns_unit": plan.dns_unit.encode(),
+    }
+    if set(staged) != set(expected) or any(
+        raw is not None and not isinstance(raw, bytes)
+        for raw in staged.values()
+    ):
+        raise StageRecoveryHold("STAGE_ARTIFACT_SET_INVALID")
+    if not pam_unchanged:
+        return StageRecovery("HOLD",False,True,reason="GLOBAL_PAM_DRIFT")
+    if roster_bytes not in (plan.current_roster,plan.next_roster):
+        return StageRecovery("HOLD",False,True,reason="ROSTER_DRIFT")
+    if any(raw is not None and raw != expected[name]
+           for name,raw in staged.items()):
+        return StageRecovery("HOLD",False,True,reason="STAGE_BYTES_MISMATCH")
+    missing = tuple(name for name,raw in staged.items() if raw is None)
+    if roster_bytes == plan.next_roster:
+        if missing:
+            return StageRecovery("HOLD",False,True,missing,
+                                 "ROSTER_REFERENCES_MISSING_GUARD")
+        # Roster committed: the UID remains deny-only until F4 and runtime
+        # prove the real path; must not replay a roster CAS or remove it.
+        return StageRecovery("ROSTERED_DENY_ONLY",False,True)
+    if not original_6g_running:
+        return StageRecovery("HOLD",False,True,missing,"ORIGINAL_6G_HOLD_REQUIRED")
+    return StageRecovery(
+        "PARTIALLY_STAGED" if len(missing)<3 else "NOT_STARTED",
+        True,True,missing,
+        "INDEPENDENT_RESCUE_IDLE_F4_AND_6G_REVIEW_REQUIRED",
+    )
+
+
+def inspect_root_append_stage(plan: MultiUIDAppendPlan, *,
+                              original_6g_running: bool,
+                              pam_unchanged: bool) -> StageRecovery:
+    """Fixed file read-only observer; noncanonical/symlinked paths HOLD."""
+    if not isinstance(plan, MultiUIDAppendPlan):
+        raise StageRecoveryHold("PLAN_REQUIRED")
+    paths = {
+        "guard":GUARD_DIR/(plan.username+".json"),
+        "guard_unit":UNITS/plan.guard_unit_name,
+        "dns_unit":UNITS/plan.dns_unit_name,
+    }
+    try:
+        for parent in (ROSTER.parent,GUARD_DIR,UNITS):
+            _owned(parent,directory=True,strict=False)
+        roster=_safe_read(ROSTER)
+        staged={}
+        for key,path in paths.items():
+            # lstat via is_symlink before any open; O_NOFOLLOW must be
+            # enforced by the final trusted host-port reader.
+            if path.is_symlink():
+                raise StageRecoveryHold("STAGED_SYMLINK_UNTRUSTED")
+            staged[key]=_safe_read(path,maximum=65536) if path.exists() else None
+        return inspect_append_stage(plan,roster_bytes=roster,staged=staged,
+            pam_unchanged=pam_unchanged,
+            original_6g_running=original_6g_running)
+    except (OSError,ValueError) as exc:
+        raise StageRecoveryHold("ROOT_STAGE_INSPECTION_FAILED") from exc

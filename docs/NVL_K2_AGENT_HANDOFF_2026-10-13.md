@@ -1,3 +1,7 @@
+> **LATEST CORE PRODUCTION DEPLOYMENT — 2026-10-14:** The operator on `CloudVPS121849` reported **successful code-only publication** of exact K2 merged SHA `d5ca38b6e7069d969d8aa33bcb42ef71c8c63b2a`: 8 root modules replaced, 13 added, all 70 module hashes matched, `nvlbot` stopped and started, and the release script observed 10 seconds of active stable PID. Staging `/root/nvl-k2-stage-d5ca38b6e706`; live `/root/bot_final_v49-2.py`; release script `/root/nvl_k2_publish.sh` (host local, not in GitHub); rollback + immediate SQLite snapshot `/root/nvl-k2-predeploy-sJsySowp/`; curated Core backup `/root/nvl-emergency-backups/core-20261014T144432Z-x4EVRH`. User confirms VPS provider snapshot/console and a downloaded unencrypted backup. **Fresh post-deploy audit and Telegram smoke are NEXT**, not already observed. Prior “source only; not deployed” statements below are historical. No per-UID PAM/route/WG/6G or customer migration was authorized; F4 stays HOLD. Full [current release record](NVL_K2_CORE_CODE_RELEASE_RECORD_2026-10-14.md).
+
+---
+
 ## AUTHORITATIVE CURRENT K2 HANDOFF — 2026-10-14 (supersedes historical checkpoints below)
 
 - **GitHub merged state:** PR #120 (Phase 1/2/3 integration) MERGED, PR #139 (P3 packages 1+2 / first-UID installer + real Linux worker code) MERGED. Verified master source baseline at this checkpoint: 331fd86e399bd18e2f524071edb7f14d099e00de. CI on PR #139 head: 1,531 full Python PASS; 789 Edge stage-only PASS on Python 3.11 and 789 PASS on 3.12. Confirm the final docs merge HEAD before any staging.

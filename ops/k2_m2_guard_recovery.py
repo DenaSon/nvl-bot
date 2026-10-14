@@ -105,7 +105,8 @@ def inspect_root_append_stage(plan: MultiUIDAppendPlan, *,
         raise StageRecoveryHold("ROOT_STAGE_INSPECTION_FAILED") from exc
 
 
-def inspect_first_uid_stage(*, plan, current_pam: bytes,
+def inspect_first_uid_stage(*, plan, pinned_pam_before: bytes,
+                            current_pam: bytes,
                             staged: Mapping[str, bytes | None],
                             original_6g_running: bool) -> StageRecovery:
     """First-UID bootstrap may crash before installing the PAM hook.
@@ -114,8 +115,12 @@ def inspect_first_uid_stage(*, plan, current_pam: bytes,
     forward-only continuation; no automatic removal or global SSH edit.
     """
     from ops.k2_p3_guard_installer import GuardInstallPlan
-    if not isinstance(plan, GuardInstallPlan) or not isinstance(staged, Mapping):
-        raise StageRecoveryHold("FIRST_STAGE_PLAN_INVALID")
+    if (not isinstance(plan, GuardInstallPlan) or not isinstance(staged, Mapping)
+        or not isinstance(pinned_pam_before,bytes) or
+        __import__("hashlib").sha256(pinned_pam_before).hexdigest() !=
+        plan.pam_before_sha256):
+        raise StageRecoveryHold("FIRST_PAM_PIN_MISSING")
+
     expected={
         "roster":plan.roster_bytes,
         "guard":plan.manifest_bytes,
@@ -130,16 +135,11 @@ def inspect_first_uid_stage(*, plan, current_pam: bytes,
     if current_pam == plan.pam_after:
         if any(staged[k] is None for k in staged):
             return StageRecovery("HOLD",False,True,reason="PAM_HOOK_WITH_MISSING_GUARD")
-        if any(staged[k] != (plan.pam_before if k=="pam_backup" else expected[k])
+        if any(staged[k] != (pinned_pam_before if k=="pam_backup" else expected[k])
                for k in staged):
             return StageRecovery("HOLD",False,True,reason="PAM_HOOK_STAGE_DRIFT")
         return StageRecovery("ROSTERED_DENY_ONLY",False,True)
-    if current_pam != plan.pam_before and (
-        not isinstance(current_pam,bytes) or
-        __import__("hashlib").sha256(current_pam).hexdigest() != plan.pam_before_sha256
-    ):
-        return StageRecovery("HOLD",False,True,reason="PAM_CONTENT_UNTRUSTED")
-    if current_pam != plan.pam_before:
+    if current_pam != pinned_pam_before:
         return StageRecovery("HOLD",False,True,reason="PAM_CONTENT_UNTRUSTED")
     if any(raw is not None and raw != (
         plan.pam_before if k=="pam_backup" else expected[k])

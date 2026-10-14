@@ -71,7 +71,8 @@ class MigrationWavePlan:
 
     @property
     def ready_count(self) -> int:
-        return sum(m.selectable for m in self.members)
+        return 0 if self.global_blockers else sum(
+            m.selectable for m in self.members)
 
     @property
     def waves(self) -> tuple[tuple[MigrationMember, ...], ...]:
@@ -316,7 +317,6 @@ def _fresh_member(
 
 def _as_report(plan: MigrationWavePlan, updates: list[WaveProgress],
                reason: str = "") -> WaveReport:
-    seen={p.username for p in updates}
     ordered=tuple(
         next((r for r in updates if r.username==m.username),
              WaveProgress(m.username,m.uid,"DEFERRED","NOT_STARTED"))

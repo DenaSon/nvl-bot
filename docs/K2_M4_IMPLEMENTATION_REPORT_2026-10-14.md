@@ -100,3 +100,8 @@ The *existing* 6G SQL is centralized, a reviewed Root assembly contract, explici
 ## Package A2 host-factory and root-daemon source increment (2026-10-15)
 
 See [Package A2 design and outstanding field gates](K2_PACKAGE_A2_HOST_AND_DAEMON_2026-10-15.md). The root-side M2/P3 factory is now typed, source/F4 reviewed, exact original 6G deferred, and the source-pinned daemon accepts only reviewed assemblies under a new independent default-OFF flag. The production root daemon's standalone entrypoint remains intentionally inert and the current root-running bot is not converted. **No live physical proof, no master merge, no active root socket; Package A is not operationally complete.**
+
+
+## Package A3/A4 source hardening checkpoint (2026-10-15)
+
+Implemented a conservative AST-only inventory of the original privileged bot and an OFF-by-default, nonroot off-Core signer for fully scoped F4 measurement receipts, using the existing M42 consumer format. **No physical observer, full bot privilege migration, or real M2 Host Snapshot is claimed.** Refer to [A3/A4 source/field matrix](K2_PACKAGE_A3_A4_SOURCE_AND_FIELD_GATES_2026-10-15.md) for blockers and phase plan. All runtime flags, master and customer accounts unchanged. CI must pass on the precise commit before a source/CI checkpoint is accepted.

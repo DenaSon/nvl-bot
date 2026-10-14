@@ -43,3 +43,8 @@ See [Package A2 design and outstanding field gates](K2_PACKAGE_A2_HOST_AND_DAEMO
 ### Nonroot privilege-audit hardening
 
 `assert_nonroot_bot_identity` additionally requires rootless *kernel* evidence from `/proc/MainPID/status`: identical real/effective/saved/fs GIDs, the reviewed IPC GID in actual `Groups`, **zero CapInh/CapPrm/CapEff/CapAmb** (not just `Uid != 0`), and `NoNewPrivs: 1`. A user configured as nonroot in systemd but carrying `CAP_NET_ADMIN`, ambient capabilities or no IPC supplementary group is HOLD. This is intentionally *stricter* than the current root-running production bot. No credentials, unit or group is modified in this change.
+
+
+## Package A3/A4 source hardening checkpoint (2026-10-15)
+
+Implemented a conservative AST-only inventory of the original privileged bot and an OFF-by-default, nonroot off-Core signer for fully scoped F4 measurement receipts, using the existing M42 consumer format. **No physical observer, full bot privilege migration, or real M2 Host Snapshot is claimed.** Refer to [A3/A4 source/field matrix](K2_PACKAGE_A3_A4_SOURCE_AND_FIELD_GATES_2026-10-15.md) for blockers and phase plan. All runtime flags, master and customer accounts unchanged. CI must pass on the precise commit before a source/CI checkpoint is accepted.

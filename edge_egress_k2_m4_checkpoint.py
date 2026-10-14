@@ -180,6 +180,50 @@ class DurableWaveCheckpoint:
         except sqlite3.Error as exc:
             raise CheckpointHold("M4_CHECKPOINT_DB_UNAVAILABLE") from exc
 
+    def record_verified(self,plan: MigrationWavePlan,
+                        approval: WaveApproval,username: str,
+                        uid: int,operation_id: int) -> None:
+        """Commit one verified original-6G UID before dispatching the next."""
+        stamp=self._gate()
+        key,digest=_pin(plan,approval)
+        if type(uid) is not int or type(operation_id) is not int or operation_id<=0:
+            raise CheckpointHold("M4_UID_RECEIPT_UNTRUSTED")
+        try:
+            with self.db_conn() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row=conn.execute(
+                    "SELECT progress_json,state FROM k2_m4_wave_checkpoints "
+                    "WHERE approval_hash=? AND plan_digest=?",
+                    (key,digest),
+                ).fetchone()
+                if row is None or row[1]!="RUNNING":
+                    raise CheckpointHold("M4_NO_RUNNING_WAVE_FOR_UID")
+                old=json.loads(row[0])
+                if not isinstance(old,list) or len(old)>=len(plan.members):
+                    raise CheckpointHold("M4_UID_PROGRESS_LENGTH_CHANGED")
+                expected=plan.members[len(old)]
+                if expected.username!=username or expected.uid!=uid:
+                    raise CheckpointHold("M4_UID_PROGRESS_ORDER_CHANGED")
+                if any(not isinstance(item,list) or len(item)!=3
+                       or item[0]!=plan.members[i].username
+                       or item[1]!="VERIFIED" or type(item[2]) is not int
+                       or item[2]<=0
+                       for i,item in enumerate(old)):
+                    raise CheckpointHold("M4_UID_PRIOR_PROGRESS_CORRUPT")
+                old.append([username,"VERIFIED",operation_id])
+                changed=conn.execute(
+                    "UPDATE k2_m4_wave_checkpoints "
+                    "SET progress_json=?,updated_at=? "
+                    "WHERE approval_hash=? AND plan_digest=? "
+                    "AND state='RUNNING' AND progress_json=?",
+                    (json.dumps(old,separators=(",",":")),stamp,
+                     key,digest,row[0]),
+                ).rowcount
+                if changed!=1:
+                    raise CheckpointHold("M4_UID_PROGRESS_CAS_FAILED")
+        except (sqlite3.Error,ValueError,TypeError,KeyError,IndexError) as exc:
+            raise CheckpointHold("M4_UID_PROGRESS_PERSISTENCE_FAILED") from exc
+
     def finish(self,plan: MigrationWavePlan,approval: WaveApproval,
                report: WaveReport) -> None:
         stamp=self._gate()
@@ -189,15 +233,29 @@ class DurableWaveCheckpoint:
         try:
             with self.db_conn() as conn:
                 conn.execute("BEGIN IMMEDIATE")
+                old=conn.execute(
+                    "SELECT progress_json FROM k2_m4_wave_checkpoints "
+                    "WHERE approval_hash=? AND plan_digest=? AND state='RUNNING'",
+                    (key,digest),
+                ).fetchone()
+                if old is None:
+                    raise CheckpointHold("M4_CHECKPOINT_TERMINAL_CAS_FAILED")
+                recorded=json.loads(old[0])
+                actual=json.loads(payload)
+                if (not isinstance(recorded,list)
+                    or recorded!=actual[:len(recorded)]
+                    or len(recorded)!=sum(
+                        p.status=="VERIFIED" for p in report.progress)):
+                    raise CheckpointHold("M4_UID_PROGRESS_NOT_CONSISTENT")
                 count=conn.execute(
                     "UPDATE k2_m4_wave_checkpoints "
                     "SET state=?,progress_json=?,reason=?,updated_at=? "
                     "WHERE approval_hash=? AND plan_digest=? "
-                    "AND state='RUNNING'",
+                    "AND state='RUNNING' AND progress_json=?",
                     (terminal,payload,
                      ("P3_6G_TERMINAL_RECEIPTS" if report.all_verified
                       else "M4_WAVE_REQUIRES_OPERATOR_REVIEW"),
-                     stamp,key,digest),
+                     stamp,key,digest,old[0]),
                 ).rowcount
                 if count!=1:
                     raise CheckpointHold("M4_CHECKPOINT_TERMINAL_CAS_FAILED")

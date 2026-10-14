@@ -129,12 +129,43 @@ class M4CheckpointTests(unittest.TestCase):
                           (WaveProgress(p.username,p.uid,"VERIFIED",
                                         "P3_6G_COMMITTED",41),),
                           False,"",True)
+        self.port.record_verified(self.plan,self.approval,
+                                  p.username,p.uid,41)
         self.port.finish(self.plan,self.approval,report)
         view=self.port.inspect(self.plan,self.approval)
         self.assertEqual(view.state,"SUCCEEDED")
         self.assertEqual(view.progress,(("nvl0555","VERIFIED",41),))
         with self.assertRaisesRegex(CheckpointHold,"CONSUMED"):
             self.port.begin(self.plan,self.approval,actor_id=11,chat_id=-222)
+
+    def test_uid_checkpoint_survives_restart_before_next_uid(self):
+        self.begin()
+        p=self.plan.members[0]
+        self.port.record_verified(self.plan,self.approval,
+                                  p.username,p.uid,41)
+        restarted=DurableWaveCheckpoint(
+            db_conn=self.connect,geteuid=lambda:0,
+            clock=lambda:NOW,release_enabled=True,
+        )
+        view=restarted.inspect(self.plan,self.approval)
+        self.assertEqual(view.state,"UNKNOWN_INFLIGHT")
+        self.assertEqual(view.progress,(("nvl0555","VERIFIED",41),))
+        with self.assertRaisesRegex(CheckpointHold,"PROGRESS_LENGTH"):
+            restarted.record_verified(self.plan,self.approval,
+                                      p.username,p.uid,41)
+
+    def test_uid_progress_tampering_rejected_on_terminal(self):
+        self.begin()
+        p=self.plan.members[0]
+        report=WaveReport(
+            self.plan.digest,
+            (WaveProgress(p.username,p.uid,"VERIFIED","P3_6G_COMMITTED",41),),
+            False,"",True,
+        )
+        with self.assertRaisesRegex(CheckpointHold,"NOT_CONSISTENT"):
+            self.port.finish(self.plan,self.approval,report)
+        self.assertEqual(self.port.inspect(self.plan,self.approval).state,
+                         "UNKNOWN_INFLIGHT")
 
     def test_forged_user_or_missing_operation_id_cannot_commit(self):
         self.begin()

@@ -221,6 +221,8 @@ class DurableWaveCheckpoint:
                 ).rowcount
                 if changed!=1:
                     raise CheckpointHold("M4_UID_PROGRESS_CAS_FAILED")
+        except CheckpointHold:
+            raise
         except (sqlite3.Error,ValueError,TypeError,KeyError,IndexError) as exc:
             raise CheckpointHold("M4_UID_PROGRESS_PERSISTENCE_FAILED") from exc
 

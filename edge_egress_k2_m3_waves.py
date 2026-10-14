@@ -335,6 +335,7 @@ async def run_migration_wave(
                              Awaitable[ExecutionReceipt]],
     committed_6g: Callable[[ExecutionScope,ExecutionTicket,int],bool],
     current_protected_mode: Callable[[], str],
+    on_verified: Callable[[str,int,int],None] | None = None,
     release_enabled: bool = False,
     geteuid: Callable[[],int] = os.geteuid,
     clock: Callable[[],int] = lambda: int(time.time()),
@@ -412,6 +413,13 @@ async def run_migration_wave(
                 raise MigrationWaveHold("M3_GUARDED_6G_SINGLE_HOLD")
             if committed_6g(scope,ticket,receipt.operation_id) is not True:
                 raise MigrationWaveHold("M3_DURABLE_6G_RECEIPT_NOT_ATTESTED")
+            # Root M4 checkpoint persists each original-6G VERIFIED
+            # terminal receipt before this wave can dispatch the next UID.
+            # A checkpoint DB failure stops the wave fail-closed.
+            if on_verified is not None:
+                if not callable(on_verified):
+                    raise MigrationWaveHold("M3_PROGRESS_WITNESS_UNTRUSTED")
+                on_verified(member.username,member.uid,receipt.operation_id)
             results.append(WaveProgress(
                 member.username,member.uid,"VERIFIED","P3_6G_COMMITTED",
                 receipt.operation_id))

@@ -159,42 +159,19 @@ class CanaryBackupAuditTests(unittest.TestCase):
         self.assertIn("ARCHIVE_ROOTS_NOT_ACTUALLY_COVERED",
                       self.check().blockers)
 
-    def test_backup_script_nul_inventory_is_real_newline_membership(self):
-        """Run actual script's tr arguments; double-escaped NUL is unsafe."""
-        script=(Path(__file__).resolve().parents[1] /
-                "ops/backup_nvl_host.sh").read_text(encoding="utf-8")
-        match=re.search(
-            r'(?m)^tr (.*?) < "\\$INV" > "\\$DETAILS/archived-roots\\.txt"
-        out=io.StringIO()
-        with patch("ops.k2_canary_backup_gate.os.geteuid",return_value=1001),\
-             redirect_stdout(out):
-            code=main(["--backup","/root/nvl-emergency-backups/test"])
-        self.assertEqual(code,2)
-        r=json.loads(out.getvalue())
-        self.assertEqual(r["status"],"HOLD")
-        self.assertFalse(r["authorizes_customer_change"])
-
-    def test_invalid_backup_scopes_are_rejected(self):
-        with self.assertRaises(CanaryBackupHold):
-            audit_backup(Path("relative"),owner_uid=self.uid)
-        with self.assertRaises(CanaryBackupHold):
-            audit_backup(self.backup,owner_uid=self.uid,
-                         active_protected_dirs=("etc/ssh",))
-
-
-if __name__=="__main__":
-    unittest.main()
-,
-            script,
-        )
-        self.assertIsNotNone(match)
-        command=["tr",*shlex.split(match.group(1))]
-        data=b"etc/ssh\\x00etc/pam.d\\x00etc/passwd\\x00etc/shadow\\x00"
-        result=subprocess.run(command,input=data,capture_output=True,check=True)
-        self.assertEqual(
-            result.stdout,
-            b"etc/ssh\\netc/pam.d\\netc/passwd\\netc/shadow\\n",
-        )
+    def test_backup_script_nul_inventory_converts_exact_bytes(self):
+        """Exercise actual CLI arguments: two shell slashes preserve NUL by mistake."""
+        script = (Path(__file__).resolve().parents[1] /
+                  "ops/backup_nvl_host.sh").read_text(encoding="utf-8")
+        lines = [line for line in script.splitlines()
+                 if line.startswith("tr ") and "archived-roots.txt" in line]
+        self.assertEqual(len(lines), 1)
+        args = shlex.split(lines[0].split(" < ", 1)[0])[1:]
+        data = b"etc/ssh\x00etc/pam.d\x00etc/passwd\x00etc/shadow\x00"
+        result = subprocess.run(["tr", *args], input=data,
+                                capture_output=True, check=True)
+        self.assertEqual(result.stdout,
+                         b"etc/ssh\netc/pam.d\netc/passwd\netc/shadow\n")
 
     def test_cli_nonroot_rejects_before_reading_any_host_backup(self):
         out=io.StringIO()

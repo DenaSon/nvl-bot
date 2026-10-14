@@ -103,3 +103,51 @@ def inspect_root_append_stage(plan: MultiUIDAppendPlan, *,
             original_6g_running=original_6g_running)
     except (OSError,ValueError) as exc:
         raise StageRecoveryHold("ROOT_STAGE_INSPECTION_FAILED") from exc
+
+
+def inspect_first_uid_stage(*, plan, current_pam: bytes,
+                            staged: Mapping[str, bytes | None],
+                            original_6g_running: bool) -> StageRecovery:
+    """First-UID bootstrap may crash before installing the PAM hook.
+
+    Only exact bytes from the reviewed original plan are eligible for
+    forward-only continuation; no automatic removal or global SSH edit.
+    """
+    from ops.k2_p3_guard_installer import GuardInstallPlan
+    if not isinstance(plan, GuardInstallPlan) or not isinstance(staged, Mapping):
+        raise StageRecoveryHold("FIRST_STAGE_PLAN_INVALID")
+    expected={
+        "roster":plan.roster_bytes,
+        "guard":plan.manifest_bytes,
+        "pam_backup":None,  # compared to the exact plan-pinned old PAM below
+        "guard_unit":plan.guard_unit.encode(),
+        "dns_unit":plan.dns_unit.encode(),
+    }
+    if set(staged)!=set(expected):
+        raise StageRecoveryHold("FIRST_STAGE_ARTIFACT_SET_INVALID")
+    if any(not isinstance(v,(bytes,type(None))) for v in staged.values()):
+        raise StageRecoveryHold("FIRST_STAGE_ARTIFACT_TYPE_INVALID")
+    if current_pam == plan.pam_after:
+        if any(staged[k] is None for k in staged):
+            return StageRecovery("HOLD",False,True,reason="PAM_HOOK_WITH_MISSING_GUARD")
+        if any(staged[k] != (plan.pam_before if k=="pam_backup" else expected[k])
+               for k in staged):
+            return StageRecovery("HOLD",False,True,reason="PAM_HOOK_STAGE_DRIFT")
+        return StageRecovery("ROSTERED_DENY_ONLY",False,True)
+    if current_pam != plan.pam_before and (
+        not isinstance(current_pam,bytes) or
+        __import__("hashlib").sha256(current_pam).hexdigest() != plan.pam_before_sha256
+    ):
+        return StageRecovery("HOLD",False,True,reason="PAM_CONTENT_UNTRUSTED")
+    if current_pam != plan.pam_before:
+        return StageRecovery("HOLD",False,True,reason="PAM_CONTENT_UNTRUSTED")
+    if any(raw is not None and raw != (
+        plan.pam_before if k=="pam_backup" else expected[k])
+        for k,raw in staged.items()):
+        return StageRecovery("HOLD",False,True,reason="FIRST_STAGE_BYTES_MISMATCH")
+    missing=tuple(k for k,v in staged.items() if v is None)
+    if not original_6g_running:
+        return StageRecovery("HOLD",False,True,missing,"ORIGINAL_6G_HOLD_REQUIRED")
+    return StageRecovery("PARTIALLY_STAGED" if len(missing)<5 else "NOT_STARTED",
+                         True,True,missing,
+                         "INDEPENDENT_F4_RESCUE_BOOT_DNS_REVIEW_REQUIRED")

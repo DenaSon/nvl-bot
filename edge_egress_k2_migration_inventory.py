@@ -189,6 +189,7 @@ def preview_migration(
     selected_names = set(selection.usernames)
     target_ip = ""
     target_f4 = False
+    readiness_identity = None
     counts: dict[str, int] = {}
     os_uids: dict[int, str] = {}
     frozen_source: list[tuple[object, ...]] = []
@@ -228,6 +229,13 @@ def preview_migration(
                 if sum(r[1] == target_ip for r in allocations) != 1:
                     global_issues.append("TARGET_EGRESS_IDENTITY_COLLISION")
                 readiness = read_readiness(conn, selection.target_edge_id)
+                if readiness is not None:
+                    readiness_identity = (
+                        readiness.edge_id,readiness.edge_ipv4,readiness.state,
+                        readiness.observed_ipv4,readiness.witness,
+                        readiness.probed_at,readiness.expires_at,
+                        readiness.generation,readiness.last_operation_id,
+                    )
                 target_f4 = bool(readiness and readiness.edge_ipv4 == target_ip
                                  and admission_eligible(readiness, now=stamp))
                 if not target_f4:
@@ -323,6 +331,8 @@ def preview_migration(
                                 observation,name,by_edge,stamp,issues)
                         except (KeyError,OSError,ValueError,TypeError):
                             _reason(issues,"SOURCE_INGRESS_NOT_ATTESTED")
+                    if source_proven and source_edge == selection.target_edge_id:
+                        _reason(issues,"TARGET_ALREADY_CURRENT_INGRESS")
                     if protected_edge and source_proven and protected_edge != source_edge:
                         _reason(issues,"PROTECTED_SOURCE_DRIFT")
                     if uid is not None:
@@ -363,8 +373,9 @@ def preview_migration(
             # transaction or assert the synthetic witness is real F4.
             snap = (
                 selection.mode,selection.usernames,selection.target_edge_id,
-                target_ip,stamp,tuple(hosts),tuple(allocations),
-                tuple(runtime),tuple(bindings),tuple(frozen_source),
+                target_ip,tuple(hosts),tuple(allocations),
+                readiness_identity,tuple(runtime),tuple(bindings),
+                tuple(frozen_source),
                 tuple((a.username,a.uid,a.source_edge_id,a.source_ipv4,
                        a.source_proven,a.protected_edge_id,a.active_sessions,
                        a.issues,a.host_class,a.selected) for a in accounts),

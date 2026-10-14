@@ -8,11 +8,29 @@ This is a conservative read-only admission check, NOT customer/transport release
 from __future__ import annotations
 
 from ipaddress import IPv4Address
+import re
 import sqlite3
 
 
 class K2WizardHold(ValueError):
     """Stop before remote provisioning when a candidate is unsafe."""
+
+
+def normalize_k2_customer_port(value: object) -> int:
+    """Parse a Telegram decimal port at the K2 boundary; never loosen the gate.
+
+    The legacy installer still receives its original input type. Both K2
+    admission checks and the original StagePin receive the same integer.
+    """
+    if type(value) is int:
+        port = value
+    elif type(value) is str and re.fullmatch(r"[0-9]{1,5}", value):
+        port = int(value)
+    else:
+        raise K2WizardHold("INVALID_CUSTOMER_PORT")
+    if not 1 <= port <= 65535:
+        raise K2WizardHold("INVALID_CUSTOMER_PORT")
+    return port
 
 
 def _table(conn: sqlite3.Connection, name: str) -> bool:

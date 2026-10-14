@@ -92,8 +92,16 @@ class IndependentSafety:
             raise LiveUIDHold("LINUX_UID_CHANGED")
         # sshd children and all unrelated user processes must be drained.
         snapshot=_checked("ps","-eo","pid,uid,comm,args","--no-headers")
+        service="nvl-egress-dns-"+req.username+".service"
+        main_pid=_checked("systemctl","show",service,
+                          "-p","MainPID","--value").strip()
+        if not main_pid.isdecimal() or int(main_pid)<=1:
+            raise LiveUIDHold("PINNED_DNS_SERVICE_PID_UNAVAILABLE")
         try:
-            assert_idle_process_snapshot(snapshot,req.username,req.uid)
+            # Only the exact root-recorded DoH MainPID is exempt; all SSH
+            # sessions and any second process of the UID still block.
+            assert_idle_process_snapshot(snapshot,req.username,req.uid,
+                                         allowed_dns_pid=int(main_pid))
         except ValueError as exc:
             raise LiveUIDHold("ACTIVE_SESSIONS_OR_PROCESSES") from exc
 

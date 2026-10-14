@@ -101,6 +101,8 @@ class Phase2CohortTests(unittest.TestCase):
         self.assertIn(("✅ بررسی نهایی انتقال","hpeg_p2_open_e9"),buttons)
 
     def test_all_protected_with_legacy_global_mode_shows_safe_next_stage(self):
+        self.db.execute("UPDATE settings SET value='0' "
+                        "WHERE key='edge_egress_protected_mode'")
         view=self.review()
         self.assertIn("PROTECTED_MODE_REQUIRED",view.blockers)
         self.assertNotIn("MIXED_OR_UNPROTECTED_COHORT",view.blockers)

@@ -268,6 +268,8 @@ class GuardedCohortPromotionPort:
         return True
 
     async def freeze_or_hold(self, scope: ExecutionScope) -> None:
-        # NEVER flip the mode back to Legacy on failure; protected accounts
-        # must not regain a Core fallback. P3-A leaves 6G RUNNING + HOLD.
-        return None
+        # No privileged UID-fence operation exists in this source-only port.
+        # Never claim "frozen" to P3-A: report it as unverified so its durable
+        # RECOVERY_REQUIRED journal retains the 6G lock for manual rescue.
+        # Never flip mode back to Legacy or remove protected mappings.
+        raise CohortPromotionHold("COHORT_KERNEL_FENCE_NOT_INDEPENDENTLY_VERIFIED")

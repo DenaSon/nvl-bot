@@ -1,3 +1,6 @@
+> **2026-10-14 CURRENT STATE OVERRIDE:** This is a historical acceptance design first written while PR #120 was Draft. PR #120 and #139 are now **MERGED into master** (source checkpoint 331fd86e399bd18e2f524071edb7f14d099e00de prior to docs update). A root-only first-UID PAM/BootGuard installer, pinned Python module stage and original 6G/Linux UID worker are now implemented as **explicit opt-in source**, but multi-UID roster CAS, independently validated live kernel/PAM/SSH/SOCKS DNS/NSS/IPv6 packet/WG-loss/cold-boot F4 and automatic Telegram execute binding are NOT accepted. **Use the newer canonical [controlled SSH deployment runbook](NVL_K2_PRODUCTION_SSH_DEPLOY_RUNBOOK_2026-10-14.md)** for executable steps. Master merge is NOT an SSH VPS deploy. The Gate 0–3 design below remains reference guidance; dated phrases about a Draft PR or absent source worker are superseded. Issues #106/#108 remain OPEN.
+
+---
 # NVL K2 — Final Integration and New-Edge VPS Acceptance Runbook
 
 **Status:** Draft code integration, **NOT production deploy, NOT customer transfer ready**. Branch `feat/k2-final-integration-20261013`; [PR #120](https://github.com/DenaSon/nvl-bot/pull/120). Reconfirm exact merged master/CI SHA before any release.

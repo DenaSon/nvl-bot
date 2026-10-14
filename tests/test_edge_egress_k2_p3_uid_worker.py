@@ -56,7 +56,7 @@ class UIDWorkerTests(unittest.TestCase):
     def prepare(self,**kw):
         opts=dict(
             db_conn=self.fx.conn_factory,acquire_6g=self.fx.acquire,
-            journal_6g=self.fx.journal,target_edge_id="src1",
+            journal_6g=self.fx.journal,candidate_target_edge_id="dst1",
             request=self.fx.request,dns_port=10553,
             safety=self.safety,evidence=self.evidence,
             actor_id=17,chat_id=31,reviewed_release=True,

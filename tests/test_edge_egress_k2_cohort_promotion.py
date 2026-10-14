@@ -147,6 +147,16 @@ class CohortPromotionTests(unittest.TestCase):
         with self.assertRaises(CohortPromotionHold):
             self.review()
 
+    def test_original_wireguard_resource_pin_mismatch_blocks_promotion(self):
+        with self.fx.db() as c:
+            c.execute(
+                "UPDATE edge_egress_allocations SET tunnel_network=? "
+                "WHERE edge_id='src1'",("10.78.199.0/30",),
+            )
+        with self.assertRaises(CohortPromotionHold):
+            self.review()
+        self.assertEqual(self.mode(),"0")
+
     def test_stale_source_f4_fails_before_ticket(self):
         with self.fx.db() as c:
             c.execute("UPDATE edge_egress_readiness SET expires_at=1 "

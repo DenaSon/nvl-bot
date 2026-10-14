@@ -1,12 +1,14 @@
 # NVL Bot
 
-## Current K2 status — 2026-10-13
+## Current release / K2 project state — 2026-10-14
 
-**Start here:** [Agent Handoff / Release Readiness](docs/NVL_K2_AGENT_HANDOFF_2026-10-13.md) → [AGENTS.md](AGENTS.md) → [Project Memory](docs/NVL_PROJECT_MEMORY.md).
+**Source of truth:** [K2 current handoff](docs/NVL_K2_AGENT_HANDOFF_2026-10-13.md), [Production SSH deployment runbook](docs/NVL_K2_PRODUCTION_SSH_DEPLOY_RUNBOOK_2026-10-14.md), [AGENTS.md](AGENTS.md), [Project Memory](docs/NVL_PROJECT_MEMORY.md).
 
-GitHub `master` at the last verified feature baseline `22eba3cda13c0c72407bd3d55d7328ae93496d25` contains merged K2 Phase2 and **P3-A through P3-F** (PRs #112–#118). Admin Edge Telegram UX is minimal/two-column Persian, but the **latest P3 features have NOT been deployed to Production**. P3-A–E still lack a reviewed concrete live privileged worker and release authorization. Independent disposable full-VPS **F4/PAM/boot/DNS/IPv6/tunnel-loss acceptance [#106](https://github.com/DenaSon/nvl-bot/issues/106)** and guarded rollout/integration [#108](https://github.com/DenaSon/nvl-bot/issues/108) remain OPEN. Do not enable protected-mode, automatic 6H, Cloudflare cutover or kernel teardown from merged source alone.
+PR #120 (K2 Phase1/2/3 source integration) and PR #139 (first-UID PAM/BootGuard installer, SHA-reviewed Python module staging and real Linux P3-A/P3-C worker constructor) are **MERGED to master**. Source baseline before the latest documentation follow-up: 331fd86e399bd18e2f524071edb7f14d099e00de. Exact-head PR #139 CI: 1,531 Python tests and 789 Edge Safety tests **per Python 3.11 and 3.12** passed. Confirm final master SHA and green CI at release time.
 
-The New York `e7` VPS was removed; its ingress registry/F3 metadata were manually retired with backup, **not** its Core kernel resources. Never unfence test UID1644 or modify the working Core ingress/default/other UID routes without independent fresh read-only audit.
+**Master merge is NOT a VPS deploy.** No live Core/Edge/UID/PAM changes or independent end-to-end F4 packet/boot acceptance are evidenced by these merges. The new UID worker and installer default OFF and are not reachable through an automatic bot execution callback. The module installer handles only the **first disposable UID**; multi-UID roster CAS, root/SSH rescue, real Linux/SSH SOCKS, DNS/NSS/IPv6 no-leak, WG-loss, cold-boot recovery and production canary remain gating work (#106, #108). Never activate global protected mode, alter operational wg0, reset the 6G journal or move active customers simply because CI is green.
+
+**Next action:** Gate 0 **read-only** Core inventory, independent Core+Edge provider snapshots and off-host encrypted backup/restore verification, immutable pinned source staging; then approved **code-only SSH deploy**, then a separate **new Edge namespace IP trial via the existing Telegram admin wizard**. Protected UID physical acceptance begins on a disposable Core clone, not existing customers. See the canonical runbook.
 
 ## Historical repository introduction (superseded next-step notes below)
 

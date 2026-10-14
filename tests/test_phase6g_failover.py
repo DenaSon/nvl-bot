@@ -213,8 +213,15 @@ class Phase6GBotSafetyRegressionTests(unittest.TestCase):
             "def _db_acquire_failover_lock(",
             "def _db_update_failover_operation(",
         )
-        self.assertIn("BEGIN IMMEDIATE", lock_region)
-        self.assertIn("FAILOVER_STATUS_ABORTED_STALE", lock_region)
+        # Phase 6G SQL now lives in one shared original-6G module for both
+        # legacy bot and K2 root. Inspect the actual owner of BEGIN/CAS,
+        # not the bot's thin compatibility wrapper.
+        shared = (ROOT / "edge_egress_k2_a_6g_shared.py").read_text()
+        self.assertIn("BEGIN IMMEDIATE", shared)
+        self.assertIn("FAILOVER_STATUS_ABORTED_STALE", shared)
+        self.assertIn("allow_legacy_stale_recovery=False", shared)
+        self.assertIn("acquire_original_6g", lock_region)
+        self.assertIn("allow_legacy_stale_recovery=True", lock_region)
         self.assertIn("FAILOVER_LOCK_STALE_SECONDS", lock_region)
 
     def test_helper_is_rebuild_only_by_default(self):

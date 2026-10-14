@@ -37,12 +37,18 @@ async def command():
 
     def test_current_legacy_bot_never_gets_implicit_privilege_split_approval(self):
         current=Path(__file__).resolve().parents[1]/"bot_final_v49-2.py"
-        report=audit.audit_legacy_bot_file(current)
+        # The legacy bot uses Python 3.12+ f-string grammar in places.
+        # A 3.11 AST parse failure is an explicit HOLD, never a pass.
         self.assertFalse(audit.A3_PRIVILEGE_SPLIT_APPROVED)
-        self.assertFalse(report.ready_for_nonroot)
-        self.assertGreater(report.functions_scanned,100)
-        self.assertGreater(len(report.callsites),10)
-        self.assertEqual(len(report.source_sha256),64)
+        try:
+            report=audit.audit_legacy_bot_file(current)
+        except audit.A3AuditHold as exc:
+            self.assertIn("CANNOT_BE_AUDITED",str(exc))
+        else:
+            self.assertFalse(report.ready_for_nonroot)
+            self.assertGreater(report.functions_scanned,100)
+            self.assertGreater(len(report.callsites),10)
+            self.assertEqual(len(report.source_sha256),64)
 
 
 if __name__=="__main__":

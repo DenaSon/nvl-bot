@@ -15,6 +15,7 @@ from hashlib import sha256
 import hmac
 import json
 import os
+import re
 import time
 from typing import Awaitable, Callable
 
@@ -116,6 +117,61 @@ class WaveReport:
         return sum(p.status == "VERIFIED" for p in self.progress)
 
 
+def _digest_plan(selection: MigrationSelection, snapshot_digest: str,
+                 target_ipv4: str, global_blockers: tuple[str, ...],
+                 members: tuple[MigrationMember, ...],
+                 wave_size: int) -> str:
+    payload={
+        "mode":selection.mode,"names":selection.usernames,
+        "edge":selection.target_edge_id,"target":target_ipv4,
+        "inventory":snapshot_digest,"global":global_blockers,
+        "wave_size":wave_size,
+        "members":[vars(m) for m in members],
+    }
+    return sha256(json.dumps(payload,sort_keys=True,separators=(",",":"),
+                             ensure_ascii=False).encode()).hexdigest()
+
+
+def _assert_plan(plan: MigrationWavePlan) -> None:
+    if (not isinstance(plan,MigrationWavePlan)
+        or type(plan.wave_size) is not int
+        or not 1 <= plan.wave_size <= MAX_WAVE_SIZE
+        or not isinstance(plan.members,tuple)
+        or len(plan.members)!=len(plan.selection.usernames)
+        or any(not isinstance(m,MigrationMember) for m in plan.members)
+        or tuple(m.username for m in plan.members)!=plan.selection.usernames
+        or any(m.target_edge_id!=plan.selection.target_edge_id
+               or m.target_ipv4!=plan.target_ipv4
+               for m in plan.members)
+        or select_migration(plan.selection.mode,plan.selection.usernames,
+                            plan.selection.target_edge_id)!=plan.selection
+        or not isinstance(plan.snapshot_digest,str)
+        or not re.fullmatch(r"[0-9a-f]{64}",plan.snapshot_digest)
+        or not isinstance(plan.digest,str)
+        or not hmac.compare_digest(
+            plan.digest,_digest_plan(plan.selection,plan.snapshot_digest,
+                    plan.target_ipv4,plan.global_blockers,plan.members,
+                    plan.wave_size))):
+        raise MigrationWaveHold("WAVE_PLAN_IMMUTABILITY_NOT_ATTESTED")
+
+
+def split_wave_plan(plan: MigrationWavePlan
+                    ) -> tuple[MigrationWavePlan, ...]:
+    """Split a broad selected cohort into separately approved <=10 UID waves."""
+    _assert_plan(plan)
+    result=[]
+    for group in plan.waves:
+        selection=select_migration(plan.selection.mode,
+            tuple(m.username for m in group),plan.selection.target_edge_id)
+        digest=_digest_plan(selection,plan.snapshot_digest,plan.target_ipv4,
+                            plan.global_blockers,group,plan.wave_size)
+        result.append(MigrationWavePlan(
+            selection,plan.snapshot_digest,plan.target_ipv4,
+            plan.global_blockers,group,plan.wave_size,digest,
+        ))
+    return tuple(result)
+
+
 def build_wave_plan(inventory: MigrationInventory, *,
                     wave_size: int = MAX_WAVE_SIZE) -> MigrationWavePlan:
     """Pure explicit-list plan, retaining BLOCKED entries without omission."""
@@ -159,18 +215,14 @@ def build_wave_plan(inventory: MigrationInventory, *,
             inventory.target_ipv4,a.protected_edge_id,a.active_sessions,
             tuple(dict.fromkeys(blockers)),
         ))
-    payload={
-        "mode":sel.mode,"names":sel.usernames,"edge":sel.target_edge_id,
-        "target":inventory.target_ipv4,"inventory":inventory.fingerprint,
-        "global":tuple(inventory.global_issues),"wave_size":wave_size,
-        "members":[vars(m) for m in members],
-    }
-    digest=sha256(json.dumps(payload,sort_keys=True,separators=(",",":"),
-                             ensure_ascii=False).encode()).hexdigest()
-    return MigrationWavePlan(
-        sel,inventory.fingerprint,inventory.target_ipv4,
-        tuple(inventory.global_issues),tuple(members),wave_size,digest,
-    )
+    members=tuple(members)
+    global_blockers=tuple(inventory.global_issues)
+    digest=_digest_plan(sel,inventory.fingerprint,inventory.target_ipv4,
+                        global_blockers,members,wave_size)
+    result=MigrationWavePlan(sel,inventory.fingerprint,inventory.target_ipv4,
+                             global_blockers,members,wave_size,digest)
+    _assert_plan(result)
+    return result
 
 
 def _approval_message(plan: MigrationWavePlan, actor_id: int,
@@ -189,6 +241,7 @@ def sign_wave_approval(plan: MigrationWavePlan, *, actor_id: int,
     issue this only for an explicitly reviewed exact plan and admin action.
     """
     stamp=int(time.time()) if now is None else now
+    _assert_plan(plan)
     if (not isinstance(plan,MigrationWavePlan)
         or not plan.digest or type(actor_id) is not int or actor_id<=0
         or type(chat_id) is not int or chat_id==0
@@ -205,6 +258,7 @@ def sign_wave_approval(plan: MigrationWavePlan, *, actor_id: int,
 def verify_wave_approval(plan: MigrationWavePlan, approval: WaveApproval, *,
                          actor_id: int,chat_id: int,secret: bytes,
                          now: int) -> None:
+    _assert_plan(plan)
     if (not isinstance(plan,MigrationWavePlan)
         or not isinstance(approval,WaveApproval)
         or not isinstance(secret,bytes) or len(secret)<32
@@ -297,6 +351,9 @@ async def run_migration_wave(
             committed_6g,clock,
         ))):
         raise MigrationWaveHold("M3_LIVE_EXECUTOR_NOT_RELEASED")
+    _assert_plan(plan)
+    if len(plan.members)>plan.wave_size:
+        raise MigrationWaveHold("WAVE_REQUIRES_EXPLICIT_SUBWAVE_APPROVAL")
     verify_wave_approval(
         plan,approval,actor_id=actor_id,chat_id=chat_id,
         secret=approval_secret,now=clock(),
@@ -332,7 +389,7 @@ async def run_migration_wave(
                 or ticket.scope_digest!=_scope_digest(scope)
                 or ticket.nonce in seen_tickets
                 or not isinstance(ticket.nonce,str)
-                or len(ticket.nonce)!=32
+                or not re.fullmatch(r"[a-f0-9]{32}",ticket.nonce)
                 or clock()>=ticket.expires_at):
                 raise MigrationWaveHold("M3_SINGLE_TICKET_NOT_PINNED")
             seen_tickets.add(ticket.nonce)

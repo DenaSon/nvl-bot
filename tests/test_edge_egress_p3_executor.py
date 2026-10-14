@@ -147,7 +147,7 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(self.host.applied,0)
 
     def test_allowlist_and_uid_identity_rejected_before_acquire(self):
-        self.assertEqual(ALLOWED_ACTIONS, {"EDGE_PREPARE","UID_ATTACH","UID_FREEZE","EDGE_RETIRE"})
+        self.assertEqual(ALLOWED_ACTIONS, {"EDGE_PREPARE","UID_ATTACH","UID_FREEZE","EDGE_RETIRE","UID_ENROLL_SOURCE"})
         for data in (
             dict(action="DELETE_ALL"), dict(edge_id="../e7"),
             dict(action="UID_ATTACH",username="",uid=None),

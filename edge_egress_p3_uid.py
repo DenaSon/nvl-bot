@@ -63,8 +63,10 @@ class ProtectedUIDPlan:
                 or self.request.uid != self.scope.uid
                 or self.request.spec.edge_id != self.scope.edge_id
                 or self.request.spec.edge_public_ipv4 != self.scope.target_host
-                or self.scope.action != ("UID_FREEZE" if self.purpose == FREEZE
-                                          else "UID_ATTACH")):
+                or (self.scope.action not in ("UID_ATTACH", "UID_ENROLL_SOURCE")
+                    if self.purpose == NEW else
+                    self.scope.action != ("UID_FREEZE" if self.purpose == FREEZE
+                                          else "UID_ATTACH"))):
             raise ProtectedUIDHold("UID_PLAN_SCOPE_MISMATCH")
 
 
@@ -128,7 +130,10 @@ def review_protected_uid(db_conn: Callable, scope: ExecutionScope,
             or not isinstance(scope, ExecutionScope)
             or scope.username != req.username or scope.uid != req.uid
             or scope.edge_id != req.spec.edge_id
-            or scope.target_host != req.spec.edge_public_ipv4):
+            or scope.target_host != req.spec.edge_public_ipv4
+            or (purpose == NEW and scope.action not in ("UID_ATTACH", "UID_ENROLL_SOURCE"))
+            or (purpose != NEW and scope.action !=
+                ("UID_FREEZE" if purpose == FREEZE else "UID_ATTACH"))):
         raise ProtectedUIDHold("UID_IDENTITY_OR_DNS_INVALID")
     if purpose not in (NEW, RESUME, FREEZE):
         raise ProtectedUIDHold("UID_PURPOSE_INVALID")
@@ -200,7 +205,7 @@ class GuardedProtectedUIDPort:
         self._touched = False
         self._operation_id = None
         if (not isinstance(plan, ProtectedUIDPlan)
-                or plan.scope.action not in ("UID_ATTACH", "UID_FREEZE")
+                or plan.scope.action not in ("UID_ATTACH", "UID_FREEZE", "UID_ENROLL_SOURCE")
                 or store.db_conn is not db_conn):
             raise ProtectedUIDHold("UNTRUSTED_UID_PORT_CONSTRUCTION")
 

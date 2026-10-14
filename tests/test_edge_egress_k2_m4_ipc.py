@@ -117,10 +117,40 @@ class M4UnixOperatorTests(unittest.IsolatedAsyncioTestCase):
             portal=self.fx.portal,bot_uid=os.getuid(),
             geteuid=lambda:0,released=True,
         )
-        right.sendall(json.dumps(self.prepare_message()).encode())
+        right.sendall(json.dumps(self.prepare_message()).encode()+b"\n")
         await handle_accepted_socket(trusted,left)
         reply=json.loads(right.recv(4096))
         self.assertEqual(reply["state"],"PREPARED")
+
+    async def test_stream_without_delimiter_holds_and_no_executor(self):
+        left,right=socket.socketpair(socket.AF_UNIX,socket.SOCK_STREAM)
+        self.addCleanup(left.close)
+        self.addCleanup(right.close)
+        trusted=RootOperatorIPC(
+            portal=self.fx.portal,bot_uid=os.getuid(),
+            geteuid=lambda:0,released=True,
+        )
+        right.sendall(json.dumps(self.prepare_message()).encode())
+        right.shutdown(socket.SHUT_WR)
+        with self.assertRaisesRegex(M4IPCReject,"HELD"):
+            await handle_accepted_socket(trusted,left)
+        self.assertEqual(json.loads(right.recv(4096))["state"],"HOLD")
+        self.assertEqual(self.fx.actions,[])
+
+    async def test_multiple_stream_frames_never_execute(self):
+        left,right=socket.socketpair(socket.AF_UNIX,socket.SOCK_STREAM)
+        self.addCleanup(left.close)
+        self.addCleanup(right.close)
+        trusted=RootOperatorIPC(
+            portal=self.fx.portal,bot_uid=os.getuid(),
+            geteuid=lambda:0,released=True,
+        )
+        payload=json.dumps(self.prepare_message()).encode()
+        right.sendall(payload+b"\n"+payload+b"\n")
+        with self.assertRaisesRegex(M4IPCReject,"HELD"):
+            await handle_accepted_socket(trusted,left)
+        self.assertEqual(json.loads(right.recv(4096))["state"],"HOLD")
+        self.assertEqual(self.fx.actions,[])
 
     async def test_unreleased_root_service_rejects_before_portal(self):
         with patch("edge_egress_k2_m4_ipc.M4_UNIX_IPC_ENABLED",False):

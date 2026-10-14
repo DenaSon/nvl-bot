@@ -21,6 +21,7 @@ import re
 import secrets
 import socket
 import struct
+import time
 from typing import Callable
 
 from edge_egress_k2_migration_inventory import select_migration
@@ -179,6 +180,36 @@ class RootOperatorIPC:
         return wire
 
 
+def _read_one_frame(conn: socket.socket) -> bytes:
+    """One newline-terminated request, bounded in size AND total wall time.
+
+    SOCK_STREAM has no record boundary. A single recv can read half a JSON
+    request, so never treat recv() as an authenticated complete message.
+    """
+    deadline = time.monotonic() + 5.0
+    frame = bytearray()
+    while len(frame) <= MAX_REQUEST_BYTES:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise M4IPCReject("IPC_FRAME_DEADLINE_EXPIRED")
+        conn.settimeout(remaining)
+        try:
+            chunk = conn.recv(min(1024, MAX_REQUEST_BYTES + 2 - len(frame)))
+        except socket.timeout as exc:
+            raise M4IPCReject("IPC_FRAME_DEADLINE_EXPIRED") from exc
+        if not chunk:
+            raise M4IPCReject("IPC_INCOMPLETE_FRAME")
+        frame.extend(chunk)
+        if b"\n" in chunk:
+            if frame.count(b"\n") != 1 or not frame.endswith(b"\n"):
+                raise M4IPCReject("IPC_MULTIPLE_OR_TRAILING_FRAMES")
+            payload = bytes(frame[:-1])
+            if not payload or len(payload) > MAX_REQUEST_BYTES:
+                raise M4IPCReject("IPC_FRAME_LENGTH_INVALID")
+            return payload
+    raise M4IPCReject("IPC_FRAME_LENGTH_INVALID")
+
+
 async def handle_accepted_socket(transport: RootOperatorIPC,
                                  conn: socket.socket) -> None:
     """For already accepted AF_UNIX stream, trusted kernel SO_PEERCRED.
@@ -197,10 +228,9 @@ async def handle_accepted_socket(transport: RootOperatorIPC,
             raise M4IPCReject("IPC_PEER_CREDENTIALS_ABSENT")
         _pid,uid,_gid=struct.unpack("3i",peer)
         transport._gate(uid)   # before reading any request
-        conn.settimeout(5)
-        raw=conn.recv(MAX_REQUEST_BYTES+1)
+        raw=await asyncio.to_thread(_read_one_frame,conn)
         response=await transport.dispatch(raw,peer_uid=uid)
-        conn.sendall(response+b"\n")
+        await asyncio.to_thread(conn.sendall,response+b"\n")
     except (OSError,ValueError,TypeError) as exc:
         # Never leak SQL/secret/nonce or raw server errors across the socket.
         try:

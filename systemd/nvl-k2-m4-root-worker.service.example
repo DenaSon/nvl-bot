@@ -1,0 +1,31 @@
+# SOURCE-ONLY EXAMPLE: DO NOT INSTALL/ENABLE IN M4.1.
+# The Python entry point intentionally exits 78 until reviewed M4.2 wiring.
+# Before operational release: bot MUST run under separate non-root UID;
+# root-owned 0600 release.json + root-hmac.key and independent F4/session
+# witness must be accepted; inspect actual host UID/group/paths and DB access.
+[Unit]
+Description=NVL K2 M4 guarded root operator (example; disabled)
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=nvl-k2-m4
+WorkingDirectory=/root
+ExecStart=/root/venv/bin/python3 -m ops.k2_m4_root_daemon
+Restart=no
+UMask=0077
+RuntimeDirectory=nvl-k2-m4
+RuntimeDirectoryMode=0750
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+LockPersonality=true
+ReadWritePaths=/run/nvl-k2-m4 /root/master_bot.db
+# Deliberately not installed, linked, enabled or started by any script.
+
+# No [Install] section: static reference template only.

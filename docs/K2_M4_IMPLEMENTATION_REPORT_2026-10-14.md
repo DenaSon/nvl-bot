@@ -65,3 +65,8 @@ All source tests use mock worker/physical gates and **cannot** attest real root/
 **User-visible operator behavior today if safely reviewed/deployed:** admin can browse and preview one/ten account status, with protected transfer execution **disabled**. There is **no** claim of end-to-end M4 or full zero-CLI migration yet.
 
 **Next UI phase after M7:** UX-POLISH, documented above, without changing the seven existing technical phase scope.
+
+
+## M4.1 Root Worker source-only continuation — 2026-10-15
+
+See [K2 M4.1 Root Worker source checkpoint](K2_M4_1_ROOT_WORKER_SOURCE_2026-10-15.md). Source now adds a sealed, root-only default-OFF Unix socket host, exact SHA256 manifest and 0600 HMAC file policies, non-root SO_PEERCRED caller UID, bounded framed IPC and tests. **Root daemon entrypoint remains inert:** no trusted P3 factory, independent F4/session witness, production bot non-root UID cutover or live root socket installation. This implements M4.1 code scaffolding, **not** operational M4 execution; M4.2–M4.5 gates remain HOLD. Do not toggle any flags or merge to auto-deploying master.

@@ -157,7 +157,7 @@ class M2MultiUIDTests(unittest.TestCase):
         with self.assertRaisesRegex(MultiUIDHold,"ROSTER_AND_MANIFESTS"):
             self.make_plan(current_roster=self.roster+b" ")
         with self.assertRaisesRegex(MultiUIDHold,"ROSTER_AND_MANIFESTS"):
-            self.make_plan(installed_manifests={"nvl0557":self.new})
+            self.make_plan(installed_manifests={"nvl0557":self.existing+b"\\n"})
 
     def test_existing_uid_or_username_collision_rejected(self):
         with self.assertRaisesRegex(MultiUIDHold,"MEMBER_ALREADY_EXISTS"):
@@ -255,7 +255,7 @@ class M2MultiUIDTests(unittest.TestCase):
         path=str(GUARD_DIR/"nvl0555.json")
         self.host[path]=self.new
         with patch("ops.k2_m2_guard_append.Path.exists",
-                   side_effect=lambda path: str(path) in self.host):
+                   new=lambda path: str(path) in self.host):
             # This test is about the existing file, not a fake filesystem.
             with self.assertRaises(ValueError):
                 self.run_with_mocks()

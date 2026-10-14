@@ -112,6 +112,30 @@ class Phase6GSharedLockTests(unittest.TestCase):
         self.conn.commit()
         return cur.lastrowid
 
+    def test_source_uid_enrollment_uses_original_6g_lock_with_same_edge(self):
+        source="172.86.94.174"
+        operation_id, busy=self.fn(source,source)
+        self.assertIsNone(busy)
+        self.assertIsInstance(operation_id,int)
+        row=self.conn.execute(
+            "SELECT source_host,target_host,status FROM failover_operations "
+            "WHERE id=?", (operation_id,)
+        ).fetchone()
+        self.assertEqual(row,(source,source,FAILOVER_STATUS_RUNNING))
+        second,busy=self.fn(source,"216.126.229.12")
+        self.assertIsNone(second)
+        self.assertEqual(busy,operation_id)
+
+    def test_protected_k2_p3_intent_cannot_be_stale_unlocked(self):
+        source="172.86.94.174"
+        old_id=self.insert_lock("EGRESS_P3_EXECUTE_INTENT")
+        new,busy=self.fn(source,"216.126.229.12")
+        self.assertIsNone(new)
+        self.assertEqual(busy,old_id)
+        self.assertEqual(self.conn.execute(
+            "SELECT status FROM failover_operations WHERE id=?",(old_id,)
+        ).fetchone(),(FAILOVER_STATUS_RUNNING,))
+
     def test_old_protected_lock_remains_busy_after_timeout(self):
         for phase in ("ARM_FAIL_CLOSED", "EDGE_ONLY_DNS_CUTOVER",
                       "EGRESS_RECOVERY_REQUIRED", "EGRESS_PREPARE_RECOVERY_REQUIRED",

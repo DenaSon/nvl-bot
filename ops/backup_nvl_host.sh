@@ -10,7 +10,7 @@ if [[ "$ROLE" != "core" && "$ROLE" != "edge" ]]; then
   echo "Usage: sudo bash $0 core|edge" >&2; exit 2
 fi
 if (( EUID != 0 )); then echo "Must run as root" >&2; exit 2; fi
-for cmd in tar sha256sum gzip df find sort mktemp date; do
+for cmd in tar sha256sum gzip df find sort mktemp date awk tr grep; do
   command -v "$cmd" >/dev/null || { echo "Missing: $cmd" >&2; exit 2; }
 done
 if [[ "$ROLE" == "core" ]]; then
@@ -75,8 +75,11 @@ for p in \
   /etc/ssl/cf /etc/ufw /etc/netplan /etc/network \
   /etc/passwd /etc/shadow /etc/group /etc/gshadow \
   /etc/security/limits.conf /etc/security/limits.d /etc/pam.d \
+  /etc/nvl-egress /opt/nvl-egress \
   /etc/crontab /etc/cron.d /etc/cron.daily /var/spool/cron/crontabs \
   /root/.ssh /root/.env /root/.env.production \
+  /root/nvl-egress-v1 /root/nvl-egress-staging /root/nvl-egress-keys \
+  /root/nvl-release \
   /usr/local/bin/gost /usr/local/bin/badvpn-udpgw; do
     add_path "$p"
 done
@@ -87,9 +90,32 @@ while IFS= read -r -d '' f; do add_path "$f"; done < <(
 )
 
 sort -zu "$INV" -o "$INV"
+# Record exactly which input roots are covered, without leaking secret bytes.
+# No claim that this curated archive replaces a full provider disk snapshot.
+tr '\\0' '\\n' < "$INV" > "$DETAILS/archived-roots.txt"
+if [[ "$ROLE" == "core" ]]; then
+  for required in etc/ssh etc/pam.d etc/passwd etc/shadow; do
+    grep -Fxq "$required" "$DETAILS/archived-roots.txt" || {
+      echo "STOP: mandatory Core host identity/config path omitted: $required" >&2
+      exit 1
+    }
+  done
+  for mandatory_k2 in /etc/nvl-egress /opt/nvl-egress; do
+    if [[ -e "$mandatory_k2" || -L "$mandatory_k2" ]]; then
+      grep -Fxq "${mandatory_k2#/}" "$DETAILS/archived-roots.txt" || {
+        echo "STOP: existing K2 PAM/roster/guard directory not snapshotted" >&2
+        exit 1
+      }
+    fi
+  done
+fi
 # The config archive contains PRIVATE KEYS and PASSWORD HASHES. Never push to Git.
 if [[ -s "$INV" ]]; then
-  tar -C / --null -T "$INV" -czf "$DEST/system-configs.tar.gz"
+  # Snapshot working tree, never caches, node_modules or virtualenvs.
+  tar -C / --exclude="*/.git/*" --exclude="*/__pycache__/*" \
+    --exclude="*/node_modules/*" --exclude="*/venv/*" \
+    --exclude="*/.venv/*" --exclude="*/.cache/*" \
+    --null -T "$INV" -czf "$DEST/system-configs.tar.gz"
 else
   echo "STOP: no config paths found" >&2; exit 1
 fi
@@ -100,8 +126,11 @@ rm -f "$INV"
 (
   cd "$DEST"
   sha256sum system-configs.tar.gz > SHA256SUMS
+  sha256sum diagnostics/archived-roots.txt >> SHA256SUMS
+  sha256sum diagnostics/host-state.txt >> SHA256SUMS
   if [[ "$ROLE" == "core" ]]; then
     sha256sum master_bot.sqlite3 >> SHA256SUMS
+    sha256sum diagnostics/db-tables.txt >> SHA256SUMS
   fi
   sha256sum -c SHA256SUMS
 )
@@ -112,6 +141,12 @@ private keys and may contain Telegram/API credentials and user personal data.
 Do not upload to GitHub or share in chat. Keep directory owned by root, mode 700.
 Copy an encrypted copy off this VPS to independent storage; a same-VPS backup
 will be lost if the VPS provider deletes/suspends the instance.
+This is a CURATED logical snapshot, NOT a full disk/VM snapshot and NOT a
+proof of restore. Take an independent provider full-volume snapshot of BOTH
+Core and candidate Edge, export encrypted backups, and perform a disposable
+clone/restore drill with working independent console rescue.
+The K2 root roster/guard/PAM and pinned dedicated transport files are included
+when present. Never infer that a missing protected gate was backed up.
 Restore only after inspecting host identity, OS versions, account UIDs and config.
 Avoid blindly extracting /etc/passwd, /etc/shadow, network, firewall or SSH configs
 on a live machine. Database and archive checksums are in SHA256SUMS.

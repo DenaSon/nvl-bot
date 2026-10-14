@@ -77,7 +77,8 @@ def edge_html(card) -> str:
         f"🖥 <b>سرور {_safe(card.edge_id)}</b>", "",
         f"🌐 نشانی: <code>{_safe(card.ip)}</code>",
         f"📡 وضعیت: {_state(card)}",
-        "📥 ورودی: " + ("✅ ثبت‌شده" if card.ingress_verified and card.pool_active
+        "📥 ورودی: " + ("✅ فعال" if card.ingress_verified and card.pool_active
+                     else "🟡 ثبت‌شده؛ در انتظار فعال‌سازی" if card.ingress_verified
                      else "⚪️ نیازمند بررسی"),
         "📤 خروجی: " + ("✅ بررسی‌شده" if card.f4_valid else "🟡 تأییدنشده"),
         "⭐ پیش‌فرض: " + ("بله" if card.pool_default else "خیر"),
@@ -91,8 +92,12 @@ def detail_buttons(card, current: str = "") -> list[list[tuple[str,str]]]:
     buttons=[
         [("🔎 بررسی اتصال",f"hpeg_health_{eid}"),
          ("🌍 تست IP",f"hpeg_probe_{eid}")],
-        [("👤 کاربران",f"hpeg_user_{eid}"),
-         ("🧭 بررسی وضعیت",f"hpeg_actions_{eid}")],
+        [("🔀 تغییر مسیر ترافیک",f"hpeg_relay_{eid}"),
+         ("👤 کاربران",f"hpeg_user_{eid}")],
+        [("🧭 بررسی وضعیت",f"hpeg_actions_{eid}"),
+         ("🧪 آزمایش VPS",f"hpeg_lab_{eid}")],
+        [("📤 فعال‌سازی خروجی",f"hpeg_p1_open_{eid}"),
+         ("🌍 تست خروجی",f"hpeg_p1_probe_{eid}")],
         [("📋 آماده‌سازی",f"hpeg_review_edge_{eid}"),
          ("📦 اطلاعات اتصال",f"hpeg_stage_{eid}")],
         [("🗑 حذف سرور",f"hpeg_retire_open_{eid}"),
@@ -241,7 +246,8 @@ def wizard_result(edge_ip: str, result: dict) -> tuple[str,str]:
         "✅ <b>سرور اضافه شد</b>\n\n"
         f"شناسه: <code>{_safe(eid)}</code>\n"
         f"نشانی: <code>{_safe(edge_ip)}</code>\n\n"
-        "برای استفاده، وضعیت اتصال را بررسی کنید.",
+        "📦 آماده‌سازی اولیه ثبت شد. مسیر خروجی کاربران هنوز فعال نیست.\\n"
+        "برای ادامه، اطلاعات اتصال را بررسی کنید.",
         eid,
     )
 

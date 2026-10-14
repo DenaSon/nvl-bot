@@ -56,7 +56,7 @@ def staged_edge_result(edge_ip: str, result: dict) -> tuple[str, str]:
         "📦 <b>Edge جدید — مراحل نصب و آماده‌سازی</b>\n\n"
         f"🌍 IP: <code>{escape(edge_ip)}</code>\n"
         f"🖥 شناسه: <code>{escape(eid)}</code>\n"
-        "✅ ۱/۳ — Ingress: WireGuard ورودی نصب و در استخر ثبت شد.\n"
+        "✅ ۱/۳ — Ingress: اتصال WireGuard ثبت شد؛ هنوز وارد استخر فعال مشتریان نشده.\n"
         "✅ ۲/۳ — Egress: Stage اختصاصی ساخته شد؛ هنوز فعال/تأیید نشده.\n"
         "⏳ ۳/۳ — بررسی و پذیرش امنیتی: <b>HOLD</b>\n\n"
         "ℹ️ عضویت فعال در استخر برای پایش ورودی است؛ "

@@ -173,6 +173,7 @@ def apply_next_uid(*, plan: MultiUIDAppendPlan, db_conn: Callable,
                    sshd_effective: Callable[[], str] | None = None,
                    guard_verify: Callable[[BootGuardManifest], None] | None = None,
                    release_enabled: bool = False,
+                   resume_partial: bool = False,
                    geteuid: Callable[[], int] = os.geteuid) -> None:
     """One UID append under an EXISTING 6G RUNNING exact P3 ticket.
 
@@ -180,6 +181,7 @@ def apply_next_uid(*, plan: MultiUIDAppendPlan, db_conn: Callable,
     or parallel kernel engine. Network/PAM/F4/boot external proof is mandatory.
     """
     if (not M2_APPEND_ENABLED or release_enabled is not True
+            or type(resume_partial) is not bool
             or not isinstance(plan, MultiUIDAppendPlan)
             or not isinstance(scope, ExecutionScope)
             or not isinstance(ticket, ExecutionTicket)
@@ -248,19 +250,33 @@ def apply_next_uid(*, plan: MultiUIDAppendPlan, db_conn: Callable,
         GUARD_DIR / (plan.username + ".json"),
         UNITS / plan.guard_unit_name, UNITS / plan.dns_unit_name,
     )
-    if any(path.exists() or path.is_symlink() for path in paths):
-        raise MultiUIDHold("M2_PARTIAL_STAGE_REQUIRES_RECONCILIATION")
+    expected = (
+        plan.manifest_bytes, plan.guard_unit.encode(), plan.dns_unit.encode(),
+    )
+    staged: list[bool] = []
+    for path, expected_bytes in zip(paths, expected):
+        if path.is_symlink():
+            raise MultiUIDHold("M2_STAGED_PATH_SYMLINK")
+        if path.exists():
+            if not resume_partial:
+                raise MultiUIDHold("M2_PARTIAL_STAGE_REQUIRES_RECONCILIATION")
+            if _safe_read(path, maximum=65536) != expected_bytes:
+                raise MultiUIDHold("M2_PARTIAL_STAGE_BYTES_MISMATCH")
+            staged.append(True)
+        else:
+            staged.append(False)
+    # If resuming, old 6G lease is STILL REQUIRED; no fresh lease is minted.
+    # The target UID stays denied until M3 commits an independently verified
+    # runtime; no old guard, rule, table or roster member is removed.
 
     # Check the exact original P3/6G lease before *each* privileged step.
     def still_locked():
         return assert_guarded_6g_intent(db_conn, scope, ticket)
     still_locked()
-    still_locked()
-    port.create(paths[0], plan.manifest_bytes)
-    still_locked()
-    port.create(paths[1], plan.guard_unit.encode())
-    still_locked()
-    port.create(paths[2], plan.dns_unit.encode())
+    for path, expected_bytes, already_staged in zip(paths, expected, staged):
+        still_locked()
+        if not already_staged:
+            port.create(path, expected_bytes)
     still_locked()
     port.command("systemctl", "daemon-reload")
     still_locked()

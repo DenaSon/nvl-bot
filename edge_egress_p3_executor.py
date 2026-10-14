@@ -23,11 +23,17 @@ EXECUTOR_ENABLED = False
 TICKET_TTL_SECONDS = 120
 INTENT_PHASE = "EGRESS_P3_EXECUTE_INTENT"
 RECOVERY_PHASE = "EGRESS_P3_RECOVERY_REQUIRED"
-ALLOWED_ACTIONS = frozenset({"EDGE_PREPARE", "UID_ATTACH", "UID_FREEZE", "EDGE_RETIRE", "UID_ENROLL_SOURCE"})
+ALLOWED_ACTIONS = frozenset({"EDGE_PREPARE", "UID_ATTACH", "UID_FREEZE", "EDGE_RETIRE", "UID_ENROLL_SOURCE", "COHORT_PROMOTE"})
 # Scope-specific source enrollment: no global mode toggle or DNS/host mutation.
 SOURCE_ENROLL_GATES = frozenset({
     "SOURCE_EDGE_F4", "MIXED_PAM_COMPATIBILITY",
     "SOURCE_INGRESS_PIN", "BOOT_ROSTER_PREINSTALLED",
+})
+PROMOTION_GATES = frozenset({
+    "SOURCE_AND_TARGET_F4", "ALL_ACTIVE_UIDS_PROTECTED",
+    "ROOT_ROSTER_AND_GUARDS", "PAM_BOOT_ADMISSION",
+    "EXTERNAL_IPV4_DNS_IPV6_NO_LEAK", "ALL_CUSTOMERS_IDLE",
+    "RESCUE_AND_REBOOT_RECOVERY", "NO_LEGACY_FALLBACK",
 })
 BASE_GATES = frozenset({
     "OPERATOR_RESCUE", "STAGE_PIN", "SSH_HOST_PIN",
@@ -101,6 +107,8 @@ class FreshEvidence:
                                  else frozenset())
         if scope.action == "UID_ENROLL_SOURCE":
             required = required | SOURCE_ENROLL_GATES
+        if scope.action == "COHORT_PROMOTE":
+            required = required | PROMOTION_GATES
         if not required <= self.gates:
             raise ExecutorHold("MISSING_ACCEPTANCE_GATES")
 

@@ -78,7 +78,8 @@ def _snapshot(conn, scope: ExecutionScope, expected_mode: str, *, now: int,
     if len(pool) != 1 or pool[0][0] != scope.source_host or type(pool[0][1]) is not int or pool[0][1] <= 0:
         raise CohortPromotionHold("SOURCE_DEFAULT_NOT_UNIQUE")
     alloc = tuple(conn.execute(
-        "SELECT edge_id,edge_public_ipv4,core_public_ipv4,route_table,status "
+        "SELECT edge_id,edge_public_ipv4,core_public_ipv4,route_table,status,"
+        "tunnel_network,veth_network,edge_listen_port,edge_uplink "
         "FROM edge_egress_allocations ORDER BY edge_id"
     ).fetchall())
     source = [x for x in alloc if x[1] == scope.source_host and x[4] == "STAGED"]
@@ -141,6 +142,10 @@ def _snapshot(conn, scope: ExecutionScope, expected_mode: str, *, now: int,
                 or req.spec.edge_public_ipv4 != scope.source_host
                 or req.spec.core_public_ipv4 != source[0][2]
                 or req.spec.route_table != rr[4]
+                or req.spec.tunnel_network != source[0][5]
+                or req.spec.veth_network != source[0][6]
+                or req.spec.edge_listen_port != source[0][7]
+                or req.spec.edge_uplink != source[0][8]
                 or req.priority != rr[5] or manifest.dns_port != rr[6]):
             raise CohortPromotionHold("ROOT_GUARD_OR_ROUTE_NOT_PINNED")
         pins.append((name,rr[1],rr[4],rr[5],rr[6],member.guard_sha256))

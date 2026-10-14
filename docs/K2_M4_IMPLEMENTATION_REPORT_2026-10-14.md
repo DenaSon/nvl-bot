@@ -85,3 +85,8 @@ Source implements a non-root fixed Unix socket client, an actor/chat/message/exa
 ## M4.4 restart-safe root status source checkpoint — 2026-10-15
 
 An explicit, independently gated `STATUS` IPC action and root-owned SELECT-only checkpoint/6G receipt reconciliation projection were added on the M4 PR branch. `RUNNING` or `HOLD` blocks all fresh checkpoint prepare/begin, even if 6G looks idle; original 6G remains untouched. New Telegram status projection is conservative, actor/chat scoped and does not label original P3 receipts as physical client packet success. See [M4.4 recovery handoff](K2_M4_4_RESTART_RECOVERY_2026-10-15.md). All root/IPC/TG status release flags remain OFF, physical M4.2 blockers and M4.5 integration acceptance remain open.
+
+
+## M4.5 end-to-end synthetic integration (2026-10-15)
+
+The stage-only full AF_UNIX socket and original P3/6G SQLite checkpoint integration is covered by [M4.5 acceptance document](K2_M4_5_E2E_INTEGRATION_2026-10-15.md) and `tests/test_edge_egress_k2_m45_end_to_end.py`. The exact HEAD CI evidence is linked in PR #148. **Source/CI checks are not real root/PAM/WG/F4 acceptance**; do not merge or deploy. M4.2 trusted live factory and physical test remain unresolved.

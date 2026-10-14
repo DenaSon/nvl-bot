@@ -1,3 +1,6 @@
+> **2026-10-14 MERGED CODE STATUS:** Parent PR #120 is **already merged to master**, and P3 packages 1+2 in PR #139 are also merged. The earlier section below saying "keep #120 Draft" is historical. No production VPS acceptance has been reported or verified. Use the [canonical deployment runbook](NVL_K2_PRODUCTION_SSH_DEPLOY_RUNBOOK_2026-10-14.md), starting with a read-only Core inventory and independent backup/restore. This Telegram lab remains **read-only new Edge namespace testing**, not an approved protected UID migration or F4 packet witness.
+
+---
 # K2 — Telegram VPS rehearsal navigation (2026-10-14)
 
 **Status:** real integration in the existing admin-only Telegram Edge panel, but source-only staged rehearsal. This does **not** mean Protected UID customer E2E is deployed or passed.

@@ -26,6 +26,7 @@ from edge_egress_v1_admission import (
     load_roster, checked_guard,
 )
 from edge_egress_f4_pam import verify_installed_gate_digest
+from edge_egress_v1_admission import inspect_pam
 from edge_egress_f4_preflight import sshd_connection_spec
 from edge_egress_v1_live_driver import assert_idle_process_snapshot
 
@@ -205,6 +206,7 @@ def apply_guard_install(*, plan: GuardInstallPlan,
                         independent_console_ok: Callable[[],bool] | None = None,
                         account_idle_ok: Callable[[str,int],bool] | None = None,
                         reviewed_module_sha: str = "",
+                        sshd_effective_probe: Callable[[],str] | None = None,
                         release_enabled: bool=False,
                         geteuid: Callable[[],int] = os.geteuid) -> None:
     """One-shot explicitly gated install, PAM edit LAST.
@@ -215,7 +217,7 @@ def apply_guard_install(*, plan: GuardInstallPlan,
     """
     if (release_enabled is not True or not isinstance(plan,GuardInstallPlan)
             or geteuid()!=0 or port is None or independent_console_ok is None
-            or account_idle_ok is None):
+            or account_idle_ok is None or sshd_effective_probe is None):
         raise GuardInstallHold("ROOT_OPERATOR_RELEASE_REQUIRED")
     if independent_console_ok() is not True:
         raise GuardInstallHold("INDEPENDENT_RESCUE_UNVERIFIED")
@@ -232,8 +234,13 @@ def apply_guard_install(*, plan: GuardInstallPlan,
     if (man.request.username!=plan.username or man.request.uid!=plan.uid):
         raise GuardInstallHold("GUARD_IDENTITY_CHANGED")
     previous=_safe_read(PAM,maximum=131072,strict=False)
-    if sha256(previous).hexdigest()!=plan.pam_before_sha256:
+    if (sha256(previous).hexdigest()!=plan.pam_before_sha256
+            or current_pam!=previous):
         raise GuardInstallHold("PAM_PREVIEW_CHANGED")
+    # Per-user/per-listener sshd -T -C must attest UsePAM yes before
+    # making ANY on-disk changes. E2E SSH/PAM still needs a VPS witness.
+    if not inspect_pam(plan.pam_after.decode("utf-8"),sshd_effective_probe()):
+        raise GuardInstallHold("SSHD_PAM_ADMISSION_NOT_ATTESTED")
     if ROSTER.exists() or ROSTER.is_symlink():
         # Existing mixed-population roster must not be overwritten as a side
         # effect of another UID's installation.
@@ -246,6 +253,10 @@ def apply_guard_install(*, plan: GuardInstallPlan,
         _owned(directory,directory=True,strict=False)
     port.create(ROSTER,plan.roster_bytes)
     port.create(GUARD_DIR/(plan.username+".json"),plan.manifest_bytes)
+    # Durable root-only rollback bytes BEFORE any PAM change. Never
+    # auto-restore: a blind removal of the hook could un-fence a UID.
+    port.create(ROSTER.parent/("pam-sshd-before-"+plan.pam_before_sha256+".bak"),
+                previous)
     port.create(UNITS/plan.guard_unit_name,plan.guard_unit.encode())
     port.create(UNITS/plan.dns_unit_name,plan.dns_unit.encode())
     port.command("systemctl","daemon-reload")

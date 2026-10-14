@@ -1,3 +1,6 @@
+> **2026-10-14 SOURCE MERGE CHECKPOINT:** PR #139 is merged to master (historical source baseline 331fd86e399bd18e2f524071edb7f14d099e00de), with 1,531 full Python tests + 789 Edge stage-only tests per Python 3.11 and 3.12 PASS. The source first-UID installer, SHA-pinned module staging and existing 6G real Linux worker assembly are present; all opt-in and **NOT yet tested on a real VPS or enabled via Telegram execution**. Do not confuse "merged" with "deployed" or "first-UID support" with a safe multi-UID population release. This text supersedes any pre-merge wording below. [Canonical SSH deploy runbook](NVL_K2_PRODUCTION_SSH_DEPLOY_RUNBOOK_2026-10-14.md), [physical F4 #106](https://github.com/DenaSon/nvl-bot/issues/106), [operator lifecycle #108](https://github.com/DenaSon/nvl-bot/issues/108).
+
+---
 # K2 P3 — Package 1 PAM/BootGuard and Package 2 UID worker (2026-10-14)
 
 ## Implementation and release boundary

@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import edge_egress_k2_a_root_assembly as a
 from edge_egress_k2_a_6g_shared import Original6GRootCallbacks
+from edge_egress_k2_a_host_factory import ReviewedM2P3HostFactory
 from edge_egress_k2_m42_bindings import (
     HostReviewedPorts, RootAdminPolicy,
 )
@@ -95,14 +96,21 @@ class ReviewedAssemblyTests(unittest.TestCase):
         self.p=paths()
         self.db=lambda:None
         self.callbacks=Original6GRootCallbacks(self.db)
+        self.root_uid=lambda:0
+        self.os_uid=lambda name:1636
+        self.factory=ReviewedM2P3HostFactory(
+            db_conn=self.db, read_root_snapshot=lambda *a:None,
+            os_uid=self.os_uid, geteuid=self.root_uid,
+            release_enabled=True,
+        )
         self.ports=HostReviewedPorts(
             db_conn=self.db,
             acquire_6g=self.callbacks.acquire,
             journal_6g=self.callbacks.journal,
-            port_factory=lambda *args:None,
+            port_factory=self.factory,
             live_admin_role=lambda a,c:False,
             protected_mode=lambda:"0",
-            geteuid=lambda:0,
+            os_uid=self.os_uid,geteuid=self.root_uid,
         )
         self.identity=patch.object(a,"assert_nonroot_bot_identity")
         self.verifier=patch.object(a,"verify_reviewed_release",return_value="a"*40)
@@ -138,6 +146,17 @@ class ReviewedAssemblyTests(unittest.TestCase):
             # No socket listener is enabled by this composition.
             with self.assertRaisesRegex(RootWorkerHold,"DISABLED"):
                 result.worker.open_listener()
+
+    def test_unreviewed_direct_host_factory_refused_before_root_assembly(self):
+        fake=HostReviewedPorts(**{
+            **self.ports.__dict__,
+            "port_factory":lambda *args:None,
+        })
+        with patch.object(a,"M4A_ROOT_ASSEMBLY_ENABLED",True):
+            with self.assertRaisesRegex(a.M4AAssemblyHold,"NOT_AUTHORIZED"):
+                a.assemble_reviewed_root(
+                    paths=self.p,ports=fake,release_enabled=True,
+                )
 
     def test_unreviewed_second_6g_callback_is_rejected(self):
         altered=HostReviewedPorts(**{

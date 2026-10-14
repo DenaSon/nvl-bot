@@ -33,3 +33,8 @@
 | Cross-Edge mixed Legacy migration | denied by design | denied | HOLD |
 
 **No claim of Package A fully operationally completed.** Treat it as code hardening with exact unresolved dependencies, not a finished production change.
+
+
+## Package A2 host-factory and root-daemon source increment (2026-10-15)
+
+See [Package A2 design and outstanding field gates](K2_PACKAGE_A2_HOST_AND_DAEMON_2026-10-15.md). The root-side M2/P3 factory is now typed, source/F4 reviewed, exact original 6G deferred, and the source-pinned daemon accepts only reviewed assemblies under a new independent default-OFF flag. The production root daemon's standalone entrypoint remains intentionally inert and the current root-running bot is not converted. **No live physical proof, no master merge, no active root socket; Package A is not operationally complete.**

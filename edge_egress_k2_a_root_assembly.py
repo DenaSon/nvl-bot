@@ -21,6 +21,7 @@ from edge_egress_k2_m42_bindings import (
 from edge_egress_k2_m42_evidence import load_external_evidence
 from edge_egress_k2_m2_ingress_journal import make_m1_readonly_ingress_provider
 from edge_egress_k2_a_6g_shared import Original6GRootCallbacks
+from edge_egress_k2_a_host_factory import ReviewedM2P3HostFactory
 from edge_egress_k2_m4_checkpoint import DurableWaveCheckpoint
 from edge_egress_k2_m4_ipc import RootOperatorIPC
 from edge_egress_k2_m4_root_worker import (
@@ -120,6 +121,10 @@ def assemble_reviewed_root(
         or getattr(ports.acquire_6g,"__self__",None)
            is not getattr(ports.journal_6g,"__self__",None)
         or ports.acquire_6g.__self__.db_conn is not ports.db_conn
+        or not isinstance(ports.port_factory,ReviewedM2P3HostFactory)
+        or ports.port_factory.db_conn is not ports.db_conn
+        or ports.port_factory.os_uid is not ports.os_uid
+        or ports.port_factory.geteuid is not ports.geteuid
         or ports.external_evidence is not load_external_evidence
         or ports.ingress_provider is not make_m1_readonly_ingress_provider):
         raise M4AAssemblyHold("M4A_ROOT_ASSEMBLY_NOT_AUTHORIZED")

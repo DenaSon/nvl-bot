@@ -95,3 +95,8 @@ The stage-only full AF_UNIX socket and original P3/6G SQLite checkpoint integrat
 ## Package A: backend source-hardening checkpoint (2026-10-15)
 
 The *existing* 6G SQL is centralized, a reviewed Root assembly contract, explicit non-root unit/process preflight and signed F4 report snapshot verification are implemented. Read [Package A handoff](K2_PACKAGE_A_BACKEND_2026-10-15.md). **Do not mark Package A operational DONE:** the actual live M2 RootFilePort/P3 factory, production non-root service split and independently deployed offhost F4 observer are not installed, and cross-Edge Legacy mode 0 remains HOLD. No merge/Production/UID changes.
+
+
+## Package A2 host-factory and root-daemon source increment (2026-10-15)
+
+See [Package A2 design and outstanding field gates](K2_PACKAGE_A2_HOST_AND_DAEMON_2026-10-15.md). The root-side M2/P3 factory is now typed, source/F4 reviewed, exact original 6G deferred, and the source-pinned daemon accepts only reviewed assemblies under a new independent default-OFF flag. The production root daemon's standalone entrypoint remains intentionally inert and the current root-running bot is not converted. **No live physical proof, no master merge, no active root socket; Package A is not operationally complete.**

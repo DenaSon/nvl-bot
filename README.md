@@ -1,3 +1,5 @@
+> **Core deploy update — 2026-10-14:** The operator reported a successful **code-only VPS publish** of SHA `d5ca38b6e7069d969d8aa33bcb42ef71c8c63b2a` on `CloudVPS121849`: 8 root Python files replaced, 13 added, 70 code hashes passed, nvlbot restarted and held a stable PID for 10 seconds. **Independent post-deploy host checks / Telegram UI smoke remain pending.** This is not an approved protected UID egress deployment or customer migration. See [exact Core recovery paths and next tests](docs/NVL_K2_CORE_CODE_RELEASE_RECORD_2026-10-14.md). Historical “not deployed” text below only describes pre-2026-10-14 state; do **not** run the one-shot deploy again.
+
 # NVL Bot
 
 ## Current release / K2 project state — 2026-10-14

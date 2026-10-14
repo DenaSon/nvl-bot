@@ -30,7 +30,6 @@ REQUIRED = frozenset({
     "edge_egress_uid_policy.py",
     "edge_egress_v1_ingress.py",
     "edge_egress_uid_runtime_store.py",
-    "ops/__init__.py",
     "ops/edge_egress_provision.py",
 })
 
@@ -73,7 +72,8 @@ def validate_module_bundle(
         raise ModuleStageHold("INCOMPLETE_REVIEWED_MODULE_SET")
     for name,raw in blobs.items():
         if (not isinstance(name,str) or not NAME.fullmatch(name)
-                or not isinstance(raw,bytes) or not 1<=len(raw)<=600000
+                or not isinstance(raw,bytes)
+                or not (0<=len(raw)<=600000 if name=="ops/__init__.py" else 1<=len(raw)<=600000)
                 or not isinstance(reviewed_sha256[name],str)
                 or not SHA.fullmatch(reviewed_sha256[name])
                 or sha256(raw).hexdigest()!=reviewed_sha256[name]):

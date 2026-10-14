@@ -204,7 +204,6 @@ def inspect_legacy_enrollment(
 
 def legacy_enrollment_html(audit: LegacyEnrollmentAudit) -> str:
     """Short operator text; no usernames, UIDs, technical release flags."""
-    from html import escape
     lines = [
         "👥 <b>آماده‌سازی کاربران قدیمی</b>", "",
         f"کاربران فعال: <b>{audit.active_count}</b>",
@@ -218,4 +217,4 @@ def legacy_enrollment_html(audit: LegacyEnrollmentAudit) -> str:
     else:
         lines.append("⛔ انتقال متوقف است؛ ابتدا ایمنی سرورها و حساب‌ها بررسی شود.")
     lines.append("حساب‌ها و مسیر اینترنت تغییری نکرده‌اند.")
-    return "\n".join(escape(s) if False else s for s in lines)
+    return "\n".join(lines)

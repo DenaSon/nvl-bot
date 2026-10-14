@@ -29,6 +29,7 @@ from edge_egress_k2_m4_root_portal import PreparedWave, RootMigrationPortal
 from edge_egress_k2_m4_telegram import select_input
 
 M4_UNIX_IPC_ENABLED = False
+M4_BATCH_RELEASE_ENABLED = False
 MAX_REQUEST_BYTES = 4096
 MAX_RESPONSE_BYTES = 4096
 _REQUEST_ID = re.compile(r"[0-9a-f]{32}\Z")
@@ -118,6 +119,9 @@ class RootOperatorIPC:
             # second separate parser for the root service.
             selection=select_input(request["mode"],",".join(names),
                                    request["edge_id"])
+            # M7 independent batch approval is not inherited from M4.
+            if selection.mode != "SINGLE" and not M4_BATCH_RELEASE_ENABLED:
+                raise M4IPCReject("IPC_BATCH_NOT_RELEASED")
             if len(self._pending)>=20:
                 raise M4IPCReject("IPC_PENDING_QUEUE_FULL")
             prepared=self.portal.prepare(

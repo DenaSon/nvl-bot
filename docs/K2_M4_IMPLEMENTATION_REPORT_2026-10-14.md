@@ -75,3 +75,8 @@ See [K2 M4.1 Root Worker source checkpoint](K2_M4_1_ROOT_WORKER_SOURCE_2026-10-1
 ## M4.2 trusted root evidence and original-6G binding (2026-10-15)
 
 Source integration adapters added on the stacked M4 branch; see [M4.2 evidence/worker handoff](K2_M4_2_TRUSTED_ROOT_BINDINGS_2026-10-15.md). M1/M2 PAM+WG source, root-only actor policy, separately signed session/F4 report, P3-A ticket/original 6G terminal receipt and M2 first/Nth bootstrap under 6G have bounded fail-closed ports. **NOT** an operationally installed worker: trusted real host factory, external probe/signing service, non-root bot split and disposable physical F4 remain HOLD; execution flags still OFF. M4.3/M4.4 are not secretly completed.
+
+
+## M4.3 two-tap Telegram PREPARE/CONFIRM/CANCEL (2026-10-15)
+
+Source implements a non-root fixed Unix socket client, an actor/chat/message/exact-selection-bound volatile one-shot approval store, root-side M7-only batch gate, and guarded existing `hpeg_m4_*` Telegram callbacks. The root request ID never enters PicklePersistence or callback_data; ambiguous IPC confirmation remains HOLD without replay. Default execution flags remain OFF, current bot is still root and live Root/physical F4 acceptance is unavailable. See [M4.3 handoff](K2_M4_3_TELEGRAM_EXECUTION_2026-10-15.md). SOURCE/CI is not operational deployment.

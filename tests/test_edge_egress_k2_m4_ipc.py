@@ -152,6 +152,14 @@ class M4UnixOperatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(right.recv(4096))["state"],"HOLD")
         self.assertEqual(self.fx.actions,[])
 
+    async def test_batch_preparation_requires_separate_m7_root_release(self):
+        assert self.ipc is not None
+        request=dict(self.prepare_message(),mode="BATCH",
+                     usernames=["nvl0555","nvl0557"])
+        with self.assertRaisesRegex(M4IPCReject,"BATCH_NOT_RELEASED"):
+            await self.call(request)
+        self.assertEqual(self.fx.actions,[])
+
     async def test_unreleased_root_service_rejects_before_portal(self):
         with patch("edge_egress_k2_m4_ipc.M4_UNIX_IPC_ENABLED",False):
             with self.assertRaisesRegex(M4IPCReject,"RELEASE"):

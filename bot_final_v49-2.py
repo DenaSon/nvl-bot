@@ -394,6 +394,19 @@ from edge_egress_k2_m4_status import (
     inspect_telegram_wave_status as k2_m4_readonly_status,
     status_html as k2_m4_status_html,
 )
+from edge_egress_k2_m43_client import (
+    NonRootOperatorClient as k2_m43_client,
+    M43ClientHold,
+)
+from edge_egress_k2_m43_workflow import (
+    APPROVALS as k2_m43_approvals,
+    PendingTelegramApproval as K2M43Pending,
+    confirmation_html as k2_m43_confirmation_html,
+    confirmation_buttons as k2_m43_confirmation_buttons,
+    result_html as k2_m43_result_html,
+    halted_html as k2_m43_halted_html,
+    cancel_html as k2_m43_cancel_html,
+)
 from edge_egress_k2_p1_worker import (
     Phase1Hold, inspect_phase1, activate_phase1, probe_phase1,
 )
@@ -10808,6 +10821,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if role != 'admin':
             await update.message.reply_text("⛔️ فقط مدیر")
             return
+        k2_m43_approvals.discard(update.effective_user.id,chat_id)
         try:
             mode='SINGLE' if state=='K2_M4_SINGLE' else 'BATCH'
             selection=k2_m4_select_input(mode,text,target)
@@ -24302,20 +24316,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     elif d.startswith("hpeg_m4_"):
-        # Existing CallbackQueryHandler; read-only under admin role.
+        # Reuse the existing admin bot; never execute root code in a callback.
         if role != 'admin':
             await query.message.reply_text("⛔️ فقط مدیر")
             return
         try:
             action,edge_id=k2_m4_parse_callback(d)
+            actor_id=update.effective_user.id
+            chat_id=update.effective_chat.id
+            message_id=query.message.message_id
             if action in ("home","cancel"):
                 context.user_data.pop('state',None)
                 context.user_data.pop('k2_m4_target_edge',None)
                 context.user_data.pop('k2_m4_selection',None)
+                k2_m43_approvals.discard(actor_id,chat_id)
                 display=k2_m4_home_html(edge_id)
                 rows=k2_m4_home_buttons(edge_id)
             elif action in ("single","batch"):
                 context.user_data.pop('k2_m4_selection',None)
+                k2_m43_approvals.discard(actor_id,chat_id)
                 mode="SINGLE" if action=="single" else "BATCH"
                 context.user_data['state']=(
                     "K2_M4_SINGLE" if mode=="SINGLE" else "K2_M4_BATCH"
@@ -24324,6 +24343,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 display=k2_m4_prompt_html(edge_id,mode)
                 rows=k2_m4_cancel_buttons(edge_id)
             elif action in ("refresh","status"):
+                k2_m43_approvals.discard(actor_id,chat_id)
                 data=context.user_data.get('k2_m4_selection')
                 if (not isinstance(data,(tuple,list)) or len(data)!=3
                     or data[2]!=edge_id or not isinstance(data[1],(tuple,list))):
@@ -24342,6 +24362,56 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     display=k2_m4_preview_html(inventory)
                 rows=k2_m4_preview_buttons(edge_id)
+            elif action=="prepare":
+                # Root plans are rechecked independently. Never persist the
+                # returned request ID in PicklePersistence/user_data.
+                k2_m43_approvals.discard(actor_id,chat_id)
+                data=context.user_data.get('k2_m4_selection')
+                if (not isinstance(data,(tuple,list)) or len(data)!=3
+                    or data[2]!=edge_id or not isinstance(data[1],(tuple,list))):
+                    raise M43ClientHold("M43_SELECTED_SCOPE_MISSING")
+                selection=k2_m4_select_input(data[0],",".join(data[1]),edge_id)
+                epoch=k2_m43_approvals.begin(actor_id,chat_id)
+                try:
+                    prepared=await k2_m43_client(released=True).request(
+                        "PREPARE",actor_id=actor_id,chat_id=chat_id,
+                        selection=selection,
+                    )
+                    pending=K2M43Pending.create(
+                        selection=selection,actor_id=actor_id,chat_id=chat_id,
+                        message_id=message_id,result=prepared,
+                    )
+                    k2_m43_approvals.finish(pending,epoch)
+                finally:
+                    k2_m43_approvals.release(actor_id,chat_id)
+                display=k2_m43_confirmation_html(pending)
+                rows=k2_m43_confirmation_buttons(edge_id)
+            elif action in ("confirm","abort"):
+                # Synchronously consume the volatile one-shot confirmation
+                # before any await; a lost IPC reply MUST NOT be replayed.
+                pending=k2_m43_approvals.consume(
+                    actor_id=actor_id,chat_id=chat_id,
+                    message_id=message_id,edge_id=edge_id,
+                )
+                client=k2_m43_client(released=True)
+                if action=="confirm":
+                    response=await client.request(
+                        "CONFIRM",actor_id=actor_id,chat_id=chat_id,
+                        request_id=pending.request_id,
+                    )
+                    display=k2_m43_result_html(
+                        response,selection=pending.selection,
+                    )
+                    rows=k2_m4_preview_buttons(edge_id)
+                else:
+                    response=await client.request(
+                        "CANCEL",actor_id=actor_id,chat_id=chat_id,
+                        request_id=pending.request_id,
+                    )
+                    if response.get("state")!="CANCELLED":
+                        raise M43ClientHold("M43_CANCEL_NOT_ACKNOWLEDGED")
+                    display=k2_m43_cancel_html()
+                    rows=k2_m4_home_buttons(edge_id)
             else:
                 raise M4UIHold("M4_ACTION_UNSUPPORTED")
             buttons=[[InlineKeyboardButton(title,callback_data=data)
@@ -24350,14 +24420,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 display,parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
+        except M43ClientHold:
+            # Never tell the operator that an uncertain request was rolled
+            # back or safe to repeat. Use existing read-only status instead.
+            await query.message.reply_text(
+                k2_m43_halted_html(),parse_mode='HTML',
+            )
         except (M4UIHold,ValueError,sqlite3.Error,OSError):
             await query.message.reply_text(
                 k2_m4_failure_html(),parse_mode='HTML',
             )
         except Exception:
-            log.exception("K2 M4 operator readonly callback HOLD")
+            log.exception("K2 M4 operator guarded callback HOLD")
             await query.message.reply_text(
-                k2_m4_failure_html(),parse_mode='HTML',
+                k2_m43_halted_html(),parse_mode='HTML',
             )
         return
 

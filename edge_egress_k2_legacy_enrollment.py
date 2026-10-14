@@ -67,7 +67,7 @@ def inspect_legacy_enrollment(
     F3/F4 is mandatory: Legacy users must not be routed via a different Edge
     during a supposed same-ingress/same-egress conversion.
     """
-    if not re.fullmatch(r"[a-z][a-z0-9_-]{1,23}", target_edge_id or ""):
+    if not isinstance(target_edge_id, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{1,23}", target_edge_id):
         raise LegacyEnrollmentHold("INVALID_EDGE_ID")
     ts = int(time.time()) if now is None else now
     if type(ts) is not int or ts <= 0:

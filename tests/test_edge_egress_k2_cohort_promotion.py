@@ -212,13 +212,14 @@ class CohortPromotionTests(unittest.TestCase):
 
     def test_wrong_actor_and_expired_confirmation_no_acquire(self):
         review,ticket,executor,_=self.prepared()
-        result=None
         with self.assertRaises(ExecutorHold):
             asyncio.run(executor.execute(
                 self.scope,ticket,actor_id=18,chat_id=42,
             ))
         self.assertEqual(self.mode(),"0")
-        self.assertIsNone(self.fx.state()[-1] if False else None)
+        with self.fx.db() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM failover_operations "
+                "WHERE status='RUNNING'").fetchone()[0],0)
 
     def test_source_identity_or_dns_change_blocks_atomic_transition(self):
         review,ticket,executor,_=self.prepared()

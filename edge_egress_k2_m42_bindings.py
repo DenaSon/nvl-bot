@@ -1,0 +1,332 @@
+"""M4.2 reviewed root-only composition of M1/M2/M3 and ORIGINAL P3/6G.
+
+No parallel worker, second 6G, Telegram callback, dynamic plugin loader, shell
+executor or implicit enablement. Host-specific root callbacks must be audited
+and wired at a separately approved deployment checkpoint. Deny if unavailable.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from hashlib import sha256
+import hmac
+import json
+import os
+from pathlib import Path
+import pwd
+import sqlite3
+import subprocess
+import time
+from typing import Callable
+
+from edge_egress_k2_m4_root_worker import _read_checked, _verify_root_directory
+from edge_egress_k2_m4_root_portal import RootMigrationPortal
+from edge_egress_k2_m4_checkpoint import DurableWaveCheckpoint
+from edge_egress_k2_m4_operator import inspect_telegram_migration
+from edge_egress_k2_m2_ingress_journal import make_m1_readonly_ingress_provider
+from edge_egress_k2_m42_evidence import (
+    M42EvidenceHold, SignedExternalEvidence, load_external_evidence,
+)
+from edge_egress_k2_migration_inventory import MigrationInventory, MigrationSelection
+from edge_egress_k2_m4_bootstrap import DeferredOriginal6GHostPort
+from edge_egress_k2_m3_journal import confirm_original_6g_commit
+from edge_egress_k2_m3_waves import build_wave_plan
+from edge_egress_p3_executor import (
+    ExecutionScope, ExecutionTicket, Existing6GGuardedExecutor,
+    FreshEvidence, issue_execution_ticket, _scope_digest, BASE_GATES,
+    ATTACH_GATES, SOURCE_ENROLL_GATES,
+)
+
+M42_LIVE_BINDINGS_ENABLED = False
+ADMIN_FILE = Path("/etc/nvl-egress/k2-m4/admin-policy.json")
+MAX_ADMIN_BYTES = 8192
+
+
+class M42BindingHold(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class RootAdminPolicy:
+    principals: frozenset[tuple[int, int]]
+
+    def permits(self, actor: int, chat: int) -> bool:
+        return (type(actor) is int and type(chat) is int
+                and (actor, chat) in self.principals)
+
+
+def load_root_admin_policy(*, geteuid: Callable[[], int] = os.geteuid
+                           ) -> RootAdminPolicy:
+    if geteuid() != 0:
+        raise M42BindingHold("M42_ROOT_POLICY_REQUIRED")
+    _verify_root_directory(ADMIN_FILE.parent, group=None, private=True)
+    raw = _read_checked(ADMIN_FILE, maximum=MAX_ADMIN_BYTES, strict=True)
+    def no_duplicates(pairs):
+        d = {}
+        for k, v in pairs:
+            if k in d:
+                raise M42BindingHold("M42_POLICY_DUPLICATE_FIELD")
+            d[k] = v
+        return d
+    try:
+        obj = json.loads(raw, object_pairs_hook=no_duplicates)
+        if (not isinstance(obj, dict)
+            or set(obj) != {"version", "principals"}
+            or type(obj["version"]) is not int or obj["version"] != 1
+            or not isinstance(obj["principals"], list)
+            or not 1 <= len(obj["principals"]) <= 20):
+            raise ValueError()
+        pairs = []
+        for person in obj["principals"]:
+            if not isinstance(person, dict) or set(person) != {"actor_id", "chat_id"}:
+                raise ValueError()
+            actor, chat = person["actor_id"], person["chat_id"]
+            if (type(actor) is not int or actor <= 0
+                or type(chat) is not int or chat == 0):
+                raise ValueError()
+            pairs.append((actor, chat))
+        if len(set(pairs)) != len(pairs):
+            raise ValueError()
+        return RootAdminPolicy(frozenset(pairs))
+    except (TypeError, ValueError, KeyError, UnicodeError) as exc:
+        raise M42BindingHold("M42_ADMIN_POLICY_INVALID") from exc
+
+
+@dataclass(frozen=True)
+class HostReviewedPorts:
+    """Root-owned fixed providers, NEVER constructed from Telegram payload.
+
+    port_factory must construct the existing GuardedVerifiedIngressUIDPort
+    with a real GuardedProtectedUIDPort + SameEdge6GUIDRuntimeStore. It must
+    not change host/PAM/kernel state; all writes are only in P3.apply under 6G.
+    M5 must physically vet implementation before enabling these callbacks.
+    """
+    db_conn: Callable
+    acquire_6g: Callable
+    journal_6g: Callable
+    port_factory: Callable
+    live_admin_role: Callable[[int, int], bool]
+    protected_mode: Callable[[], str]
+    external_evidence: Callable[[], SignedExternalEvidence] = load_external_evidence
+    ingress_provider: Callable = make_m1_readonly_ingress_provider
+    os_uid: Callable[[str], int] = lambda name: pwd.getpwnam(name).pw_uid
+    now: Callable[[], int] = lambda: int(time.time())
+    geteuid: Callable[[], int] = os.geteuid
+
+
+class RootM42Bindings:
+    """Bind authoritative sources; root-only, staged and disabled by default."""
+
+    def __init__(self, *, ports: HostReviewedPorts, root_secret: bytes,
+                 admin_policy: RootAdminPolicy,
+                 reviewed_release: bool = False):
+        if (not isinstance(ports, HostReviewedPorts)
+            or not isinstance(admin_policy, RootAdminPolicy)
+            or type(root_secret) is not bytes or len(root_secret) < 32
+            or not all(callable(c) for c in (
+                ports.db_conn, ports.acquire_6g, ports.journal_6g,
+                ports.port_factory, ports.live_admin_role,
+                ports.protected_mode, ports.external_evidence,
+                ports.ingress_provider, ports.os_uid, ports.now,
+                ports.geteuid))):
+            raise M42BindingHold("M42_ROOT_PORTS_NOT_VERIFIED")
+        self.ports = ports
+        self.secret = root_secret
+        self.policy = admin_policy
+        self.reviewed_release = reviewed_release is True
+        self._outstanding: dict[str, tuple[ExecutionScope, ExecutionTicket]] = {}
+
+    def _gate(self):
+        if (not M42_LIVE_BINDINGS_ENABLED or not self.reviewed_release
+            or self.ports.geteuid() != 0):
+            raise M42BindingHold("M42_LIVE_BINDINGS_NOT_RELEASED")
+
+    def admin(self, actor: int, chat: int) -> bool:
+        self._gate()
+        # Both pinned root actor/chat list AND live DB role must agree.
+        return (self.policy.permits(actor, chat)
+                and self.ports.live_admin_role(actor, chat) is True)
+
+    def _proof(self) -> SignedExternalEvidence:
+        self._gate()
+        ev = self.ports.external_evidence()
+        if not isinstance(ev, SignedExternalEvidence):
+            raise M42BindingHold("M42_SIGNED_EXTERNAL_EVIDENCE_ABSENT")
+        now = self.ports.now()
+        if (type(now) is not int or now < ev.observed_at or now >= ev.expires_at
+            or now - ev.observed_at > 30):
+            raise M42BindingHold("M42_EXTERNAL_EVIDENCE_EXPIRED")
+        return ev
+
+    def review(self, selected: MigrationSelection) -> MigrationInventory:
+        self._gate()
+        if not isinstance(selected, MigrationSelection):
+            raise M42BindingHold("M42_SELECTION_REQUIRED")
+        evidence = self._proof()
+        if evidence.target_edge != selected.target_edge_id:
+            raise M42BindingHold("M42_SIGNED_EDGE_MISMATCH")
+        now = self.ports.now()
+        sources = self.ports.ingress_provider(
+            now=now, run=subprocess.run, geteuid=self.ports.geteuid,
+            resolve_uid=self.ports.os_uid,
+        )
+        if not callable(sources):
+            raise M42BindingHold("M42_ROOT_PAM_WG_SOURCE_ABSENT")
+
+        def source(name: str):
+            w = sources(name)
+            if not any(
+                a.username == name
+                and a.source_edge == w.edge_id and a.source_ipv4 == w.edge_ipv4
+                and a.uid == self.ports.os_uid(name)
+                for a in evidence.accounts
+            ):
+                raise M42BindingHold("M42_SIGNED_PAM_SOURCE_DRIFT")
+            return w
+
+        def count(name: str, uid: int):
+            w = source(name)
+            return evidence.verify_account(
+                name, uid, source_edge=w.edge_id, source_ipv4=w.edge_ipv4,
+            )
+
+        result = inspect_telegram_migration(
+            self.ports.db_conn, selected, now=now,
+            uid_lookup=self.ports.os_uid, source_provider=source,
+            session_provider=count, geteuid=self.ports.geteuid,
+        )
+        evidence.verify_target(
+            selected.target_edge_id, result.target_ipv4, selected.usernames,
+        )
+        return result
+
+    def physical_f4(self, plan) -> bool:
+        self._gate()
+        try:
+            ev = self._proof()
+            ev.verify_target(plan.selection.target_edge_id,
+                             plan.target_ipv4, plan.selection.usernames)
+            for member in plan.members:
+                ev.verify_account(
+                    member.username, member.uid,
+                    source_edge=member.source_edge_id,
+                    source_ipv4=member.source_ipv4,
+                )
+            current = self.review(plan.selection)
+            return bool(current.target_f4_accepted
+                        and build_wave_plan(current).digest == plan.digest
+                        and not plan.global_blockers and not plan.blocked)
+        except (M42EvidenceHold, AttributeError, ValueError, TypeError):
+            return False
+
+    def mode(self) -> str:
+        self._gate()
+        observed = self.ports.protected_mode()
+        if type(observed) is not str or observed not in ("0", "1"):
+            raise M42BindingHold("M42_PROTECTED_MODE_UNTRUSTED")
+        return observed
+
+    def fresh_p3_evidence(self, scope: ExecutionScope) -> FreshEvidence:
+        self._gate()
+        if not isinstance(scope, ExecutionScope):
+            raise M42BindingHold("M42_P3_SCOPE_UNTRUSTED")
+        if scope.action != "UID_ENROLL_SOURCE" or (
+            scope.source_host != scope.target_host
+        ):
+            # Cross-Edge mixed Legacy UID_ATTACH remains an explicit HOLD.
+            raise M42BindingHold("M42_ONLY_SAME_EDGE_LEGACY_ALLOWED")
+        from edge_egress_k2_migration_inventory import select_migration
+        selection = select_migration("SINGLE", (scope.username,), scope.edge_id)
+        reviewed = self.review(selection)
+        if (any(issue != 'SHARED_6G_BUSY' for issue in reviewed.global_issues)\
+            or not reviewed.target_f4_accepted
+            or any(a.selected and a.issues for a in reviewed.accounts)
+            or self.mode() != "0"):
+            raise M42BindingHold("M42_P3_FRESH_EVIDENCE_HOLD")
+        proof = self._proof()
+        proof.verify_account(scope.username, scope.uid)
+        if (proof.target_edge != scope.edge_id or
+            proof.target_ipv4 != scope.target_host):
+            raise M42BindingHold("M42_P3_EXTERNAL_SCOPE_DRIFT")
+        observed = {
+            "scope": _scope_digest(scope),
+            "generation": proof.generation,
+            "observed_at": proof.observed_at,
+            "target": proof.target_ipv4,
+        }
+        digest = sha256(json.dumps(observed, sort_keys=True,
+                                  separators=(",", ":")).encode()).hexdigest()
+        return FreshEvidence(
+            digest=digest, checked_at=self.ports.now(),
+            gates=BASE_GATES | ATTACH_GATES | SOURCE_ENROLL_GATES,
+        )
+
+    def issue_ticket(self, scope: ExecutionScope,
+                     actor: int, chat: int) -> ExecutionTicket:
+        self._gate()
+        if not self.admin(actor, chat):
+            raise M42BindingHold("M42_ROOT_OPERATOR_UNAUTHORIZED")
+        fresh = self.fresh_p3_evidence(scope)
+        ticket = issue_execution_ticket(
+            scope, fresh, actor_id=actor, chat_id=chat, now=self.ports.now(),
+        )
+        # Bound one-shot ticket cache: never grow without limit and never
+        # evict an in-flight approval to make room for a new one.
+        if len(self._outstanding) >= 20:
+            raise M42BindingHold("M42_ROOT_TICKET_QUEUE_FULL")
+        self._outstanding[ticket.nonce] = (scope, ticket)
+        return ticket
+
+    async def execute_single(self, scope: ExecutionScope,
+                             ticket: ExecutionTicket,
+                             actor: int, chat: int):
+        self._gate()
+        if not self.admin(actor, chat):
+            raise M42BindingHold("M42_ROOT_OPERATOR_UNAUTHORIZED")
+        record = self._outstanding.pop(ticket.nonce, None)
+        if (record is None or record != (scope, ticket)
+            or ticket.actor_id != actor or ticket.chat_id != chat
+            or ticket.scope_digest != _scope_digest(scope)):
+            raise M42BindingHold("M42_P3_ONE_SHOT_TICKET_UNTRUSTED")
+        # This is deliberately a root-owned, reviewed factory. Its output is
+        # the REAL M3 guarded port, not an arbitrary callable/boolean.
+        port = self.ports.port_factory(scope, ticket, self.review)
+        if (not isinstance(port, DeferredOriginal6GHostPort)
+            or port.scope != scope or port.ticket != ticket
+            or port.db_conn is not self.ports.db_conn):
+            raise M42BindingHold("M42_GUARDED_UID_HOST_PORT_REQUIRED")
+        executor = Existing6GGuardedExecutor(
+            db_conn=self.ports.db_conn,
+            acquire_fn=self.ports.acquire_6g,
+            journal_fn=self.ports.journal_6g,
+            review_fn=self.fresh_p3_evidence,
+            host_port=port, release_enabled=True,
+            geteuid=self.ports.geteuid, clock=self.ports.now,
+        )
+        return await executor.execute(scope, ticket,
+                                      actor_id=actor, chat_id=chat)
+
+    def confirm_6g(self, scope: ExecutionScope,
+                   ticket: ExecutionTicket, op_id: int) -> bool:
+        self._gate()
+        return confirm_original_6g_commit(
+            self.ports.db_conn, scope, ticket, op_id,
+        )
+
+    def portal(self, *, checkpoint: DurableWaveCheckpoint) -> RootMigrationPortal:
+        self._gate()
+        if not isinstance(checkpoint, DurableWaveCheckpoint):
+            raise M42BindingHold("M42_ORIGINAL_DB_CHECKPOINT_REQUIRED")
+        return RootMigrationPortal(
+            root_secret=self.secret,
+            review=self.review,
+            admin_authorized=self.admin,
+            independent_physical_f4=self.physical_f4,
+            current_protected_mode=self.mode,
+            issue_single_ticket=self.issue_ticket,
+            execute_single=self.execute_single,
+            committed_6g=self.confirm_6g,
+            checkpoint=checkpoint,
+            clock=self.ports.now,
+            geteuid=self.ports.geteuid,
+            release_enabled=True,
+        )

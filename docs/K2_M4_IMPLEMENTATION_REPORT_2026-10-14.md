@@ -70,3 +70,8 @@ All source tests use mock worker/physical gates and **cannot** attest real root/
 ## M4.1 Root Worker source-only continuation — 2026-10-15
 
 See [K2 M4.1 Root Worker source checkpoint](K2_M4_1_ROOT_WORKER_SOURCE_2026-10-15.md). Source now adds a sealed, root-only default-OFF Unix socket host, exact SHA256 manifest and 0600 HMAC file policies, non-root SO_PEERCRED caller UID, bounded framed IPC and tests. **Root daemon entrypoint remains inert:** no trusted P3 factory, independent F4/session witness, production bot non-root UID cutover or live root socket installation. This implements M4.1 code scaffolding, **not** operational M4 execution; M4.2–M4.5 gates remain HOLD. Do not toggle any flags or merge to auto-deploying master.
+
+
+## M4.2 trusted root evidence and original-6G binding (2026-10-15)
+
+Source integration adapters added on the stacked M4 branch; see [M4.2 evidence/worker handoff](K2_M4_2_TRUSTED_ROOT_BINDINGS_2026-10-15.md). M1/M2 PAM+WG source, root-only actor policy, separately signed session/F4 report, P3-A ticket/original 6G terminal receipt and M2 first/Nth bootstrap under 6G have bounded fail-closed ports. **NOT** an operationally installed worker: trusted real host factory, external probe/signing service, non-root bot split and disposable physical F4 remain HOLD; execution flags still OFF. M4.3/M4.4 are not secretly completed.

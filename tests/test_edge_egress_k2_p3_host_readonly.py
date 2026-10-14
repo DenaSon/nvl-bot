@@ -83,7 +83,7 @@ class RootOnlyHostWitnessTests(unittest.TestCase):
                          os_uid=lambda n:True)
 
     def test_root_owned_pam_module_and_sshd_context_required(self):
-        self.assert_hold("V1_ROOT_PAM_GATE_NOT_PINN",
+        self.assert_hold("V1_ROOT_PAM_GATE_NOT_PINNED",
                          gate_digest_verified=False)
         self.assert_hold("LIVE_PAM_SSHD_CONTEXT_NOT_VERIFIED",
                          pam_text="")

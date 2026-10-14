@@ -124,12 +124,14 @@ class K2M1InventoryTests(unittest.TestCase):
                               self.selected(snap)[0].issues)
                 self.assertFalse(snap.inventory_clear)
 
-    def test_existing_target_ingress_is_not_migrated_to_itself(self):
+    def test_same_target_ingress_allows_legacy_source_enrollment(self):
         snap=self.preview(ingress_witness=lambda name:LiveIngressWitness(
             name,"e9",TARGET,NOW-1,"INDEPENDENT_LIVE"))
-        self.assertIn("TARGET_ALREADY_CURRENT_INGRESS",
-                      self.selected(snap)[0].issues)
-        self.assertFalse(snap.inventory_clear)
+        self.assertNotIn("TARGET_ALREADY_CURRENT_INGRESS",
+                         self.selected(snap)[0].issues)
+        self.assertTrue(snap.inventory_clear)
+        # Preview is not permission to execute or proof that e9 F4 is live.
+        self.assertFalse(snap.can_execute)
 
     def test_missing_and_active_sessions_fail_closed(self):
         self.assertIn("SESSION_STATE_NOT_ATTESTED",

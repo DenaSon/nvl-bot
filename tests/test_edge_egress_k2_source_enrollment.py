@@ -38,6 +38,7 @@ class SameEdgeEnrollmentTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.path = Path(tmp.name) / "db.sqlite"
         self.uid = 1644
+        self.conn_factory = self.db
         self.request = UIDPolicyRequest(
             replace(req().spec, edge_id="src1", edge_public_ipv4=SOURCE),
             "nvl0557", self.uid, priority=1780,
@@ -150,23 +151,23 @@ class SameEdgeEnrollmentTests(unittest.TestCase):
         else:
             return plan,evidence,None,None
         store=SameEdge6GUIDRuntimeStore(
-            self.db,self.lookup,scope=plan.scope,ticket=ticket,
+            self.conn_factory,self.lookup,scope=plan.scope,ticket=ticket,
             shared_edge_enabled=True,
         )
         self.kernel.ip=TARGET if wrong_ip else SOURCE
         self.safety.error_on=safety_failure
         uid_port=GuardedProtectedUIDPort(
-            db_conn=self.db,plan=plan.uid_plan,ticket=ticket,store=store,
+            db_conn=self.conn_factory,plan=plan.uid_plan,ticket=ticket,store=store,
             kernel=self.kernel,safety=self.safety,
             roster_loader=lambda:self.roster,guard_loader=lambda _:self.manifest,
             os_uid_for_username=self.lookup,release_enabled=release,
         )
         port=GuardedSourceEnrollmentPort(
-            db_conn=self.db,plan=plan,ticket=ticket,uid_port=uid_port,
+            db_conn=self.conn_factory,plan=plan,ticket=ticket,uid_port=uid_port,
             os_uid_for_username=self.lookup,release_enabled=release,
         )
         engine=Existing6GGuardedExecutor(
-            db_conn=self.db,acquire_fn=self.acquire,journal_fn=self.journal,
+            db_conn=self.conn_factory,acquire_fn=self.acquire,journal_fn=self.journal,
             review_fn=lambda _:evidence,host_port=port,
             release_enabled=True,geteuid=lambda:0,clock=lambda:1000,
         )

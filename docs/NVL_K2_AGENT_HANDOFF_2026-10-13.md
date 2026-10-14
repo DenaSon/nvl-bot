@@ -1,3 +1,10 @@
+## 2026-10-14 — K2 Phase 2 Source enrollment implementation (feature-only)
+
+Nested PR #132 adds guarded **same-Edge Legacy → PROTECTED** source code: explicit P3-A `UID_ENROLL_SOURCE` action (same source/target IP only, global mode must remain `0`), fresh independent safety gates; `SameEdge6GUIDRuntimeStore` checks exact nonce/scope/action of the original 6G RUNNING lease and keeps the base F2 store unchanged; `GuardedSourceEnrollmentPort` rechecks whole-cohort Legacy snapshot under that lease before calling the existing P3-C deny-first UID lifecycle. No Linux accounts, public DNS, host metadata, default relay, global mode or original wg0 are changed by this code path. See `docs/K2_PHASE2_SOURCE_ENROLLMENT_2026-10-14.md`.
+
+**Important: source/offline mocks are NOT an accepted live migration.** Source Edge itself requires F3 + independently attested F4, a separately verified complete PAM/roster/BootGuard and 6G operator rescue; existing production 6G acquisition with same source/target is still unverified, and external SSH/SOCKS + DNS/IPv6/loss/cold-boot evidence is still required. Do not register an execute callback, switch `edge_egress_protected_mode` to 1, or merge parent draft PR #120 into master. Current next work: final concrete privileged host safety provider + disposable-VPS F4 acceptance, then approved source enroll canary, eventually a separately gated mixed-mode→all-protected promotion followed by existing protected J handoff.
+
+---
 ## 2026-10-14 — Phase 2 Legacy enrollment inventory (feature branch, not a release)
 
 The nested K2 Phase 2 PR #131 adds SELECT-only `edge_egress_k2_legacy_enrollment.py` and shows Legacy/inconsistent UID counts in the existing Telegram relay review. It independently checks the current source Edge F3 identity, target F3, source/target F4, real OS UID/host, partial protected mappings, DNS and shared 6G busy status. Its fingerprint and audit are **not** a transfer ticket or F4 acceptance. See `docs/K2_PHASE2_LEGACY_ENROLLMENT_2026-10-14.md`.

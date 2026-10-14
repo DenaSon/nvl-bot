@@ -388,6 +388,7 @@ from edge_egress_k2_vps_lab import (
 )
 from edge_egress_k2_phase1_wizard import (
     assert_isolated_new_edge_candidate, K2WizardHold,
+    normalize_k2_customer_port,
 )
 from edge_egress_k2_transfer_service import (
     GuardedK2TelegramTransferService, PreparedCustomerTransfer,
@@ -3849,8 +3850,9 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
     # unlock Legacy host selection or mutate any protected UID while staging.
     if egress_stage_requested:
         try:
+            k2_customer_port = normalize_k2_customer_port(customer_port)
             await asyncio.to_thread(
-                assert_isolated_new_edge_candidate, db_conn, edge_ip, customer_port,
+                assert_isolated_new_edge_candidate, db_conn, edge_ip, k2_customer_port,
             )
         except (K2WizardHold, sqlite3.Error):
             await app.bot.send_message(
@@ -3923,6 +3925,7 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
                 ssh_port=result.get('_edge_ssh_port'),
                 root_password=root_password,
                 private_key_path=private_key_path,
+                customer_port=k2_customer_port if egress_stage_requested else 0,
             )
             if egress_stage_requested:
                 egress_staged_edge_result(edge_ip, result)
@@ -3942,7 +3945,7 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
         # Recheck after remote operations in case the host/6G state changed.
         try:
             await asyncio.to_thread(
-                assert_isolated_new_edge_candidate, db_conn, edge_ip, customer_port,
+                assert_isolated_new_edge_candidate, db_conn, edge_ip, k2_customer_port,
             )
         except (K2WizardHold, sqlite3.Error):
             await app.bot.send_message(

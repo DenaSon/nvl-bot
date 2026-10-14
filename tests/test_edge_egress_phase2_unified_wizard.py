@@ -3,6 +3,7 @@
 All bot functions are AST-extracted with fake I/O. No VPS, Core or network.
 """
 import asyncio
+import sqlite3
 import sys
 import types
 import unittest
@@ -13,6 +14,7 @@ from edge_egress_entrypoints import (
     classify_edge_callback, EdgeOperation, evaluate_manual_edge_gate,
 )
 from edge_egress_v1_console import EgressConsoleHold
+from edge_egress_k2_phase1_wizard import normalize_k2_customer_port
 
 if sys.version_info >= (3, 12):
     from test_edge_egress_bot_integration import get_function
@@ -99,7 +101,7 @@ class WizardCallbackRoutingTests(unittest.TestCase):
 @unittest.skipIf(sys.version_info < (3,12), "NVL bot requires Python 3.12")
 class IntegratedWizardFunctionTests(unittest.TestCase):
     def execute(self, *, opt_in, global_toggle="0", protected="0",
-                stage_error=None, stage_payload=None):
+                stage_error=None, stage_payload=None, customer_port=2252):
         events=[]
         bot=types.SimpleNamespace(send_message=AsyncMock())
         app=types.SimpleNamespace(bot=bot)
@@ -120,6 +122,7 @@ class IntegratedWizardFunctionTests(unittest.TestCase):
             return default
         def stage(**kwargs):
             events.append(("stage",kwargs["edge_ip"],kwargs["ingress_ip"]))
+            events.append(("stage_port",kwargs.get("customer_port")))
             if stage_error:
                 raise ValueError("SIMULATED_STAGE_HOLD")
             return stage_payload if stage_payload is not None else {
@@ -129,6 +132,7 @@ class IntegratedWizardFunctionTests(unittest.TestCase):
             }
         def fake_sync(*args, **kwargs):
             events.append(("ingress",args[0]))
+            events.append(("sync_port",args[2]))
             return True, "", outcome.copy()
         fake_module=types.SimpleNamespace(onboard_after_ingress=stage)
         fn=get_function("_provision_new_edge",{
@@ -143,6 +147,8 @@ class IntegratedWizardFunctionTests(unittest.TestCase):
             "egress_staged_edge_result":staged_edge_result,
             "db_conn":lambda:None,
             "assert_isolated_new_edge_candidate":lambda *args:None,
+            "normalize_k2_customer_port":normalize_k2_customer_port,
+            "sqlite3":sqlite3,
             "K2WizardHold":__import__("edge_egress_k2_phase1_wizard",fromlist=["K2WizardHold"]).K2WizardHold,
             "InlineKeyboardButton":lambda label,callback_data:(label,callback_data),
             "InlineKeyboardMarkup":lambda rows:rows,
@@ -151,7 +157,7 @@ class IntegratedWizardFunctionTests(unittest.TestCase):
         })
         with patch.dict(sys.modules,{"edge_egress_v1_onboarding":fake_module}):
             result=asyncio.run(fn(
-                "172.86.105.67","DO_NOT_LOG",2252,
+                "172.86.105.67","DO_NOT_LOG",customer_port,
                 "edge-172-86-105-67",5000,app,
                 egress_stage_requested=opt_in,
             ))
@@ -173,6 +179,24 @@ class IntegratedWizardFunctionTests(unittest.TestCase):
         self.assertFalse(any(event[0]=="setting_write" and
                              event[1][0]=="edge_egress_v1_onboard_enabled"
                              for event in events))
+
+    def test_string_telegram_port_passes_k2_and_pins_customer_port(self):
+        result, events, _ = self.execute(opt_in=True, customer_port="2252")
+        self.assertTrue(result[0])
+        self.assertIn(("sync_port", "2252"), events)
+        self.assertIn(("stage_port", 2252), events)
+
+    def test_string_port_does_not_change_legacy_installer_contract(self):
+        result, events, _ = self.execute(opt_in=False, customer_port="2252")
+        self.assertTrue(result[0])
+        self.assertIn(("sync_port", "2252"), events)
+        self.assertNotIn(("stage_port", 2252), events)
+
+    def test_invalid_k2_port_holds_before_remote_install(self):
+        result, events, messages = self.execute(opt_in=True, customer_port="65536")
+        self.assertFalse(result[0])
+        self.assertFalse(any(x[0] in ("ingress", "stage") for x in events))
+        self.assertIn("قابل آماده", messages[-1].args[1])
 
     def test_legacy_flow_default_off_remains_ingress_only(self):
         result,events,messages=self.execute(opt_in=False,global_toggle="0")

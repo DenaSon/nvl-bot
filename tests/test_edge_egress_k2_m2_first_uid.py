@@ -122,7 +122,7 @@ class M2FirstUIDTests(unittest.TestCase):
                    return_value=True), \
              patch("edge_egress_v1_admission.inspect_pam",
                    return_value=True), \
-             patch("ops.k2_m2_first_uid.Path.exists",
+             patch("pathlib.Path.exists",
                    new=lambda path:str(path) in pinned):
             resume_first_uid_bootstrap(**args)
         self.assertEqual(current[0],plan.pam_after)

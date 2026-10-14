@@ -94,9 +94,11 @@ class M4CheckpointTests(unittest.TestCase):
         other=sign_wave_approval(
             self.plan,actor_id=12,chat_id=-333,expires_at=NOW+90,
             secret=SECRET,now=NOW,operator_authorized=True)
-        self.port.prepare(self.plan,other)
-        with self.assertRaisesRegex(CheckpointHold,"ANOTHER_WAVE|UNRESOLVED"):
-            self.port.begin(self.plan,other,actor_id=12,chat_id=-333)
+        # Since M4.4 no second PREPARE can be staged while a prior
+        # wave remains RUNNING or HOLD. This is stronger than the old
+        # BEGIN-only conflict check.
+        with self.assertRaisesRegex(CheckpointHold,"UNRESOLVED"):
+            self.port.prepare(self.plan,other)
         self.assertEqual(self.port.inspect(self.plan,self.approval).state,
                          "UNKNOWN_INFLIGHT")
 

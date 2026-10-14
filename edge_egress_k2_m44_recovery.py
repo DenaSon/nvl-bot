@@ -171,7 +171,7 @@ def inspect_root_recovery(
                 raise M44StatusHold("M44_CHECKPOINT_SELECTED_SCOPE_CHANGED")
             progress = json.loads(progress_json)
             if len(progress) > len(selection.usernames) or (
-                state in ("SUCCEEDED", "HOLD")
+                state == "SUCCEEDED"
                 and len(progress) != len(selection.usernames)
             ):
                 raise M44StatusHold("M44_CHECKPOINT_PROGRESS_LENGTH_UNTRUSTED")
@@ -179,7 +179,7 @@ def inspect_root_recovery(
             mismatch = False
             for index, name in enumerate(selection.usernames):
                 if index >= len(progress):
-                    users.append(RecoveredUser(name, "UNKNOWN" if state == "RUNNING"
+                    users.append(RecoveredUser(name, "UNKNOWN" if state in ("RUNNING","HOLD")
                                               else "NOT_STARTED"))
                     continue
                 item = progress[index]

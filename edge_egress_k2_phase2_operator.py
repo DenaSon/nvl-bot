@@ -359,6 +359,11 @@ def render_cohort_review(review: RelayCohortReview) -> str:
                 if audit.invalid_count:
                     body.append(f"حساب‌های نیازمند بررسی: <b>{audit.invalid_count}</b>")
             body.append("ابتدا خروجی کاربران قدیمی باید روی رله فعلی به‌طور امن تأیید شود.")
+        elif ("PROTECTED_MODE_REQUIRED" in review.blockers
+              and "SOURCE_PROTECTED_EDGE_UNVERIFIED" not in review.blockers
+              and review.active_accounts > 0):
+            # DB cohort identity only; not evidence of root/PAM/F4 acceptance.
+            body.append("همه حساب‌های فعال در فهرست محافظت‌شده‌اند؛ تأیید نهایی ایمنی سرور باقی است.")
         body.append("هیچ مسیر، DNS یا حسابی تغییر نکرده است.")
     return "\n".join(body)
 

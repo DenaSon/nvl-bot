@@ -29,10 +29,11 @@ class FirstUIDHold(ValueError):
 class Original6GRootPort:
     """Typed, lease-checked adapter; no dynamic shell command generation."""
 
-    def __init__(self, *, port: RootFilePort, lease: Callable[[], int]):
-        if port is None or not callable(lease):
-            raise FirstUIDHold("M2_LEASE_PORT_REQUIRED")
-        self.port, self.lease = port, lease
+    def __init__(self, *, port: RootFilePort, lease: Callable[[], int],
+                 before_pam: Callable[[], bool]):
+        if port is None or not callable(lease) or not callable(before_pam):
+            raise FirstUIDHold("M2_LEASE_AND_PAM_FENCE_REQUIRED")
+        self.port, self.lease, self.before_pam = port, lease, before_pam
 
     def create(self, path, data) -> None:
         self.lease()
@@ -40,6 +41,9 @@ class Original6GRootPort:
 
     def replace_exact(self, path, expected, replacement) -> None:
         self.lease()
+        from ops.k2_p3_guard_installer import PAM
+        if path == PAM and self.before_pam() is not True:
+            raise FirstUIDHold("M2_BEFORE_PAM_DNS_IPV6_FENCE_NOT_ATTESTED")
         self.port.replace_exact(path, expected, replacement)
 
     def command(self, *cmd) -> None:
@@ -56,6 +60,8 @@ def guarded_first_uid_bootstrap(
     mixed_legacy_pam_ok: Callable[[], bool],
     account_idle_ok: Callable[[str, int], bool],
     sshd_effective_probe: Callable[[], str],
+    guard_frozen_ok: Callable[[BootGuardManifest], bool],
+    dns_ipv6_ok: Callable[[BootGuardManifest], bool],
     release_enabled: bool = False,
     geteuid: Callable[[], int] = os.geteuid,
 ) -> None:
@@ -70,6 +76,7 @@ def guarded_first_uid_bootstrap(
         not all(callable(x) for x in (
             os_uid, independent_rescue_ok, independent_f4_ok,
             mixed_legacy_pam_ok, account_idle_ok, sshd_effective_probe,
+            guard_frozen_ok, dns_ipv6_ok,
         ))):
         raise FirstUIDHold("M2_FIRST_BOOTSTRAP_RELEASE_NOT_ATTESTED")
     try:
@@ -96,7 +103,13 @@ def guarded_first_uid_bootstrap(
     # Original installer validates installed pinned source bundle, PAM
     # diff, root ownership, canary idleness, kernel denial and systemd;
     # the port reasserts the SAME 6G intent before every host mutation.
-    wrapped=Original6GRootPort(port=port,lease=locked)
+    wrapped=Original6GRootPort(
+        port=port,lease=locked,
+        before_pam=lambda: (
+            guard_frozen_ok(manifest) is True and
+            dns_ipv6_ok(manifest) is True
+        ),
+    )
     apply_guard_install(
         plan=plan,current_pam=current_pam,existing_guards={},
         os_uid=os_uid,port=wrapped,
@@ -196,7 +209,13 @@ def resume_first_uid_bootstrap(
         "guard_unit":plan.guard_unit.encode(),
         "dns_unit":plan.dns_unit.encode(),
     }
-    wrapped=Original6GRootPort(port=port,lease=locked)
+    wrapped=Original6GRootPort(
+        port=port,lease=locked,
+        before_pam=lambda: (
+            guard_frozen_ok(manifest) is True and
+            dns_ipv6_ok(manifest) is True
+        ),
+    )
     for key,path in paths.items():
         locked()
         if existing[key] is None:

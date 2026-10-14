@@ -22,6 +22,7 @@ from edge_egress_k2_m3_waves import (
     run_migration_wave,
 )
 from edge_egress_p3_executor import ExecutionScope, ExecutionTicket, ExecutionReceipt
+from edge_egress_k2_m4_checkpoint import DurableWaveCheckpoint
 
 M4_ROOT_PORTAL_ENABLED = False
 
@@ -53,6 +54,7 @@ class RootMigrationPortal:
         execute_single: Callable[
             [ExecutionScope,ExecutionTicket,int,int],Awaitable[ExecutionReceipt]],
         committed_6g: Callable[[ExecutionScope,ExecutionTicket,int],bool],
+        checkpoint: DurableWaveCheckpoint | None = None,
         clock: Callable[[],int] = lambda:int(time.time()),
         geteuid: Callable[[],int] = os.geteuid,
         release_enabled: bool = False,
@@ -65,14 +67,16 @@ class RootMigrationPortal:
         self.issue_ticket=issue_single_ticket
         self.execute_single=execute_single
         self.committed_6g=committed_6g
+        self.checkpoint=checkpoint
         self.clock=clock
         self.geteuid=geteuid
         self.release_enabled=release_enabled
-        self._used=set()
 
     def _gate(self,actor_id:int,chat_id:int) -> None:
         if (not M4_ROOT_PORTAL_ENABLED or self.release_enabled is not True
-            or self.geteuid()!=0 or not isinstance(self.secret,bytes)
+            or self.geteuid()!=0
+            or not isinstance(self.checkpoint,DurableWaveCheckpoint)
+            or not isinstance(self.secret,bytes)
             or len(self.secret)<32 or type(actor_id) is not int
             or type(chat_id) is not int or actor_id<=0 or chat_id==0
             or not all(callable(fn) for fn in (
@@ -104,6 +108,7 @@ class RootMigrationPortal:
             expires_at=now+90,secret=self.secret,now=now,
             operator_authorized=True,
         )
+        self.checkpoint.prepare(plan,approval)
         return PreparedWave(plan,approval)
 
     async def execute(self,prepared: PreparedWave, *,
@@ -117,9 +122,6 @@ class RootMigrationPortal:
             plan,approval,actor_id=actor_id,chat_id=chat_id,
             secret=self.secret,now=now,
         )
-        if approval.signature in self._used:
-            raise RootPortalHold("M4_OPERATOR_APPROVAL_ALREADY_CONSUMED")
-        self._used.add(approval.signature)  # consume before any awaits
         if len(plan.members)>10 or plan.global_blockers or plan.blocked:
             raise RootPortalHold("M4_PLAN_CHANGED_OR_BLOCKED")
         refreshed=self.review(plan.selection)
@@ -128,15 +130,29 @@ class RootMigrationPortal:
             raise RootPortalHold("M4_SELECTED_WAVE_CHANGED")
         if self.physical_f4(plan) is not True:
             raise RootPortalHold("M4_F4_EXPIRED_BEFORE_EXECUTE")
-        # M3 repeats per-account freshness, exact P3 ticket, active-global
-        # mode, and durable ORIGINAL 6G terminal receipt before next UID.
-        return await run_migration_wave(
-            plan,approval,actor_id=actor_id,chat_id=chat_id,
-            approval_secret=self.secret,
-            fresh_inventory=self.review,
-            issue_single_ticket=self.issue_ticket,
-            execute_single=self.execute_single,
-            committed_6g=self.committed_6g,
-            current_protected_mode=self.current_protected_mode,
-            release_enabled=True,geteuid=self.geteuid,clock=self.clock,
-        )
+        # The root DB consumes exactly this actor/chat/plan approval BEFORE
+        # any P3 host mutation. A crash leaves RUNNING permanently inspectable
+        # as UNKNOWN_INFLIGHT; no automatic 6G unlock or batch replay.
+        self.checkpoint.begin(plan,approval,actor_id=actor_id,chat_id=chat_id)
+        try:
+            report=await run_migration_wave(
+                plan,approval,actor_id=actor_id,chat_id=chat_id,
+                approval_secret=self.secret,
+                fresh_inventory=self.review,
+                issue_single_ticket=self.issue_ticket,
+                execute_single=self.execute_single,
+                committed_6g=self.committed_6g,
+                current_protected_mode=self.current_protected_mode,
+                release_enabled=True,geteuid=self.geteuid,clock=self.clock,
+            )
+            self.checkpoint.finish(plan,approval,report)
+            return report
+        except BaseException:
+            # CancelledError is BaseException; never resume next UID when
+            # cancellation happens during awaited root operations. Preserve
+            # the original exception if checkpoint writing itself fails.
+            try:
+                self.checkpoint.hold(plan,approval)
+            except Exception:
+                pass  # RUNNING remains a stronger fail-closed gate.
+            raise

@@ -142,7 +142,7 @@ def inspect_first_uid_stage(*, plan, pinned_pam_before: bytes,
     if current_pam != pinned_pam_before:
         return StageRecovery("HOLD",False,True,reason="PAM_CONTENT_UNTRUSTED")
     if any(raw is not None and raw != (
-        plan.pam_before if k=="pam_backup" else expected[k])
+        pinned_pam_before if k=="pam_backup" else expected[k])
         for k,raw in staged.items()):
         return StageRecovery("HOLD",False,True,reason="FIRST_STAGE_BYTES_MISMATCH")
     missing=tuple(k for k,v in staged.items() if v is None)

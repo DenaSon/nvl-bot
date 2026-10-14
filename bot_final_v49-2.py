@@ -376,6 +376,20 @@ from edge_egress_k2_final_integration import (
     transfer_preview_html as k2_transfer_preview_html,
     transfer_preview_buttons as k2_transfer_preview_buttons,
 )
+from edge_egress_k2_m4_telegram import (
+    M4UIHold, parse_callback as k2_m4_parse_callback,
+    select_input as k2_m4_select_input,
+    home_html as k2_m4_home_html,
+    home_buttons as k2_m4_home_buttons,
+    prompt_html as k2_m4_prompt_html,
+    cancel_buttons as k2_m4_cancel_buttons,
+    preview_html as k2_m4_preview_html,
+    preview_buttons as k2_m4_preview_buttons,
+    failure_html as k2_m4_failure_html,
+)
+from edge_egress_k2_m4_operator import (
+    inspect_telegram_migration as k2_m4_readonly_preview,
+)
 from edge_egress_k2_p1_worker import (
     Phase1Hold, inspect_phase1, activate_phase1, probe_phase1,
 )
@@ -10780,6 +10794,40 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = context.user_data.get('state')
     role = context.user_data.get('role')
     chat_id = update.effective_chat.id
+
+    # K2 M4: existing-bot, admin-only Single/Batch selection. Persist no
+    # root approval, SSH secret, operator ticket or 6G nonce in Pickle.
+    if state in ('K2_M4_SINGLE', 'K2_M4_BATCH'):
+        context.user_data.pop('state', None)
+        target=context.user_data.pop('k2_m4_target_edge',None)
+        context.user_data.pop('k2_m4_selection',None)
+        if role != 'admin':
+            await update.message.reply_text("⛔️ فقط مدیر")
+            return
+        try:
+            mode='SINGLE' if state=='K2_M4_SINGLE' else 'BATCH'
+            selection=k2_m4_select_input(mode,text,target)
+            inventory=await asyncio.to_thread(
+                k2_m4_readonly_preview,db_conn,selection
+            )
+            context.user_data['k2_m4_selection']=(
+                mode,selection.usernames,selection.target_edge_id
+            )
+            rows=k2_m4_preview_buttons(target)
+            buttons=[[InlineKeyboardButton(title,callback_data=data)
+                      for title,data in row] for row in rows]
+            await update.message.reply_text(
+                k2_m4_preview_html(inventory),parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        except (M4UIHold,ValueError,sqlite3.Error,OSError):
+            await update.message.reply_text(
+                k2_m4_failure_html(),parse_mode='HTML')
+        except Exception:
+            log.exception("K2 M4 readonly selected UID preview HOLD")
+            await update.message.reply_text(
+                k2_m4_failure_html(),parse_mode='HTML')
+        return
 
     # D1-C2B: a protected-mode legacy Edge text wizard must be vetoed BEFORE
     # collecting root credentials, changing host_pool or starting remote SSH.
@@ -24246,6 +24294,60 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(
                 "⛔️ عملیات به نتیجه قطعی نرسید؛ تا بررسی قفل 6G و "
                 "وضعیت کاربران، اجرای مجدد ممنوع است."
+            )
+        return
+
+    elif d.startswith("hpeg_m4_"):
+        # Existing CallbackQueryHandler; read-only under admin role.
+        if role != 'admin':
+            await query.message.reply_text("⛔️ فقط مدیر")
+            return
+        try:
+            action,edge_id=k2_m4_parse_callback(d)
+            if action in ("home","cancel"):
+                context.user_data.pop('state',None)
+                context.user_data.pop('k2_m4_target_edge',None)
+                context.user_data.pop('k2_m4_selection',None)
+                display=k2_m4_home_html(edge_id)
+                rows=k2_m4_home_buttons(edge_id)
+            elif action in ("single","batch"):
+                context.user_data.pop('k2_m4_selection',None)
+                mode="SINGLE" if action=="single" else "BATCH"
+                context.user_data['state']=(
+                    "K2_M4_SINGLE" if mode=="SINGLE" else "K2_M4_BATCH"
+                )
+                context.user_data['k2_m4_target_edge']=edge_id
+                display=k2_m4_prompt_html(edge_id,mode)
+                rows=k2_m4_cancel_buttons(edge_id)
+            elif action=="refresh":
+                data=context.user_data.get('k2_m4_selection')
+                if (not isinstance(data,(tuple,list)) or len(data)!=3
+                    or data[2]!=edge_id or not isinstance(data[1],(tuple,list))):
+                    raise M4UIHold("M4_SELECTION_EXPIRED")
+                selection=k2_m4_select_input(
+                    data[0],",".join(data[1]),edge_id,
+                )
+                inventory=await asyncio.to_thread(
+                    k2_m4_readonly_preview,db_conn,selection,
+                )
+                display=k2_m4_preview_html(inventory)
+                rows=k2_m4_preview_buttons(edge_id)
+            else:
+                raise M4UIHold("M4_ACTION_UNSUPPORTED")
+            buttons=[[InlineKeyboardButton(title,callback_data=data)
+                      for title,data in row] for row in rows]
+            await query.edit_message_text(
+                display,parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        except (M4UIHold,ValueError,sqlite3.Error,OSError):
+            await query.message.reply_text(
+                k2_m4_failure_html(),parse_mode='HTML',
+            )
+        except Exception:
+            log.exception("K2 M4 operator readonly callback HOLD")
+            await query.message.reply_text(
+                k2_m4_failure_html(),parse_mode='HTML',
             )
         return
 

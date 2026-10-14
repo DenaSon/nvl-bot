@@ -5,6 +5,7 @@ from pathlib import Path
 
 from edge_egress_k2_phase1_wizard import (
     assert_isolated_new_edge_candidate, K2WizardHold,
+    normalize_k2_customer_port,
 )
 from edge_egress_phase2_console import inspect_local_stage, EdgeCard
 
@@ -48,6 +49,26 @@ class IsolatedWizardGateTests(unittest.TestCase):
         self.assertFalse(any(line.lstrip().upper().startswith((
             "UPDATE ", "INSERT ", "DELETE ", "CREATE ", "ALTER ", "REPLACE ",
         )) for line in sql))
+
+    def test_k2_telegram_port_normalized_before_both_admission_checks(self):
+        # Telegram supplies a string, but the K2 gate and StagePin need an int.
+        for raw, expected in (("2252", 2252), (2252, 2252),
+                              ("1", 1), ("65535", 65535)):
+            with self.subTest(raw=raw):
+                normalized = normalize_k2_customer_port(raw)
+                self.assertEqual(normalized, expected)
+                self.assertIs(type(normalized), int)
+                assert_isolated_new_edge_candidate(
+                    self.database, "172.86.105.68", normalized,
+                )
+
+    def test_k2_port_normalization_fails_closed(self):
+        for raw in ("", "0", 0, "65536", 65536, "22x", " 2252",
+                    "2252 ", "+2252", "٢٢٥٢", True, False, 2252.0,
+                    None, [], "999999999999999"):
+            with self.subTest(raw=raw), self.assertRaisesRegex(
+                    K2WizardHold, "INVALID_CUSTOMER_PORT"):
+                normalize_k2_customer_port(raw)
 
     def test_running_6g_and_reused_host_hold(self):
         self.conn.execute(
@@ -117,6 +138,25 @@ class IsolatedWizardGateTests(unittest.TestCase):
         self.assertIn("legacy_new_edge_gate(", block)
         self.assertIn("if not protected_wizard:", src)
         self.assertIn("onboard_after_ingress,", block)
+        # Regression: the real Telegram path supplies str("2252"). The K2
+        # boundary must use one canonical int for pre/post gates and StagePin.
+        self.assertIn(
+            "k2_customer_port = normalize_k2_customer_port(customer_port)",
+            block,
+        )
+        self.assertEqual(
+            block.count("assert_isolated_new_edge_candidate, db_conn, edge_ip, k2_customer_port"),
+            2,
+        )
+        self.assertIn(
+            "customer_port=k2_customer_port if egress_stage_requested else 0,",
+            block,
+        )
+        # Legacy's existing installer still receives the original input.
+        self.assertIn(
+            "_provision_new_edge_sync, edge_ip, root_password, customer_port, edge_name",
+            block,
+        )
 
 
 if __name__ == "__main__":

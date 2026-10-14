@@ -15,8 +15,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable
-from hashlib import sha256
-
 from edge_egress_k2_migration_inventory import (
     MigrationInventory, MigrationSelection, select_migration,
 )
@@ -58,6 +56,9 @@ class GuardedVerifiedIngressUIDPort:
             or contract.scope.action!="UID_ENROLL_SOURCE"
             or contract.scope.source_host!=contract.scope.target_host
             or contract.member.source_ipv4!=contract.member.target_ipv4
+            or not contract.member.source_proven
+            or contract.member.source_edge_id!=contract.scope.edge_id
+            or contract.member.active_sessions!=0
             or contract.member.uid!=contract.scope.uid
             or contract.member.username!=contract.scope.username
             or contract.member.target_edge_id!=contract.scope.edge_id

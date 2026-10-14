@@ -34,7 +34,7 @@ from edge_egress_v1_admission import (
     inspect_pam,
 )
 from edge_egress_v1_live_driver import assert_idle_process_snapshot
-from edge_egress_v1_ingress import probe_ingress
+from ops.k2_p3_host_readonly import trusted_pam_config
 
 
 WORKER_ENABLED = False
@@ -113,7 +113,7 @@ class IndependentSafety:
                 or not verify_installed_gate_digest(self.reviewed_module_sha256)):
             raise LiveUIDHold("LIVE_PAM_MODULE_OR_EDGE_IDENTITY_UNVERIFIED")
         manifest=self._manifest(req)
-        actual_pam=Path("/etc/pam.d/sshd").read_text(encoding="utf-8")
+        actual_pam=trusted_pam_config()
         sshd=sshd_connection_spec(
             username=req.username,local_addr=self.ssh_local_addr,
             remote_addr=self.ingress_rhost,local_port=self.ssh_local_port,
@@ -131,8 +131,12 @@ class IndependentSafety:
         if len(matched)!=1:
             raise LiveUIDHold("INGRESS_WG0_PEER_NOT_PINNED")
         live=_checked("wg","show","wg0","allowed-ips")
-        if (matched[0].wg_public_key not in live
-                or self.ingress_rhost+"/32" not in live):
+        observed=[]
+        for line in live.splitlines():
+            parts=line.split()
+            if len(parts)==2 and parts[0]==matched[0].wg_public_key:
+                observed.extend(parts[1].split(","))
+        if observed.count(self.ingress_rhost+"/32")!=1:
             raise LiveUIDHold("LIVE_WG0_PEER_NOT_ATTESTED")
         with self.db_conn() as db:
             r=read_readiness(db,req.spec.edge_id)

@@ -33,6 +33,7 @@ from ops.k2_final_readiness import _trusted_db
 
 V1_PAM_GATE = Path("/opt/nvl-egress/edge_egress_v1_admission.py")
 CORE_DB = Path("/root/master_bot.db")
+PAM_SSHD = Path("/etc/pam.d/sshd")
 NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
 EDGE = re.compile(r"[a-z][a-z0-9_-]{1,23}\Z")
 SHA = re.compile(r"[0-9a-f]{64}\Z")
@@ -88,6 +89,31 @@ def trusted_v1_gate_sha(expected: str, path: Path = V1_PAM_GATE) -> bool:
         return False
 
 
+def trusted_pam_config(path: Path = PAM_SSHD) -> str:
+    """Read pinned root-owned live PAM bytes without following file symlinks."""
+    if path != PAM_SSHD:
+        raise ValueError("UNREVIEWED_PAM_PATH")
+    for parent in (Path("/etc"),Path("/etc/pam.d")):
+        info=parent.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError("UNTRUSTED_PAM_DIRECTORY")
+    info=path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+            or info.st_mode & 0o022 or not 1 <= info.st_size <= 131072):
+        raise ValueError("UNTRUSTED_PAM_FILE")
+    fd=os.open(path,os.O_RDONLY | getattr(os,"O_NOFOLLOW",0))
+    try:
+        after=os.fstat(fd)
+        if (after.st_dev != info.st_dev or after.st_ino != info.st_ino
+                or not stat.S_ISREG(after.st_mode) or after.st_uid != 0
+                or after.st_mode & 0o022 or not 1 <= after.st_size <= 131072):
+            raise ValueError("PAM_FILE_CHANGED_ON_READ")
+        with os.fdopen(os.dup(fd),"rb") as stream:
+            return stream.read(131073).decode("utf-8")
+    finally:
+        os.close(fd)
+
+
 def inspect_uid_host(
     db_conn: Callable, *, username: str, edge_id: str, ingress_source: str,
     expected_edge: str, pam_rhost: str, pam_text: str, sshd_effective: str,
@@ -124,6 +150,10 @@ def inspect_uid_host(
             raise ValueError("ROOT_ROSTER_MISSING")
         member = members[username]
         manifest = guard_loader(member)
+        if (manifest.mode != "PROTECTED_BOOT_GUARD"
+                or manifest.ingress_return is not True
+                or manifest.shared_edge is not True or manifest.dns_port is None):
+            raise ValueError("INVALID_ROOT_BOOT_GUARD")
         req = manifest.request
         with db_conn() as db:
             if db.execute(
@@ -250,7 +280,7 @@ def main(argv=None) -> int:
         )
         if effective.returncode != 0:
             raise ValueError("SSHD_CONFIG_UNAVAILABLE")
-        pam=Path("/etc/pam.d/sshd").read_text(encoding="utf-8")
+        pam=trusted_pam_config()
 
         from contextlib import contextmanager
         @contextmanager

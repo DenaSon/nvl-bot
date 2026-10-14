@@ -1,3 +1,7 @@
+> **CURRENT DEPLOY RECORD (2026-10-14):** The Core-only Python code publish described in section 3 was **executed successfully according to the operator-supplied command output** on `CloudVPS121849`: release SHA `d5ca38b6e7069d969d8aa33bcb42ef71c8c63b2a`, 8 replacements / 13 creations, 70 SHA256 checks passed, service restarted and stable over script's 10s observation. Source `/root/nvl-k2-stage-d5ca38b6e706`, host-local one-shot script `/root/nvl_k2_publish.sh`, rollback `/root/nvl-k2-predeploy-sJsySowp`, previous independently audited backup `/root/nvl-emergency-backups/core-20261014T144432Z-x4EVRH`. **DO NOT RE-RUN the one-shot publication script**: it requires old file hashes and a fresh backup filename and is not idempotent. Go directly to [post-deployment audit and Telegram smoke](NVL_K2_CORE_CODE_RELEASE_RECORD_2026-10-14.md). This changes only the **code-deployed** state, not customer Egress/F4/Edge acceptance. User confirms provider snapshot and console; unencrypted off-host backup transfer reported, checksum+restore drill remain unobserved.
+
+---
+
 # NVL K2 — SSH deployment and new Edge acceptance (2026-10-14)
 
 ## 2026-10-14 backup HOLD diagnosis (Core snapshot; READ ONLY)

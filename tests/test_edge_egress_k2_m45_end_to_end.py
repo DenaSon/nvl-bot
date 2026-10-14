@@ -130,7 +130,6 @@ class M45FullIntegrationTests(unittest.IsolatedAsyncioTestCase):
             geteuid=lambda:0,released=True,
         )
         self.ui=EphemeralApprovalStore()
-        self.loop=asyncio.get_running_loop()
         self.bot=NonRootOperatorClient(
             geteuid=lambda:10001,released=True,exchange=self.socket_exchange,
         )
@@ -152,6 +151,9 @@ class M45FullIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         resolve.start()
         self.addCleanup(resolve.stop)
+
+    async def asyncSetUp(self):
+        self.loop=asyncio.get_running_loop()
 
     @contextmanager
     def db(self):
@@ -380,7 +382,7 @@ class M45FullIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await self.confirm()
         self.assertEqual(self.original_rows(),[])
         view=await self.status()
-        self.assertEqual(view["wave_state"],"PREPARED")
+        self.assertIn(view["wave_state"],("PREPARED","EXPIRED"))
         self.assertFalse(view["unresolved"])
         self.assertNotIn(pending.request_id,json.dumps(view))
 

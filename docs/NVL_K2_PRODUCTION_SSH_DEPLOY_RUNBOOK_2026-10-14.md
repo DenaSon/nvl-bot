@@ -1,5 +1,33 @@
 # NVL K2 — SSH deployment and new Edge acceptance (2026-10-14)
 
+## 2026-10-14 backup HOLD diagnosis (Core snapshot; READ ONLY)
+
+After the first Core archive generated under git SHA 33321f5783bc7683482e2bd769fb59e2d8a0a90e, the checksum checks passed but the separate backup audit reported ARCHIVE_ROOTS_UNTRUSTED. This audit does **not** diagnose DB corruption or a service stop; do not continue deploy or change PAM/UID/6G.
+
+The original auditor required Python-sorted roots even though the producer sorts via GNU sort -zu under the source host locale. The reviewer now allows **any ordered set of unique, trusted root names** with unchanged checksums, tar member coverage, mandatory identity files, root-only permissions and SQLite integrity. Duplicate entries, invalid paths and oversized manifest remain HOLD.
+
+Run this read-only aggregate diagnostic on the actual Core backup (does not reveal path names):
+
+~~~bash
+python3 - <<'PY'
+from pathlib import Path
+p=Path("/root/nvl-emergency-backups/core-20261014T144432Z-x4EVRH/diagnostics/archived-roots.txt")
+raw=p.read_bytes()
+roots=raw.decode("utf-8").splitlines()
+print("BYTES:", len(raw), "WITHIN_64K:", len(raw)<=65536)
+print("ROOT_COUNT:", len(roots), "WITHIN_2048:", len(roots)<=2048)
+print("UNIQUE:", len(roots)==len(set(roots)))
+print("PYTHON_SORTED:", roots==sorted(set(roots)))
+print("EMPTY_ENTRIES:", sum(not r for r in roots))
+print("NUL_BYTES:", raw.count(b"\x00"))
+PY
+~~~
+
+If the only issue is PYTHON_SORTED=False (all other checks true), use the **new reviewed auditor from the pinned new SHA** against the **unchanged old snapshot**. Never reorder, resign or modify archived-roots.txt or SHA256SUMS to force a PASS. If oversized, duplicated, malformed or a later check fails, stop and investigate from the original trusted input/snapshot. Even LOCAL_CONSISTENT does not prove independent provider snapshot or successful off-host restore. Preserve original backup intact.
+
+---
+
+
 **Canonical runbook.** GitHub code baseline after PRs #120 and #139: 331fd86e399bd18e2f524071edb7f14d099e00de (before this documentation and backup fix). Use the NEW final pinned merge SHA when deploying, not this historical SHA. The actual running VPS version, Linux/systemd/venv environment, database schema, Edge configuration and private modules MUST be independently read from the host.
 
 ## Release policy: three levels, never conflated

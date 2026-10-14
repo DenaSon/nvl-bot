@@ -82,6 +82,10 @@ class K2M1InventoryTests(unittest.TestCase):
         self.assertTrue(batch.inventory_clear)
         self.assertEqual(single.active_total,3)
         self.assertEqual(batch.selected_total,2)
+        # Unselected users remain explicitly unproven, never implicitly
+        # considered safe just because their historical host is in host_pool.
+        self.assertEqual(single.needs_review_count,2)
+        self.assertEqual(batch.needs_review_count,1)
         self.assertEqual(self.selected(single)[0],
                          next(x for x in batch.accounts if x.username=="nvl0555"))
         self.assertEqual(dict(batch.host_counts),
@@ -119,6 +123,13 @@ class K2M1InventoryTests(unittest.TestCase):
                 self.assertIn("SOURCE_WITNESS_INVALID_OR_STALE",
                               self.selected(snap)[0].issues)
                 self.assertFalse(snap.inventory_clear)
+
+    def test_existing_target_ingress_is_not_migrated_to_itself(self):
+        snap=self.preview(ingress_witness=lambda name:LiveIngressWitness(
+            name,"e9",TARGET,NOW-1,"INDEPENDENT_LIVE"))
+        self.assertIn("TARGET_ALREADY_CURRENT_INGRESS",
+                      self.selected(snap)[0].issues)
+        self.assertFalse(snap.inventory_clear)
 
     def test_missing_and_active_sessions_fail_closed(self):
         self.assertIn("SESSION_STATE_NOT_ATTESTED",
@@ -195,6 +206,8 @@ class K2M1InventoryTests(unittest.TestCase):
         neighbor=next(x for x in p.accounts if x.username=="nvl0557")
         self.assertFalse(neighbor.selected)
         self.assertFalse(neighbor.source_proven)
+        self.assertTrue(neighbor.needs_review)
+        self.assertIn("SOURCE_INGRESS_NOT_ATTESTED",neighbor.issues)
         self.assertEqual(neighbor.host_class,
                          "UNRESOLVED_HISTORICAL_METADATA")
         self.assertTrue(p.inventory_clear)

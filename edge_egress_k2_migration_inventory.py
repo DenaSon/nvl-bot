@@ -343,8 +343,11 @@ def preview_migration(
                                 observation,name,by_edge,stamp,issues)
                         except (KeyError,OSError,ValueError,TypeError):
                             _reason(issues,"SOURCE_INGRESS_NOT_ATTESTED")
-                    if source_proven and source_edge == selection.target_edge_id:
-                        _reason(issues,"TARGET_ALREADY_CURRENT_INGRESS")
+                    # Same-edge Legacy→Protected is a valid customer
+                    # enrollment route. Being already PROTECTED on the
+                    # target is a different (idempotent/no-op) condition.
+                    if source_proven and protected_edge == selection.target_edge_id:
+                        _reason(issues,"TARGET_ALREADY_PROTECTED")
                     if protected_edge and source_proven and protected_edge != source_edge:
                         _reason(issues,"PROTECTED_SOURCE_DRIFT")
                     if uid is not None:

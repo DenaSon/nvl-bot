@@ -118,6 +118,30 @@ class Phase2CohortTests(unittest.TestCase):
             ("UPDATE ","INSERT ","DELETE ","REPLACE ","CREATE ")
         ) for q in sql))
 
+    def test_legacy_enrollment_status_in_existing_telegram_review(self):
+        self.db.execute(
+            "INSERT INTO ssh_accounts VALUES('legacy2',?,?,?)",
+            (SOURCE,"ssh","🟢 فعال"),
+        )
+        self.known["legacy2"]=1651
+        self.db.execute(
+            "INSERT INTO edge_egress_readiness "
+            "(edge_id,edge_ipv4,state,observed_ipv4,witness,probed_at,"
+            "expires_at,last_operation_id) VALUES('e8',?,'READY',?,"
+            "'F4_PRODUCTION_ACCEPTANCE',?,?,1)",
+            (SOURCE,SOURCE,int(time.time())-5,int(time.time())+120),
+        )
+        review=self.review()
+        self.assertFalse(review.ready)
+        self.assertIsNotNone(review.enrollment_audit)
+        self.assertEqual(review.enrollment_audit.legacy_users,(("legacy2",1651),))
+        self.assertEqual(review.enrollment_audit.invalid_count,0)
+        self.assertEqual(review.enrollment_audit.protected_count,2)
+        self.assertIn("کاربران قدیمیِ شناسایی‌شده: <b>1</b>",
+                      render_cohort_review(review))
+        self.assertNotIn(("✅ بررسی نهایی انتقال","hpeg_p2_open_e9"),
+                         sum(relay_cohort_buttons(review),[]))
+
     def test_source_protected_allocation_must_match_existing_users(self):
         self.db.execute(
             "INSERT INTO settings VALUES('k2_p2_relay_switch_enabled','1')")

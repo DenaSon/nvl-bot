@@ -114,6 +114,19 @@ class TrustedRootFactoryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(b.M42BindingHold,"ONE_SHOT"):
             await self.bind.execute_single(scope,ticket,11,-222)
 
+    def test_original_p3_evidence_digest_pins_entire_signed_report(self):
+        scope=b.ExecutionScope(
+            "UID_ENROLL_SOURCE","e9",TARGET,TARGET,
+            username="nvl0555",uid=1636,
+        )
+        before=self.bind.fresh_p3_evidence(scope)
+        self.evidence=SignedExternalEvidence(
+            "a"*64,NOW-1,NOW+16,"e9",TARGET,REQUIRED_CHECKS,
+            (WitnessAccount("nvl0555",1636,"e9",TARGET,0),),
+        )
+        after=self.bind.fresh_p3_evidence(scope)
+        self.assertNotEqual(before.digest,after.digest)
+
     def test_wrong_actor_never_reaches_port_or_original_6g(self):
         scope=b.ExecutionScope(
             "UID_ENROLL_SOURCE","e9",TARGET,TARGET,

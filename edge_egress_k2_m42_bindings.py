@@ -247,11 +247,26 @@ class RootM42Bindings:
         if (proof.target_edge != scope.edge_id or
             proof.target_ipv4 != scope.target_host):
             raise M42BindingHold("M42_P3_EXTERNAL_SCOPE_DRIFT")
+        # Bind a P3 ticket to the complete signed observation, not only
+        # generation/time. A witness replacement with identical metadata
+        # but different accounts, checks or validity must invalidate P3.
         observed = {
             "scope": _scope_digest(scope),
             "generation": proof.generation,
             "observed_at": proof.observed_at,
+            "expires_at": proof.expires_at,
+            "target_edge": proof.target_edge,
             "target": proof.target_ipv4,
+            "checks": sorted(proof.checks),
+            "accounts": [
+                {
+                    "username": account.username, "uid": account.uid,
+                    "source_edge": account.source_edge,
+                    "source_ipv4": account.source_ipv4,
+                    "active_sessions": account.active_sessions,
+                } for account in sorted(proof.accounts,
+                                         key=lambda item:item.username)
+            ],
         }
         digest = sha256(json.dumps(observed, sort_keys=True,
                                   separators=(",", ":")).encode()).hexdigest()

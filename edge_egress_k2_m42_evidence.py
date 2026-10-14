@@ -161,7 +161,7 @@ def decode_evidence(raw: bytes, *, now: int) -> SignedExternalEvidence:
 
 
 def verify_external_signature(*, paths: tuple[Path, Path, Path],
-                              run: Callable = subprocess.run) -> None:
+                              run: Callable = subprocess.run) -> bytes:
     """OpenSSL verifies an off-host private-key signature using root-pinned pubkey.
 
     All three paths are fixed, root-owned, mode 0600 files under root-only
@@ -170,19 +170,28 @@ def verify_external_signature(*, paths: tuple[Path, Path, Path],
     if paths != (WITNESS_JSON, WITNESS_SIG, WITNESS_PUB):
         raise M42EvidenceHold("M42_WITNESS_PATH_UNTRUSTED")
     _verify_root_directory(WITNESS_DIR, group=None, private=True)
-    for path, limit in ((WITNESS_JSON, MAX_EVIDENCE_BYTES),
-                        (WITNESS_SIG, 4096), (WITNESS_PUB, 8192)):
-        _read_checked(path, maximum=limit, strict=True)
+    # Capture exactly ONE report byte sequence before signature checking.
+    # Feeding those bytes to OpenSSL on stdin prevents a different in-place
+    # report read from being decoded as an authorized packet witness.
+    raw = _read_checked(WITNESS_JSON, maximum=MAX_EVIDENCE_BYTES, strict=True)
+    sig = _read_checked(WITNESS_SIG, maximum=4096, strict=True)
+    pub = _read_checked(WITNESS_PUB, maximum=8192, strict=True)
     try:
         proc = run(
             ["openssl", "dgst", "-sha256", "-verify", str(WITNESS_PUB),
-             "-signature", str(WITNESS_SIG), str(WITNESS_JSON)],
-            capture_output=True, text=True, check=False, timeout=4,
+             "-signature", str(WITNESS_SIG), "-"],
+            input=raw, capture_output=True, text=False, check=False, timeout=4,
         )
     except (OSError, subprocess.TimeoutExpired, TypeError, ValueError) as exc:
         raise M42EvidenceHold("M42_EXTERNAL_SIGNATURE_UNAVAILABLE") from exc
-    if proc.returncode != 0 or proc.stdout.strip() != "Verified OK":
+    if proc.returncode != 0 or proc.stdout.strip() != b"Verified OK":
         raise M42EvidenceHold("M42_EXTERNAL_SIGNATURE_INVALID")
+    # Signature and public key may only be changed by the trusted root
+    # administrator; fail closed if their bytes changed during verification.
+    if (_read_checked(WITNESS_SIG, maximum=4096, strict=True) != sig
+        or _read_checked(WITNESS_PUB, maximum=8192, strict=True) != pub):
+        raise M42EvidenceHold("M42_EXTERNAL_SIGNER_MATERIAL_CHANGED")
+    return raw
 
 
 def load_external_evidence(*, now: int | None = None,
@@ -190,6 +199,7 @@ def load_external_evidence(*, now: int | None = None,
                            run: Callable = subprocess.run) -> SignedExternalEvidence:
     if not M42_EVIDENCE_ENABLED or geteuid() != 0:
         raise M42EvidenceHold("M42_EXTERNAL_WITNESS_NOT_RELEASED")
-    verify_external_signature(paths=(WITNESS_JSON, WITNESS_SIG, WITNESS_PUB), run=run)
-    raw = _read_checked(WITNESS_JSON, maximum=MAX_EVIDENCE_BYTES, strict=True)
+    raw = verify_external_signature(
+        paths=(WITNESS_JSON, WITNESS_SIG, WITNESS_PUB), run=run,
+    )
     return decode_evidence(raw, now=int(time.time()) if now is None else now)

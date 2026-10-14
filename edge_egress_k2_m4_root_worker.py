@@ -28,6 +28,8 @@ MAX_SECRET_BYTES = 4096
 MAX_MANIFEST_BYTES = 8192
 MAX_SOURCE_BYTES = 2_000_000
 PINNED_SOURCE_FILES = frozenset((
+    "edge_egress_k2_a_6g_shared.py",
+    "edge_egress_k2_a_root_assembly.py",
     "edge_egress_k2_m4_root_worker.py",
     "edge_egress_k2_m4_ipc.py",
     "edge_egress_k2_m44_recovery.py",

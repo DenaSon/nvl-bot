@@ -125,11 +125,23 @@ class SignedWitnessContractTests(unittest.TestCase):
             # detached OpenSSL verification still runs against real RSA key.
             with patch.object(ev,"WITNESS_DIR",root),patch.object(ev,"WITNESS_JSON",data),\
                  patch.object(ev,"WITNESS_SIG",signature),patch.object(ev,"WITNESS_PUB",public),\
-                 patch.object(ev,"_verify_root_directory"),patch.object(ev,"_read_checked"):
-                ev.verify_external_signature(paths=paths)
+                 patch.object(ev,"_verify_root_directory"),\
+                 patch.object(ev,"_read_checked",side_effect=lambda p,**k:p.read_bytes()):
+                self.assertEqual(ev.verify_external_signature(paths=paths),report())
                 data.write_bytes(report(target_edge="e7"))
                 with self.assertRaisesRegex(ev.M42EvidenceHold,"INVALID"):
                     ev.verify_external_signature(paths=paths)
+
+
+    def test_loader_decodes_only_bytes_used_for_signature(self):
+        original=report()
+        impostor=report(target_edge="e7")
+        with patch.object(ev,"M42_EVIDENCE_ENABLED",True),\
+             patch.object(ev,"verify_external_signature",return_value=original),\
+             patch.object(ev,"_read_checked",side_effect=AssertionError("RE_READ_REPORT")):
+            proof=ev.load_external_evidence(now=NOW,geteuid=lambda:0)
+            self.assertEqual(proof.target_edge,"e9")
+            self.assertNotEqual(original,impostor)
 
 
 if __name__=="__main__":

@@ -308,6 +308,7 @@ from edge_egress_lifecycle import (
     legacy_new_edge_gate,
 )
 from edge_egress_handoff import is_egress_recovery_hold
+from edge_egress_k2_a_6g_shared import acquire_original_6g, update_original_6g
 from edge_egress_v1_6h import evaluate_j_switch
 from edge_egress_legacy_fence import (
     LEGACY_PROTECTED_BINDINGS_BLOCKED,
@@ -3134,41 +3135,14 @@ def _db_rollback_failover_account_state(
 
 
 def _db_acquire_failover_lock(source_host, target_host, *, mode=FAILOVER_MODE_MANUAL):
-    """Acquire the single persisted Phase 6G failover lock."""
-    now_dt = datetime.now()
-    now = now_dt.strftime("%Y-%m-%d %H:%M:%S")
-    with db_conn() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute(
-            "SELECT id, updated_at, detail_json FROM failover_operations "
-            "WHERE status=? ORDER BY id DESC LIMIT 1",
-            (FAILOVER_STATUS_RUNNING,),
-        ).fetchone()
-        if row:
-            lock_id, updated_at, detail_json = row
-            # An interrupted protected Egress cutover must not have its 6G
-            # shared lock auto-recovered while routes/DB/DNS may be uncertain.
-            if is_egress_recovery_hold(detail_json):
-                return None, lock_id
-            try:
-                age = (now_dt - _parse_flexible_datetime(updated_at)).total_seconds()
-            except Exception:
-                age = FAILOVER_LOCK_STALE_SECONDS + 1
-            if age <= FAILOVER_LOCK_STALE_SECONDS:
-                return None, lock_id
-            conn.execute(
-                "UPDATE failover_operations SET status=?, updated_at=?, finished_at=?, "
-                "error=COALESCE(error, 'stale lock recovered by Phase 6G') WHERE id=?",
-                (FAILOVER_STATUS_ABORTED_STALE, now, now, lock_id),
-            )
-
-        cur = conn.execute(
-            "INSERT INTO failover_operations "
-            "(mode, source_host, target_host, status, started_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (mode, source_host, target_host, FAILOVER_STATUS_RUNNING, now, now),
-        )
-        return cur.lastrowid, None
+    """Legacy wrapper over the ONE shared original Phase 6G lease."""
+    return acquire_original_6g(
+        db_conn,source_host,target_host,mode=mode,
+        stale_seconds=FAILOVER_LOCK_STALE_SECONDS,
+        parse_datetime=_parse_flexible_datetime,
+        clock=lambda: datetime.now(),
+        allow_legacy_stale_recovery=True,
+    )
 
 
 def _db_update_failover_operation(
@@ -3185,38 +3159,14 @@ def _db_update_failover_operation(
     finished=False,
     require_running=False,
 ):
-    fields = ["updated_at=?"]
-    values = [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
-    updates = {
-        "status": status,
-        "account_count": account_count,
-        "moved_count": moved_count,
-        "previous_default_host": previous_default_host,
-        "previous_dns_ip": previous_dns_ip,
-        "core_fallback_ip": core_fallback_ip,
-        "error": error,
-        "detail_json": None if detail is None else json.dumps(detail, ensure_ascii=False),
-    }
-    for name, value in updates.items():
-        if value is not None:
-            fields.append(f"{name}=?")
-            values.append(value)
-    if finished:
-        fields.append("finished_at=?")
-        values.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    # D1-C2B2: a protected stage write must be fenced to its live 6G
-    # operation, so an expired/stolen lock cannot be marked SUCCEEDED.
-    values.append(operation_id)
-    if require_running:
-        values.append(FAILOVER_STATUS_RUNNING)
-    with db_conn() as conn:
-        cur = conn.execute(
-            f"UPDATE failover_operations SET {', '.join(fields)} WHERE id=?"
-            + (" AND status=?" if require_running else ""),
-            values,
-        )
-        if require_running and cur.rowcount != 1:
-            raise RuntimeError("SHARED_6G_LOCK_NO_LONGER_RUNNING")
+    """Legacy wrapper over the same original 6G journal/CAS SQL."""
+    return update_original_6g(
+        db_conn,operation_id,status=status,account_count=account_count,
+        moved_count=moved_count,previous_default_host=previous_default_host,
+        previous_dns_ip=previous_dns_ip,core_fallback_ip=core_fallback_ip,
+        error=error,detail=detail,finished=finished,
+        require_running=require_running,clock=lambda: datetime.now(),
+    )
 
 
 def _db_get_latest_failover_operation():

@@ -90,3 +90,8 @@ An explicit, independently gated `STATUS` IPC action and root-owned SELECT-only 
 ## M4.5 end-to-end synthetic integration (2026-10-15)
 
 The stage-only full AF_UNIX socket and original P3/6G SQLite checkpoint integration is covered by [M4.5 acceptance document](K2_M4_5_E2E_INTEGRATION_2026-10-15.md) and `tests/test_edge_egress_k2_m45_end_to_end.py`. The exact HEAD CI evidence is linked in PR #148. **Source/CI checks are not real root/PAM/WG/F4 acceptance**; do not merge or deploy. M4.2 trusted live factory and physical test remain unresolved.
+
+
+## Package A: backend source-hardening checkpoint (2026-10-15)
+
+The *existing* 6G SQL is centralized, a reviewed Root assembly contract, explicit non-root unit/process preflight and signed F4 report snapshot verification are implemented. Read [Package A handoff](K2_PACKAGE_A_BACKEND_2026-10-15.md). **Do not mark Package A operational DONE:** the actual live M2 RootFilePort/P3 factory, production non-root service split and independently deployed offhost F4 observer are not installed, and cross-Edge Legacy mode 0 remains HOLD. No merge/Production/UID changes.

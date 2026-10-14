@@ -51,8 +51,14 @@ def _deps(tree: ast.AST) -> set[str]:
     for node in ast.walk(tree):
         if isinstance(node,ast.Import):
             names.update(a.name for a in node.names)
-        if isinstance(node,ast.ImportFrom) and node.level==0 and node.module:
-            names.add(node.module)
+        if isinstance(node,ast.ImportFrom):
+            if node.level:
+                raise ModuleStageHold("RELATIVE_MODULE_IMPORT_NOT_REVIEWED")
+            if node.module:
+                names.add(node.module)
+                if node.module=="ops":
+                    names.update("ops."+alias.name for alias in node.names
+                                 if alias.name.startswith("edge_egress_"))
     result=set()
     for name in names:
         if name.startswith("edge_egress_"):

@@ -287,6 +287,49 @@ class M2MultiUIDTests(unittest.TestCase):
         self.assertEqual(self.host[str(ROSTER)],self.roster)
         self.assertFalse(any(x[0]=="roster_cas" for x in self.port.actions))
 
+    def test_resume_partial_requires_original_6g_and_matches_all_files(self):
+        # Simulate crash after the guard manifest and before unit stage.
+        self.host[str(GUARD_DIR/"nvl0555.json")]=self.new
+        with patch("ops.k2_m2_guard_append.Path.exists",
+                   new=lambda path:str(path) in self.host):
+            self.run_with_mocks(resume_partial=True)
+        self.assertEqual(self.host[str(ROSTER)],self.plan.next_roster)
+        self.assertEqual(
+            len([x for x in self.port.actions if x[0]=="create"]),2)
+        self.assertIn("FROZEN",self.checks)
+        self.assertEqual(self.checks[-1],"6G")
+
+    def test_resume_partial_stale_guard_blocks_without_side_effects(self):
+        self.host[str(GUARD_DIR/"nvl0555.json")]=b"wrong"
+        with patch("ops.k2_m2_guard_append.Path.exists",
+                   new=lambda path:str(path) in self.host):
+            with self.assertRaisesRegex(MultiUIDHold,
+                                        "STAGE_BYTES_MISMATCH"):
+                self.run_with_mocks(resume_partial=True)
+        self.assertEqual(self.port.actions,[])
+        self.assertEqual(self.host[str(ROSTER)],self.roster)
+
+    def test_resume_partial_loses_lease_before_writing_roster(self):
+        self.host[str(GUARD_DIR/"nvl0555.json")]=self.new
+        with patch("ops.k2_m2_guard_append.Path.exists",
+                   new=lambda path:str(path) in self.host):
+            patches=self.mocks()
+            for p in patches:p.start()
+            try:
+                calls=[0]
+                def lease(*args):
+                    calls[0]+=1
+                    if calls[0]==4:
+                        raise MultiUIDHold("LEASE_EXPIRED_AT_REPLAY")
+                with patch("ops.k2_m2_guard_append.assert_guarded_6g_intent",
+                           side_effect=lease):
+                    with self.assertRaisesRegex(MultiUIDHold,
+                                                "LEASE_EXPIRED_AT_REPLAY"):
+                        self.apply(resume_partial=True)
+            finally:
+                for p in reversed(patches):p.stop()
+        self.assertEqual(self.host[str(ROSTER)],self.roster)
+
     def test_source_target_scope_mismatch_blocks(self):
         other=ExecutionScope(
             "UID_ENROLL_SOURCE","src1",self.scope.source_host,

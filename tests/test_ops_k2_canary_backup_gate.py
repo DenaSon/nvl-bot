@@ -68,6 +68,12 @@ class CanaryBackupAuditTests(unittest.TestCase):
             + "  "+name+"\n"
             for name in sorted(CORE_REQUIRED)
         ))
+        # Mirror the production script's 0600/0700 secret permissions.
+        for file in self.backup.rglob("*"):
+            if file.is_dir():
+                file.chmod(0o700)
+            elif file.is_file() and not file.is_symlink():
+                file.chmod(0o600)
 
     def check(self,**kwargs):
         return audit_backup(self.backup,owner_uid=self.uid,

@@ -157,7 +157,7 @@ class M2MultiUIDTests(unittest.TestCase):
         with self.assertRaisesRegex(MultiUIDHold,"ROSTER_AND_MANIFESTS"):
             self.make_plan(current_roster=self.roster+b" ")
         with self.assertRaisesRegex(MultiUIDHold,"ROSTER_AND_MANIFESTS"):
-            self.make_plan(installed_manifests={"nvl0557":self.existing+b"\\n"})
+            self.make_plan(installed_manifests={"nvl0557":self.existing+b"\n"})
 
     def test_existing_uid_or_username_collision_rejected(self):
         with self.assertRaisesRegex(MultiUIDHold,"MEMBER_ALREADY_EXISTS"):

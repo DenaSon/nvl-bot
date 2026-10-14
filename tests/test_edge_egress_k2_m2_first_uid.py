@@ -110,17 +110,17 @@ class M2FirstUIDTests(unittest.TestCase):
         from ops.k2_p3_guard_installer import PAM as GLOBAL_PAM
         import ops.k2_p3_guard_installer as installer
         orig_exists=Path.exists
-        with patch("ops.k2_m2_first_uid.M2_FIRST_UID_ENABLED",True), \\
+        with patch("ops.k2_m2_first_uid.M2_FIRST_UID_ENABLED",True), \
              patch("ops.k2_m2_first_uid.assert_guarded_6g_intent",
-                   side_effect=lambda *x:self.locks.append("6G")), \\
-             patch("ops.k2_p3_guard_installer._owned"), \\
+                   side_effect=lambda *x:self.locks.append("6G")), \
+             patch("ops.k2_p3_guard_installer._owned"), \
              patch("ops.k2_p3_guard_installer._safe_read",
                    side_effect=lambda path,**kw:(
-                       current[0] if path==GLOBAL_PAM else pinned[str(path)])), \\
+                       current[0] if path==GLOBAL_PAM else pinned[str(path)])), \
              patch("edge_egress_f4_pam.verify_installed_gate_digest",
-                   return_value=True), \\
+                   return_value=True), \
              patch("edge_egress_v1_admission.inspect_pam",
-                   return_value=True), \\
+                   return_value=True), \
              patch("ops.k2_m2_first_uid.Path.exists",
                    new=lambda path:str(path) in pinned):
             resume_first_uid_bootstrap(**args)

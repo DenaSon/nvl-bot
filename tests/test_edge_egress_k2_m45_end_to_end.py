@@ -90,8 +90,14 @@ class M45FullIntegrationTests(unittest.IsolatedAsyncioTestCase):
         fixture.c.backup(copy)
         copy.close()
         with self.db() as conn:
-            for name in ("source_host","target_host","detail_json"):
-                conn.execute("ALTER TABLE failover_operations ADD COLUMN "+name+" TEXT")
+            # The original M1 fixture uses an id-only preview table.
+            # Rebuild its EMPTY table with the actual original 6G PK so
+            # INSERT.lastrowid is the same id read by P3 _locked().
+            conn.execute("DROP TABLE failover_operations")
+            conn.execute("CREATE TABLE failover_operations ("
+                         "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                         "status TEXT,source_host TEXT,target_host TEXT,"
+                         "detail_json TEXT)")
             conn.execute("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT)")
             conn.execute(
                 "INSERT INTO settings VALUES('edge_egress_protected_mode','0')"

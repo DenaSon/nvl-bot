@@ -186,6 +186,25 @@ class M4UnixOperatorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response["wave_state"],"NO_CHECKPOINT")
                 self.assertEqual(self.fx.actions,[])
 
+    async def test_unexpected_root_portal_error_returns_sanitized_hold(self):
+        # Root provider exceptions must not hang the client or expose data.
+        left,right=socket.socketpair(socket.AF_UNIX,socket.SOCK_STREAM)
+        self.addCleanup(left.close)
+        self.addCleanup(right.close)
+        trusted=RootOperatorIPC(
+            portal=self.fx.portal,bot_uid=os.getuid(),
+            geteuid=lambda:0,released=True,
+        )
+        right.sendall(json.dumps(self.prepare_message()).encode()+b"\n")
+        with patch.object(self.fx.portal,"prepare",
+                          side_effect=RuntimeError("private_root_token=secret")):
+            with self.assertRaisesRegex(M4IPCReject,"HELD"):
+                await handle_accepted_socket(trusted,left)
+        reply=right.recv(4096)
+        self.assertEqual(reply,b'{"state":"HOLD"}\n')
+        self.assertNotIn(b"private_root_token",reply)
+        self.assertEqual(self.fx.actions,[])
+
     async def test_unreleased_root_service_rejects_before_portal(self):
         with patch("edge_egress_k2_m4_ipc.M4_UNIX_IPC_ENABLED",False):
             with self.assertRaisesRegex(M4IPCReject,"RELEASE"):

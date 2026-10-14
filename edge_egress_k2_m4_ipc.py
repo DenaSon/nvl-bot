@@ -274,7 +274,10 @@ async def handle_accepted_socket(transport: RootOperatorIPC,
         raw=await asyncio.to_thread(_read_one_frame,conn)
         response=await transport.dispatch(raw,peer_uid=uid)
         await asyncio.to_thread(conn.sendall,response+b"\n")
-    except (OSError,ValueError,TypeError) as exc:
+    except Exception as exc:
+        # A root provider may raise RuntimeError/sqlite3.Error after 6G INTENT.
+        # Return only a generic HOLD, never hang the non-root Telegram socket.
+        # Do not catch BaseException: cancellation still stops the worker.
         # Never leak SQL/secret/nonce or raw server errors across the socket.
         try:
             conn.sendall(b'{"state":"HOLD"}\n')

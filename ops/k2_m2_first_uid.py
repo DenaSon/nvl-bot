@@ -49,7 +49,7 @@ class Original6GRootPort:
 
 def guarded_first_uid_bootstrap(
     *, plan: GuardInstallPlan, scope: ExecutionScope,
-    ticket: ExecutionTicket, db_conn: Callable,
+    ticket: ExecutionTicket, current_pam: bytes, db_conn: Callable,
     os_uid: Callable[[str], int], port: RootFilePort,
     independent_rescue_ok: Callable[[], bool],
     independent_f4_ok: Callable[[ExecutionScope], bool],
@@ -64,6 +64,7 @@ def guarded_first_uid_bootstrap(
         not isinstance(plan, GuardInstallPlan) or
         not isinstance(scope, ExecutionScope) or
         not isinstance(ticket, ExecutionTicket) or
+        not isinstance(current_pam, bytes) or
         scope.action not in ("UID_ATTACH", "UID_ENROLL_SOURCE") or
         not callable(db_conn) or port is None or geteuid() != 0 or
         not all(callable(x) for x in (
@@ -97,7 +98,7 @@ def guarded_first_uid_bootstrap(
     # the port reasserts the SAME 6G intent before every host mutation.
     wrapped=Original6GRootPort(port=port,lease=locked)
     apply_guard_install(
-        plan=plan,current_pam=b"",existing_guards={},
+        plan=plan,current_pam=current_pam,existing_guards={},
         os_uid=os_uid,port=wrapped,
         independent_console_ok=independent_rescue_ok,
         account_idle_ok=account_idle_ok,

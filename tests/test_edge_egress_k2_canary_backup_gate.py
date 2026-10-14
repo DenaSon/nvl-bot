@@ -96,6 +96,33 @@ class CanaryBackupAuditTests(unittest.TestCase):
         self.assertFalse(r.independent_restore_drill_verified)
         self.assertFalse(r.live_kernel_rollback_verified)
 
+    def test_locale_dependent_root_order_is_not_a_release_blocker(self):
+        # The producer uses GNU sort -zu with the source VPS LC_COLLATE.
+        # A valid complete/unique manifest may have a different order
+        # from Python Unicode lexical sorting.
+        manifest=self.backup/"diagnostics/archived-roots.txt"
+        manifest.write_text("\n".join(reversed(self.roots))+"\n")
+        self.sign()
+        observed=self.check()
+        self.assertTrue(observed.local_consistency,observed.blockers)
+        self.assertFalse(observed.authorizes_customer_change)
+
+    def test_duplicate_roots_remain_fail_closed_even_with_valid_digest(self):
+        manifest=self.backup/"diagnostics/archived-roots.txt"
+        manifest.write_text("\n".join(self.roots+(self.roots[0],))+"\n")
+        self.sign()
+        observed=self.check()
+        self.assertFalse(observed.local_consistency)
+        self.assertIn("ARCHIVE_ROOTS_DUPLICATED",observed.blockers)
+
+    def test_bad_parent_traversal_path_rejected_after_hash_validation(self):
+        manifest=self.backup/"diagnostics/archived-roots.txt"
+        manifest.write_text("\n".join(self.roots+("etc/../shadow",))+"\n")
+        self.sign()
+        observed=self.check()
+        self.assertFalse(observed.local_consistency)
+        self.assertIn("ARCHIVE_PATH_UNTRUSTED",observed.blockers)
+
     def test_corrupted_database_backup_is_hold_even_with_updated_hash(self):
         self.db.write_bytes(b"not a database")
         self.sign()

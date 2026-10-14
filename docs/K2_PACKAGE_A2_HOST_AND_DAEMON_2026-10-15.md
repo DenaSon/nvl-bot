@@ -31,3 +31,8 @@
 ## Classification
 
 `M4.1–M4.5` and Package A adapters are source/CI deliverables, not operational release. **Package A overall remains HOLD** until A3 and A4 prove the installed host and identity. A real root daemon, live signed physical observer and safe bot privilege split cannot be honestly marked implemented from Github-only access.
+
+
+### Nonroot privilege-audit hardening
+
+`assert_nonroot_bot_identity` additionally requires rootless *kernel* evidence from `/proc/MainPID/status`: identical real/effective/saved/fs GIDs, the reviewed IPC GID in actual `Groups`, **zero CapInh/CapPrm/CapEff/CapAmb** (not just `Uid != 0`), and `NoNewPrivs: 1`. A user configured as nonroot in systemd but carrying `CAP_NET_ADMIN`, ambient capabilities or no IPC supplementary group is HOLD. This is intentionally *stricter* than the current root-running production bot. No credentials, unit or group is modified in this change.

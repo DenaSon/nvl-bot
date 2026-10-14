@@ -38,3 +38,8 @@
 ## Package A2 host-factory and root-daemon source increment (2026-10-15)
 
 See [Package A2 design and outstanding field gates](K2_PACKAGE_A2_HOST_AND_DAEMON_2026-10-15.md). The root-side M2/P3 factory is now typed, source/F4 reviewed, exact original 6G deferred, and the source-pinned daemon accepts only reviewed assemblies under a new independent default-OFF flag. The production root daemon's standalone entrypoint remains intentionally inert and the current root-running bot is not converted. **No live physical proof, no master merge, no active root socket; Package A is not operationally complete.**
+
+
+### Nonroot privilege-audit hardening
+
+`assert_nonroot_bot_identity` additionally requires rootless *kernel* evidence from `/proc/MainPID/status`: identical real/effective/saved/fs GIDs, the reviewed IPC GID in actual `Groups`, **zero CapInh/CapPrm/CapEff/CapAmb** (not just `Uid != 0`), and `NoNewPrivs: 1`. A user configured as nonroot in systemd but carrying `CAP_NET_ADMIN`, ambient capabilities or no IPC supplementary group is HOLD. This is intentionally *stricter* than the current root-running production bot. No credentials, unit or group is modified in this change.

@@ -33,7 +33,17 @@ class BotNonrootIdentityTests(unittest.TestCase):
         self.p=paths()
         self.rendered="User=nvlbot\nMainPID=321\nActiveState=active\nDynamicUser=no\n"
         self.seen=[]
-        self.procuid="Name:\tpython\nUid:\t12001\t12001\t12001\t12001\n"
+        self.procuid=(
+            "Name:\tpython\n"
+            "Uid:\t12001\t12001\t12001\t12001\n"
+            "Gid:\t12001\t12001\t12001\t12001\n"
+            "Groups:\t12001 12002\n"
+            "CapInh:\t0000000000000000\n"
+            "CapPrm:\t0000000000000000\n"
+            "CapEff:\t0000000000000000\n"
+            "CapAmb:\t0000000000000000\n"
+            "NoNewPrivs:\t1\n"
+        )
         self.pwd=SimpleNamespace(pw_uid=12001,pw_gid=12001)
 
     def command_run(self,args,**kwargs):
@@ -69,6 +79,24 @@ class BotNonrootIdentityTests(unittest.TestCase):
         ):
             with self.subTest(kind=list(fake)),self.assertRaises(a.M4AAssemblyHold):
                 self.check(**fake)
+
+    def test_kernel_capabilities_groups_and_no_new_privileges_required(self):
+        original=self.procuid
+        for changed in (
+            original.replace("CapEff:\t0000000000000000","CapEff:\t0000000000000001"),
+            original.replace("CapPrm:\t0000000000000000","CapPrm:\t0000000000000001"),
+            original.replace("CapInh:\t0000000000000000","CapInh:\t0000000000000001"),
+            original.replace("CapAmb:\t0000000000000000","CapAmb:\t0000000000000001"),
+            original.replace("Groups:\t12001 12002","Groups:\t12001"),
+            original.replace("NoNewPrivs:\t1","NoNewPrivs:\t0"),
+            original.replace("Gid:\t12001\t12001\t12001\t12001",
+                             "Gid:\t0\t0\t0\t0"),
+        ):
+            self.procuid=changed
+            with self.subTest(status=changed[-90:]),self.assertRaises(a.M4AAssemblyHold):
+                self.check()
+        self.procuid=original
+        self.check()
 
     def test_dynamic_uid_stopped_pid_and_pid_reuse_denied(self):
         for key,value in (("DynamicUser","yes"),("ActiveState","inactive"),

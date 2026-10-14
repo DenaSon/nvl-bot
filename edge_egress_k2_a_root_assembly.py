@@ -32,6 +32,10 @@ M4A_ROOT_ASSEMBLY_ENABLED = False
 BOT_UNIT = "nvlbot.service"
 _UNIT_FIELDS = frozenset(("User", "MainPID", "ActiveState", "DynamicUser"))
 _PROC_UID = re.compile(r"^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$",re.M)
+_PROC_GID = re.compile(r"^Gid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$",re.M)
+_PROC_GROUPS = re.compile(r"^Groups:\s*([0-9 ]+)\s*$",re.M)
+_PROC_CAP = re.compile(r"^Cap(?:Inh|Prm|Eff|Amb):\s*([0-9a-fA-F]{1,16})\s*$",re.M)
+_PROC_NO_NEW_PRIVS = re.compile(r"^NoNewPrivs:\s*1\s*$",re.M)
 
 
 class M4AAssemblyHold(ValueError):
@@ -93,6 +97,22 @@ def assert_nonroot_bot_identity(
         match=_PROC_UID.search(status)
         if not match or any(int(value)!=paths.bot_uid for value in match.groups()):
             raise ValueError("RUNNING_BOT_PROCESS_UID_MISMATCH")
+        gid=_PROC_GID.search(status)
+        groups=_PROC_GROUPS.search(status)
+        cap_lines=tuple(
+            line for line in status.splitlines()
+            if line.startswith(("CapInh:", "CapPrm:", "CapEff:", "CapAmb:"))
+        )
+        if (gid is None or any(int(value)!=account.pw_gid
+                               for value in gid.groups())
+            or groups is None
+            or paths.ipc_gid not in {int(x) for x in groups.group(1).split()}
+            or len(cap_lines)!=4
+            or any(_PROC_CAP.fullmatch(line) is None
+                   or int(_PROC_CAP.fullmatch(line).group(1),16)!=0
+                   for line in cap_lines)
+            or _PROC_NO_NEW_PRIVS.search(status) is None):
+            raise ValueError("BOT_PROCESS_CAPABILITIES_OR_GROUPS_UNSAFE")
         # Inspect the unit again to detect a restart/PID switch during the
         # identity check. First and second snapshots must be byte identical.
         again=run(cmd,capture_output=True,text=True,timeout=5,check=False)

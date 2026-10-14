@@ -224,3 +224,34 @@ def compare_and_swap_root_journal(before: bytes, after: bytes, *,
     finally:
         if temp.exists():
             temp.unlink()
+
+
+def make_m1_readonly_ingress_provider(
+    *, now: int, run, geteuid: Callable[[],int] = os.geteuid,
+    resolve_uid: Callable[[str],int] =
+        lambda name: pwd.getpwnam(name).pw_uid,
+) -> Callable[[str], LiveIngressWitness]:
+    """Read-only M1 callback; no bot, PAM, service registration or new CLI.
+
+    Journal freshness AND the pinned current wg0 owner are checked. The
+    returned callback is for M1 preview only; not F4/root authorization.
+    """
+    from edge_egress_v1_ingress import load_registry
+    if geteuid()!=0 or type(now) is not int or now<=0 or not callable(run):
+        raise DurableIngressHold("ROOT_LIVE_OBSERVER_REQUIRED")
+    raw=read_root_journal()
+    peers=load_registry()
+    try:
+        result=run(["wg","show","wg0","allowed-ips"],capture_output=True,
+                   text=True,timeout=3,check=False)
+        if result.returncode!=0:
+            raise DurableIngressHold("WG_PEER_READ_FAILED")
+    except (OSError,TypeError,ValueError) as exc:
+        raise DurableIngressHold("WG_PEER_READ_UNAVAILABLE") from exc
+
+    def evidence(username: str) -> LiveIngressWitness:
+        uid=resolve_uid(username)
+        return verified_recent_observation(
+            raw,username=username,uid=uid,peers=peers,
+            allowed_ips=result.stdout,now=now,resolve_uid=resolve_uid)
+    return evidence

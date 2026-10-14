@@ -91,7 +91,8 @@ class GuardInstallerTests(unittest.TestCase):
         port=FakePort()
         base=dict(plan=p,current_pam=self.pam,existing_guards={},
                   os_uid=self.fx.lookup,port=port,release_enabled=True,
-                  reviewed_module_sha=self.module,geteuid=lambda:0)
+                  reviewed_module_sha=self.module,geteuid=lambda:0,
+                  sshd_effective_probe=lambda:"usepam yes\\n")
         with self.assertRaisesRegex(GuardInstallHold,"INDEPENDENT_RESCUE"):
             apply_guard_install(**base,
                 independent_console_ok=lambda:False,
@@ -127,9 +128,10 @@ class GuardInstallerTests(unittest.TestCase):
                 os_uid=self.fx.lookup,port=port,release_enabled=True,
                 independent_console_ok=lambda:True,
                 account_idle_ok=lambda n,u:True,
-                reviewed_module_sha=self.module,geteuid=lambda:0)
+                reviewed_module_sha=self.module,geteuid=lambda:0,
+                sshd_effective_probe=lambda:"usepam yes\\n")
         ops=[x[0] for x in port.actions]
-        self.assertEqual(ops[:4],["create"]*4)
+        self.assertEqual(ops[:5],["create"]*5)
         self.assertEqual(ops[-1],"pam")
         self.assertEqual(Guard.calls,[True])
         self.assertTrue(any("enable" in x[1] and plan.guard_unit_name in x[1]
@@ -152,7 +154,8 @@ class GuardInstallerTests(unittest.TestCase):
                     os_uid=self.fx.lookup,port=port,release_enabled=True,
                     independent_console_ok=lambda:True,
                     account_idle_ok=lambda n,u:True,
-                    reviewed_module_sha=self.module,geteuid=lambda:0)
+                    reviewed_module_sha=self.module,geteuid=lambda:0,
+                    sshd_effective_probe=lambda:"usepam yes\\n")
         self.assertNotIn("pam",[x[0] for x in port.actions])
         self.assertTrue(any(x[0]=="create" for x in port.actions))
 

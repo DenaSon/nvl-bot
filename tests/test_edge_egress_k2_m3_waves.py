@@ -191,12 +191,14 @@ class M3WaveTests(unittest.IsolatedAsyncioTestCase):
         verify_wave_approval(plan,a,actor_id=1001,chat_id=-55,
                              secret=SECRET,now=NOW)
         for changed in (
-            dict(actor_id=1111,chat_id=-55),
-            dict(actor_id=1001,chat_id=-56),
-            dict(actor_id=1001,chat_id=-55,now=NOW+181),
+            dict(actor_id=1111),
+            dict(chat_id=-56),
+            dict(now=NOW+181),
         ):
             with self.subTest(changed=changed),self.assertRaises(MigrationWaveHold):
-                verify_wave_approval(plan,a,secret=SECRET,now=NOW,**changed)
+                ctx=dict(actor_id=1001,chat_id=-55,now=NOW)
+                ctx.update(changed)
+                verify_wave_approval(plan,a,secret=SECRET,**ctx)
 
     def test_forged_member_with_stale_digest_fails_integrity(self):
         plan=self.plan()

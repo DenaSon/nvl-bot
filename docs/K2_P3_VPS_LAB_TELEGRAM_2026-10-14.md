@@ -11,7 +11,7 @@ Open **🛡 مدیریت سرورها → select Edge → 🧪 آزمایش VPS*
 - F4 identity/freshness in the underlying read-only snapshot (no F4 minting);
 - numbered trial steps and firm assurance that SSH accounts remain on Core.
 
-When the exact candidate Stage+original ingress+6G snapshot is coherent, the page links **🌍 تست IP سرور** directly to the **existing** `hpeg_p1_probe_<edge_id>` bot callback. That existing callback proves the dedicated *namespace* public Edge IPv4 only. It is **not** an SSH/SOCKS user-route proof. The page also links to the existing one-user review and guarded relay review, neither of which becomes executable from this page.
+When the exact target Stage+trusted ingress+6G snapshot is coherent, the page links **🌍 تست IP سرور** directly to the **existing** `hpeg_p1_probe_<edge_id>` bot callback. A Legacy *source* may have no F3 protected-egress allocation at this early stage: that fact remains a migration HOLD but MUST NOT prohibit a harmless candidate VPS namespace IP test. That existing callback proves the dedicated *namespace* public Edge IPv4 only. It is **not** an SSH/SOCKS user-route proof. The page also links to the existing one-user review and guarded relay review, neither of which becomes executable from this page.
 
 The new callback is **admin-only**, resolves a strictly validated Edge ID, runs only the read-only inventory in `asyncio.to_thread`, renders HTML via escaping and on exceptions returns a generic HOLD with navigation back. No new bot, webhook, permission, journal, or host port; no root shell or SSH commands within the new handler.
 

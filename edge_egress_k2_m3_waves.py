@@ -334,6 +334,7 @@ async def run_migration_wave(
     execute_single: Callable[[ExecutionScope,ExecutionTicket,int,int],
                              Awaitable[ExecutionReceipt]],
     committed_6g: Callable[[ExecutionScope,ExecutionTicket,int],bool],
+    current_protected_mode: Callable[[], str],
     release_enabled: bool = False,
     geteuid: Callable[[],int] = os.geteuid,
     clock: Callable[[],int] = lambda: int(time.time()),
@@ -348,7 +349,7 @@ async def run_migration_wave(
         or not isinstance(plan,MigrationWavePlan) or geteuid()!=0
         or not all(callable(fn) for fn in (
             fresh_inventory,issue_single_ticket,execute_single,
-            committed_6g,clock,
+            committed_6g,current_protected_mode,clock,
         ))):
         raise MigrationWaveHold("M3_LIVE_EXECUTOR_NOT_RELEASED")
     _assert_plan(plan)
@@ -383,6 +384,16 @@ async def run_migration_wave(
             if not _fresh_member(member,current):
                 raise MigrationWaveHold("M3_UID_OR_F4_EVIDENCE_CHANGED")
             scope=_scope(member)
+            mode=current_protected_mode()
+            if mode not in ("0","1"):
+                raise MigrationWaveHold("M3_PROTECTED_MODE_NOT_ATTESTED")
+            if (scope.action=="UID_ENROLL_SOURCE" and mode!="0"):
+                raise MigrationWaveHold("M3_SAME_EDGE_REQUIRES_LEGACY_MODE")
+            if (scope.action=="UID_ATTACH" and mode!="1"):
+                # Existing P3 UID_ATTACH rejects mode 0. Do NOT switch
+                # the global mode of 425 mixed Legacy users for one UID.
+                raise MigrationWaveHold(
+                    "M3_CROSS_EDGE_REQUIRES_SEPARATE_PROTECTED_ACCEPTANCE")
             ticket=issue_single_ticket(scope,actor_id,chat_id)
             if (not isinstance(ticket,ExecutionTicket)
                 or ticket.actor_id!=actor_id or ticket.chat_id!=chat_id

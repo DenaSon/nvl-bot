@@ -196,6 +196,38 @@ class M4CheckpointTests(unittest.TestCase):
         with self.assertRaisesRegex(CheckpointHold,"HOLD_ONLY"):
             self.port.hold(self.plan,self.approval)
 
+    def test_batch_first_uid_persists_and_later_uid_holds(self):
+        batch=build_wave_plan(
+            self.fx.preview(("nvl0555","nvl0557"),"BATCH"))
+        approval=sign_wave_approval(
+            batch,actor_id=11,chat_id=-222,expires_at=NOW+110,
+            secret=SECRET,now=NOW,operator_authorized=True,
+        )
+        self.port.prepare(batch,approval)
+        self.port.begin(batch,approval,actor_id=11,chat_id=-222)
+        first,second=batch.members
+        self.port.record_verified(
+            batch,approval,first.username,first.uid,111)
+        crash_view=self.port.inspect(batch,approval)
+        self.assertEqual(crash_view.state,"UNKNOWN_INFLIGHT")
+        self.assertEqual(crash_view.progress,
+                         ((first.username,"VERIFIED",111),))
+        report=WaveReport(
+            batch.digest,
+            (WaveProgress(first.username,first.uid,"VERIFIED",
+                          "P3_6G_COMMITTED",111),
+             WaveProgress(second.username,second.uid,"HOLD",
+                          "M3_F4_DRIFT")),
+            True,"M3_F4_DRIFT",False,
+        )
+        self.port.finish(batch,approval,report)
+        final=self.port.inspect(batch,approval)
+        self.assertEqual(final.state,"HOLD")
+        self.assertEqual(final.progress[0][2],111)
+        self.assertEqual(final.progress[1][1],"HOLD")
+        with self.assertRaises(CheckpointHold):
+            self.port.begin(batch,approval,actor_id=11,chat_id=-222)
+
     def test_corrupt_stage_does_not_look_successful(self):
         self.begin()
         with self.connect() as c:

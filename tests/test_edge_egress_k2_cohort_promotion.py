@@ -185,8 +185,9 @@ class CohortPromotionTests(unittest.TestCase):
         self.assertFalse(result.allowed)
         self.assertEqual(self.mode(),"0")
         self.assertEqual(self.journal()[0],"RUNNING")
-        self.assertEqual(json.loads(self.journal()[1])["phase"],
-                         "EGRESS_P3_RECOVERY_REQUIRED")
+        detail=json.loads(self.journal()[1])
+        self.assertEqual(detail["phase"],"EGRESS_P3_RECOVERY_REQUIRED")
+        self.assertIs(detail["frozen"],False)  # no fake UID-fence attestations
 
     def test_failure_after_cas_keeps_mode_protected_and_6g_hold(self):
         review,ticket,executor,_=self.prepared()

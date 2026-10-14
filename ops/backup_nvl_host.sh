@@ -10,7 +10,7 @@ if [[ "$ROLE" != "core" && "$ROLE" != "edge" ]]; then
   echo "Usage: sudo bash $0 core|edge" >&2; exit 2
 fi
 if (( EUID != 0 )); then echo "Must run as root" >&2; exit 2; fi
-for cmd in tar sha256sum gzip df find sort mktemp date; do
+for cmd in tar sha256sum gzip df find sort mktemp date awk tr grep; do
   command -v "$cmd" >/dev/null || { echo "Missing: $cmd" >&2; exit 2; }
 done
 if [[ "$ROLE" == "core" ]]; then

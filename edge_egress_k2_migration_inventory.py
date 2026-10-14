@@ -65,6 +65,10 @@ class UserInventory:
     issues: tuple[str, ...]
     selected: bool
 
+    @property
+    def needs_review(self) -> bool:
+        return not self.source_proven or bool(self.issues)
+
 
 @dataclass(frozen=True)
 class MigrationInventory:
@@ -77,6 +81,10 @@ class MigrationInventory:
     global_issues: tuple[str, ...]
     fingerprint: str
     target_f4_accepted: bool
+
+    @property
+    def needs_review_count(self) -> int:
+        return sum(a.needs_review for a in self.accounts)
 
     @property
     def selected_issues(self) -> tuple[str, ...]:
@@ -321,6 +329,10 @@ def preview_migration(
                 source_edge = source_ip = ""
                 source_proven = False
                 sessions = None
+                if not selected:
+                    # Nonselected accounts are inventoried, not silently
+                    # given a trusted ingress solely from DB host metadata.
+                    _reason(issues,"SOURCE_INGRESS_NOT_ATTESTED")
                 if selected:
                     if ingress_witness is None:
                         _reason(issues,"SOURCE_INGRESS_NOT_ATTESTED")

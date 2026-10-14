@@ -28,7 +28,7 @@ async def command():
                       {h.sink for h in report.callsites})
 
     def test_invalid_source_holds_and_simple_source_does_not_certify_nonroot(self):
-        for raw in (b"",b"\xff",b"def bad(":):
+        for raw in (b"",b"\xff",b"def bad("):
             with self.subTest(raw=raw),self.assertRaises(audit.A3AuditHold):
                 audit.scan_legacy_bot_source(raw)
         r=audit.scan_legacy_bot_source(b"def simple():\n    return 42\n")

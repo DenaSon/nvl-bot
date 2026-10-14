@@ -80,3 +80,8 @@ Source integration adapters added on the stacked M4 branch; see [M4.2 evidence/w
 ## M4.3 two-tap Telegram PREPARE/CONFIRM/CANCEL (2026-10-15)
 
 Source implements a non-root fixed Unix socket client, an actor/chat/message/exact-selection-bound volatile one-shot approval store, root-side M7-only batch gate, and guarded existing `hpeg_m4_*` Telegram callbacks. The root request ID never enters PicklePersistence or callback_data; ambiguous IPC confirmation remains HOLD without replay. Default execution flags remain OFF, current bot is still root and live Root/physical F4 acceptance is unavailable. See [M4.3 handoff](K2_M4_3_TELEGRAM_EXECUTION_2026-10-15.md). SOURCE/CI is not operational deployment.
+
+
+## M4.4 restart-safe root status source checkpoint — 2026-10-15
+
+An explicit, independently gated `STATUS` IPC action and root-owned SELECT-only checkpoint/6G receipt reconciliation projection were added on the M4 PR branch. `RUNNING` or `HOLD` blocks all fresh checkpoint prepare/begin, even if 6G looks idle; original 6G remains untouched. New Telegram status projection is conservative, actor/chat scoped and does not label original P3 receipts as physical client packet success. See [M4.4 recovery handoff](K2_M4_4_RESTART_RECOVERY_2026-10-15.md). All root/IPC/TG status release flags remain OFF, physical M4.2 blockers and M4.5 integration acceptance remain open.

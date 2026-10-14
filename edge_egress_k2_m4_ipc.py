@@ -27,6 +27,7 @@ from typing import Callable
 from edge_egress_k2_migration_inventory import select_migration
 from edge_egress_k2_m4_root_portal import PreparedWave, RootMigrationPortal
 from edge_egress_k2_m4_telegram import select_input
+from edge_egress_k2_m44_recovery import inspect_root_recovery
 
 M4_UNIX_IPC_ENABLED = False
 M4_BATCH_RELEASE_ENABLED = False
@@ -96,17 +97,55 @@ class RootOperatorIPC:
         self.released=released
         self._pending: dict[str,PendingRequest]={}
 
-    def _gate(self,peer_uid:int) -> None:
-        if (not M4_UNIX_IPC_ENABLED or self.released is not True
-            or self.geteuid()!=0 or type(peer_uid) is not int
-            or peer_uid!=self.bot_uid):
+    def _gate(self,peer_uid:int, *, peer_only:bool=False,
+              action:str|None=None) -> None:
+        if (self.released is not True or self.geteuid()!=0
+            or type(peer_uid) is not int or peer_uid!=self.bot_uid):
             raise M4IPCReject("IPC_UNTRUSTED_PEER_OR_RELEASE")
+        if peer_only:
+            return  # kernel SO_PEERCRED identity only, before reading frame.
+        from edge_egress_k2_m44_recovery import M44_ROOT_STATUS_ENABLED
+        if not (M44_ROOT_STATUS_ENABLED if action=="STATUS"
+                else M4_UNIX_IPC_ENABLED):
+            raise M4IPCReject("IPC_ACTION_RELEASE_DISABLED")
 
     async def dispatch(self,raw:bytes,*,peer_uid:int) -> bytes:
-        self._gate(peer_uid)
+        self._gate(peer_uid, peer_only=True)
         request=_decode_request(raw)
         action=request.get("action")
-        if action=="PREPARE":
+        self._gate(peer_uid, action=action)
+        if action=="STATUS":
+            _field_keys(request,frozenset((
+                "action","mode","usernames","edge_id","actor_id","chat_id",
+            )))
+            actor,chat=_actor(request)
+            names=request["usernames"]
+            if not isinstance(names,list) or any(
+                type(name) is not str for name in names
+            ):
+                raise M4IPCReject("IPC_STATUS_USERS_INVALID")
+            selection=select_input(request["mode"],",".join(names),
+                                   request["edge_id"])
+            from edge_egress_k2_m4_checkpoint import DurableWaveCheckpoint
+            cp=self.portal.checkpoint
+            if (not isinstance(cp,DurableWaveCheckpoint)
+                or not callable(self.portal.admin_authorized)):
+                raise M4IPCReject("IPC_ROOT_CHECKPOINT_MISSING")
+            view=inspect_root_recovery(
+                cp.db_conn,selection,actor_id=actor,chat_id=chat,
+                admin_authorized=self.portal.admin_authorized,
+                geteuid=self.geteuid,release_enabled=True,
+            )
+            result={
+                "state":"STATUS","edge_id":view.edge_id,
+                "wave_state":view.wave_state,
+                "busy":view.original_6g_busy,
+                "unresolved":view.unresolved,
+                "users":[{"username":u.username,"state":u.state}
+                         for u in view.users],
+                "note":view.note,
+            }
+        elif action=="PREPARE":
             _field_keys(request,frozenset((
                 "action","mode","usernames","edge_id","actor_id","chat_id",
             )))
@@ -231,7 +270,7 @@ async def handle_accepted_socket(transport: RootOperatorIPC,
         if len(peer)!=12:
             raise M4IPCReject("IPC_PEER_CREDENTIALS_ABSENT")
         _pid,uid,_gid=struct.unpack("3i",peer)
-        transport._gate(uid)   # before reading any request
+        transport._gate(uid,peer_only=True)   # kernel peer before any payload
         raw=await asyncio.to_thread(_read_one_frame,conn)
         response=await transport.dispatch(raw,peer_uid=uid)
         await asyncio.to_thread(conn.sendall,response+b"\n")

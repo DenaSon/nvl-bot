@@ -6,6 +6,7 @@ from pathlib import Path
 
 from edge_egress_k2_m4_status import (
     M4StatusHold, inspect_telegram_wave_status, status_html,
+    root_checkpoint_status_html,
 )
 from edge_egress_k2_migration_inventory import select_migration
 from tests.test_edge_egress_k2_migration_inventory import (
@@ -51,6 +52,38 @@ class M4WaveStatusTests(unittest.TestCase):
             "VALUES('nvl0555',1636,'e9',?,'PROTECTED')",(TARGET,))
         state=inspect_telegram_wave_status(self.fx.db,self.selection)
         self.assertEqual(state.accounts[0].state,"HOLD")
+
+    def test_root_checkpoint_status_is_receipt_not_packet_proof(self):
+        response={
+            "state":"STATUS","edge_id":"e9","wave_state":"RECEIPTS_RECORDED",
+            "busy":False,"unresolved":False,
+            "users":[{"username":"nvl0555","state":"RECEIPT_SCOPED"}],
+            "note":"REQUIRES_INDEPENDENT_PACKET_PROOF",
+        }
+        display=root_checkpoint_status_html(response,self.selection)
+        self.assertIn("رسید اصلی ثبت و تطبیق شد",display)
+        self.assertIn("اتصال واقعی باید جداگانه تأیید شود",display)
+        response["wave_state"]="UNKNOWN_INFLIGHT"
+        response["unresolved"]=True
+        response["users"][0]["state"]="UNKNOWN"
+        display=root_checkpoint_status_html(response,self.selection)
+        self.assertIn("اجرای مجدد خودکار مجاز نیست",display)
+        response["users"][0]["username"]="nvl0557"
+        with self.assertRaises(M4StatusHold):
+            root_checkpoint_status_html(response,self.selection)
+
+    def test_bot_uses_root_status_when_released_no_silent_fallback(self):
+        source=(Path(__file__).resolve().parents[1]/
+                "bot_final_v49-2.py").read_text(encoding="utf-8")
+        a=source.index('    elif d.startswith("hpeg_m4_"):')
+        b=source.index('    elif d.startswith("hpeg_transfer_"):',a)
+        handler=source[a:b]
+        self.assertIn("k2_m44_status_flags.M44_TELEGRAM_STATUS_ENABLED",handler)
+        self.assertIn('"STATUS",actor_id=actor_id,chat_id=chat_id',handler)
+        self.assertIn("k2_m44_root_status_html(root_result,selection)",handler)
+        self.assertLess(handler.index("if role != 'admin':"),
+                        handler.index('"STATUS",actor_id=actor_id'))
+        self.assertNotIn("run_migration_wave(",handler)
 
     def test_bot_status_callback_role_gate_and_read_only(self):
         source=(Path(__file__).resolve().parents[1]/

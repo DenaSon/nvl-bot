@@ -30,6 +30,12 @@ MAX_SOURCE_BYTES = 2_000_000
 PINNED_SOURCE_FILES = frozenset((
     "edge_egress_k2_m4_root_worker.py",
     "edge_egress_k2_m4_ipc.py",
+    "edge_egress_k2_m44_recovery.py",
+    "edge_egress_k2_m4_status.py",
+    "edge_egress_k2_m43_client.py",
+    "edge_egress_k2_m43_workflow.py",
+    "edge_egress_k2_m4_telegram.py",
+    "bot_final_v49-2.py",
     "edge_egress_k2_m42_evidence.py",
     "edge_egress_k2_m42_bindings.py",
     "edge_egress_k2_m4_bootstrap.py",

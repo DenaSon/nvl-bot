@@ -393,7 +393,9 @@ from edge_egress_k2_m4_operator import (
 from edge_egress_k2_m4_status import (
     inspect_telegram_wave_status as k2_m4_readonly_status,
     status_html as k2_m4_status_html,
+    root_checkpoint_status_html as k2_m44_root_status_html,
 )
+import edge_egress_k2_m43_client as k2_m44_status_flags
 from edge_egress_k2_m43_client import (
     NonRootOperatorClient as k2_m43_client,
     M43ClientHold,
@@ -24352,10 +24354,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     data[0],",".join(data[1]),edge_id,
                 )
                 if action=="status":
-                    overview=await asyncio.to_thread(
-                        k2_m4_readonly_status,db_conn,selection,
-                    )
-                    display=k2_m4_status_html(overview)
+                    if k2_m44_status_flags.M44_TELEGRAM_STATUS_ENABLED:
+                        # Root-owned checkpoint and original 6G read view.
+                        # No local DB fallback if the root service disappears;
+                        # a timeout must never turn UNKNOWN_INFLIGHT to idle.
+                        root_result=await k2_m43_client(released=True).request(
+                            "STATUS",actor_id=actor_id,chat_id=chat_id,
+                            selection=selection,
+                        )
+                        display=k2_m44_root_status_html(root_result,selection)
+                    else:
+                        # Legacy read-only snapshot is NOT a restart-safe
+                        # root checkpoint view or independent packet proof.
+                        overview=await asyncio.to_thread(
+                            k2_m4_readonly_status,db_conn,selection,
+                        )
+                        display=k2_m4_status_html(overview)
                 else:
                     inventory=await asyncio.to_thread(
                         k2_m4_readonly_preview,db_conn,selection,

@@ -160,6 +160,32 @@ class M4UnixOperatorTests(unittest.IsolatedAsyncioTestCase):
             await self.call(request)
         self.assertEqual(self.fx.actions,[])
 
+    async def test_root_status_exact_actor_and_restart_readonly(self):
+        packet=dict(action="STATUS",mode="SINGLE",
+                    usernames=["nvl0555"],edge_id="e9",
+                    actor_id=11,chat_id=-222)
+        # Mutation flags are NOT a substitute for a separately reviewed
+        # read-only root status gate.
+        with patch("edge_egress_k2_m4_ipc.M4_UNIX_IPC_ENABLED",False):
+            with self.assertRaisesRegex(M4IPCReject,"RELEASE"):
+                await self.call(packet)
+            with patch("edge_egress_k2_m44_recovery.M44_ROOT_STATUS_ENABLED",True):
+                result=await self.call(packet)
+                self.assertEqual(result["state"],"STATUS")
+                self.assertEqual(result["wave_state"],"NO_CHECKPOINT")
+                self.assertEqual(result["users"][0]["state"],"UNKNOWN")
+                self.assertEqual(self.fx.actions,[])
+                with self.assertRaisesRegex(Exception,"AUTHORIZED"):
+                    await self.call(dict(packet,actor_id=12))
+                restart=RootOperatorIPC(
+                    portal=self.fx.portal,bot_uid=50101,
+                    geteuid=lambda:0,released=True,
+                )
+                response=json.loads(await restart.dispatch(
+                    json.dumps(packet).encode(),peer_uid=50101))
+                self.assertEqual(response["wave_state"],"NO_CHECKPOINT")
+                self.assertEqual(self.fx.actions,[])
+
     async def test_unreleased_root_service_rejects_before_portal(self):
         with patch("edge_egress_k2_m4_ipc.M4_UNIX_IPC_ENABLED",False):
             with self.assertRaisesRegex(M4IPCReject,"RELEASE"):

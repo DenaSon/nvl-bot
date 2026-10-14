@@ -16,6 +16,7 @@ import struct
 
 M43_TELEGRAM_EXECUTION_ENABLED = False
 M43_BATCH_EXECUTION_ENABLED = False
+M44_TELEGRAM_STATUS_ENABLED = False
 ROOT_SOCKET = Path("/run/nvl-k2-m4/operator.sock")
 MAX_BYTES = 4096
 _REQUEST_ID = re.compile(r"[0-9a-f]{32}\Z")
@@ -81,7 +82,36 @@ def _response(raw: bytes, action: str) -> dict:
         result.get("state") == "HOLD" and action != "CONFIRM"
     ):
         raise M43ClientHold("M43_ROOT_HOLD_OR_RESPONSE_INVALID")
-    if action == "PREPARE":
+    if action == "STATUS":
+        states = {"NO_CHECKPOINT","PREPARED","EXPIRED","UNKNOWN_INFLIGHT",
+                  "RECEIPTS_RECORDED","HOLD"}
+        user_states = {"UNKNOWN","NOT_STARTED","RECEIPT_SCOPED",
+                       "RECEIPT_UNVERIFIED","HOLD","DEFERRED"}
+        if (set(result) != {"state","edge_id","wave_state","busy",
+                            "unresolved","users","note"}
+            or result["state"] != "STATUS"
+            or type(result["edge_id"]) is not str
+            or result["wave_state"] not in states
+            or type(result["busy"]) is not bool
+            or type(result["unresolved"]) is not bool
+            or result["wave_state"] in ("UNKNOWN_INFLIGHT","HOLD")
+               and not result["unresolved"]
+            or type(result["note"]) is not str
+            or result["note"] not in (
+                "NO_ROOT_CHECKPOINT_FOR_SCOPE",
+                "REQUIRES_INDEPENDENT_PACKET_PROOF",
+                "MANUAL_RECONCILIATION_REQUIRED",
+                "ROOT_CHECKPOINT_READ_ONLY",
+            )
+            or not isinstance(result["users"],list)
+            or not 1 <= len(result["users"]) <= 10
+            or any(not isinstance(u,dict)
+                   or set(u) != {"username","state"}
+                   or type(u["username"]) is not str
+                   or u["state"] not in user_states
+                   for u in result["users"])):
+            raise M43ClientHold("M44_STATUS_RESPONSE_INVALID")
+    elif action == "PREPARE":
         if (set(result) != {"state", "request_id", "edge_id",
                             "user_count", "expires_at"}
             or result["state"] != "PREPARED"
@@ -127,21 +157,23 @@ class NonRootOperatorClient:
     async def request(self, action: str, *, actor_id: int, chat_id: int,
                       selection=None, request_id=None) -> dict:
         # Runtime gate before constructing JSON, opening a socket or side effect.
-        if (not M43_TELEGRAM_EXECUTION_ENABLED or self.released is not True
+        if (not (M44_TELEGRAM_STATUS_ENABLED if action=="STATUS"
+                 else M43_TELEGRAM_EXECUTION_ENABLED)
+            or self.released is not True
             or not callable(self.geteuid) or type(self.geteuid()) is not int
             or self.geteuid() <= 0
             or not callable(self.exchange)
             or type(actor_id) is not int or actor_id <= 0
             or type(chat_id) is not int or chat_id == 0):
             raise M43ClientHold("M43_NONROOT_RELEASE_REQUIRED")
-        if action == "PREPARE":
+        if action in ("PREPARE","STATUS"):
             from edge_egress_k2_migration_inventory import MigrationSelection,select_migration
             if not isinstance(selection, MigrationSelection):
                 raise M43ClientHold("M43_SELECTION_REQUIRED")
             if select_migration(selection.mode,selection.usernames,
                                 selection.target_edge_id) != selection:
                 raise M43ClientHold("M43_SELECTION_CHANGED")
-            if (selection.mode != "SINGLE"
+            if (action == "PREPARE" and selection.mode != "SINGLE"
                 and not M43_BATCH_EXECUTION_ENABLED):
                 raise M43ClientHold("M43_BATCH_NOT_RELEASED")
             data = {"action":action,"mode":selection.mode,
@@ -161,9 +193,16 @@ class NonRootOperatorClient:
             raise M43ClientHold("M43_REQUEST_TOO_LONG")
         raw = await asyncio.to_thread(self.exchange,frame)
         result = _response(raw,action)
-        if action == "PREPARE" and (
-            result["edge_id"] != selection.target_edge_id
-            or result["user_count"] != len(selection.usernames)
-        ):
-            raise M43ClientHold("M43_PREPARE_SCOPE_DRIFT")
+        if action in ("PREPARE","STATUS"):
+            if result["edge_id"] != selection.target_edge_id:
+                raise M43ClientHold("M44_ROOT_EDGE_SCOPE_DRIFT")
+            if action == "PREPARE" and (
+                result["user_count"] != len(selection.usernames)
+            ):
+                raise M43ClientHold("M43_PREPARE_SCOPE_DRIFT")
+            if action == "STATUS" and (
+                tuple(u["username"] for u in result["users"])
+                != selection.usernames
+            ):
+                raise M43ClientHold("M44_ROOT_UID_ORDER_DRIFT")
         return result

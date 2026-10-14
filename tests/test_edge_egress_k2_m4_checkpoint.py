@@ -83,7 +83,7 @@ class M4CheckpointTests(unittest.TestCase):
             db_conn=self.connect,geteuid=lambda:0,
             clock=lambda:NOW,release_enabled=True,
         )
-        with self.assertRaisesRegex(CheckpointHold,"CONSUMED"):
+        with self.assertRaisesRegex(CheckpointHold,"CONSUMED|UNRESOLVED"):
             restarted.begin(self.plan,self.approval,actor_id=11,chat_id=-222)
         view=restarted.inspect(self.plan,self.approval)
         self.assertEqual(view.state,"UNKNOWN_INFLIGHT")
@@ -95,7 +95,7 @@ class M4CheckpointTests(unittest.TestCase):
             self.plan,actor_id=12,chat_id=-333,expires_at=NOW+90,
             secret=SECRET,now=NOW,operator_authorized=True)
         self.port.prepare(self.plan,other)
-        with self.assertRaisesRegex(CheckpointHold,"ANOTHER_WAVE"):
+        with self.assertRaisesRegex(CheckpointHold,"ANOTHER_WAVE|UNRESOLVED"):
             self.port.begin(self.plan,other,actor_id=12,chat_id=-333)
         self.assertEqual(self.port.inspect(self.plan,self.approval).state,
                          "UNKNOWN_INFLIGHT")

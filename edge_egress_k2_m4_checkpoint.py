@@ -131,6 +131,15 @@ class DurableWaveCheckpoint:
         try:
             with self.db_conn() as conn:
                 conn.execute("BEGIN IMMEDIATE")
+                # A previous ambiguous wave cannot be reapproved merely
+                # because the original 6G process crashed or went idle.
+                unresolved=conn.execute(
+                    "SELECT COUNT(*) FROM k2_m4_wave_checkpoints "
+                    "WHERE state IN ('RUNNING','HOLD')"
+                ).fetchone()
+                if (unresolved is None or type(unresolved[0]) is not int
+                    or unresolved[0] != 0):
+                    raise CheckpointHold("M44_UNRESOLVED_WAVE_MANUAL_HOLD")
                 conn.execute(
                     "INSERT INTO k2_m4_wave_checkpoints "
                     "(approval_hash,plan_digest,actor_id,chat_id,"
@@ -153,6 +162,14 @@ class DurableWaveCheckpoint:
         try:
             with self.db_conn() as conn:
                 conn.execute("BEGIN IMMEDIATE")
+                # A previous HOLD (or RUNNING from any other approval)
+                # blocks a fresh wave even if original 6G appears idle.
+                unresolved=conn.execute(
+                    "SELECT COUNT(*) FROM k2_m4_wave_checkpoints "
+                    "WHERE state IN ('RUNNING','HOLD')"
+                ).fetchone()
+                if unresolved is None or type(unresolved[0]) is not int or unresolved[0]:
+                    raise CheckpointHold("M44_UNRESOLVED_WAVE_MANUAL_HOLD")
                 # A crashed previous wave must not make an idle 6G claim.
                 busy=conn.execute(
                     "SELECT COUNT(*) FROM failover_operations "

@@ -102,6 +102,54 @@ class M43BotClientTests(unittest.IsolatedAsyncioTestCase):
             b'"accounts":[{"username":"nvl0555","state":"DEFERRED"}]}',"CONFIRM")
         self.assertEqual(hold["state"],"HOLD")
 
+    async def test_status_is_independently_released_readonly(self):
+        response=lambda frame:json.dumps({
+            "state":"STATUS","edge_id":"e9",
+            "wave_state":"UNKNOWN_INFLIGHT",
+            "busy":False,"unresolved":True,
+            "users":[{"username":"nvl0555","state":"UNKNOWN"}],
+            "note":"MANUAL_RECONCILIATION_REQUIRED",
+        }).encode()
+        bot=client.NonRootOperatorClient(
+            released=True,geteuid=lambda:10001,exchange=response,
+        )
+        with patch.object(client,"M43_TELEGRAM_EXECUTION_ENABLED",False):
+            with self.assertRaisesRegex(client.M43ClientHold,"NONROOT"):
+                await bot.request("STATUS",actor_id=11,chat_id=-222,
+                                  selection=self.selection)
+            with patch.object(client,"M44_TELEGRAM_STATUS_ENABLED",True):
+                status=await bot.request("STATUS",actor_id=11,
+                                         chat_id=-222,selection=self.selection)
+                self.assertEqual(status["wave_state"],"UNKNOWN_INFLIGHT")
+                with self.assertRaisesRegex(client.M43ClientHold,"NONROOT"):
+                    await bot.request("PREPARE",actor_id=11,chat_id=-222,
+                                      selection=self.selection)
+
+    async def test_status_forgery_and_scope_drift_hold(self):
+        messages=[
+            {"state":"STATUS","edge_id":"e9","wave_state":"HOLD",
+             "busy":False,"unresolved":False,
+             "users":[{"username":"nvl0555","state":"UNKNOWN"}],
+             "note":"MANUAL_RECONCILIATION_REQUIRED"},
+            {"state":"STATUS","edge_id":"e9","wave_state":"SUCCEEDED",
+             "busy":False,"unresolved":False,
+             "users":[{"username":"nvl0555","state":"RECEIPT_SCOPED"}],
+             "note":"ROOT_CHECKPOINT_READ_ONLY"},
+            {"state":"STATUS","edge_id":"e9","wave_state":"NO_CHECKPOINT",
+             "busy":False,"unresolved":False,
+             "users":[{"username":"nvl0557","state":"UNKNOWN"}],
+             "note":"NO_ROOT_CHECKPOINT_FOR_SCOPE"},
+        ]
+        with patch.object(client,"M44_TELEGRAM_STATUS_ENABLED",True):
+            for response in messages:
+                bot=client.NonRootOperatorClient(
+                    released=True,geteuid=lambda:10001,
+                    exchange=lambda _,reply=response:json.dumps(reply).encode(),
+                )
+                with self.subTest(message=response),self.assertRaises(client.M43ClientHold):
+                    await bot.request("STATUS",actor_id=11,chat_id=-222,
+                                      selection=self.selection)
+
     async def test_no_generic_command_and_scoped_reply(self):
         with self.assertRaisesRegex(client.M43ClientHold,"DENIED"):
             await self.bot.request("SHELL",actor_id=11,chat_id=-222)

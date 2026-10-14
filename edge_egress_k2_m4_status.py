@@ -106,3 +106,49 @@ def status_html(s: M4WaveStatus) -> str:
     lines.extend(("","این گزارش وضعیت ثبت‌شده است، "
                   "نه تأیید اتصال واقعی کاربر."))
     return "\n".join(lines)
+
+
+def root_checkpoint_status_html(result: dict, selection: MigrationSelection) -> str:
+    """A root-owned *receipt* view, not physical customer egress attestation."""
+    if (not isinstance(result,dict) or result.get("state")!="STATUS"
+        or not isinstance(selection,MigrationSelection)
+        or result.get("edge_id")!=selection.target_edge_id
+        or not isinstance(result.get("users"),list)
+        or tuple(u.get("username") for u in result["users"]
+                 if isinstance(u,dict))!=selection.usernames):
+        raise M4StatusHold("ROOT_STATUS_SCOPE_INVALID")
+    titles={
+        "NO_CHECKPOINT":"⚪️ سابقه تأییدشده‌ای یافت نشد",
+        "PREPARED":"🟡 در انتظار تأیید",
+        "EXPIRED":"⚪️ درخواست قبلی منقضی شد",
+        "UNKNOWN_INFLIGHT":"⛔️ وضعیت اجرا نامشخص است",
+        "RECEIPTS_RECORDED":"🟡 رسیدهای انتقال ثبت شده‌اند",
+        "HOLD":"⛔️ انتقال نیازمند بررسی است",
+    }
+    labels={
+        "UNKNOWN":"⚪️ نامشخص",
+        "NOT_STARTED":"⚪️ شروع نشده در این درخواست",
+        "RECEIPT_SCOPED":"🟡 رسید اصلی ثبت و تطبیق شد",
+        "RECEIPT_UNVERIFIED":"⛔️ رسید نیازمند بررسی است",
+        "HOLD":"⛔️ متوقف شده",
+        "DEFERRED":"⚪️ انجام نشده",
+    }
+    state=result.get("wave_state")
+    if (state not in titles or type(result.get("busy")) is not bool
+        or type(result.get("unresolved")) is not bool):
+        raise M4StatusHold("ROOT_STATUS_UNTRUSTED")
+    lines=["📋 <b>وضعیت انتقال</b>","",
+           "مقصد: <code>"+escape(selection.target_edge_id)+"</code>",
+           titles[state],""]
+    for item in result["users"]:
+        name=item.get("username")
+        status=item.get("state")
+        if name not in selection.usernames or status not in labels:
+            raise M4StatusHold("ROOT_STATUS_USER_UNTRUSTED")
+        lines.append("<code>"+escape(name)+"</code> — "+labels[status])
+    if result["busy"] or result["unresolved"]:
+        lines.extend(("","⛔️ ابتدا وضعیت انتقال باید بررسی شود؛ "
+                      "اجرای مجدد خودکار مجاز نیست."))
+    lines.extend(("","این گزارش تنها وضعیت رسیدها و سوابق است؛ "
+                  "اتصال واقعی باید جداگانه تأیید شود."))
+    return "\n".join(lines)

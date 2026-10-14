@@ -19,7 +19,7 @@ MAX_INPUT_UIDS = 10
 _NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
 _EDGE = re.compile(r"[a-z][a-z0-9_-]{1,23}\Z")
 CALLBACK_PREFIX = "hpeg_m4_"
-ACTIONS = frozenset(("home","single","batch","refresh","cancel","recheck"))
+ACTIONS = frozenset(("home","single","batch","refresh","cancel","status"))
 
 
 class M4UIHold(ValueError):
@@ -139,7 +139,8 @@ def preview_buttons(edge_id: str):
     if not _EDGE.fullmatch(edge_id):
         raise M4UIHold("EDGE_INVALID")
     return _button_rows(
-        (("🔄 بررسی دوباره",f"hpeg_m4_refresh_{edge_id}"),),
+        (("🔄 بررسی دوباره",f"hpeg_m4_refresh_{edge_id}"),
+         ("📋 وضعیت",f"hpeg_m4_status_{edge_id}")),
         (("👥 انتخاب جدید",f"hpeg_m4_home_{edge_id}"),
          ("◀️ سرور",f"hpeg_edge_{edge_id}")),
     )

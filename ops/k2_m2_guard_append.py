@@ -171,7 +171,8 @@ def apply_next_uid(*, plan: MultiUIDAppendPlan, db_conn: Callable,
                    independent_f4_ok: Callable[[ExecutionScope], bool] | None = None,
                    legacy_pam_ok: Callable[[], bool] | None = None,
                    sshd_effective: Callable[[], str] | None = None,
-                   guard_verify: Callable[[BootGuardManifest], None] | None = None,
+                   guard_verify: Callable[[BootGuardManifest], bool] | None = None,
+                   dns_ipv6_verify: Callable[[BootGuardManifest], bool] | None = None,
                    release_enabled: bool = False,
                    resume_partial: bool = False,
                    geteuid: Callable[[], int] = os.geteuid) -> None:
@@ -190,6 +191,7 @@ def apply_next_uid(*, plan: MultiUIDAppendPlan, db_conn: Callable,
             or not all(callable(c) for c in (
                 os_uid, rescue_ok, idle_ok, independent_f4_ok,
                 legacy_pam_ok, sshd_effective, guard_verify,
+                dns_ipv6_verify,
             ))):
         raise MultiUIDHold("M2_ROOT_RELEASE_NOT_ATTESTED")
     if (scope.username != plan.username or scope.uid != plan.uid
@@ -282,9 +284,13 @@ def apply_next_uid(*, plan: MultiUIDAppendPlan, db_conn: Callable,
     still_locked()
     port.command("systemctl", "enable", "--now", plan.guard_unit_name)
     still_locked()
-    guard_verify(manifest)  # BootGuardApplier.verify(..., require_frozen=True)
+    if guard_verify(manifest) is not True:
+        raise MultiUIDHold("M2_UID_DENY_FENCE_NOT_PROVEN")
     still_locked()
     port.command("systemctl", "enable", "--now", plan.dns_unit_name)
+    still_locked()
+    if dns_ipv6_verify(manifest) is not True:
+        raise MultiUIDHold("M2_DNS_IPV6_NOT_PROVEN")
     still_locked()
     # Make admission deny this UID as 'rostered but no PROTECTED runtime' only
     # once its on-disk deny/IPv6/DNS guard is independently verified.

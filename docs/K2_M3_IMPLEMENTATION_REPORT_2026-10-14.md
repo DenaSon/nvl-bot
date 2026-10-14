@@ -31,11 +31,24 @@ Canonical seven-phase product contract: PR [#144](https://github.com/DenaSon/nvl
 ## Crucial scope / genuine remaining engineering and field gates
 
 - **Target ingress and historical DB host are different identities.** Same-Edge (currently entered e9) Legacy `UID_ENROLL_SOURCE` can use root-attested current e9 ingress even if `ssh_accounts.host=104.194.144.195`. P3 still enforces global Legacy mode `0` for that action and exact root roster/BootGuard/kernel/F4. **No automatic end-user endpoint switch** was implemented by M3. M4 must expose/prove source/endpoint reconciliation; otherwise a client on a different Edge is HOLD.
-- **Cross-Edge direct UID_ATTACH is not unrestricted.** Existing P3 requires global Protected mode `1`, unsafe for a mixed 425-client population without cohort acceptance. M3 does not override this gate. For mixed Legacy rollout, use a genuinely verified target ingress + same-Edge per-UID enrollment, or develop an independently safe restricted cross-Edge port before declaring release. Do **not** flip global protected mode merely to make preview green.
+- **Cross-Edge direct UID_ATTACH is not unrestricted.** Existing P3 requires global Protected mode `1`, unsafe for a mixed 425-client population without cohort acceptance. M3 **checks the effective protected-mode contract before issuing each UID ticket**: cross-Edge with mode `0` is immediately `HOLD`, same-Edge source enrollment with mode `1` is also `HOLD`. It does not override or toggle global mode. For mixed Legacy rollout, use a genuinely verified target ingress + same-Edge per-UID enrollment, or develop an independently safe restricted cross-Edge port before declaring release. **Do not** flip global protected mode merely to make preview green.
 - Current production `e9` is F3 transport UP/STAGED but **F4 not accepted**, and `nvl0555/1636` has no dedicated e9 route. M3 source CI cannot make either ready. No PAM/SSH/WG/kernel/UID change has been performed.
 - M3 source components are callback/injection interfaces **not connected to a real operator-authenticated root service**. M4 must bind vetted implementations, root secret storage, durable bot actor/nonce and per-wave review; M5/M6 must provide independent packet/F4/boot/WG-loss and mixed cohort physical acceptance. An arbitrary synthetic `committed_6g=True` function in a unit test is NOT acceptable as a live witness.
 - Original P3 `failover_operations` is the only authoritative per-UID commit journal. The M3 report is an in-memory projection; **M4 needs a durable root-owned wave-intent/checkpoint projection for UI restart** that can be reconciled against immutable original 6G operations, never a second operation/lease authority. Unknown or lost batch tracking must HOLD pending explicit operator confirmation.
 - Expected result after **all seven phases** remains full Telegram operation without routine manual operator CLI and no unresolved product-side functional blockers. This is NOT accomplished by just building source M3.
+
+## Code and production status ledger
+
+| Stage | Status |
+| --- | --- |
+| M3 source: common one/ten-UID wave engine, actual-ingress UID host port and 6G verifier | IMPLEMENTED on feature branch |
+| M3 source: final exact-HEAD CI | Must verify both Python checks and stage-only PR checks (run IDs on PR) |
+| PR review & dependency merges (M1 #145 → M2 #146 → M3) | NOT MERGED |
+| Live privileged M3 P3 executor registration / bot authorization | OFF; assigned to M4 |
+| e9 real SSH/SOCKS public IP + packet/DNS/IPv6/boot acceptance | NOT TESTED; M5/M6 |
+| Fleet batch activation and migration of eligible accounts | OFF; M7 |
+
+**No CLI action is requested from the operator** for this source phase. A long-run recovery of a lost UI checkpoint is explicitly not auto-replayed: only the real original 6G journal and a fresh signed operator approval can authorize any next UID.
 
 ## Verification and next phase handoff
 

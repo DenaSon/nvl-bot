@@ -53,6 +53,9 @@ PROTECTED_RELEASE_SWITCHES = {
     "edge_egress_k2_m4_root_worker": (
         "M4_ROOT_WORKER_ENABLED",
     ),
+    "ops.k2_m4_plan_stage": (
+        "K2_INITIAL_UID_PLAN_STAGE_ENABLED",
+    ),
     "ops.k2_m4_root_daemon": (
         "M4A_ROOT_DAEMON_RELEASED",
     ),

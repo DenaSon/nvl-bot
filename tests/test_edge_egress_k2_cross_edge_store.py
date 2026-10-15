@@ -147,7 +147,17 @@ class CrossEdgeStoreTests(unittest.TestCase):
             reserved = store.reserve_blocked(
                 self.op, self.fx.uid_req, source=SOURCE, dns_port=10553,
             )
+            routed = store.transition(
+                self.op, self.fx.uid_req, source=SOURCE,
+                expected="BLOCKED", target="ROUTED_UNVERIFIED",
+            )
+            protected = store.commit_protected(
+                self.op, self.fx.uid_req, source=SOURCE,
+            )
         self.assertEqual(reserved.state,"BLOCKED")
+        self.assertEqual(routed.state,"ROUTED_UNVERIFIED")
+        self.assertEqual(protected.state,"PROTECTED")
+        self.assertEqual(self.fx.mapping(),(1644,"fra1",TARGET,"PROTECTED"))
         with self.fx.db() as db:
             self.assertEqual(
                 db.execute(

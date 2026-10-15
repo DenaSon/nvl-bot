@@ -101,6 +101,49 @@ class ReviewedRootCutoverGateTests(unittest.TestCase):
         self.assertIn("REVIEWED_ROOT_SOURCE_NOT_ATTESTED",result.blockers)
         self.assertFalse(result.safe_for_cutover)
 
+    def test_readonly_lab_cli_never_returns_a_release_success(self):
+        import io
+        import json
+        from contextlib import redirect_stdout
+        from ops.k2_m4_cutover_audit import main
+        report=CutoverAudit(
+            "a"*40,"b"*64,(LegacyPrivilegeUse("run_cmd",51),),
+            ("LEGACY_PRIVILEGED_CALLS_NEED_COMPATIBILITY_REVIEW",),
+        )
+        output=io.StringIO()
+        with patch("ops.k2_m4_cutover_audit.inspect_cutover",return_value=report) as checker,\
+             redirect_stdout(output):
+            code=main([
+                "--source-root","/srv/nvl/reviewed",
+                "--bot-uid","12001","--ipc-gid","12002",
+            ])
+        checker.assert_called_once()
+        self.assertEqual(code,78)
+        payload=json.loads(output.getvalue())
+        self.assertEqual(payload["status"],"HOLD")
+        self.assertFalse(payload["can_deploy"])
+        self.assertFalse(payload["can_release"])
+        self.assertEqual(payload["legacy_privileged_call_sites"],1)
+        self.assertNotIn("source_root",payload)
+
+    def test_readonly_lab_cli_bad_source_is_a_sanitized_hold(self):
+        import io
+        import json
+        from contextlib import redirect_stdout
+        from ops.k2_m4_cutover_audit import main
+        output=io.StringIO()
+        with patch("ops.k2_m4_cutover_audit.inspect_cutover",
+                   side_effect=RootWorkerHold("SECRET_PATH=/root/key")),\
+             redirect_stdout(output):
+            code=main([
+                "--source-root","/srv/nvl/reviewed",
+                "--bot-uid","12001","--ipc-gid","12002",
+            ])
+        self.assertEqual(code,78)
+        result=json.loads(output.getvalue())
+        self.assertEqual(result["blockers"],["CUTOVER_AUDIT_NOT_ATTESTED"])
+        self.assertNotIn("SECRET_PATH",output.getvalue())
+
     def test_forged_audit_result_cannot_claim_production_approval(self):
         with self.assertRaisesRegex(CutoverAuditHold,"FIELD_ACCEPTANCE"):
             CutoverAudit("a"*40,"b"*64,(),(),safe_for_cutover=True)

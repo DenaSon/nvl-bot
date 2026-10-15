@@ -93,6 +93,31 @@ class M4RootPortalTests(unittest.IsolatedAsyncioTestCase):
         ).fetchone(),(0,))
         self.assertEqual(self.actions,[])
 
+    def test_wrong_protected_mode_denied_before_durable_prepare(self):
+        self.portal.current_protected_mode=lambda:"1"
+        with patch("edge_egress_k2_m4_root_portal.M4_ROOT_PORTAL_ENABLED",True), \
+             patch("edge_egress_k2_m4_checkpoint.M4_CHECKPOINT_RELEASE_ENABLED",True):
+            with self.assertRaisesRegex(RootPortalHold,"REQUIRES_LEGACY_MODE"):
+                self.portal.prepare(self.selection,actor_id=11,chat_id=-222)
+        self.assertEqual(self.fx.c.execute(
+            "SELECT COUNT(*) FROM k2_m4_wave_checkpoints"
+        ).fetchone(),(0,))
+        self.assertEqual(self.actions,[])
+
+    async def test_mode_drift_after_prepare_holds_before_6g(self):
+        with patch("edge_egress_k2_m4_root_portal.M4_ROOT_PORTAL_ENABLED",True), \
+             patch("edge_egress_k2_m4_checkpoint.M4_CHECKPOINT_RELEASE_ENABLED",True):
+            prepared=self.portal.prepare(
+                self.selection,actor_id=11,chat_id=-222)
+            self.portal.current_protected_mode=lambda:"1"
+            with self.assertRaisesRegex(RootPortalHold,"MODE_CHANGED"):
+                await self.portal.execute(
+                    prepared,actor_id=11,chat_id=-222)
+        self.assertEqual(self.fx.c.execute(
+            "SELECT state FROM k2_m4_wave_checkpoints"
+        ).fetchone(),("PREPARED",))
+        self.assertEqual(self.actions,[])
+
     def test_fake_packet_f4_never_yields_signed_approval(self):
         self.portal.physical_f4=lambda plan:False
         with patch("edge_egress_k2_m4_root_portal.M4_ROOT_PORTAL_ENABLED",True), \

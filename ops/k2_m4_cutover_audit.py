@@ -133,3 +133,53 @@ def inspect_cutover(paths: WorkerPaths) -> CutoverAudit:
     # way to turn unreviewed test fixtures into production permissions.
     issues.append("INDEPENDENT_LEGACY_FUNCTIONAL_AND_VPS_PROOF_PENDING")
     return CutoverAudit(git_sha, digest, uses, tuple(issues))
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Explicit standalone READ-ONLY cutover diagnostics for a lab Core.
+
+    Returns 78/HOLD even with a valid release manifest. Does not run an M4
+    worker, modify systemd/permissions, create a socket or issue a ticket.
+    """
+    import argparse
+    import json
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(
+        description="Read-only NVL K2 root-bot cutover audit (never releases)"
+    )
+    parser.add_argument("--source-root", type=Path, required=True)
+    parser.add_argument("--bot-uid", type=int, required=True)
+    parser.add_argument("--ipc-gid", type=int, required=True)
+    args = parser.parse_args(argv)
+    try:
+        result = inspect_cutover(WorkerPaths(
+            source_root=args.source_root,
+            manifest_file=Path("/etc/nvl-egress/k2-m4/release.json"),
+            secret_file=Path("/etc/nvl-egress/k2-m4/root-hmac.key"),
+            runtime_dir=Path("/run/nvl-k2-m4"),
+            bot_uid=args.bot_uid,
+            ipc_gid=args.ipc_gid,
+        ))
+        output = {
+            "status": "HOLD",
+            "reviewed_git_sha": result.reviewed_git_sha,
+            "bot_sha256": result.bot_sha256,
+            "legacy_privileged_call_sites": len(result.privileged_uses),
+            "blockers": list(result.blockers),
+            "can_deploy": False,
+            "can_release": False,
+        }
+    except (RootWorkerHold, CutoverAuditHold, ValueError, OSError):
+        output = {
+            "status": "HOLD",
+            "blockers": ["CUTOVER_AUDIT_NOT_ATTESTED"],
+            "can_deploy": False,
+            "can_release": False,
+        }
+    print(json.dumps(output, sort_keys=True, separators=(",", ":")))
+    return 78
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

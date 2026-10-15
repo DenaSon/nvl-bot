@@ -81,7 +81,7 @@ class M4UnixOperatorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(M4IPCReject,"MISSING"):
             await self.call(expired)
         # Only the fresh PREPARE has entered the durable root checkpoint.
-        self.assertEqual(self.fx.c.execute(
+        self.assertEqual(self.fx.fx.c.execute(
             "SELECT COUNT(*) FROM k2_m4_wave_checkpoints"
         ).fetchone()[0],1)
         self.assertEqual(self.fx.actions,[])
@@ -91,7 +91,7 @@ class M4UnixOperatorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(M4IPCReject,"QUEUE_FULL"):
             await self.call(self.prepare_message())
         self.assertEqual(len(self.ipc._pending),20)
-        self.assertEqual(self.fx.c.execute(
+        self.assertEqual(self.fx.fx.c.execute(
             "SELECT COUNT(*) FROM k2_m4_wave_checkpoints"
         ).fetchone()[0],0)
         self.assertEqual(self.fx.actions,[])

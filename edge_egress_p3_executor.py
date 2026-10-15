@@ -20,6 +20,8 @@ from typing import Callable, Protocol
 
 # There is no implicit live port or Telegram authorisation.
 EXECUTOR_ENABLED = False
+# Never permit mode-0 UID_ATTACH with a generic fake host or 6G callback.
+P3_CROSS_EDGE_LEGACY_UID_ATTACH_ENABLED = False
 TICKET_TTL_SECONDS = 120
 INTENT_PHASE = "EGRESS_P3_EXECUTE_INTENT"
 RECOVERY_PHASE = "EGRESS_P3_RECOVERY_REQUIRED"
@@ -301,6 +303,30 @@ class Existing6GGuardedExecutor:
             finished=(status == "SUCCEEDED"), require_running=True,
         )
 
+    def _legacy_cross_edge_host_bound(self, scope: ExecutionScope) -> bool:
+        """Only the original M4 reviewed deferred port may bypass mode=1.
+
+        The port still must install real root PAM/UID guards after original
+        6G intent and use the typed cross-Edge F2 CAS store. No arbitrary
+        host_port, preview bool, or Telegram-supplied marker is accepted.
+        """
+        from edge_egress_k2_m4_bootstrap import (
+            DeferredCrossEdgeOriginal6GHostPort,
+        )
+        port = self.host_port
+        return (
+            P3_CROSS_EDGE_LEGACY_UID_ATTACH_ENABLED
+            and scope.action == "UID_ATTACH"
+            and scope.source_host != scope.target_host
+            and type(port) is DeferredCrossEdgeOriginal6GHostPort
+            and port.scope == scope
+            and port.db_conn is self.db_conn
+            and port.release_enabled is True
+            and isinstance(port.ticket, ExecutionTicket)
+            and port.ticket.scope_digest == _scope_digest(scope)
+            and port.ticket.nonce is not None
+        )
+
     def _lease(self, operation_id, scope, nonce_hash=None):
         with self.db_conn() as conn:
             _locked(conn, operation_id, scope, nonce_hash=nonce_hash)
@@ -312,7 +338,10 @@ class Existing6GGuardedExecutor:
                     "SELECT value FROM settings "
                     "WHERE key='edge_egress_protected_mode'"
                 ).fetchone()
-                expected = ("0",) if scope.action == "UID_ENROLL_SOURCE" else ("1",)
+                expected = ("0",) if (
+                    scope.action == "UID_ENROLL_SOURCE"
+                    or self._legacy_cross_edge_host_bound(scope)
+                ) else ("1",)
                 if mode != expected:
                     raise ExecutorHold(
                         "SOURCE_ENROLL_REQUIRES_LEGACY_MODE"
@@ -353,7 +382,10 @@ class Existing6GGuardedExecutor:
                     "SELECT value FROM settings "
                     "WHERE key='edge_egress_protected_mode'"
                 ).fetchone()
-                expected = ("0",) if scope.action == "UID_ENROLL_SOURCE" else ("1",)
+                expected = ("0",) if (
+                    scope.action == "UID_ENROLL_SOURCE"
+                    or self._legacy_cross_edge_host_bound(scope)
+                ) else ("1",)
                 if mode != expected:
                     raise ExecutorHold(
                         "SOURCE_ENROLL_REQUIRES_LEGACY_MODE"

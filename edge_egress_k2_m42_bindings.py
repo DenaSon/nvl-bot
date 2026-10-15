@@ -333,13 +333,12 @@ class RootM42Bindings:
                     and detail.get("action") == scope.action
                     and detail.get("edge_id") == scope.edge_id
                     and detail.get("scope_digest") == _scope_digest(scope)
-                    and isinstance(detail.get("nonce_hash"),str)
+                    and type(detail.get("nonce_hash")) is str
+                    and re.fullmatch(r"[a-f0-9]{64}", detail["nonce_hash"])
+                        is not None
                     and hmac.compare_digest(
                         detail["nonce_hash"], expected_nonce_hash
-                    ) if (type(detail) is dict
-                          and type(detail.get("nonce_hash")) is str
-                          and re.fullmatch(r"[a-f0-9]{64}", detail["nonce_hash"]))
-                    else False
+                    )
                 )
         except (sqlite3.Error,ValueError,TypeError,KeyError):
             return False

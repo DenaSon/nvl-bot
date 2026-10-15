@@ -21,8 +21,8 @@ from edge_egress_v1_admission import _trusted_bytes, _trusted_directory
 
 ROOT_BINDINGS = Path("/etc/nvl-egress/k2-m4/uid-ingress-egress.json")
 MAX_BINDING_BYTES = 262144
-_EDGE = re.compile(r"[a-z][a-z0-9_-]{1,23}\\Z")
-_USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}\\Z")
+_EDGE = re.compile(r"[a-z][a-z0-9_-]{1,23}\Z")
+_USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
 FIELDS = frozenset(("username", "uid", "ingress_edge", "ingress_ipv4",
                     "egress_edge", "egress_ipv4"))
 

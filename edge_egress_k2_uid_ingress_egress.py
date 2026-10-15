@@ -21,6 +21,9 @@ from edge_egress_v1_admission import _trusted_bytes, _trusted_directory
 
 ROOT_BINDINGS = Path("/etc/nvl-egress/k2-m4/uid-ingress-egress.json")
 MAX_BINDING_BYTES = 262144
+
+# Original-6G P3 precommit-only policy stage. Inert until root host acceptance.
+K2_M4_POLICY_STAGE_ENABLED = False
 _EDGE = re.compile(r"[a-z][a-z0-9_-]{1,23}\Z")
 _USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
 FIELDS = frozenset(("username", "uid", "ingress_edge", "ingress_ipv4",
@@ -226,3 +229,145 @@ def load_root_uid_ingress_egress_bindings(
         )
     except (OSError, ValueError) as exc:
         raise IngressEgressHold("INGRESS_EGRESS_ROOT_SOURCE_UNTRUSTED") from exc
+
+def stage_6g_cross_edge_binding(
+    *, db_conn, scope, ticket, source_evidence, geteuid,
+    release_enabled: bool = False,
+) -> UIDIngressEgressBinding:
+    """Root-only CAS of future-PROTECTED PAM identity *before* F2 commit.
+
+    Called by the original P3 UID port ONLY after ROUTED_UNVERIFIED and
+    independent packet/DNS/IPv6 evidence, while original 6G is RUNNING.
+    The staged record carries generation+1 and remains non-admitting until
+    original F2 commit_protected succeeds. A failed CAS preserves 6G HOLD.
+    Existing policy entries and other UIDs cannot be silently changed.
+    """
+    import os
+    import tempfile
+    from dataclasses import asdict
+    from edge_egress_p3_executor import (
+        ExecutionScope, ExecutionTicket, assert_guarded_6g_intent,
+    )
+    from edge_egress_uid_runtime_store import read_binding
+    from edge_egress_v1_admission import load_roster, checked_guard
+    from edge_egress_k2_m2_ingress_journal import RootReadOnlyIngressEvidence
+    from edge_egress_v1_ingress import IngressPeer
+
+    if (not K2_M4_POLICY_STAGE_ENABLED or release_enabled is not True
+        or not callable(db_conn) or not callable(source_evidence)
+        or not callable(geteuid) or geteuid() != 0
+        or not isinstance(scope, ExecutionScope)
+        or scope.action != "UID_ATTACH"
+        or not isinstance(ticket, ExecutionTicket)):
+        raise IngressEgressHold("K2_POLICY_STAGE_NOT_RELEASED")
+    op_id = assert_guarded_6g_intent(db_conn, scope, ticket)
+
+    def inspect() -> UIDIngressEgressBinding:
+        # Typed fresh root PAM journal already checks real live WG ownership;
+        # an unrelated Telegram callback cannot provide root source records.
+        observed = source_evidence()
+        if type(observed) is not RootReadOnlyIngressEvidence:
+            raise IngressEgressHold("K2_ROOT_PAM_WG_SOURCE_REQUIRED")
+        witness = observed(scope.username)
+        matches = [
+            p for p in observed.peers if type(p) is IngressPeer
+            and p.edge_id == witness.edge_id
+            and p.edge_ipv4 == witness.edge_ipv4
+        ]
+        if (witness.username != scope.username
+            or witness.edge_ipv4 != scope.source_host
+            or witness.edge_id == scope.edge_id
+            or len(matches) != 1):
+            raise IngressEgressHold("K2_PAM_INGRESS_SCOPE_CHANGED")
+        roster = load_roster()
+        member = roster.get(scope.username)
+        if (member is None or member.uid != scope.uid):
+            raise IngressEgressHold("K2_INSTALLED_GUARD_IDENTITY_MISSING")
+        manifest = checked_guard(member)
+        if (manifest.request.username != scope.username
+            or manifest.request.uid != scope.uid
+            or manifest.request.spec.edge_id != scope.edge_id
+            or manifest.request.spec.edge_public_ipv4 != scope.target_host):
+            raise IngressEgressHold("K2_BOOT_GUARD_NOT_AT_TARGET")
+        with db_conn() as db:
+            row = read_binding(db, scope.username)
+            global_mode = db.execute(
+                "SELECT value FROM settings "
+                "WHERE key='edge_egress_protected_mode'"
+            ).fetchone()
+        if (type(row) is not RuntimeBinding
+            or row.uid != scope.uid or row.edge_id != scope.edge_id
+            or row.edge_ipv4 != scope.target_host
+            or row.state != "ROUTED_UNVERIFIED"
+            or row.last_operation_id != op_id
+            or type(row.generation) is not int
+            or row.generation < 1 or global_mode != ("0",)):
+            raise IngressEgressHold("K2_UNCOMMITTED_F2_SCOPE_NOT_PINNED")
+        record = UIDIngressEgressBinding(
+            username=scope.username, uid=scope.uid,
+            ingress_edge=witness.edge_id, ingress_ipv4=witness.edge_ipv4,
+            egress_edge=scope.edge_id, egress_ipv4=scope.target_host,
+            ingress_wg_public_key=matches[0].wg_public_key,
+            runtime_generation=row.generation + 1,
+            operation_id=op_id, guard_sha256=member.guard_sha256,
+        )
+        parse_uid_ingress_egress_bindings(
+            json.dumps({"version": 2, "bindings": [asdict(record)]}).encode()
+        )
+        return record
+
+    before_record = inspect()
+    try:
+        _trusted_directory(ROOT_BINDINGS.parent)
+        raw_before = _trusted_bytes(ROOT_BINDINGS, MAX_BINDING_BYTES)
+        existing = parse_uid_ingress_egress_bindings(raw_before)
+    except (OSError, ValueError) as exc:
+        raise IngressEgressHold("K2_ROOT_POLICY_FILE_UNTRUSTED") from exc
+    if (scope.username in existing
+        or any(record.uid == scope.uid for record in existing.values())
+        or len(existing) >= 2000):
+        raise IngressEgressHold("K2_POLICY_IDENTITY_ALREADY_PRESENT")
+    new_rows = [asdict(record) for record in existing.values()]
+    new_rows.append(asdict(before_record))
+    encoded = (json.dumps(
+        {"version": 2, "bindings": sorted(
+            new_rows, key=lambda item: item["username"]
+        )}, sort_keys=True, separators=(",", ":")
+    ) + "\n").encode("utf-8")
+    if len(encoded) > MAX_BINDING_BYTES:
+        raise IngressEgressHold("K2_POLICY_FILE_TOO_LARGE")
+    parse_uid_ingress_egress_bindings(encoded)
+    fd, path = tempfile.mkstemp(
+        prefix=".uid-ingress-egress-", dir=ROOT_BINDINGS.parent
+    )
+    temporary = Path(path)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as output:
+            output.write(encoded)
+            output.flush()
+            os.fsync(output.fileno())
+        if (inspect() != before_record
+            or assert_guarded_6g_intent(db_conn, scope, ticket) != op_id):
+            raise IngressEgressHold("K2_POLICY_SCOPE_DRIFT_BEFORE_CAS")
+        try:
+            current = _trusted_bytes(ROOT_BINDINGS, MAX_BINDING_BYTES)
+        except (OSError, ValueError) as exc:
+            raise IngressEgressHold("K2_POLICY_FILE_CHANGED") from exc
+        if current != raw_before:
+            raise IngressEgressHold("K2_POLICY_CAS_LOST")
+        os.replace(temporary, ROOT_BINDINGS)
+        parent_fd = os.open(
+            ROOT_BINDINGS.parent, os.O_RDONLY | os.O_DIRECTORY
+        )
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+        # A post-commit filesystem error is HOLD, never a synthetic PASS.
+        if _trusted_bytes(ROOT_BINDINGS, MAX_BINDING_BYTES) != encoded:
+            raise IngressEgressHold("K2_POLICY_DURABILITY_UNVERIFIED")
+        return before_record
+    finally:
+        if temporary.exists():
+            temporary.unlink()

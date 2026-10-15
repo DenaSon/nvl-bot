@@ -126,6 +126,31 @@ class ReviewedRootCutoverGateTests(unittest.TestCase):
         self.assertEqual(payload["legacy_privileged_call_sites"],1)
         self.assertNotIn("source_root",payload)
 
+    def test_detailed_audit_truncates_without_outputting_commands(self):
+        import io
+        import json
+        from contextlib import redirect_stdout
+        from ops.k2_m4_cutover_audit import main
+        entries=tuple(LegacyPrivilegeUse("run_cmd",i) for i in range(1,101))
+        report=CutoverAudit("a"*40,"b"*64,entries,(
+            "LEGACY_PRIVILEGED_CALLS_NEED_COMPATIBILITY_REVIEW",
+        ))
+        output=io.StringIO()
+        with patch("ops.k2_m4_cutover_audit.inspect_cutover",return_value=report),\
+             redirect_stdout(output):
+            exit_code=main([
+                "--source-root","/srv/nvl/reviewed",
+                "--bot-uid","12001","--ipc-gid","12002","--details",
+            ])
+        obj=json.loads(output.getvalue())
+        self.assertEqual(exit_code,78)
+        self.assertEqual(len(obj["call_sites"]),64)
+        self.assertEqual(obj["call_sites"][0],{"kind":"run_cmd","line":1})
+        self.assertTrue(obj["call_sites_truncated"])
+        self.assertEqual(obj["legacy_privileged_call_sites"],100)
+        self.assertNotIn("arguments",output.getvalue())
+        self.assertFalse(obj["can_release"])
+
     def test_readonly_lab_cli_bad_source_is_a_sanitized_hold(self):
         import io
         import json

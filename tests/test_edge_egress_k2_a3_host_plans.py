@@ -193,5 +193,177 @@ class RootM2ReadOnlyPlanTests(unittest.TestCase):
             planner.assert_not_called()
 
 
+
+class RootOwnedSnapshotWiringTests(unittest.TestCase):
+    """Source wiring, not an independent physical witness or server release."""
+
+    def setUp(self):
+        from dataclasses import replace
+        from edge_egress_k2_migration_inventory import LiveIngressWitness
+        from edge_egress_uid_policy import UIDPolicyRequest
+        from ops.k2_p3_uid_worker import IndependentSafety
+        from tests.test_edge_egress_uid_runtime_store import req as sample_req
+
+        fx=K2M1InventoryTests()
+        fx.setUp()
+        self.addCleanup(fx.doCleanups)
+        self.fx=fx
+        self.scope=ExecutionScope(
+            "UID_ENROLL_SOURCE","e9",TARGET,TARGET,
+            username="nvl0555",uid=1636,
+        )
+        self.ticket=ExecutionTicket(
+            11,-222,"a"*32,NOW+100,
+            _scope_digest(self.scope),"b"*64,
+        )
+        self.uid=lambda name:fx.uids[name]
+        self.root=lambda:0
+        self.pam=b"synthetic root-only pam bytes\n"
+        self.manifest_raw=b'{"synthetic":"not-a-real-host-manifest"}'
+        self.request=UIDPolicyRequest(
+            replace(sample_req().spec,edge_id="e9",edge_public_ipv4=TARGET),
+            "nvl0555",1636,
+        )
+        self.manifest=SimpleNamespace(
+            request=self.request,dns_port=11053,
+        )
+        self.safety=IndependentSafety(
+            db_conn=fx.db,target_edge_id="e9",source_ipv4=TARGET,
+            ingress_rhost="10.77.0.3",ssh_local_addr="10.77.0.1",
+            ssh_local_port=2252,reviewed_module_sha256="a"*64,
+            packet_witness=lambda req:True,
+            neighbour_witness=lambda req:True,
+        )
+        self.gates=a.RootHostSafetyGates(
+            safety=self.safety,independent_rescue_ok=lambda:True,
+            independent_f4_ok=lambda scope:True,
+            mixed_legacy_pam_ok=lambda:True,
+            account_idle_ok=lambda name,uid:True,
+            sshd_effective_probe=lambda:"UsePAM yes",
+            guard_frozen_ok=lambda manifest:True,
+            dns_ipv6_ok=lambda manifest:True,
+        )
+        self.review=lambda selection:fx.preview(
+            selection.usernames,
+            ingress_witness=lambda name:LiveIngressWitness(
+                name,"e9",TARGET,NOW-1,"INDEPENDENT_LIVE",
+            ),
+        )
+        self.calls=[]
+        self.plan_src=a.RootOwnedM2PlanSource(
+            db_conn=fx.db,os_uid=self.uid,geteuid=self.root,
+        )
+        self.adapter=a.RootOwnedUIDSnapshotSource(
+            plan_source=self.plan_src,
+            inventory_provider=self.review,
+            gates_provider=lambda scope,member:(
+                self.calls.append("gates") or self.gates
+            ),
+            db_conn=fx.db,os_uid=self.uid,geteuid=self.root,
+        )
+        self.plan=self.first_plan()
+
+    def first_plan(self):
+        from ops.k2_p3_guard_installer import GuardInstallPlan
+        return GuardInstallPlan(
+            "nvl0555",1636,self.manifest_raw,
+            sha256(self.manifest_raw).hexdigest(),
+            b"roster", "guard unit","dns unit",
+            "nvl-egress-guard-nvl0555.service",
+            "nvl-egress-dns-nvl0555.service",
+            sha256(self.pam).hexdigest(),b"new pam","a"*64,
+        )
+
+    def next_plan(self):
+        from ops.k2_m2_guard_append import MultiUIDAppendPlan
+        return MultiUIDAppendPlan(
+            "nvl0555",1636,"e9",TARGET,self.manifest_raw,
+            b"old roster",b"new roster",
+            "nvl-egress-guard-nvl0555.service","guard unit",
+            "nvl-egress-dns-nvl0555.service","dns unit",
+            sha256(self.pam).hexdigest(),"a"*64,
+        )
+
+    def root_plan(self,kind,plan,pam_hash=None):
+        return a.ReviewedRootM2Plan(
+            self.scope,self.ticket,kind,plan,
+            sha256(self.manifest_raw).hexdigest(),
+            pam_hash or sha256(self.pam).hexdigest(),"a"*64,
+        )
+
+    def call_bound(self,kind="FIRST_UID",plan=None,pam_hash=None):
+        item=self.root_plan(kind,plan if plan is not None else self.plan,pam_hash)
+        with patch.object(a,"A3_ROOT_SNAPSHOT_BINDING_ENABLED",True),\
+             patch.object(a.RootOwnedM2PlanSource,"__call__",return_value=item),\
+             patch.object(a,"_read_checked",return_value=self.pam),\
+             patch.object(a.BootGuardManifest,"parse",return_value=self.manifest):
+            return self.adapter(self.scope,self.ticket)
+
+    def test_default_off_and_cross_edge_hold_without_probe_or_plan(self):
+        self.assertFalse(a.A3_ROOT_SNAPSHOT_BINDING_ENABLED)
+        with self.assertRaisesRegex(a.A3PlanHold,"RELEASE_REQUIRED"):
+            self.adapter(self.scope,self.ticket)
+        with patch.object(a,"A3_ROOT_SNAPSHOT_BINDING_ENABLED",True):
+            bad=ExecutionScope(
+                "UID_ATTACH","e9","172.86.111.69",TARGET,
+                username="nvl0555",uid=1636,
+            )
+            with self.assertRaisesRegex(a.A3PlanHold,"RELEASE_REQUIRED"):
+                self.adapter(bad,self.ticket)
+        self.assertEqual(self.calls,[])
+
+    def test_first_uid_builds_deferred_bootstrap_without_host_writes(self):
+        from edge_egress_k2_m4_bootstrap import GuardBootstrap
+        from edge_egress_k2_a_host_factory import ReviewedUIDHostSnapshot
+        from ops.k2_p3_guard_installer import RootFilePort
+        snapshot=self.call_bound()
+        self.assertIsInstance(snapshot,ReviewedUIDHostSnapshot)
+        self.assertIsInstance(snapshot.bootstrap,GuardBootstrap)
+        self.assertEqual(snapshot.bootstrap.kind,"FIRST_UID")
+        self.assertIsInstance(snapshot.bootstrap.kwargs["port"],RootFilePort)
+        self.assertIs(snapshot.bootstrap.kwargs["db_conn"],self.fx.db)
+        self.assertEqual(snapshot.bootstrap.kwargs["current_pam"],self.pam)
+        self.assertIs(snapshot.request,self.request)
+        self.assertEqual(self.calls,["gates"])
+
+    def test_next_uid_uses_existing_cas_port_and_no_auto_resume(self):
+        from ops.k2_m2_guard_append import CASRootRosterPort
+        snapshot=self.call_bound("NEXT_UID",self.next_plan())
+        self.assertEqual(snapshot.bootstrap.kind,"NEXT_UID")
+        self.assertIsInstance(snapshot.bootstrap.kwargs["port"],CASRootRosterPort)
+        self.assertIs(snapshot.bootstrap.kwargs["resume_partial"],False)
+        self.assertNotIn("current_pam",snapshot.bootstrap.kwargs)
+
+    def test_root_pam_drift_denied_before_gates_or_bootstrap(self):
+        with self.assertRaisesRegex(a.A3PlanHold,"PAM_CHANGED"):
+            self.call_bound(pam_hash="0"*64)
+        self.assertEqual(self.calls,[])
+
+    def test_unbound_external_safety_rejected(self):
+        from dataclasses import replace
+        self.gates=replace(self.gates,safety=None)
+        with self.assertRaisesRegex(a.A3PlanHold,"PHYSICAL_WITNESS"):
+            self.call_bound()
+
+    def test_factory_receives_real_typed_snapshot_and_defers_sixg(self):
+        import edge_egress_k2_a_host_factory as factory
+        from edge_egress_k2_m4_bootstrap import DeferredOriginal6GHostPort
+        host=factory.ReviewedM2P3HostFactory(
+            db_conn=self.fx.db,read_root_snapshot=self.adapter,
+            os_uid=self.uid,geteuid=self.root,release_enabled=True,
+        )
+        item=self.root_plan("FIRST_UID",self.plan)
+        with patch.object(factory,"M4A_REAL_HOST_FACTORY_ENABLED",True),\
+             patch.object(a,"A3_ROOT_SNAPSHOT_BINDING_ENABLED",True),\
+             patch.object(a.RootOwnedM2PlanSource,"__call__",return_value=item),\
+             patch.object(a,"_read_checked",return_value=self.pam),\
+             patch.object(a.BootGuardManifest,"parse",return_value=self.manifest):
+            port=host(self.scope,self.ticket,self.review)
+        self.assertIsInstance(port,DeferredOriginal6GHostPort)
+        self.assertFalse(port._started)
+        self.assertEqual(self.calls,["gates"])
+
+
+
 if __name__=="__main__":
     unittest.main()

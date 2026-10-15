@@ -180,7 +180,7 @@ def _remote_transport(pin: StagePin, action: str) -> str:
     No mutable scripts installed to remote /opt; stream both exact repository
     modules into root Python stdin over the verified SSH session.
     """
-    if action not in ("inspect", "ensure"):
+    if action not in ("inspect", "ensure", "persist"):
         raise Phase1Hold("REMOTE_VERB_NOT_ALLOWED")
     from edge_egress_v1_live_driver import RemotePinnedEdge
     remote = RemotePinnedEdge(
@@ -204,6 +204,24 @@ def _remote_transport(pin: StagePin, action: str) -> str:
     command = ("python3 - " + action + " --stage "
                + "/root/nvl-egress-v1/edge-" + pin.edge_id
                + " --role edge --digest " + pin.edge_sha)
+    if action=='persist':
+        sources={'ops/__init__.py':b'',
+                 'ops/edge_egress_provision.py':provision.encode(),
+                 'ops/edge_egress_v1_transport.py':transport.encode()}
+        boot=(
+            "import sys,types,pathlib\n"
+            "pkg=types.ModuleType('ops');pkg.__path__=[];sys.modules['ops']=pkg\n"
+            "m=types.ModuleType('ops.edge_egress_provision');sys.modules[m.__name__]=m\n"
+            "exec(compile("+repr(provision)+",'provision.py','exec'),m.__dict__)\n"
+            "t=types.ModuleType('ops.edge_egress_v1_transport');sys.modules[t.__name__]=t\n"
+            "exec(compile("+repr(transport)+",'transport.py','exec'),t.__dict__)\n"
+            "stage=pathlib.Path('/root/nvl-egress-v1/edge-"+pin.edge_id+"')\n"
+            "guard=lambda:t.pinned(stage,'edge',"+repr(pin.edge_sha)+")\n"
+            "t.stage_transport_modules("+repr(sources)+",guard=guard)\n"
+            "t.install_persistence(stage,'edge',"+repr(pin.edge_sha)+",guard=guard)\n"
+            "print('TRANSPORT_PERSISTENCE_VERIFIED')\n"
+        )
+        command='python3 -'
     try:
         ssh = remote._ssh()  # Same verified key and root-only identity as K2 driver.
         try:
@@ -214,10 +232,10 @@ def _remote_transport(pin: StagePin, action: str) -> str:
             stdout.channel.shutdown_write()
             result = stdout.read(128).decode("utf-8").strip()
             code = stdout.channel.recv_exit_status()
-            if code != 0 or result not in (
-                ("UP", "ABSENT") if action == "inspect" else
-                ("EXACT_TRANSPORT_ALREADY_UP", "TRANSPORT_STARTED")
-            ):
+            expected=(("UP", "ABSENT") if action == "inspect" else
+                      ("TRANSPORT_PERSISTENCE_VERIFIED",) if action=='persist' else
+                      ("EXACT_TRANSPORT_ALREADY_UP", "TRANSPORT_STARTED"))
+            if code != 0 or result not in expected:
                 raise Phase1Hold("REMOTE_PINNED_TRANSPORT_HOLD")
             return result
         finally:
@@ -230,7 +248,8 @@ def _remote_transport(pin: StagePin, action: str) -> str:
 
 def inspect_phase1(edge_id: str, *, db_conn: Callable,
                    load_pin: Callable = load_stage_pin,
-                   remote_transport: Callable = _remote_transport) -> dict:
+                   remote_transport: Callable = _remote_transport,
+                   uid_intent=None) -> dict:
     pin = load_pin(edge_id)
     spec, peer, _ = _check_stage(pin)
     with db_conn() as db:
@@ -241,7 +260,13 @@ def inspect_phase1(edge_id: str, *, db_conn: Callable,
         if db.execute(
             "SELECT 1 FROM failover_operations WHERE status='RUNNING' LIMIT 1"
         ).fetchone():
-            raise Phase1Hold("SHARED_6G_BUSY")
+            if uid_intent is None:
+                raise Phase1Hold("SHARED_6G_BUSY")
+            from edge_egress_p3_executor import assert_guarded_6g_intent
+            scope, ticket = uid_intent
+            if scope.edge_id != pin.edge_id or scope.target_host != pin.edge_ipv4:
+                raise Phase1Hold("READONLY_PROBE_UID_INTENT_TARGET_CHANGED")
+            assert_guarded_6g_intent(db_conn, scope, ticket)
     core = observe(spec, "core", peer)
     edge = remote_transport(pin, "inspect")
     return {"edge_id":pin.edge_id, "edge_ip":pin.edge_ipv4,
@@ -462,7 +487,8 @@ def activate_phase1(edge_id: str, *, db_conn: Callable,
 def probe_phase1(edge_id: str, *, db_conn: Callable,
                  load_pin: Callable = load_stage_pin,
                  remote_transport: Callable = _remote_transport,
-                 ipv4_proof: Callable = _prove_ipv4) -> dict:
+                 ipv4_proof: Callable = _prove_ipv4,
+                 uid_intent=None) -> dict:
     """Read-only fresh Core-namespace IP check for one dedicated K2 Edge.
 
     This is NOT a subscriber SSH/SOCKS test and never changes the default
@@ -471,6 +497,7 @@ def probe_phase1(edge_id: str, *, db_conn: Callable,
     before = inspect_phase1(
         edge_id, db_conn=db_conn, load_pin=load_pin,
         remote_transport=remote_transport,
+        uid_intent=uid_intent,
     )
     if before["core"] != "UP" or before["edge"] != "UP":
         raise Phase1Hold("DEDICATED_TRANSPORT_NOT_UP")
@@ -482,6 +509,7 @@ def probe_phase1(edge_id: str, *, db_conn: Callable,
     after = inspect_phase1(
         edge_id, db_conn=db_conn, load_pin=load_pin,
         remote_transport=remote_transport,
+        uid_intent=uid_intent,
     )
     if after["core"] != "UP" or after["edge"] != "UP" or after["edge_ip"] != pin.edge_ipv4:
         raise Phase1Hold("DEDICATED_TRANSPORT_CHANGED_DURING_PROBE")

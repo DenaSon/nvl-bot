@@ -24,6 +24,12 @@ do not claim real VPS acceptance.
 
 ## Phase 2 — Complete Edge and transfer operations
 
+Source implementation: [Phase 2 Core operations](K2_PHASE2_CORE_OPERATIONS_2026-10-16.md).
+Native observations, existing wizard/transport persistence, protected repin,
+group/all, active-egress marker and settled-cohort reconciliation are connected.
+Source tests use synthetic host I/O; no deploy or real client acceptance yet.
+Unknown original 6G recovery remains fail-closed, never an automatic unlock.
+
 - Existing new-Edge wizard provisions/stages/activates the pinned tunnel and
   required host prerequisites automatically.
 - Existing active-relay control uses the guarded data plane and verified
@@ -43,6 +49,8 @@ Acceptance: all scoped backend operations are connected and exercised by
 integration/failure tests; no missing-function HOLD may masquerade as success.
 
 ## Phase 3 — Telegram UI/UX and release preparation
+
+**Next development phase.** Deploy/live tests remain deferred until this closes.
 
 Two-column minimal Persian flow: select Edge, Single/group/all, fresh review,
 confirm/cancel, progress/results, diagnostic guidance and scoped recovery.

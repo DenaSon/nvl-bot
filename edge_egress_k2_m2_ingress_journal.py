@@ -9,6 +9,7 @@ No ssh_accounts.host, DNS/default, or user-supplied source fields are used.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from contextlib import contextmanager
 from hashlib import sha256
 import json
 import os
@@ -23,10 +24,35 @@ from edge_egress_k2_migration_inventory import LiveIngressWitness
 from edge_egress_v1_ingress import IngressPeer, _networks
 
 VERSION = 1
-MAX_RECORDS = 2000
-MAX_BYTES = 512000
+MAX_RECORDS = 10000
+MAX_BYTES = 4_000_000
 TTL_SECONDS = 300
 JOURNAL = Path("/etc/nvl-egress/m2-pam-ingress.json")
+
+
+@contextmanager
+def serialized_root_journal():
+    """Serialize PAM and on-demand authenticated observation file writers.
+
+    This is only the journal's file-CAS lock, never a network/6G lease.
+    """
+    import fcntl
+    if os.geteuid()!=0:
+        raise DurableIngressHold('ROOT_REQUIRED')
+    info=JOURNAL.parent.lstat()
+    if info.st_uid!=0 or not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o022:
+        raise DurableIngressHold('INGRESS_DIRECTORY_NOT_ROOT_TRUSTED')
+    fd=os.open(JOURNAL.parent/'.m2-pam-ingress.lock',
+               os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
+    try:
+        info=os.fstat(fd)
+        if (info.st_uid!=0 or not stat.S_ISREG(info.st_mode)
+            or info.st_nlink!=1 or info.st_mode & 0o077):
+            raise DurableIngressHold('INGRESS_JOURNAL_LOCK_UNTRUSTED')
+        fcntl.flock(fd,fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 class DurableIngressHold(ValueError):

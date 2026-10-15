@@ -19,6 +19,7 @@ from typing import Callable
 from edge_egress_f3_readiness import admission_eligible, read_readiness
 
 M1_EXECUTION_ENABLED = False
+M1_INDEPENDENT_EGRESS_ENABLED = False
 _MAX_ACTIVE = 10000
 _NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
 _EDGE = re.compile(r"[a-z][a-z0-9_-]{1,23}\Z")
@@ -81,6 +82,17 @@ class MigrationInventory:
     global_issues: tuple[str, ...]
     fingerprint: str
     target_f4_accepted: bool
+    target_qualification_digest: str = ""
+
+    @property
+    def target_accepted(self) -> bool:
+        # A release-qualified Core operation is a controlled per-UID trial,
+        # NOT an F4 READY promotion. Generic/legacy inventory remains F4-only.
+        return self.target_f4_accepted or bool(
+            M1_INDEPENDENT_EGRESS_ENABLED
+            and type(self.target_qualification_digest) is str
+            and re.fullmatch(r"[a-f0-9]{64}", self.target_qualification_digest)
+        )
 
     @property
     def needs_review_count(self) -> int:
@@ -386,7 +398,8 @@ def preview_migration(
                     # immutable state and must not be enrolled again.
                     if source_proven and protected_edge == selection.target_edge_id:
                         _reason(issues,"TARGET_ALREADY_PROTECTED")
-                    if protected_edge and source_proven and protected_edge != source_edge:
+                    if (protected_edge and source_proven and protected_edge != source_edge
+                            and not M1_INDEPENDENT_EGRESS_ENABLED):
                         _reason(issues,"PROTECTED_SOURCE_DRIFT")
                     if uid is not None:
                         if session_count is None:

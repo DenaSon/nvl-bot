@@ -101,7 +101,8 @@ class WizardCallbackRoutingTests(unittest.TestCase):
 @unittest.skipIf(sys.version_info < (3,12), "NVL bot requires Python 3.12")
 class IntegratedWizardFunctionTests(unittest.TestCase):
     def execute(self, *, opt_in, global_toggle="0", protected="0",
-                stage_error=None, stage_payload=None, customer_port=2252):
+                stage_error=None, stage_payload=None, customer_port=2252,
+                native=False,transport_error=False):
         events=[]
         bot=types.SimpleNamespace(send_message=AsyncMock())
         app=types.SimpleNamespace(bot=bot)
@@ -135,6 +136,11 @@ class IntegratedWizardFunctionTests(unittest.TestCase):
             events.append(("sync_port",args[2]))
             return True, "", outcome.copy()
         fake_module=types.SimpleNamespace(onboard_after_ingress=stage)
+        async def prepare_edge(*args,**kwargs):
+            events.append(('automatic_transport',args[1]))
+            if transport_error:
+                raise ValueError('synthetic transport failure')
+            return {'observed_ipv4':'172.86.105.67','customer_ready':False}
         fn=get_function("_provision_new_edge",{
             "_db_get_setting":read_setting,
             "_provision_new_edge_sync":fake_sync,
@@ -146,14 +152,16 @@ class IntegratedWizardFunctionTests(unittest.TestCase):
             "record_ingress_candidate":lambda *args:events.append(("candidate",)),
             "egress_staged_edge_result":staged_edge_result,
             "db_conn":lambda:None,
-            "assert_isolated_new_edge_candidate":lambda *args:None,
+            "assert_isolated_new_edge_candidate":lambda *args:events.append(('isolated_check',)),
             "normalize_k2_customer_port":normalize_k2_customer_port,
+            "k2_native_operations_registered":lambda:native,
+            "k2_native_prepare_edge":prepare_edge,
             "sqlite3":sqlite3,
             "K2WizardHold":__import__("edge_egress_k2_phase1_wizard",fromlist=["K2WizardHold"]).K2WizardHold,
             "InlineKeyboardButton":lambda label,callback_data:(label,callback_data),
             "InlineKeyboardMarkup":lambda rows:rows,
             "esc":lambda s:s,
-            "log":types.SimpleNamespace(exception=lambda *a,**kw:None),
+            "log":types.SimpleNamespace(exception=lambda *a,**kw:None,warning=lambda *a,**kw:None),
         })
         with patch.dict(sys.modules,{"edge_egress_v1_onboarding":fake_module}):
             result=asyncio.run(fn(
@@ -166,7 +174,7 @@ class IntegratedWizardFunctionTests(unittest.TestCase):
     def test_new_wizard_stages_even_when_global_flag_off(self):
         result,events,messages=self.execute(opt_in=True,global_toggle="0")
         self.assertTrue(result[0])
-        self.assertEqual(events[0],("ingress","172.86.105.67"))
+        self.assertIn(("ingress","172.86.105.67"),events)
         self.assertIn(("stage","172.86.105.67","10.77.0.7"),events)
         self.assertFalse(any(event[0] in ("pool","setting_write","pool_active")
                              for event in events))
@@ -185,6 +193,21 @@ class IntegratedWizardFunctionTests(unittest.TestCase):
         self.assertTrue(result[0])
         self.assertIn(("sync_port", "2252"), events)
         self.assertIn(("stage_port", 2252), events)
+
+    def test_native_wizard_activates_only_after_final_isolated_candidate_check(self):
+        result,events,messages=self.execute(opt_in=True,native=True)
+        self.assertTrue(result[0])
+        self.assertEqual(events[-1],('automatic_transport','e7'))
+        self.assertEqual(sum(e[0]=='isolated_check' for e in events),2)
+        self.assertFalse(result[2]['automatic_transport']['customer_ready'])
+        self.assertIn('آماده بررسی انتقال',messages[-1].args[1])
+
+    def test_native_transport_failure_does_not_repeat_install_or_admit_customer(self):
+        result,events,messages=self.execute(opt_in=True,native=True,transport_error=True)
+        self.assertFalse(result[0])
+        self.assertEqual(sum(e[0]=='ingress' for e in events),1)
+        self.assertFalse(any(e[0] in ('pool','setting_write') for e in events))
+        self.assertIn('نصب را تکرار نکنید',messages[-1].args[1])
 
     def test_string_port_does_not_change_legacy_installer_contract(self):
         result, events, _ = self.execute(opt_in=False, customer_port="2252")

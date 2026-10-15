@@ -16,6 +16,7 @@ from edge_egress_k2_migration_inventory import (
 from edge_egress_k2_m3_waves import (
     MigrationWavePlan, build_wave_plan, m4_same_ingress_reviewed,
     m4_cross_edge_single_reviewed,
+    m4_operational_reviewed,
 )
 import edge_egress_k2_m4_root_portal as _root_portal
 
@@ -23,7 +24,7 @@ MAX_INPUT_UIDS = 10
 _NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
 _EDGE = re.compile(r"[a-z][a-z0-9_-]{1,23}\Z")
 CALLBACK_PREFIX = "hpeg_m4_"
-ACTIONS = frozenset(("home","single","batch","refresh","cancel","status","prepare","confirm","abort"))
+ACTIONS = frozenset(("home","single","batch","all","stop","recover","refresh","cancel","status","prepare","confirm","abort"))
 
 
 class M4UIHold(ValueError):
@@ -75,8 +76,8 @@ def home_html(edge_id: str) -> str:
         raise M4UIHold("EDGE_INVALID")
     return ("👥 <b>انتقال کاربران</b>\n\n"
             f"سرور مقصد: <code>{_safe(edge_id)}</code>\n"
-            "انتقال تکی یا گروهی را انتخاب کنید.\n\n"
-            "هر گروه حداکثر ۱۰ کاربر دارد. "
+            "انتقال تکی، گروهی یا همه کاربران واجد شرایط را انتخاب کنید.\n\n"
+            "کاربران به‌ترتیب بررسی و منتقل می‌شوند. "
             "حساب‌های دیگر بدون تغییر می‌مانند.")
 
 
@@ -86,6 +87,7 @@ def home_buttons(edge_id: str):
     return _button_rows(
         (("👤 انتقال تکی",f"hpeg_m4_single_{edge_id}"),
          ("👥 انتقال گروهی",f"hpeg_m4_batch_{edge_id}")),
+        (("🌐 همه کاربران واجد شرایط",f"hpeg_m4_all_{edge_id}"),),
         (("◀️ سرور",f"hpeg_edge_{edge_id}"),)
     )
 
@@ -114,7 +116,7 @@ def cancel_buttons(edge_id: str):
 def _root_can_review(plan: MigrationWavePlan) -> bool:
     # Mirror original root PREPARE eligibility, never infer a release
     # from a user-facing preview or a generic "ready" flag.
-    return m4_same_ingress_reviewed(plan) or (
+    return m4_operational_reviewed(plan) or m4_same_ingress_reviewed(plan) or (
         _root_portal.M4_CROSS_EDGE_SINGLE_ENABLED
         and m4_cross_edge_single_reviewed(plan)
     )
@@ -129,7 +131,9 @@ def _operator_runtime_released(plan: MigrationWavePlan) -> bool:
     """
     import os
     from edge_egress_k2_root_direct import native_core_runtime_registered
-    if (os.geteuid() == 0 and plan.selection.mode == "SINGLE" and _root_can_review(plan)
+    from edge_egress_k2_root_direct import K2_ROOT_DIRECT_BATCH_ENABLED
+    if (os.geteuid() == 0 and (plan.selection.mode == "SINGLE" or K2_ROOT_DIRECT_BATCH_ENABLED)
+        and _root_can_review(plan)
         and native_core_runtime_registered()):
         return True
     from edge_egress_k2_root_direct import K2_ROOT_DIRECT_ENABLED
@@ -188,7 +192,7 @@ def preview_html(inventory: MigrationInventory) -> str:
     total=len(chosen)
     # Match the same explicit single-only gate as privileged M4 PREPARE.
     can_stage=_root_can_review(plan)
-    ready=sum(
+    ready=(plan.ready_count if m4_operational_reviewed(plan) else sum(
         m.selectable and not plan.global_blockers
         and (m.source_edge_id==m.target_edge_id
              and m.source_ipv4==m.target_ipv4 or (
@@ -199,7 +203,7 @@ def preview_html(inventory: MigrationInventory) -> str:
                  and len(chosen)==1
              ))
         for m in chosen
-    )
+    ))
     held=total-ready
     title="یک کاربر" if inventory.selection.mode=="SINGLE" else "گروه کاربران"
     lines=[
@@ -209,12 +213,14 @@ def preview_html(inventory: MigrationInventory) -> str:
         f"آماده بررسی: <b>{ready}</b>",
         f"نیازمند بررسی: <b>{held}</b>","",
     ]
-    for member in chosen:
+    for member in chosen[:20]:
         sign="✅" if member.selectable and can_stage else "⛔️"
         lines.append(f"{sign} <code>{_safe(member.username)}</code> — "+
                      ("آماده بررسی" if sign=="✅" else "نیازمند بررسی"))
+    if len(chosen)>20:
+        lines.append(f"و {len(chosen)-20} حساب دیگر")
     lines.append("")
-    lines.append(
+    lines.append("برای ادامه، درخواست تأیید را بزنید." if _operator_runtime_released(plan) else
         ("⛔️ مسیر این حساب‌ها هنوز آماده انتقال نیست. "
          "ابتدا وضعیت سرور ورودی بررسی شود."
          if not can_stage else
@@ -244,6 +250,7 @@ def preview_buttons(edge_id: str, *,
         if reviewed else (),
         (("🔄 بررسی دوباره",f"hpeg_m4_refresh_{edge_id}"),
          ("📋 وضعیت",f"hpeg_m4_status_{edge_id}")),
+        (("🔎 بررسی بازیابی",f"hpeg_m4_recover_{edge_id}"),),
         (("👥 انتخاب جدید",f"hpeg_m4_home_{edge_id}"),
          ("◀️ سرور",f"hpeg_edge_{edge_id}")),
     )

@@ -90,7 +90,7 @@ class GuardedVerifiedIngressUIDPort:
             or review.selection.usernames!=(m.username,)
             or review.selection.target_edge_id!=m.target_edge_id
             or review.target_ipv4!=m.target_ipv4
-            or not review.target_f4_accepted
+            or not review.target_accepted
             or any(issue!="SHARED_6G_BUSY" for issue in review.global_issues)):
             raise VerifiedIngressHold("LIVE_M1_F4_OR_GLOBAL_GUARD_DRIFT")
         found=[a for a in review.accounts if a.selected]

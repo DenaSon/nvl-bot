@@ -399,7 +399,11 @@ from edge_egress_k2_m4_status import (
 import edge_egress_k2_root_direct as k2_root_direct_flags
 from edge_egress_k2_root_direct import (
     bound_root_client as k2_root_direct_client,
+    native_review as k2_native_review,
+    native_prepare_edge as k2_native_prepare_edge,
+    native_operations_registered as k2_native_operations_registered,
 )
+from edge_egress_k2_migration_inventory import select_migration as k2_selected_scope
 from edge_egress_k2_m43_client import (
     M43ClientHold,
 )
@@ -412,6 +416,40 @@ from edge_egress_k2_m43_workflow import (
     halted_html as k2_m43_halted_html,
     cancel_html as k2_m43_cancel_html,
 )
+
+
+async def _k2_m4_inventory_all(context,query,edge_id,*,activate_relay=False):
+    actor_id=query.from_user.id
+    chat_id=query.message.chat_id
+    k2_m43_approvals.discard(actor_id,chat_id)
+    context.user_data.pop('k2_m4_selection',None)
+    result=await k2_root_direct_client(context.application).request(
+        'ALL',actor_id=actor_id,chat_id=chat_id,edge_id=edge_id,activate_relay=activate_relay)
+    selection=result['selection']
+    skipped=result['skipped']
+    if selection is None:
+        if activate_relay and skipped and all(reason=='TARGET_ALREADY_PROTECTED' for _,reason in skipped):
+            selection=k2_selected_scope('BATCH',tuple(name for name,_ in skipped),edge_id)
+            context.user_data['k2_m4_selection']=(selection.mode,selection.usernames,edge_id)
+            context.user_data['k2_m4_make_active']=True
+            await query.edit_message_text('تمام حساب‌ها روی این خروجی تأیید شده‌اند.\nانتخاب خروجی فعال را تأیید کنید.',
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton('🔐 بررسی و تأیید',callback_data=f'hpeg_m4_prepare_{edge_id}')],
+                    [InlineKeyboardButton('❌ انصراف',callback_data=f'hpeg_m4_cancel_{edge_id}')]]))
+            return
+        await query.edit_message_text(
+            f"⛔️ حساب واجد شرایطی برای انتقال پیدا نشد.\nحساب‌های کنارگذاشته‌شده: {len(skipped)}")
+        return
+    context.user_data['k2_m4_selection']=(selection.mode,selection.usernames,edge_id)
+    context.user_data['k2_m4_make_active']=activate_relay
+    inventory=await k2_native_review(context.application,selection,actor_id=actor_id,chat_id=chat_id)
+    text=k2_m4_preview_html(inventory)+f"\n\nکنارگذاشته‌شده در بررسی اولیه: {len(skipped)}"
+    if activate_relay:
+        text+='\nانتخاب خروجی فعال پس از تأیید تمام حساب‌ها انجام می‌شود.'
+    rows=k2_m4_preview_buttons(edge_id,inventory=inventory)
+    await query.edit_message_text(text,parse_mode='HTML',reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton(label,callback_data=data) for label,data in row] for row in rows]))
+
 from edge_egress_k2_p1_worker import (
     Phase1Hold, inspect_phase1, activate_phase1, probe_phase1,
 )
@@ -3962,6 +4000,19 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
     if egress_stage_requested:
         # No default/DNS/UID switch on the new protected-aware entrypoint.
         html, edge_id = egress_staged_edge_result(edge_ip, result)
+        if k2_native_operations_registered():
+            try:
+                result['automatic_transport']=await k2_native_prepare_edge(
+                    app,edge_id,actor_id=chat_id,chat_id=chat_id)
+                html=('✅ <b>سرور جدید آماده بررسی انتقال است</b>\n\n'
+                      f'سرور: <code>{esc(edge_id)}</code>\n'
+                      f'IP خروجی تونل: <code>{esc(edge_ip)}</code>\n\n'
+                      'برای تغییر خروجی کاربران، انتقال تکی یا گروهی را انتخاب کنید.')
+            except Exception:
+                log.warning('K2 automatic Edge preparation HOLD')
+                await app.bot.send_message(chat_id,
+                    '⛔️ نصب سرور ثبت شد؛ آماده‌سازی خروجی کامل نشد. از وضعیت سرور پیگیری کنید؛ نصب را تکرار نکنید.')
+                return False,edge_ip,result
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("📤 فعال‌سازی خروجی", callback_data=f"hpeg_p1_open_{edge_id}"),
              InlineKeyboardButton("🔎 بررسی اتصال", callback_data=f"hpeg_stage_{edge_id}")],
@@ -10781,9 +10832,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             mode='SINGLE' if state=='K2_M4_SINGLE' else 'BATCH'
             selection=k2_m4_select_input(mode,text,target)
-            inventory=await asyncio.to_thread(
-                k2_m4_readonly_preview,db_conn,selection
-            )
+            if k2_native_operations_registered():
+                inventory=await k2_native_review(context.application,selection,
+                    actor_id=update.effective_user.id,chat_id=chat_id)
+            else:
+                inventory=await asyncio.to_thread(k2_m4_readonly_preview,db_conn,selection)
             context.user_data['k2_m4_selection']=(
                 mode,selection.usernames,selection.target_edge_id
             )
@@ -21192,6 +21245,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🎯 تبدیل یک سرور Edge آماده‌به‌کار به رله فعال (Active Edge)
     elif d.startswith("srv_mkactive_") and role == 'admin':
         target_ip = d.replace("srv_mkactive_", "").strip()
+        if k2_native_operations_registered():
+            with db_conn() as _db:
+                _edges=_db.execute('SELECT edge_id FROM edge_egress_allocations WHERE edge_public_ipv4=? AND status=\'STAGED\'',(target_ip,)).fetchall()
+            if len(_edges)!=1:
+                await query.message.reply_text('⛔️ خروجی این سرور هنوز آماده نشده است.')
+                return
+            try:
+                await _k2_m4_inventory_all(context,query,_edges[0][0],activate_relay=True)
+            except Exception:
+                await query.message.reply_text(k2_m4_failure_html(),parse_mode='HTML')
+            return
         await query.edit_message_text(f"⏳ در حال انتقال دامنه و ترافیک به سرور <code>{esc(target_ip)}</code>...\nلطفاً چند لحظه صبر کنید.", parse_mode="HTML")
         
         async def _make_edge_active():
@@ -24144,6 +24208,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("⛔️ فقط مدیر")
             return
         edge_id = d[len("hpeg_relay_"):]
+        if k2_native_operations_registered():
+            try:
+                await _k2_m4_inventory_all(context,query,edge_id,activate_relay=True)
+            except Exception:
+                await query.message.reply_text(k2_m4_failure_html(),parse_mode='HTML')
+            return
         context.user_data.pop("k2_p2_switch_ticket", None)
         try:
             edge_id_checked(edge_id)
@@ -24285,11 +24355,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.pop('state',None)
                 context.user_data.pop('k2_m4_target_edge',None)
                 context.user_data.pop('k2_m4_selection',None)
+                context.user_data.pop('k2_m4_make_active',None)
                 k2_m43_approvals.discard(actor_id,chat_id)
                 display=k2_m4_home_html(edge_id)
                 rows=k2_m4_home_buttons(edge_id)
+            elif action=='all':
+                await _k2_m4_inventory_all(context,query,edge_id)
+                return
+            elif action=='stop':
+                response=await k2_root_direct_client(context.application).request(
+                    'STOP',actor_id=actor_id,chat_id=chat_id)
+                await query.message.reply_text('⏸ توقف ثبت شد؛ پس از پایان حساب جاری ادامه داده نمی‌شود.'
+                    if response['state']=='STOP_REQUESTED' else 'عملیاتی در حال اجرا نیست.')
+                return
             elif action in ("single","batch"):
                 context.user_data.pop('k2_m4_selection',None)
+                context.user_data.pop('k2_m4_make_active',None)
                 k2_m43_approvals.discard(actor_id,chat_id)
                 mode="SINGLE" if action=="single" else "BATCH"
                 context.user_data['state']=(
@@ -24298,16 +24379,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data['k2_m4_target_edge']=edge_id
                 display=k2_m4_prompt_html(edge_id,mode)
                 rows=k2_m4_cancel_buttons(edge_id)
-            elif action in ("refresh","status"):
+            elif action in ("refresh","status","recover"):
                 k2_m43_approvals.discard(actor_id,chat_id)
                 data=context.user_data.get('k2_m4_selection')
                 if (not isinstance(data,(tuple,list)) or len(data)!=3
                     or data[2]!=edge_id or not isinstance(data[1],(tuple,list))):
                     raise M4UIHold("M4_SELECTION_EXPIRED")
-                selection=k2_m4_select_input(
-                    data[0],",".join(data[1]),edge_id,
-                )
-                if action=="status":
+                selection=k2_selected_scope(data[0],tuple(data[1]),edge_id)
+                if action=='recover':
+                    response=await k2_root_direct_client(context.application).request(
+                        'RECONCILE',actor_id=actor_id,chat_id=chat_id,selection=selection)
+                    display=f"✅ بررسی بازیابی تمام شد.\nعملیات بسته‌شده: {response['closed']}\nهیچ انتقالی تکرار نشد."
+                elif action=="status":
                     if k2_root_direct_flags.K2_ROOT_DIRECT_ENABLED:
                         # Root-owned checkpoint and original 6G read view.
                         # No local DB fallback if the root service disappears;
@@ -24325,9 +24408,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                         display=k2_m4_status_html(overview)
                 else:
-                    inventory=await asyncio.to_thread(
-                        k2_m4_readonly_preview,db_conn,selection,
-                    )
+                    if k2_native_operations_registered():
+                        inventory=await k2_native_review(context.application,selection,
+                            actor_id=actor_id,chat_id=chat_id)
+                    else:
+                        inventory=await asyncio.to_thread(k2_m4_readonly_preview,db_conn,selection)
                     display=k2_m4_preview_html(inventory)
                 rows=k2_m4_preview_buttons(
                     edge_id, inventory=(inventory if action=="refresh" else None),
@@ -24340,12 +24425,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if (not isinstance(data,(tuple,list)) or len(data)!=3
                     or data[2]!=edge_id or not isinstance(data[1],(tuple,list))):
                     raise M43ClientHold("M43_SELECTED_SCOPE_MISSING")
-                selection=k2_m4_select_input(data[0],",".join(data[1]),edge_id)
+                selection=k2_selected_scope(data[0],tuple(data[1]),edge_id)
                 epoch=k2_m43_approvals.begin(actor_id,chat_id)
                 try:
                     prepared=await k2_root_direct_client(context.application).request(
                         "PREPARE",actor_id=actor_id,chat_id=chat_id,
                         selection=selection,
+                        activate_relay=context.user_data.get('k2_m4_make_active') is True,
                     )
                     pending=K2M43Pending.create(
                         selection=selection,actor_id=actor_id,chat_id=chat_id,
@@ -24365,6 +24451,29 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 client=k2_root_direct_client(context.application)
                 if action=="confirm":
+                    await query.edit_message_text('⏳ در حال بررسی و انتقال کاربران...',
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton('⏸ توقف پس از حساب جاری',callback_data=f'hpeg_m4_stop_{edge_id}')]]))
+                    if k2_native_operations_registered():
+                        async def _run_selected_transfer():
+                            try:
+                                response=await client.request('CONFIRM',actor_id=actor_id,chat_id=chat_id,
+                                    request_id=pending.request_id)
+                                display=k2_m43_result_html(response,selection=pending.selection)
+                            except Exception:
+                                log.warning('K2 native transfer result requires reconciliation')
+                                display=k2_m43_halted_html()
+                            rows=k2_m4_preview_buttons(edge_id)
+                            with contextlib.suppress(Exception):
+                                await query.edit_message_text(display,parse_mode='HTML',
+                                    reply_markup=InlineKeyboardMarkup([[
+                                        InlineKeyboardButton(title,callback_data=data)
+                                        for title,data in row] for row in rows]))
+                        # PTB handles updates serially. Return this callback
+                        # immediately so STOP/status reach the same bot while
+                        # the single original-6G operation is running.
+                        spawn_bg_task(_run_selected_transfer())
+                        return
                     response=await client.request(
                         "CONFIRM",actor_id=actor_id,chat_id=chat_id,
                         request_id=pending.request_id,

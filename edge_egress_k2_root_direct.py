@@ -12,6 +12,7 @@ All flags default OFF; missing registration is HOLD, never a fake success.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import asyncio
 import os
 import re
 import secrets
@@ -22,6 +23,7 @@ from edge_egress_k2_migration_inventory import (
     MigrationSelection, select_migration,
 )
 from edge_egress_k2_m4_root_portal import PreparedWave, RootMigrationPortal
+from edge_egress_k2_core_edge_operations import PreparedActiveEgress
 
 K2_ROOT_DIRECT_ENABLED = False
 K2_ROOT_DIRECT_BATCH_ENABLED = False
@@ -30,9 +32,10 @@ _REQUEST_ID = re.compile(r"[0-9a-f]{32}\Z")
 
 @dataclass(frozen=True)
 class _Pending:
-    prepared: PreparedWave
+    prepared: PreparedWave | PreparedActiveEgress
     actor_id: int
     chat_id: int
+    activate_relay: bool = False
 
 
 class RootDirectOperatorClient:
@@ -49,6 +52,8 @@ class RootDirectOperatorClient:
         self.released = released
         self._pending: dict[str, _Pending] = {}
         self._executing = False
+        self._preparing = False
+        self._stop = False
 
     def _gate(self, actor_id: int, chat_id: int) -> None:
         if (not K2_ROOT_DIRECT_ENABLED or self.released is not True
@@ -66,19 +71,74 @@ class RootDirectOperatorClient:
             raise M43ClientHold("K2_ROOT_DIRECT_CLOCK_UNTRUSTED")
         for key,item in tuple(self._pending.items()):
             if (not isinstance(item,_Pending)
-                or not isinstance(item.prepared,PreparedWave)
-                or type(item.prepared.approval.expires_at) is not int):
+                or not isinstance(item.prepared,(PreparedWave,PreparedActiveEgress))):
                 raise M43ClientHold("K2_ROOT_DIRECT_PENDING_CORRUPT")
-            if item.prepared.approval.expires_at <= now:
+            expiry=(item.prepared.expires_at if type(item.prepared) is PreparedActiveEgress
+                    else item.prepared.approval.expires_at)
+            if type(expiry) is not int:
+                raise M43ClientHold("K2_ROOT_DIRECT_PENDING_CORRUPT")
+            if expiry <= now:
                 del self._pending[key]
+
+    async def _host_task(self,call):
+        """Retain single-flight ownership until synchronous host I/O ends."""
+        task=asyncio.create_task(asyncio.to_thread(call))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            self._stop=True
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            # Retrieve host exceptions, but cancellation remains the result.
+            if task.done() and not task.cancelled():
+                task.exception()
+            raise
 
     async def request(self, action: str, *, actor_id: int, chat_id: int,
                       selection: MigrationSelection | None = None,
-                      request_id: str | None = None) -> dict:
-        if action not in ("PREPARE","CONFIRM","CANCEL","STATUS"):
+                      request_id: str | None = None,
+                      activate_relay: bool = False,
+                      edge_id: str | None = None) -> dict:
+        if action not in ("PREPARE","CONFIRM","CANCEL","STATUS","ALL","STOP","RECONCILE"):
             raise M43ClientHold("K2_ROOT_DIRECT_ACTION_DENIED")
         self._gate(actor_id,chat_id)
-        if action in ("PREPARE","STATUS"):
+        if type(activate_relay) is not bool:
+            raise M43ClientHold('K2_RELAY_INTENT_INVALID')
+        if action=='STOP':
+            if self._executing:
+                self._stop=True
+            return {'state':'STOP_REQUESTED' if self._executing else 'IDLE'}
+        if action=='ALL':
+            from edge_egress_k2_core_operations import eligible_cohort,CoreOperationalBindings
+            if (not K2_ROOT_DIRECT_BATCH_ENABLED or self._executing or self._preparing
+                or type(getattr(self.portal.review,'__self__',None)) is not CoreOperationalBindings):
+                raise M43ClientHold('K2_ALL_NOT_RELEASED_OR_BUSY')
+            from edge_egress_v1_console import edge_id_checked
+            edge_id_checked(edge_id)
+            self._preparing=True
+            try:
+                if activate_relay:
+                    with self.portal.checkpoint.db_conn() as db:
+                        names=tuple(r[0] for r in db.execute(
+                            "SELECT username FROM ssh_accounts WHERE service_type='ssh' "
+                            "AND status LIKE '%فعال%' AND status NOT LIKE '%غیر%' ORDER BY username"))
+                        on_target=tuple(r[0] for r in db.execute(
+                            "SELECT username FROM edge_egress_uid_runtime WHERE edge_id=? "
+                            "AND state='PROTECTED' ORDER BY username",(edge_id,)))
+                    if names and names==on_target:
+                        return {'state':'INVENTORIED','selection':None,
+                            'skipped':tuple((n,'TARGET_ALREADY_PROTECTED') for n in names)}
+                selected,skipped=await self._host_task(lambda:eligible_cohort(
+                    self.portal.checkpoint.db_conn,edge_id,review=self.portal.review))
+                return {'state':'INVENTORIED','selection':selected,'skipped':skipped}
+            finally:
+                self._preparing=False
+        if action in ("PREPARE","STATUS","RECONCILE"):
             if (not isinstance(selection, MigrationSelection)
                 or select_migration(selection.mode, selection.usernames,
                                     selection.target_edge_id) != selection):
@@ -88,16 +148,31 @@ class RootDirectOperatorClient:
                 or _REQUEST_ID.fullmatch(request_id) is None):
                 raise M43ClientHold("K2_ROOT_DIRECT_REQUEST_ID_INVALID")
 
+        if action=='RECONCILE':
+            from edge_egress_k2_core_recovery import reconcile_settled_cohorts
+            if self._executing or self._preparing:
+                raise M43ClientHold('K2_RECONCILE_BUSY')
+            self._preparing=True
+            try:
+                return await self._host_task(lambda:reconcile_settled_cohorts(
+                    self.portal.execute_single.__self__,selection,actor_id=actor_id,chat_id=chat_id))
+            finally:
+                self._preparing=False
         if action == "STATUS":
             from edge_egress_k2_m44_recovery import inspect_root_recovery
             from edge_egress_k2_m4_checkpoint import DurableWaveCheckpoint
             cp=self.portal.checkpoint
             if not isinstance(cp,DurableWaveCheckpoint):
                 raise M43ClientHold("K2_ROOT_DIRECT_CHECKPOINT_REQUIRED")
+            from edge_egress_k2_m42_bindings import RootM42Bindings
+            root=getattr(self.portal.execute_single,'__self__',None)
+            providers=({'os_uid':root.ports.os_uid,'clock':root.ports.now}
+                       if isinstance(root,RootM42Bindings) else {})
             view=inspect_root_recovery(
                 cp.db_conn,selection,actor_id=actor_id,chat_id=chat_id,
                 admin_authorized=self.portal.admin_authorized,
                 geteuid=self.geteuid,release_enabled=True,
+                **providers,
             )
             return {
                 "state":"STATUS","edge_id":view.edge_id,
@@ -108,25 +183,47 @@ class RootDirectOperatorClient:
                 "note":view.note,
             }
         if action == "PREPARE":
-            if (self._executing
+            if (self._executing or self._preparing
                 or (selection.mode != "SINGLE"
                     and not K2_ROOT_DIRECT_BATCH_ENABLED)):
                 raise M43ClientHold("K2_ROOT_DIRECT_BATCH_OR_INFLIGHT_HOLD")
             self._prune()
             if len(self._pending) >= 20:
                 raise M43ClientHold("K2_ROOT_DIRECT_QUEUE_FULL")
-            prepared=self.portal.prepare(
-                selection,actor_id=actor_id,chat_id=chat_id,
-            )
+            self._preparing=True
+            try:
+                from edge_egress_k2_core_operations import CoreOperationalBindings
+                root=getattr(self.portal.execute_single,'__self__',None)
+                if type(root) is CoreOperationalBindings:
+                    def prepare():
+                        if activate_relay:
+                            with root.ports.db_conn() as db:
+                                names=tuple(r[0] for r in db.execute(
+                                    "SELECT username FROM ssh_accounts WHERE service_type='ssh' "
+                                    "AND status LIKE '%فعال%' AND status NOT LIKE '%غیر%' ORDER BY username"))
+                                verified=tuple(r[0] for r in db.execute(
+                                    "SELECT username FROM edge_egress_uid_runtime WHERE edge_id=? "
+                                    "AND state='PROTECTED' ORDER BY username",(selection.target_edge_id,)))
+                            if names==tuple(sorted(selection.usernames))==verified:
+                                from edge_egress_k2_core_edge_operations import prepare_active_egress
+                                return prepare_active_egress(root,selection.target_edge_id,
+                                    actor_id=actor_id,chat_id=chat_id)
+                        return self.portal.prepare(selection,actor_id=actor_id,chat_id=chat_id)
+                    prepared=await self._host_task(prepare)
+                else:
+                    prepared=self.portal.prepare(selection,actor_id=actor_id,chat_id=chat_id)
+            finally:
+                self._preparing=False
             nonce=secrets.token_hex(16)
             while nonce in self._pending:
                 nonce=secrets.token_hex(16)
-            self._pending[nonce]=_Pending(prepared,actor_id,chat_id)
+            self._pending[nonce]=_Pending(prepared,actor_id,chat_id,activate_relay)
             return {
                 "state":"PREPARED","request_id":nonce,
                 "edge_id":selection.target_edge_id,
                 "user_count":len(selection.usernames),
-                "expires_at":prepared.approval.expires_at,
+                "expires_at":(prepared.expires_at if type(prepared) is PreparedActiveEgress
+                              else prepared.approval.expires_at),
             }
 
         pending=self._pending.get(request_id)
@@ -137,14 +234,44 @@ class RootDirectOperatorClient:
         del self._pending[request_id]
         if action == "CANCEL":
             return {"state":"CANCELLED"}
-        if self._executing:
+        if self._executing or self._preparing:
             raise M43ClientHold("K2_ROOT_DIRECT_SINGLE_FLIGHT_HOLD")
         self._executing=True
+        self._stop=False
         try:
-            report=await self.portal.execute(
-                pending.prepared,actor_id=actor_id,chat_id=chat_id,
-            )
-            return {
+            from edge_egress_k2_core_operations import CoreOperationalBindings
+            if type(pending.prepared) is PreparedActiveEgress:
+                from edge_egress_k2_core_edge_operations import execute_active_egress
+                root=self.portal.execute_single.__self__
+                receipt=await self._host_task(lambda:asyncio.run(execute_active_egress(
+                    root,pending.prepared,actor_id=actor_id,chat_id=chat_id)))
+                success=receipt.allowed and receipt.result=='SUCCEEDED'
+                names=[r[0] for r in pending.prepared.identity[0]]
+                return {'state':'COMPLETED' if success else 'HOLD','completed':0,
+                    'halted':not success,'relay_state':'VERIFIED' if success else 'HOLD',
+                    'accounts':[{'username':n,'state':'VERIFIED' if success else 'HOLD'} for n in names]}
+            if type(getattr(self.portal.execute_single,'__self__',None)) is CoreOperationalBindings:
+                # Keep the existing Telegram event loop responsive while
+                # fixed synchronous OS/SSH measurements run. One temporary
+                # thread, no daemon/poller; STOP is observed between UIDs.
+                report=await self._host_task(lambda:asyncio.run(self.portal.execute(
+                    pending.prepared,actor_id=actor_id,chat_id=chat_id,
+                    stop_requested=lambda:self._stop)))
+            else:
+                report=await self.portal.execute(
+                    pending.prepared,actor_id=actor_id,chat_id=chat_id)
+            relay_state=None
+            if pending.activate_relay and report.all_verified:
+                from edge_egress_k2_core_edge_operations import select_active_egress
+                root=getattr(self.portal.execute_single,'__self__',None)
+                try:
+                    receipt=await self._host_task(lambda:asyncio.run(select_active_egress(
+                        root,pending.prepared.plan.selection.target_edge_id,
+                        actor_id=actor_id,chat_id=chat_id)))
+                    relay_state='VERIFIED' if receipt.allowed and receipt.result=='SUCCEEDED' else 'HOLD'
+                except (ValueError,OSError):
+                    relay_state='HOLD'
+            result={
                 "state":"COMPLETED" if report.all_verified else "HOLD",
                 "completed":report.completed,"halted":report.halted,
                 "accounts":[
@@ -152,6 +279,9 @@ class RootDirectOperatorClient:
                     for p in report.progress
                 ],
             }
+            if pending.activate_relay:
+                result['relay_state']=relay_state or 'HOLD'
+            return result
         finally:
             self._executing=False
 
@@ -210,3 +340,37 @@ def native_core_runtime_registered() -> bool:
     root = getattr(execute, "__self__", None)
     factory = getattr(getattr(root, "ports", None), "port_factory", None)
     return type(getattr(factory, "read_root_snapshot", None)) is CoreUIDSnapshotSource
+
+
+def native_operations_registered() -> bool:
+    from edge_egress_k2_core_operations import CoreOperationalBindings,CORE_OPERATIONS_ENABLED
+    return bool(native_core_runtime_registered() and CORE_OPERATIONS_ENABLED
+        and type(getattr(_ACTIVE_CLIENT.portal.execute_single,'__self__',None)) is CoreOperationalBindings)
+
+
+async def native_review(application, selection, *, actor_id,chat_id):
+    """Fresh native measurements for existing UI; no synthetic preview fallback."""
+    client=bound_root_client(application)
+    client._gate(actor_id,chat_id)
+    if client._executing or client._preparing:
+        raise M43ClientHold('K2_REVIEW_BUSY')
+    client._preparing=True
+    try:
+        return await client._host_task(lambda:client.portal.review(selection))
+    finally:
+        client._preparing=False
+
+
+async def native_prepare_edge(application,edge_id,*,actor_id,chat_id):
+    client=bound_root_client(application)
+    client._gate(actor_id,chat_id)
+    from edge_egress_k2_core_operations import CoreOperationalBindings
+    root=getattr(client.portal.execute_single,'__self__',None)
+    if type(root) is not CoreOperationalBindings or client._executing or client._preparing:
+        raise M43ClientHold('K2_NATIVE_EDGE_PREPARATION_UNAVAILABLE')
+    client._preparing=True
+    try:
+        from edge_egress_k2_core_edge_operations import prepare_edge
+        return await client._host_task(lambda:prepare_edge(root,edge_id,actor_id=actor_id,chat_id=chat_id))
+    finally:
+        client._preparing=False

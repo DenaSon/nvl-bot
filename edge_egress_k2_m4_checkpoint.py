@@ -75,7 +75,7 @@ def _pin(plan: MigrationWavePlan, approval: WaveApproval) -> tuple[str,str]:
         or not _DIGEST.fullmatch(plan.digest)
         or not isinstance(approval.signature,str)
         or not _DIGEST.fullmatch(approval.signature)
-        or len(plan.members)<1 or len(plan.members)>10
+        or len(plan.members)<1 or len(plan.members)>10000
         or tuple(m.username for m in plan.members)!=plan.selection.usernames):
         raise CheckpointHold("M4_CHECKPOINT_UNTRUSTED_PLAN")
     return sha256(approval.signature.encode("ascii")).hexdigest(),plan.digest
@@ -121,6 +121,18 @@ class DurableWaveCheckpoint:
         if type(ts) is not int or ts<=0:
             raise CheckpointHold("M4_CHECKPOINT_TIME_UNTRUSTED")
         return ts
+
+    def running(self, plan, approval) -> bool:
+        """Only the exact consumed cohort may continue past confirmation TTL."""
+        self._gate()
+        key,digest=_pin(plan,approval)
+        with self.db_conn() as conn:
+            return conn.execute(
+                "SELECT actor_id,chat_id,edge_id,usernames_json,state "
+                "FROM k2_m4_wave_checkpoints WHERE approval_hash=? AND plan_digest=?",
+                (key,digest),
+            ).fetchone() == (approval.actor_id,approval.chat_id,
+                plan.selection.target_edge_id,json.dumps(plan.selection.usernames),"RUNNING")
 
     def prepare(self,plan: MigrationWavePlan,approval: WaveApproval) -> None:
         stamp=self._gate()
@@ -322,7 +334,7 @@ class DurableWaveCheckpoint:
             ) or row[4] not in _STATES:
                 raise CheckpointHold("M4_CHECKPOINT_IDENTITY_CHANGED")
             progress=json.loads(row[6])
-            if not isinstance(progress,list) or len(progress)>10:
+            if not isinstance(progress,list) or len(progress)>10000:
                 raise CheckpointHold("M4_CHECKPOINT_CORRUPT_PROGRESS")
             display=tuple(tuple(v) for v in progress)
             if any(len(v)!=3 or v[0] not in plan.selection.usernames

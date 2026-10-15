@@ -29,6 +29,7 @@ from edge_egress_p3_executor import (
 M3_WAVE_EXECUTION_ENABLED = False
 # Single verified cross-Edge transfer in unchanged Legacy global mode only.
 M3_CROSS_EDGE_LEGACY_SINGLE_ENABLED = False
+M3_COHORT_OPERATIONS_ENABLED = False
 MAX_WAVE_SIZE = 10
 MAX_APPROVAL_AGE_SECONDS = 300
 
@@ -200,7 +201,7 @@ def build_wave_plan(inventory: MigrationInventory, *,
     for name in sel.usernames:
         a=rows[name]
         blockers=list(a.issues)
-        if not inventory.target_f4_accepted:
+        if not inventory.target_accepted:
             blockers.append("TARGET_F4_NOT_ACCEPTED")
         if not a.source_proven or not a.source_edge_id or not a.source_ipv4:
             blockers.append("SOURCE_INGRESS_NOT_ATTESTED")
@@ -266,6 +267,16 @@ def m4_cross_edge_single_reviewed(plan: MigrationWavePlan) -> bool:
             for m in plan.members
         )
     )
+
+
+def m4_operational_reviewed(plan: MigrationWavePlan) -> bool:
+    """Explicit phase-2 release: each member still gets its own Single lease."""
+    _assert_plan(plan)
+    return bool(M3_COHORT_OPERATIONS_ENABLED and plan.members
+                and not plan.global_blockers and not plan.blocked
+                and all(m.source_proven and m.active_sessions == 0
+                        and m.protected_edge_id != m.target_edge_id
+                        for m in plan.members))
 
 
 def _approval_message(plan: MigrationWavePlan, actor_id: int,
@@ -341,7 +352,7 @@ def _fresh_member(
         or fresh.selection.usernames!=(expected.username,)
         or fresh.selection.target_edge_id!=expected.target_edge_id
         or fresh.target_ipv4!=expected.target_ipv4
-        or not fresh.target_f4_accepted or fresh.global_issues):
+        or not fresh.target_accepted or fresh.global_issues):
         return False
     chosen=[x for x in fresh.accounts if x.selected]
     if len(chosen)!=1 or chosen[0].issues:
@@ -378,6 +389,8 @@ async def run_migration_wave(
     committed_6g: Callable[[ExecutionScope,ExecutionTicket,int],bool],
     current_protected_mode: Callable[[], str],
     on_verified: Callable[[str,int,int],None] | None = None,
+    continuation_authorized: Callable[[], bool] | None = None,
+    stop_requested: Callable[[], bool] | None = None,
     release_enabled: bool = False,
     geteuid: Callable[[],int] = os.geteuid,
     clock: Callable[[],int] = lambda: int(time.time()),
@@ -396,7 +409,9 @@ async def run_migration_wave(
         ))):
         raise MigrationWaveHold("M3_LIVE_EXECUTOR_NOT_RELEASED")
     _assert_plan(plan)
-    if len(plan.members)>plan.wave_size:
+    if len(plan.members)>plan.wave_size and not (
+        m4_operational_reviewed(plan) and callable(continuation_authorized)
+    ):
         raise MigrationWaveHold("WAVE_REQUIRES_EXPLICIT_SUBWAVE_APPROVAL")
     verify_wave_approval(
         plan,approval,actor_id=actor_id,chat_id=chat_id,
@@ -416,7 +431,12 @@ async def run_migration_wave(
     for member in plan.members:
         # No more than ten accounts, one-at-a-time and no automatic next UID
         # after failed 6G, lost F4, packet hold or cancellation.
-        if clock()>=approval.expires_at:
+        if stop_requested is not None and stop_requested():
+            return _as_report(plan,results,"OPERATOR_STOPPED")
+        if clock()>=approval.expires_at and not (
+            M3_COHORT_OPERATIONS_ENABLED and callable(continuation_authorized)
+            and continuation_authorized() is True
+        ):
             results.append(WaveProgress(member.username,member.uid,
                                         "HOLD","WAVE_APPROVAL_EXPIRED"))
             return _as_report(plan,results,"WAVE_APPROVAL_EXPIRED")
@@ -434,7 +454,8 @@ async def run_migration_wave(
                 raise MigrationWaveHold("M3_SAME_EDGE_REQUIRES_LEGACY_MODE")
             if scope.action=="UID_ATTACH" and mode=="0":
                 if (not M3_CROSS_EDGE_LEGACY_SINGLE_ENABLED
-                    or not m4_cross_edge_single_reviewed(plan)):
+                    or not (m4_cross_edge_single_reviewed(plan)
+                            or m4_operational_reviewed(plan))):
                     raise MigrationWaveHold(
                         "M3_CROSS_EDGE_REQUIRES_SEPARATE_PROTECTED_ACCEPTANCE")
             elif scope.action=="UID_ATTACH" and mode!="1":

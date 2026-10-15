@@ -83,6 +83,21 @@ def _private_directory(path: Path) -> None:
     _verify_root_directory(path, group=None, private=True)
 
 
+def stage_core_modules(blobs,pins,bundle_digest,locked):
+    """One reviewed closure, reused by Edge preparation and UID bootstrap."""
+    locked()
+    if validate_module_bundle(blobs,pins)!=bundle_digest:
+        raise CorePrerequisiteHold('CORE_BOOTSTRAP_BUNDLE_CHANGED')
+    if TARGET.exists() or TARGET.is_symlink():
+        inspect_installed_module_bundle(pins)
+    else:
+        def create(path,raw):
+            locked();create_public_root_module(path,raw);locked()
+        stage_module_bundle(blobs=blobs,reviewed_sha256=pins,
+            approved_bundle_digest=bundle_digest,port=create,release_enabled=True)
+    locked()
+
+
 @dataclass(frozen=True)
 class CoreGuardBootstrap(GuardBootstrap):
     module_blobs: dict[str, bytes]
@@ -97,23 +112,7 @@ class CoreGuardBootstrap(GuardBootstrap):
         def locked():
             return assert_guarded_6g_intent(db_conn, scope, ticket)
 
-        locked()
-        if validate_module_bundle(self.module_blobs, self.module_pins) != self.bundle_digest:
-            raise CorePrerequisiteHold("CORE_BOOTSTRAP_BUNDLE_CHANGED")
-        if TARGET.exists() or TARGET.is_symlink():
-            # Existing bytes must be exactly this release. Never overwrite
-            # live PAM/DoH code or silently adopt a partially staged bundle.
-            inspect_installed_module_bundle(self.module_pins)
-        else:
-            def create(path, raw):
-                locked()
-                create_public_root_module(path, raw)
-                locked()
-            stage_module_bundle(
-                blobs=self.module_blobs, reviewed_sha256=self.module_pins,
-                approved_bundle_digest=self.bundle_digest,
-                port=create, release_enabled=True,
-            )
+        stage_core_modules(self.module_blobs,self.module_pins,self.bundle_digest,locked)
         for folder in (ROSTER.parent, GUARD_DIR):
             locked()
             _private_directory(folder)

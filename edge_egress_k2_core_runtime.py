@@ -71,6 +71,7 @@ class CoreHostSources:
         self.os_uid = lambda name: pwd.getpwnam(name).pw_uid
         self.geteuid = os.geteuid
         self.now = lambda: int(time.time())
+        self.observations = None
 
     def protected_mode(self):
         if not load_core_profile().enabled:
@@ -97,7 +98,14 @@ class CoreHostSources:
         return RootAdminPolicy(frozenset((int(t), int(t)) for t in tokens))
 
     def pre(self, scope=None):
-        proof = load_external_evidence(now=self.now())
+        if self.observations is not None:
+            if scope is not None:
+                from edge_egress_k2_migration_inventory import select_migration
+                proof=self.observations.pre(select_migration('SINGLE',(scope.username,),scope.edge_id))
+            else:
+                proof=self.observations.current()
+        else:
+            proof = load_external_evidence(now=self.now())
         proof.verify_pre_attach()
         if scope is not None:
             proof.verify_target(scope.edge_id, scope.target_host, (scope.username,))
@@ -109,6 +117,10 @@ class CoreHostSources:
         # additional local check, never a substitute for source attribution.
         proof = self.pre()
         proof.verify_account(username, uid)
+        return self.local_idle(username,uid)
+
+    def local_idle(self,username,uid):
+        """Local process evidence; independent of the observation collector."""
         if self.os_uid(username) != uid:
             return False
         snapshot = _checked("ps", "-eo", "pid,uid,comm,args", "--no-headers")
@@ -168,16 +180,22 @@ class CoreHostSources:
         def packet(req):
             if req != manifest.request:
                 return False
-            load_post_attach_evidence(scope=scope, ticket=ticket,
-                                      db_conn=self.db_conn, now=self.now())
+            if self.observations is not None:
+                self.observations.post(scope,ticket,phase='POST_ATTACH')
+            else:
+                load_post_attach_evidence(scope=scope, ticket=ticket,
+                                          db_conn=self.db_conn, now=self.now())
             return True
 
         def uid_packet(req):
             if req != manifest.request:
                 return False
-            load_post_attach_evidence(scope=scope, ticket=ticket,
-                                      db_conn=self.db_conn, now=self.now(),
-                                      phase="UID_ROUTE")
+            if self.observations is not None:
+                self.observations.post(scope,ticket,phase='UID_ROUTE')
+            else:
+                load_post_attach_evidence(scope=scope, ticket=ticket,
+                                          db_conn=self.db_conn, now=self.now(),
+                                          phase="UID_ROUTE")
             return True
 
         def neighbour(req):
@@ -192,6 +210,7 @@ class CoreHostSources:
             reviewed_module_sha256=module_sha, packet_witness=packet,
             neighbour_witness=neighbour, now=self.now,
             precommit_packet_witness=uid_packet,
+            qualified_target=(self.observations.target_qualified if self.observations is not None else None),
         )
         safety = (CrossEdgeIndependentSafety(
             **args, ingress_edge_id=member.source_edge_id,
@@ -223,7 +242,8 @@ class CoreHostSources:
             safety=safety,
             independent_rescue_ok=lambda: "operator_rescue" in self.pre(scope).checks,
             independent_f4_ok=lambda current_scope: (
-                current_scope == scope and "f4_accepted" in self.pre(scope).checks
+                current_scope == scope and bool(
+                    {'f4_accepted','release_qualified'} & self.pre(scope).checks)
             ),
             mixed_legacy_pam_ok=mixed_pam, account_idle_ok=self.idle,
             sshd_effective_probe=lambda: _checked("sshd", "-T", "-C", context),
@@ -333,6 +353,17 @@ def start_core_single_runtime(application, *, db_conn,
         db_conn=db_conn, read_root_snapshot=snapshot, os_uid=host.os_uid,
         geteuid=host.geteuid, release_enabled=True,
     )
+    root_class=RootM42Bindings
+    root_extra={}
+    if profile.operations_enabled:
+        from edge_egress_k2_core_observer import CorePhysicalObservations
+        from edge_egress_k2_core_operations import CoreOperationalBindings,CoreOperationalHostFactory
+        observations=CorePhysicalObservations(db_conn=db_conn,host=host,
+            qualification_sha256=profile.field_acceptance_sha256,release_sha=release_sha)
+        host.observations=observations
+        factory=CoreOperationalHostFactory(new_factory=factory,host=host,observations=observations)
+        root_class=CoreOperationalBindings
+        root_extra={'observations':observations}
     ports = HostReviewedPorts(
         db_conn=db_conn, acquire_6g=callbacks.acquire,
         journal_6g=callbacks.journal, port_factory=factory,
@@ -342,12 +373,24 @@ def start_core_single_runtime(application, *, db_conn,
         now=host.now, geteuid=host.geteuid,
     )
     switches = _single_switches()
+    if profile.operations_enabled:
+        import edge_egress_k2_core_operations as operations
+        import edge_egress_k2_core_reassignment as reassignment
+        import edge_egress_k2_migration_inventory as inventory
+        import edge_egress_k2_m3_waves as waves
+        switches += ((operations,'CORE_OPERATIONS_ENABLED'),
+                     (reassignment,'CORE_REASSIGNMENT_ENABLED'),
+                     (inventory,'M1_INDEPENDENT_EGRESS_ENABLED'),
+                     (waves,'M3_COHORT_OPERATIONS_ENABLED'))
+    if profile.batch_enabled:
+        import edge_egress_k2_root_direct as direct
+        switches+=((direct,'K2_ROOT_DIRECT_BATCH_ENABLED'),)
     previous = [(module, name, getattr(module, name)) for module, name in switches]
     try:
         for module, name, _ in previous:
             setattr(module, name, True)
-        root = RootM42Bindings(ports=ports, root_secret=secret,
-                               admin_policy=policy, reviewed_release=True)
+        root = root_class(ports=ports, root_secret=secret,
+                          admin_policy=policy, reviewed_release=True,**root_extra)
         root_holder["root"] = root
         checkpoint = DurableWaveCheckpoint(
             db_conn=db_conn, geteuid=host.geteuid, clock=host.now,

@@ -308,11 +308,17 @@ class Existing6GGuardedExecutor:
         )
 
     def _core_single_host_bound(self, scope: ExecutionScope) -> bool:
+        from edge_egress_k2_core_reassignment import CoreReassignmentPort,CORE_REASSIGNMENT_ENABLED
         from edge_egress_k2_core_prerequisites import CoreGuardBootstrap
         from edge_egress_k2_m4_bootstrap import (
             DeferredOriginal6GHostPort, DeferredCrossEdgeOriginal6GHostPort,
         )
         port = self.host_port
+        if (P3_UID_POST_COMMIT_PROBE_ENABLED and CORE_REASSIGNMENT_ENABLED
+            and type(port) is CoreReassignmentPort and port.scope==scope
+            and port.db_conn is self.db_conn and port.ticket==self._execution_ticket
+            and scope.action in ('UID_ATTACH','UID_ENROLL_SOURCE')):
+            return True
         return (
             P3_UID_POST_COMMIT_PROBE_ENABLED
             and scope.action in ("UID_ATTACH", "UID_ENROLL_SOURCE")
@@ -333,6 +339,12 @@ class Existing6GGuardedExecutor:
             DeferredCrossEdgeOriginal6GHostPort,
         )
         port = self.host_port
+        from edge_egress_k2_core_reassignment import CoreReassignmentPort,CORE_REASSIGNMENT_ENABLED
+        if (CORE_REASSIGNMENT_ENABLED and P3_CROSS_EDGE_LEGACY_UID_ATTACH_ENABLED
+            and type(port) is CoreReassignmentPort and port.scope==scope
+            and port.db_conn is self.db_conn and port.ticket==self._execution_ticket
+            and scope.action=='UID_ATTACH' and port.release_enabled is True):
+            return True
         return (
             P3_CROSS_EDGE_LEGACY_UID_ATTACH_ENABLED
             and scope.action == "UID_ATTACH"

@@ -180,6 +180,7 @@ class ReviewedM2P3HostFactory:
                     self.db_conn, self.os_uid, scope=scope, ticket=ticket,
                     shared_edge_enabled=True,
                 )
+            store.qualified_target=spec.safety.qualified_target
             kernel = LocalLinuxProtectedRuntimeKernel(explicitly_enabled=True)
             uid_port = GuardedProtectedUIDPort(
                 db_conn=self.db_conn, plan=plan, ticket=ticket,

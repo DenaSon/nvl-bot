@@ -27,7 +27,8 @@ class RuntimeKernelUnsafe(ValueError):
 
 def _run(*args, timeout=15):
     return subprocess.run(list(args), check=False, capture_output=True,
-                          text=True, timeout=timeout)
+                          text=True, timeout=timeout,
+                          env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C'})
 
 
 class LocalLinuxProtectedRuntimeKernel:

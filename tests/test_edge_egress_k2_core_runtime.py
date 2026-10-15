@@ -153,6 +153,22 @@ class CoreStartupTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("run_polling", startup)
         self.assertNotIn("ApplicationBuilder", startup)
 
+    def test_operations_profile_composes_native_measurements_with_batch_still_off(self):
+        from edge_egress_k2_core_operations import CoreOperationalBindings,CoreOperationalHostFactory
+        operations_profile=CoreReleaseProfile(True,'a'*64,True,False,'b'*64)
+        for flag in ('edge_egress_k2_core_operations.CORE_OPERATIONS_ENABLED',
+                     'edge_egress_k2_core_reassignment.CORE_REASSIGNMENT_ENABLED',
+                     'edge_egress_k2_migration_inventory.M1_INDEPENDENT_EGRESS_ENABLED',
+                     'edge_egress_k2_m3_waves.M3_COHORT_OPERATIONS_ENABLED'):
+            p=patch(flag,False);p.start();self.addCleanup(p.stop)
+        with patch.object(runtime,'load_core_profile',return_value=operations_profile):
+            self.start()
+        root=direct.bound_root_client(self.app).portal.execute_single.__self__
+        self.assertIs(type(root),CoreOperationalBindings)
+        self.assertIs(type(root.ports.port_factory),CoreOperationalHostFactory)
+        self.assertTrue(direct.native_operations_registered())
+        self.assertFalse(direct.K2_ROOT_DIRECT_BATCH_ENABLED)
+
 
 if __name__ == "__main__":
     unittest.main()

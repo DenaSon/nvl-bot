@@ -124,7 +124,7 @@ def inspect_root_recovery(
         or not isinstance(selection, MigrationSelection)
         or select_migration(selection.mode, selection.usernames,
                             selection.target_edge_id) != selection
-        or len(selection.usernames) > 10):
+        or len(selection.usernames) > 10000):
         raise M44StatusHold("M44_ROOT_STATUS_NOT_RELEASED")
     # Fail closed *before* touching any DB row if role was revoked.
     if admin_authorized(actor_id, chat_id) is not True:
@@ -163,7 +163,7 @@ def inspect_root_recovery(
                 or edge != selection.target_edge_id or state not in _STATES
                 or type(expires) is not int or not isinstance(reason, str)
                 or len(reason) > 250 or not isinstance(progress_json, str)
-                or len(progress_json) > 4096):
+                or len(progress_json) > 128*len(selection.usernames)+2):
                 raise M44StatusHold("M44_CHECKPOINT_CORRUPT")
             # Decode exact names and original DB ordered per-UID receipts.
             if (json.loads(names_json) != list(selection.usernames)

@@ -78,6 +78,18 @@ class IndependentSafety:
     neighbour_witness: Callable | None = None
     now: Callable = lambda: int(time.time())
     precommit_packet_witness: Callable | None = None
+    qualified_target: Callable | None = None
+
+    def core_target_qualified(self, req):
+        # Only the concrete, release-pinned same-process collector can
+        # qualify a STAGED target. A callback/bool from UI cannot do so.
+        from edge_egress_k2_core_observer import CorePhysicalObservations
+        from edge_egress_k2_core_operations import CORE_OPERATIONS_ENABLED
+        callback = self.qualified_target
+        return bool(CORE_OPERATIONS_ENABLED and callable(callback)
+                    and type(getattr(callback, '__self__', None)) is CorePhysicalObservations
+                    and getattr(callback, '__func__', None) is CorePhysicalObservations.target_qualified
+                    and callback(req) is True)
 
     def _manifest(self,req):
         members=load_roster()
@@ -142,7 +154,7 @@ class IndependentSafety:
         with self.db_conn() as db:
             r=read_readiness(db,req.spec.edge_id)
             if (r is None or r.edge_ipv4!=req.spec.edge_public_ipv4
-                    or not admission_eligible(r,now=self.now())):
+                    or not admission_eligible(r,now=self.now())) and not self.core_target_qualified(req):
                 raise LiveUIDHold("SOURCE_F4_NOT_ACCEPTED")
         BootGuardApplier().verify(manifest,require_frozen=True)
 

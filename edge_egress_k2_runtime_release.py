@@ -40,6 +40,9 @@ def _root_bytes(path: Path, maximum: int, *, private=False) -> bytes:
 class CoreReleaseProfile:
     enabled: bool
     pam_module_sha256: str
+    operations_enabled: bool = False
+    batch_enabled: bool = False
+    field_acceptance_sha256: str = ""
 
 
 def load_core_profile() -> CoreReleaseProfile:
@@ -59,14 +62,29 @@ def load_core_profile() -> CoreReleaseProfile:
             return result
         data = json.loads(_root_bytes(CORE_PROFILE, 2048, private=True),
                           object_pairs_hook=unique)
+        version=data.get('version') if type(data) is dict else None
+        keys={"version", "single_enabled", "pam_module_sha256"}
+        if version==2:
+            keys|={'operations_enabled','batch_enabled','field_acceptance_sha256'}
         if (type(data) is not dict
-            or set(data) != {"version", "single_enabled", "pam_module_sha256"}
-            or type(data["version"]) is not int or data["version"] != 1
+            or set(data) != keys
+            or type(version) is not int or version not in (1,2)
             or type(data["single_enabled"]) is not bool
             or type(data["pam_module_sha256"]) is not str
             or not re.fullmatch(r"[a-f0-9]{64}", data["pam_module_sha256"])):
             raise CoreReleaseHold("CORE_PROFILE_INVALID")
-        return CoreReleaseProfile(data["single_enabled"], data["pam_module_sha256"])
+        if version==2 and (
+            type(data['operations_enabled']) is not bool
+            or type(data['batch_enabled']) is not bool
+            or data['batch_enabled'] and not data['operations_enabled']
+            or data['operations_enabled'] and not data['single_enabled']
+            or type(data['field_acceptance_sha256']) is not str
+            or not re.fullmatch(r'[a-f0-9]{64}',data['field_acceptance_sha256'])
+        ):
+            raise CoreReleaseHold('CORE_PROFILE_OPERATIONS_INVALID')
+        return CoreReleaseProfile(data["single_enabled"], data["pam_module_sha256"],
+            data.get('operations_enabled',False),data.get('batch_enabled',False),
+            data.get('field_acceptance_sha256',''))
     except (OSError, ValueError, TypeError, KeyError) as exc:
         raise CoreReleaseHold("CORE_PROFILE_UNAVAILABLE_OR_INVALID") from exc
 

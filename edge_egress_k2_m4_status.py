@@ -140,12 +140,16 @@ def root_checkpoint_status_html(result: dict, selection: MigrationSelection) -> 
     lines=["📋 <b>وضعیت انتقال</b>","",
            "مقصد: <code>"+escape(selection.target_edge_id)+"</code>",
            titles[state],""]
-    for item in result["users"]:
+    for index,item in enumerate(result["users"]):
         name=item.get("username")
         status=item.get("state")
         if name not in selection.usernames or status not in labels:
             raise M4StatusHold("ROOT_STATUS_USER_UNTRUSTED")
-        lines.append("<code>"+escape(name)+"</code> — "+labels[status])
+        if index<20:
+            lines.append("<code>"+escape(name)+"</code> — "+labels[status])
+    if len(result['users'])>20:
+        verified=sum(u['state']=='RECEIPT_SCOPED' for u in result['users'])
+        lines.append(f"رسید تأییدشده: {verified} از {len(result['users'])} حساب")
     if result["busy"] or result["unresolved"]:
         lines.extend(("","⛔️ ابتدا وضعیت انتقال باید بررسی شود؛ "
                       "اجرای مجدد خودکار مجاز نیست."))

@@ -79,6 +79,19 @@ class RootReleaseProfileTests(unittest.TestCase):
             self.profile.symlink_to(self.module)
             self.assertFalse(release.pam_cross_edge_released())
 
+    def test_operations_and_batch_are_separate_explicit_version_two_releases(self):
+        self.body.update(version=2,operations_enabled=True,batch_enabled=False,
+                         field_acceptance_sha256='a'*64)
+        self.write()
+        with self.owned():
+            profile=release.load_core_profile()
+            self.assertTrue(profile.operations_enabled)
+            self.assertFalse(profile.batch_enabled)
+            self.body['batch_enabled']=True;self.write()
+            self.assertTrue(release.load_core_profile().batch_enabled)
+            self.body['operations_enabled']=False;self.write()
+            with self.assertRaises(release.CoreReleaseHold):release.load_core_profile()
+
 
 if __name__ == "__main__":
     unittest.main()

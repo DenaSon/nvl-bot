@@ -85,9 +85,12 @@ class GuardedCrossEdgeUIDPort:
         committed_blockers = (
             "TARGET_ALREADY_PROTECTED", "PROTECTED_SOURCE_DRIFT"
         )
+        from edge_egress_k2_migration_inventory import M1_INDEPENDENT_EGRESS_ENABLED
+        if M1_INDEPENDENT_EGRESS_ENABLED:
+            committed_blockers = ("TARGET_ALREADY_PROTECTED",)
         if (not plan.selection.mode == "SINGLE"
             or any(x != "SHARED_6G_BUSY" for x in plan.global_blockers)
-            or chosen is None or not fresh.target_f4_accepted
+            or chosen is None or not fresh.target_accepted
             or (chosen.blockers != committed_blockers
                 if committed else chosen.blockers != ())
             or chosen.username != member.username or chosen.uid != member.uid
@@ -214,6 +217,6 @@ class CrossEdgeIndependentSafety(IndependentSafety):
             readiness = read_readiness(db, req.spec.edge_id)
             if (readiness is None
                 or readiness.edge_ipv4 != req.spec.edge_public_ipv4
-                or not admission_eligible(readiness, now=self.now())):
+                or not admission_eligible(readiness, now=self.now())) and not self.core_target_qualified(req):
                 raise LiveUIDHold("K2_TARGET_F4_NOT_ACCEPTED")
         BootGuardApplier().verify(manifest, require_frozen=True)

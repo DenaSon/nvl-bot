@@ -20,6 +20,7 @@ from edge_egress_k2_m3_waves import (
     MigrationWavePlan, WaveApproval, WaveReport, MigrationWaveHold,
     build_wave_plan, m4_same_ingress_reviewed,
     m4_cross_edge_single_reviewed,
+    m4_operational_reviewed,
     sign_wave_approval, verify_wave_approval,
     run_migration_wave,
 )
@@ -103,11 +104,12 @@ class RootMigrationPortal:
             or inventory.selection!=selection):
             raise RootPortalHold("M4_INVENTORY_SELECTION_DRIFT")
         plan=build_wave_plan(inventory)
-        if len(plan.members)>10 or plan.global_blockers or plan.blocked:
+        if (len(plan.members)>10 and not m4_operational_reviewed(plan)
+            or plan.global_blockers or plan.blocked):
             raise RootPortalHold("M4_UNSAFE_OR_OVERSIZED_SELECTION")
         # Cross-Edge remains a separate, single-only reviewed release gate;
         # no PREPARED approval may authorize an implicit mixed Legacy batch.
-        if not (m4_same_ingress_reviewed(plan) or (
+        if not (m4_operational_reviewed(plan) or m4_same_ingress_reviewed(plan) or (
             M4_CROSS_EDGE_SINGLE_ENABLED
             and m4_cross_edge_single_reviewed(plan)
         )):
@@ -129,7 +131,7 @@ class RootMigrationPortal:
         return PreparedWave(plan,approval)
 
     async def execute(self,prepared: PreparedWave, *,
-                      actor_id:int,chat_id:int) -> WaveReport:
+                      actor_id:int,chat_id:int, stop_requested=None) -> WaveReport:
         self._gate(actor_id,chat_id)
         if not isinstance(prepared,PreparedWave):
             raise RootPortalHold("M4_EXACT_PREPARED_WAVE_REQUIRED")
@@ -139,9 +141,10 @@ class RootMigrationPortal:
             plan,approval,actor_id=actor_id,chat_id=chat_id,
             secret=self.secret,now=now,
         )
-        if len(plan.members)>10 or plan.global_blockers or plan.blocked:
+        if (len(plan.members)>10 and not m4_operational_reviewed(plan)
+            or plan.global_blockers or plan.blocked):
             raise RootPortalHold("M4_PLAN_CHANGED_OR_BLOCKED")
-        if not (m4_same_ingress_reviewed(plan) or (
+        if not (m4_operational_reviewed(plan) or m4_same_ingress_reviewed(plan) or (
             M4_CROSS_EDGE_SINGLE_ENABLED
             and m4_cross_edge_single_reviewed(plan)
         )):
@@ -170,6 +173,8 @@ class RootMigrationPortal:
                 on_verified=lambda username,uid,op:
                     self.checkpoint.record_verified(
                         plan,approval,username,uid,op),
+                continuation_authorized=(lambda: self.checkpoint.running(plan,approval)),
+                stop_requested=stop_requested,
                 release_enabled=True,geteuid=self.geteuid,clock=self.clock,
             )
             self.checkpoint.finish(plan,approval,report)

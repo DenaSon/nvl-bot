@@ -73,6 +73,16 @@ class Existing6GUIDRuntimeStore:
     os_uid_for_username: Callable[[str], int]
     # Opt-in only after per-UID fences + complete durable roster are attested.
     shared_edge_enabled: bool = False
+    qualified_target: Callable | None = None
+
+    def _core_target_qualified(self, req):
+        from edge_egress_k2_core_observer import CorePhysicalObservations
+        from edge_egress_k2_core_operations import CORE_OPERATIONS_ENABLED
+        callback=self.qualified_target
+        return bool(CORE_OPERATIONS_ENABLED and callable(callback)
+            and type(getattr(callback,'__self__',None)) is CorePhysicalObservations
+            and getattr(callback,'__func__',None) is CorePhysicalObservations.target_qualified
+            and callback(req) is True)
 
     @staticmethod
     def _lock(conn, op_id: int, source: str, target: str) -> None:
@@ -151,7 +161,7 @@ class Existing6GUIDRuntimeStore:
             raise RuntimeStoreUnsafe("F3_READINESS_MIGRATION_REQUIRED")
         if require_ready and not admission_eligible(
             read_readiness(conn, req.spec.edge_id)
-        ):
+        ) and not self._core_target_qualified(req):
             raise RuntimeStoreUnsafe("F4_PRODUCTION_READINESS_REQUIRED")
 
     def _tx(self, operation_id, source, target, task):

@@ -11,6 +11,7 @@ PROTECTED_RELEASE_SWITCHES = {
     "edge_egress_k2_m3_waves": (
         "M3_WAVE_EXECUTION_ENABLED",
         "M3_CROSS_EDGE_LEGACY_SINGLE_ENABLED",
+        "M3_COHORT_OPERATIONS_ENABLED",
     ),
     "edge_egress_k2_m4_root_portal": (
         "M4_ROOT_PORTAL_ENABLED",
@@ -57,6 +58,9 @@ PROTECTED_RELEASE_SWITCHES = {
     "edge_egress_k2_root_direct": (
         "K2_ROOT_DIRECT_ENABLED", "K2_ROOT_DIRECT_BATCH_ENABLED",
     ),
+    "edge_egress_k2_core_operations": ("CORE_OPERATIONS_ENABLED",),
+    "edge_egress_k2_core_reassignment": ("CORE_REASSIGNMENT_ENABLED",),
+    "edge_egress_k2_migration_inventory": ("M1_INDEPENDENT_EGRESS_ENABLED",),
     "ops.k2_m4_plan_stage": (
         "K2_INITIAL_UID_PLAN_STAGE_ENABLED",
     ),

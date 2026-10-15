@@ -45,7 +45,7 @@ TLS_PORT="${6:-2088}" # پورت پیش‌فرض TLS اگر داده نشد
 
 echo "🔹 ۱) نصب WireGuard و iptables-persistent..."
 apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard iptables-persistent >/dev/null
+DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard iptables-persistent python3 curl openssh-client >/dev/null
 echo "   ✅ نصب شد."
 
 echo "🔹 ۲) ساخت کلید این Edge..."

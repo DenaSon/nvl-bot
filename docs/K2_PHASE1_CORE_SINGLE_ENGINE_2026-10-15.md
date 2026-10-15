@@ -73,6 +73,11 @@ enabling an in-memory bot flag alone cannot enable the installed PAM route.
 
 ## Phase 2 integration obligations
 
+Historical handoff checklist: source integration is now implemented in
+[Phase 2 Core operations](K2_PHASE2_CORE_OPERATIONS_2026-10-16.md), including
+the native collector and its explicit qualification/physical-test boundaries.
+The original signed-file path described above remains a separate Phase-1 route.
+
 1. Reuse this registered engine from the existing new-Edge wizard and active
    relay controls, rather than installing the historical nonroot/IPC worker.
 2. Automatically invoke and refresh the independent observation producer and

@@ -113,6 +113,7 @@ def record_current_pam_ingress() -> None:
     from edge_egress_k2_m2_ingress_journal import (
         create_root_journal_if_absent, add_authenticated_observation,
         compare_and_swap_root_journal,
+        serialized_root_journal,
     )
     if os.geteuid() != 0:
         raise PAMIngressHold("ROOT_REQUIRED")
@@ -125,10 +126,11 @@ def record_current_pam_ingress() -> None:
     )
     if observed.returncode != 0:
         raise PAMIngressHold("WG_INVENTORY_UNAVAILABLE")
-    before = create_root_journal_if_absent()
-    after = add_authenticated_observation(
-        before, username=name, uid=uid, pam_env=os.environ,
-        peers=peers, allowed_ips=observed.stdout, now=int(time.time()),
-        geteuid=os.geteuid, resolve_uid=lambda n: pwd.getpwnam(n).pw_uid,
-    )
-    compare_and_swap_root_journal(before, after)
+    with serialized_root_journal():
+        before = create_root_journal_if_absent()
+        after = add_authenticated_observation(
+            before, username=name, uid=uid, pam_env=os.environ,
+            peers=peers, allowed_ips=observed.stdout, now=int(time.time()),
+            geteuid=os.geteuid, resolve_uid=lambda n: pwd.getpwnam(n).pw_uid,
+        )
+        compare_and_swap_root_journal(before, after)

@@ -73,7 +73,9 @@ def confirmation_html(pending: PendingTelegramApproval) -> str:
            f"مقصد: <code>{escape(pending.selection.target_edge_id)}</code>",
            f"تعداد حساب: <b>{len(pending.selection.usernames)}</b>",""]
     lines.extend("• <code>"+escape(name)+"</code>"
-                 for name in pending.selection.usernames)
+                 for name in pending.selection.usernames[:10])
+    if len(pending.selection.usernames)>10:
+        lines.append(f"و {len(pending.selection.usernames)-10} حساب دیگر")
     lines.extend(("","با تأیید، درخواست برای بررسی نهایی ارسال می‌شود.",
                   "در صورت تغییر شرایط، انتقال متوقف خواهد شد."))
     return "\n".join(lines)
@@ -102,14 +104,21 @@ def result_html(result: dict, *, selection: MigrationSelection) -> str:
     lines=[("✅ <b>انتقال بررسی و تکمیل شد</b>" if state=="COMPLETED"
             else "⛔️ <b>انتقال متوقف شد</b>"),"",
            f"مقصد: <code>{escape(selection.target_edge_id)}</code>"]
-    for item in entries:
+    for item in entries[:20]:
         status=item.get("state")
         lines.append(("✅" if status=="VERIFIED" else "⛔️")
                      +f" <code>{escape(item['username'])}</code>"
                      +(" — تأیید شد" if status=="VERIFIED" else " — نیازمند بررسی"))
+    if len(entries)>20:
+        count=sum(e.get('state')=='VERIFIED' for e in entries)
+        lines.append(f"نتیجه کل: {count} تأییدشده از {len(entries)} حساب")
     if state=="HOLD":
         lines.extend(("","برای ادامه، وضعیت کاربران را بررسی کنید؛"
                       " اجرای خودکار مجدد انجام نمی‌شود."))
+    if result.get('relay_state')=='VERIFIED':
+        lines.extend(('','✅ خروجی فعال روی سرور انتخابی تأیید شد.'))
+    elif result.get('relay_state')=='HOLD':
+        lines.extend(('','⛔️ انتخاب خروجی فعال کامل نشد؛ وضعیت تمام حساب‌ها باید تأیید شود.'))
     return "\n".join(lines)
 
 

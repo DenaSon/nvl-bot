@@ -146,6 +146,25 @@ class M4UnixOperatorTests(unittest.IsolatedAsyncioTestCase):
                 await self.ipc.dispatch(frame,peer_uid=50101)
         self.assertEqual(self.fx.actions,[])
 
+    async def test_admin_revoked_after_prepare_cannot_confirm(self):
+        prepared=await self.call(self.prepare_message())
+        request=dict(
+            action="CONFIRM",request_id=prepared["request_id"],
+            actor_id=11,chat_id=-222,
+        )
+        # Simulate logout/role removal after the Telegram two-step prompt.
+        # Root MUST re-check live role at CONFIRM, not trust PREPARE.
+        self.fx.portal.admin_authorized=lambda actor,chat:False
+        with self.assertRaisesRegex(Exception,"SUPERADMIN"):
+            await self.call(request)
+        self.assertEqual(self.fx.actions,[])
+        self.assertNotIn(prepared["request_id"],self.ipc._pending)
+        # The failed confirmation cannot be replayed after re-login.
+        self.fx.portal.admin_authorized=self.fx.admin
+        with self.assertRaisesRegex(M4IPCReject,"MISSING"):
+            await self.call(request)
+        self.assertEqual(self.fx.actions,[])
+
     async def test_cancellation_and_process_restart_never_replays_ticket(self):
         prep=await self.call(self.prepare_message())
         restart=RootOperatorIPC(

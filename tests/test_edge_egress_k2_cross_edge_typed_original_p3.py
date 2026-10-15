@@ -32,6 +32,16 @@ class TypedOriginalP3CrossEdgeTests(unittest.TestCase):
         )
         self.h.setUp()
         self.addCleanup(self.h.doCleanups)
+        # P3 store-only tests deliberately unset the global default host
+        # to prove F2 does not depend on it. The real M1 front door *must*
+        # observe exactly one active/default legacy host before a transfer.
+        # Restore only that read-only fixture invariant; never change it
+        # during actual P3/F2 apply.
+        with self.h.base.db() as db:
+            db.execute(
+                "UPDATE host_pool SET is_default=1 WHERE host=?",
+                (SOURCE,),
+            )
         self.scope=self.h.harness.scope
         self.ticket=self.h.harness.ticket
         # Use the actual immutable member from original M1 plan, never
@@ -73,6 +83,7 @@ class TypedOriginalP3CrossEdgeTests(unittest.TestCase):
         before=self.preview(selection)
         chosen=[a for a in before.accounts if a.selected][0]
         self.assertEqual(chosen.issues,(),chosen.issues)
+        self.assertEqual(before.global_issues,("SHARED_6G_BUSY",))
         with self._gates():
             asyncio.run(self.port.apply(self.scope))
             self.assertTrue(asyncio.run(self.port.verify(self.scope)))

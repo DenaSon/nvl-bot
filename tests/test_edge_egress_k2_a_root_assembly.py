@@ -12,6 +12,9 @@ from unittest.mock import patch
 import edge_egress_k2_a_root_assembly as a
 from edge_egress_k2_a_6g_shared import Original6GRootCallbacks
 from edge_egress_k2_a_host_factory import ReviewedM2P3HostFactory
+from edge_egress_k2_a3_host_plans import (
+    RootOwnedM2PlanSource, RootOwnedUIDSnapshotSource,
+)
 from edge_egress_k2_m42_bindings import (
     HostReviewedPorts, RootAdminPolicy,
 )
@@ -126,9 +129,20 @@ class ReviewedAssemblyTests(unittest.TestCase):
         self.callbacks=Original6GRootCallbacks(self.db)
         self.root_uid=lambda:0
         self.os_uid=lambda name:1636
+        # Only a typed root-owned source is allowed in production assembly.
+        # Its synthetic test providers are never executed or released here.
+        self.plan_source=RootOwnedM2PlanSource(
+            db_conn=self.db,os_uid=self.os_uid,geteuid=self.root_uid,
+        )
+        self.snapshot_source=RootOwnedUIDSnapshotSource(
+            plan_source=self.plan_source,db_conn=self.db,
+            os_uid=self.os_uid,geteuid=self.root_uid,
+            inventory_provider=lambda selection:None,
+            gates_provider=lambda scope,member:None,
+        )
         self.factory=ReviewedM2P3HostFactory(
-            db_conn=self.db, read_root_snapshot=lambda *a:None,
-            os_uid=self.os_uid, geteuid=self.root_uid,
+            db_conn=self.db,read_root_snapshot=self.snapshot_source,
+            os_uid=self.os_uid,geteuid=self.root_uid,
             release_enabled=True,
         )
         self.ports=HostReviewedPorts(
@@ -174,6 +188,20 @@ class ReviewedAssemblyTests(unittest.TestCase):
             # No socket listener is enabled by this composition.
             with self.assertRaisesRegex(RootWorkerHold,"DISABLED"):
                 result.worker.open_listener()
+
+    def test_unreviewed_snapshot_callback_cannot_be_assembled(self):
+        loose=ReviewedM2P3HostFactory(
+            db_conn=self.db,read_root_snapshot=lambda *args:None,
+            os_uid=self.os_uid,geteuid=self.root_uid,release_enabled=True,
+        )
+        altered=HostReviewedPorts(**{
+            **self.ports.__dict__,"port_factory":loose,
+        })
+        with patch.object(a,"M4A_ROOT_ASSEMBLY_ENABLED",True):
+            with self.assertRaisesRegex(a.M4AAssemblyHold,"NOT_AUTHORIZED"):
+                a.assemble_reviewed_root(
+                    paths=self.p,ports=altered,release_enabled=True,
+                )
 
     def test_unreviewed_direct_host_factory_refused_before_root_assembly(self):
         fake=HostReviewedPorts(**{

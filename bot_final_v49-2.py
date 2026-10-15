@@ -396,9 +396,11 @@ from edge_egress_k2_m4_status import (
     status_html as k2_m4_status_html,
     root_checkpoint_status_html as k2_m44_root_status_html,
 )
-import edge_egress_k2_m43_client as k2_m44_status_flags
+import edge_egress_k2_root_direct as k2_root_direct_flags
+from edge_egress_k2_root_direct import (
+    bound_root_client as k2_root_direct_client,
+)
 from edge_egress_k2_m43_client import (
-    NonRootOperatorClient as k2_m43_client,
     M43ClientHold,
 )
 from edge_egress_k2_m43_workflow import (
@@ -24306,11 +24308,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     data[0],",".join(data[1]),edge_id,
                 )
                 if action=="status":
-                    if k2_m44_status_flags.M44_TELEGRAM_STATUS_ENABLED:
+                    if k2_root_direct_flags.K2_ROOT_DIRECT_ENABLED:
                         # Root-owned checkpoint and original 6G read view.
                         # No local DB fallback if the root service disappears;
                         # a timeout must never turn UNKNOWN_INFLIGHT to idle.
-                        root_result=await k2_m43_client(released=True).request(
+                        root_result=await k2_root_direct_client(context.application).request(
                             "STATUS",actor_id=actor_id,chat_id=chat_id,
                             selection=selection,
                         )
@@ -24341,7 +24343,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 selection=k2_m4_select_input(data[0],",".join(data[1]),edge_id)
                 epoch=k2_m43_approvals.begin(actor_id,chat_id)
                 try:
-                    prepared=await k2_m43_client(released=True).request(
+                    prepared=await k2_root_direct_client(context.application).request(
                         "PREPARE",actor_id=actor_id,chat_id=chat_id,
                         selection=selection,
                     )
@@ -24361,7 +24363,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     actor_id=actor_id,chat_id=chat_id,
                     message_id=message_id,edge_id=edge_id,
                 )
-                client=k2_m43_client(released=True)
+                client=k2_root_direct_client(context.application)
                 if action=="confirm":
                     response=await client.request(
                         "CONFIRM",actor_id=actor_id,chat_id=chat_id,

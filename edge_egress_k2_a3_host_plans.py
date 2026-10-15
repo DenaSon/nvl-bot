@@ -133,6 +133,29 @@ class RootOwnedM2PlanSource:
             expected_guards={name+".json" for name in roster}
             if actual_guards != expected_guards:
                 raise A3PlanHold("A3_ORPHANED_OR_MISSING_GUARD_HOLD")
+            # Do not enroll a UID that is already in either existing F2
+            # runtime table but missing from the root-owned roster. This is
+            # an inconsistent/partial protected identity, not a free UID.
+            try:
+                with self.db_conn() as conn:
+                    for table in ("edge_egress_uid_runtime",
+                                  "edge_egress_uid_bindings"):
+                        present=conn.execute(
+                            "SELECT 1 FROM sqlite_master "
+                            "WHERE type='table' AND name=?",(table,),
+                        ).fetchone()
+                        if not present:
+                            raise A3PlanHold("A3_PROTECTED_SCHEMA_MISSING")
+                        if conn.execute(
+                            "SELECT 1 FROM "+table+
+                            " WHERE username=? OR uid=? LIMIT 1",
+                            (scope.username,scope.uid),
+                        ).fetchone():
+                            raise A3PlanHold("A3_CANDIDATE_RUNTIME_ALREADY_BOUND")
+            except A3PlanHold:
+                raise
+            except Exception as exc:
+                raise A3PlanHold("A3_ROOT_DB_READ_UNAVAILABLE") from exc
             plan=plan_next_uid(
                 username=scope.username,manifest_bytes=raw,
                 current_roster=roster_bytes,installed_manifests=owned,

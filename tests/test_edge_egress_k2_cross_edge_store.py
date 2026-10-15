@@ -170,6 +170,33 @@ class CrossEdgeStoreTests(unittest.TestCase):
                 ).fetchone(),("8.8.8.8",),
             )
 
+    def test_original_legacy_owner_rule_is_not_weakened(self):
+        from edge_egress_uid_runtime_store import Existing6GUIDRuntimeStore
+        with self.fx.db() as db:
+            db.execute(
+                "UPDATE ssh_accounts SET host=? WHERE username='nvl0557'",
+                ("104.194.144.195",),
+            )
+            db.execute(
+                "UPDATE host_pool SET is_default=1 WHERE host=?",
+                (SOURCE,),
+            )
+            db.execute(
+                "UPDATE settings SET value=? WHERE key='dns_current_ip'",
+                (SOURCE,),
+            )
+        original = Existing6GUIDRuntimeStore(
+            self.fx.conn_factory, self.fx.unix_lookup,
+            shared_edge_enabled=True,
+        )
+        with self.assertRaisesRegex(
+            RuntimeStoreUnsafe,"SSH_ACCOUNT_SOURCE_NOT_VERIFIED"
+        ):
+            original.reserve_blocked(
+                self.op,self.fx.uid_req,source=SOURCE,dns_port=10553,
+            )
+        self.assertIsNone(self.fx.binding())
+
     def test_historical_metadata_does_not_bypass_live_source_witness(self):
         with self.fx.db() as db:
             db.execute(

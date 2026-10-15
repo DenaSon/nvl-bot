@@ -111,8 +111,11 @@ class M43ApprovalTests(unittest.TestCase):
         self.assertEqual(parse_callback("hpeg_m4_abort_e9"),("abort","e9"))
         items=[x for row in confirmation_buttons("e9") for x in row]
         self.assertEqual(len(items),2)
-        self.assertIn(("🔐 درخواست تأیید","hpeg_m4_prepare_e9"),
-                      [x for row in preview_buttons("e9") for x in row])
+        # A STATUS / post-CONFIRM view without a fresh inventory must
+        # not show an actionable PREPARE; fresh positive source+F4 previews
+        # are tested separately by M4OperatorReadOnlyTests.
+        self.assertNotIn(("🔐 درخواست تأیید","hpeg_m4_prepare_e9"),
+                         [x for row in preview_buttons("e9") for x in row])
         self.assertNotIn("a"*32,str(items))
         self.assertLessEqual(max(len(x[1]) for x in items),64)
         self.assertNotIn("a"*32,confirmation_html(make()))

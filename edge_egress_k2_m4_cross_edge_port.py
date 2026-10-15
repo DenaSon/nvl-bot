@@ -194,8 +194,15 @@ class CrossEdgeIndependentSafety(IndependentSafety):
             and peer.edge_ipv4 == self.source_ipv4
             and peer.ingress_ipv4 == self.ingress_rhost
         ]
+        # The journal's authenticated PAM_RHOST/key must identify this
+        # exact SSH ingress, not merely another peer on the same Edge.
+        from edge_egress_k2_m2_ingress_journal import _validated
+        source_record = _validated(observed.raw).get(req.username)
         if (witness.username != req.username or witness.edge_id != self.ingress_edge_id
-            or witness.edge_ipv4 != self.source_ipv4 or len(matches) != 1):
+            or witness.edge_ipv4 != self.source_ipv4 or len(matches) != 1
+            or source_record is None
+            or source_record.ingress_ipv4 != self.ingress_rhost
+            or source_record.wg_public_key != matches[0].wg_public_key):
             raise LiveUIDHold("K2_CROSS_EDGE_WG_KEY_OR_SOURCE_DRIFT")
         with self.db_conn() as db:
             readiness = read_readiness(db, req.spec.edge_id)

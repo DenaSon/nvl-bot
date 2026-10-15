@@ -11,7 +11,7 @@ customers before the real SSH session-gate and reboot E2E tests.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Callable, Optional, Protocol
 
 from edge_egress_uid_policy import UIDPolicyRequest
 
@@ -80,13 +80,24 @@ class RuntimePorts(Protocol):
 async def attach_protected(
     ports: RuntimePorts, request: UIDPolicyRequest, *, source: str,
     dns_port: int, authorized: bool = False, resume_frozen: bool = False,
+    lab_core_ingress_attestor: object | None = None,
 ) -> RuntimeOutcome:
     """Atomic-intent/journaled attach. No Core fallback or canary restore."""
     request.validate()
     if not authorized:
         return RuntimeOutcome(False, "EXPLICIT_PROTECTED_AUTHORIZATION_REQUIRED")
-    if source in (request.spec.core_public_ipv4, request.spec.edge_public_ipv4):
+    if source == request.spec.edge_public_ipv4:
         return RuntimeOutcome(False, "INVALID_SOURCE_EDGE")
+    if source == request.spec.core_public_ipv4:
+        # Only an independently verified disposable LAB host may also be its
+        # own ingress. Production calls do not supply this port and stay denied.
+        try:
+            from edge_egress_r1_lab_topology import TwoHostCoreIngress
+            if (type(lab_core_ingress_attestor) is not TwoHostCoreIngress or
+                    lab_core_ingress_attestor.for_request(request, source) is not True):
+                return RuntimeOutcome(False, "INVALID_SOURCE_EDGE")
+        except Exception:
+            return RuntimeOutcome(False, "INVALID_SOURCE_EDGE")
     operation_id, busy = await ports.acquire_6g(
         source, request.spec.edge_public_ipv4,
     )

@@ -48,3 +48,15 @@ The off-Core signer now refuses to sign even an otherwise valid complete set of 
 - Regression tests include raw missing/tamper, mode changes, mismatched claims, source-default OFF, and off-Core real detached RSA sign/verify with disposable CI keys.
 
 **Operational status is unchanged**: A4.1 actual independently operated SSH/SOCKS/DNS/NSS/IPv6/Core packet/WG-loss/console probes and review of their source still remain HOLD. A3.1/3.2 remain HOLD. This code must not be used to mark the F4 physical proof READY, unlock 6G or deploy.
+
+
+## A3.1 — Real root-owned read-only first/next UID plan input (2026-10-15)
+
+`edge_egress_k2_a3_host_plans.py` now implements `RootOwnedM2PlanSource` behind **`A3_ROOT_OWNED_PLAN_SOURCE_ENABLED=False`**. It reads the prospective UID's approved manifest only from the hardcoded owner-only `/etc/nvl-egress/k2-m4/uid-plans/<username>.json`; checks effective root identity, exact `UID_ENROLL_SOURCE` and P3 ticket scope; reads installed `/etc/pam.d/sshd`, the original pinned M2 module, Linux UID and current M2 roster using owned/no-follow readers.
+
+- **First UID**: checks for zero prior guard files *and* zero entries in both existing protected UID tables. A missing roster alone is not trusted. Calls the existing pure `plan_guard_install` with exact current root PAM bytes and SHA.
+- **Next UID**: loads every existing root-owned guard by its current roster identity, verifies each SHA and the complete original roster's canonical bytes, then calls existing pure `plan_next_uid`. Unknown, existing, partial, orphaned, symlinked, changed or unowned state is HOLD.
+- Returns the immutable `ReviewedRootM2Plan` and **does not provide physical F4/PAM/packet safety callbacks, install any M2 artifacts, launch a root service or alter the existing 6G lease**. It is preparatory input to a later vetted `ReviewedUIDHostSnapshot`, not a drop-in ready-to-deploy live host factory.
+- The file is now included in the sealed root-worker source SHA manifest. Synthetic tests cover default-OFF, wrong root/scope, first/next plans, old protected UID, and root-roster byte drift.
+
+**Still required to close A3:** on-host reviewed gate binding for the generated plans, independent external packet/console evidence; dedicated privilege-safe RPC for existing legacy bot root features, admin live-session authority and a proven one-bot nonroot cutover. CI without an audited live Core/Edge cannot assert these items.

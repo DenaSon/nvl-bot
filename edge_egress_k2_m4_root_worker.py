@@ -29,6 +29,7 @@ MAX_MANIFEST_BYTES = 8192
 MAX_SOURCE_BYTES = 2_000_000
 PINNED_SOURCE_FILES = frozenset((
     "edge_egress_k2_a_6g_shared.py",
+    "edge_egress_k2_a3_host_plans.py",
     "edge_egress_k2_a_host_factory.py",
     "edge_egress_k2_a_root_assembly.py",
     "edge_egress_k2_m4_root_worker.py",

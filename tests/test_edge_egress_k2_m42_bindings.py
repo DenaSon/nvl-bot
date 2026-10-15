@@ -157,6 +157,44 @@ class TrustedRootFactoryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(b.M42BindingHold,"ONE_SHOT"):
             await self.bind.execute_single(scope,ticket,11,-222)
 
+    def _queue_filled(self, expires_at):
+        scope=b.ExecutionScope(
+            "UID_ENROLL_SOURCE","e9",TARGET,TARGET,
+            username="nvl0555",uid=1636,
+        )
+        for i in range(20):
+            nonce=f"{i:032x}"
+            ticket=b.ExecutionTicket(
+                11,-222,nonce,expires_at,b._scope_digest(scope),"a"*64
+            )
+            self.bind._outstanding[nonce]=(scope,ticket)
+        return scope
+
+    def test_expired_root_p3_tickets_free_queue_without_replay(self):
+        scope=self._queue_filled(NOW-1)
+        new=self.bind.issue_ticket(scope,11,-222)
+        self.assertEqual(len(self.bind._outstanding),1)
+        self.assertEqual(
+            self.bind._outstanding[new.nonce],(scope,new)
+        )
+        self.assertNotIn(f"{0:032x}",self.bind._outstanding)
+        self.assertEqual(self.called,[])
+
+    def test_current_p3_tickets_remain_reserved_at_capacity(self):
+        scope=self._queue_filled(NOW+25)
+        with self.assertRaisesRegex(b.M42BindingHold,"QUEUE_FULL"):
+            self.bind.issue_ticket(scope,11,-222)
+        self.assertEqual(len(self.bind._outstanding),20)
+        self.assertEqual(self.called,[])
+
+    def test_corrupt_p3_ticket_cache_holds_without_partial_eviction(self):
+        scope=self._queue_filled(NOW-1)
+        self.bind._outstanding[f"{19:032x}"]=(scope,None)
+        with self.assertRaisesRegex(b.M42BindingHold,"QUEUE_CORRUPT"):
+            self.bind.issue_ticket(scope,11,-222)
+        self.assertEqual(len(self.bind._outstanding),20)
+        self.assertEqual(self.called,[])
+
     def test_original_p3_evidence_digest_pins_entire_signed_report(self):
         scope=b.ExecutionScope(
             "UID_ENROLL_SOURCE","e9",TARGET,TARGET,

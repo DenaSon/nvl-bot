@@ -27,6 +27,41 @@ async def command():
         self.assertIn("asyncio.create_subprocess_exec",
                       {h.sink for h in report.callsites})
 
+    def test_aliased_privileged_imports_remain_visible_for_a3_cutover(self):
+        raw=b"""import subprocess as sp
+import os as operating_system
+from subprocess import run as execute_program
+from os import chmod as file_mode
+from asyncio import create_subprocess_exec as spawn
+def create_user():
+    sp.run(["useradd", "test"])
+    execute_program(["chpasswd"])
+    operating_system.system("systemctl restart ssh")
+    file_mode("/etc/ssh/sshd_config", 0o600)
+    spawn("ip", "route")
+def inner():
+    from subprocess import Popen as launch
+    launch(["sudo", "true"])
+"""
+        report=audit.scan_legacy_bot_source(raw)
+        self.assertFalse(report.ready_for_nonroot)
+        roots={h.sink for h in report.callsites if h.risk=="root-or-command"}
+        self.assertTrue({
+            "subprocess.run","os.system","os.chmod",
+            "asyncio.create_subprocess_exec","subprocess.Popen",
+        } <= roots)
+        self.assertGreaterEqual(
+            sum(h.sink=="subprocess.run" for h in report.callsites),2
+        )
+
+    def test_wildcard_imports_never_silently_certify_nonroot(self):
+        report=audit.scan_legacy_bot_source(
+            b"from subprocess import *\ndef call():\n    run(['useradd','test'])\n"
+        )
+        self.assertFalse(report.ready_for_nonroot)
+        self.assertIn("subprocess.*",{h.sink for h in report.callsites})
+        self.assertIn("manual-review",{h.risk for h in report.callsites})
+
     def test_invalid_source_holds_and_simple_source_does_not_certify_nonroot(self):
         for raw in (b"",b"\xff",b"def bad("):
             with self.subTest(raw=raw),self.assertRaises(audit.A3AuditHold):

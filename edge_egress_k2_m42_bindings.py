@@ -284,7 +284,13 @@ class RootM42Bindings:
             or self.mode() != "0"):
             raise M42BindingHold("M42_P3_FRESH_EVIDENCE_HOLD")
         proof = self._proof()
-        proof.verify_account(scope.username, scope.uid)
+        # The signed report must name the same *currently observed ingress*.
+        # Target-only identity and UID are insufficient to authorize a 6G
+        # ticket if the operator moved the SSH ingress between witnesses.
+        proof.verify_account(
+            scope.username, scope.uid, source_edge=scope.edge_id,
+            source_ipv4=scope.source_host,
+        )
         if (proof.target_edge != scope.edge_id or
             proof.target_ipv4 != scope.target_host):
             raise M42BindingHold("M42_P3_EXTERNAL_SCOPE_DRIFT")

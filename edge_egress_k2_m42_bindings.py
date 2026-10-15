@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
 import sqlite3
 import subprocess
 import time
@@ -89,6 +90,46 @@ def load_root_admin_policy(*, geteuid: Callable[[], int] = os.geteuid
         return RootAdminPolicy(frozenset(pairs))
     except (TypeError, ValueError, KeyError, UnicodeError) as exc:
         raise M42BindingHold("M42_ADMIN_POLICY_INVALID") from exc
+
+
+class LegacyCurrentAdminRole:
+    """Read-only current admin allowlist; never historical admin IDs.
+
+    This is one factor in the existing root authorization check (the
+    independent root-owned actor/chat policy is the other). Telegram private
+    messages have actor_id == chat_id; group impersonation is rejected.
+    Login/session verification remains a separate A3.2 field gate.
+    """
+
+    def __init__(self, db_conn: Callable):
+        if not callable(db_conn):
+            raise M42BindingHold("M42_ADMIN_DB_SOURCE_REQUIRED")
+        self.db_conn = db_conn
+
+    def __call__(self, actor: int, chat: int) -> bool:
+        if (type(actor) is not int or type(chat) is not int
+            or actor <= 0 or actor != chat):
+            return False
+        try:
+            with self.db_conn() as db:
+                rows=db.execute(
+                    "SELECT value FROM settings "
+                    "WHERE key='admin_chat_ids' LIMIT 2"
+                ).fetchall()
+            if len(rows) != 1 or type(rows[0][0]) is not str:
+                return False
+            raw=rows[0][0]
+            if not raw or len(raw) > 8192:
+                return False
+            tokens=raw.split(",")
+            if (len(tokens) > 20 or
+                any(not re.fullmatch(r"[1-9][0-9]{0,19}",v) for v in tokens)
+                or len(set(tokens)) != len(tokens)):
+                return False
+            return str(actor) in tokens
+        except (sqlite3.Error, OSError, ValueError, TypeError,
+                AttributeError, KeyError):
+            return False
 
 
 @dataclass(frozen=True)

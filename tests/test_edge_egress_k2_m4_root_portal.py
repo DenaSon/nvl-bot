@@ -18,7 +18,7 @@ from edge_egress_p3_executor import (
     ExecutionScope,ExecutionTicket,ExecutionReceipt,_scope_digest,
 )
 from tests.test_edge_egress_k2_migration_inventory import (
-    K2M1InventoryTests,NOW,SOURCE,
+    K2M1InventoryTests,NOW,SOURCE,TARGET,
 )
 SECRET=b"test-only-root-secret-"+b"q"*32
 
@@ -33,7 +33,7 @@ class M4RootPortalTests(unittest.IsolatedAsyncioTestCase):
         self.clock=lambda:NOW
         self.admin=lambda actor,chat:actor==11 and chat==-222
         self.witness=lambda n:LiveIngressWitness(
-            n,"s8",SOURCE,NOW-1,"INDEPENDENT_LIVE",
+            n,"e9",TARGET,NOW-1,"INDEPENDENT_LIVE",
         )
         self.review=lambda sel:self.fx.preview(
             sel.usernames,sel.mode,ingress_witness=self.witness,
@@ -50,7 +50,7 @@ class M4RootPortalTests(unittest.IsolatedAsyncioTestCase):
             root_secret=SECRET,review=self.review,
             admin_authorized=self.admin,
             independent_physical_f4=lambda plan:True,
-            current_protected_mode=lambda:"1",
+            current_protected_mode=lambda:"0",
             issue_single_ticket=ticket,execute_single=run,
             committed_6g=lambda scope,t,op:True,
             checkpoint=DurableWaveCheckpoint(
@@ -77,6 +77,22 @@ class M4RootPortalTests(unittest.IsolatedAsyncioTestCase):
                 self.portal.prepare(self.selection,actor_id=11,chat_id=-222)
         self.assertEqual(self.actions,[])
 
+    def test_cross_edge_legacy_cannot_consume_operator_approval(self):
+        # A read-only M1 plan can show a cross-edge source, but the live M4
+        # host adapter only supports same-edge UID_ENROLL_SOURCE. Source
+        # preview must NEVER be confused with an executable UID_ATTACH.
+        self.witness=lambda n:LiveIngressWitness(
+            n,"s8",SOURCE,NOW-1,"INDEPENDENT_LIVE",
+        )
+        with patch("edge_egress_k2_m4_root_portal.M4_ROOT_PORTAL_ENABLED",True), \
+             patch("edge_egress_k2_m4_checkpoint.M4_CHECKPOINT_RELEASE_ENABLED",True):
+            with self.assertRaisesRegex(RootPortalHold,"CROSS_EDGE_ATTACH"):
+                self.portal.prepare(self.selection,actor_id=11,chat_id=-222)
+        self.assertEqual(self.fx.c.execute(
+            "SELECT COUNT(*) FROM k2_m4_wave_checkpoints"
+        ).fetchone(),(0,))
+        self.assertEqual(self.actions,[])
+
     def test_fake_packet_f4_never_yields_signed_approval(self):
         self.portal.physical_f4=lambda plan:False
         with patch("edge_egress_k2_m4_root_portal.M4_ROOT_PORTAL_ENABLED",True), \
@@ -91,7 +107,7 @@ class M4RootPortalTests(unittest.IsolatedAsyncioTestCase):
             prepared=self.portal.prepare(
                 self.selection,actor_id=11,chat_id=-222)
             self.witness=lambda n:LiveIngressWitness(
-                n,"s8",SOURCE,NOW-1,"INDEPENDENT_LIVE",
+                n,"e9",TARGET,NOW-1,"INDEPENDENT_LIVE",
             )
             with patch("edge_egress_k2_m4_root_portal.M4_ROOT_PORTAL_ENABLED",
                        True),patch("edge_egress_k2_m4_checkpoint.M4_CHECKPOINT_RELEASE_ENABLED",True), \

@@ -93,6 +93,51 @@ class M4OperatorReadOnlyTests(unittest.TestCase):
         self.assertIn("SESSION_STATE_NOT_ATTESTED",snapshot.selected_issues)
         self.assertFalse(snapshot.inventory_clear)
 
+    def test_root_pam_wg_source_without_f3_allocation_is_readonly(self):
+        import base64
+        from edge_egress_v1_ingress import IngressPeer
+        from edge_egress_k2_m2_ingress_journal import (
+            RootReadOnlyIngressEvidence,IngressRecord,encode_records,
+        )
+        self.fx.c.execute(
+            "DELETE FROM edge_egress_allocations WHERE edge_id='s8'"
+        )
+        key=base64.b64encode(bytes(range(32))).decode()
+        peer=IngressPeer("s8",SOURCE,"10.77.0.8",key)
+        proof=RootReadOnlyIngressEvidence(
+            raw=encode_records({"nvl0555":IngressRecord(
+                "nvl0555",1636,"s8",SOURCE,"10.77.0.8",key,NOW-1
+            )}),
+            peers=(peer,),allowed_ips=key+" 10.77.0.8/32\n",
+            now=NOW,resolve_uid=lambda n:self.fx.uids[n],
+        )
+        selection=select_input("SINGLE","nvl0555","e9")
+        observed=inspect_telegram_migration(
+            self.fx.db,selection,now=NOW,
+            uid_lookup=lambda n:self.fx.uids[n],
+            source_provider=proof,
+            session_provider=lambda *_:0,
+            geteuid=lambda:1000,
+        )
+        self.assertTrue(observed.inventory_clear)
+        self.assertEqual(observed.accounts[0].source_edge_id,"s8")
+        self.assertFalse(observed.can_execute)
+        rows=preview_buttons("e9",inventory=observed)
+        self.assertFalse(any(
+            callback=="hpeg_m4_prepare_e9"
+            for row in rows for _,callback in row
+        ))
+        # A generic untrusted source callback cannot supply the extra
+        # registry peers: its observation is not sufficient even to classify.
+        unknown=inspect_telegram_migration(
+            self.fx.db,selection,now=NOW,
+            uid_lookup=lambda n:self.fx.uids[n],
+            source_provider=lambda _:proof("nvl0555"),
+            session_provider=lambda *_:0,
+            geteuid=lambda:1000,
+        )
+        self.assertFalse(unknown.inventory_clear)
+
     def test_prepare_button_requires_fresh_same_ingress_preview(self):
         selection=select_input("SINGLE","nvl0555","e9")
         def snapshot(edge,ipv4):

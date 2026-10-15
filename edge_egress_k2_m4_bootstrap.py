@@ -114,3 +114,44 @@ class DeferredOriginal6GHostPort:
             # possibly half-staged M2 unit or invent success.
             raise M42BootstrapHold("M42_PARTIAL_BOOTSTRAP_HOLD_ORIGINAL_6G")
         await self._port.freeze_or_hold(scope)
+
+
+# This subclass binds the original P3 executor to the exact cross-Edge M4
+# adapter. No second engine or operator-accessible raw root callback.
+M42_CROSS_EDGE_DEFERRED_ENABLED = False
+
+
+class DeferredCrossEdgeOriginal6GHostPort(DeferredOriginal6GHostPort):
+    """Original M2 first/Nth bootstrap then exact cross-Edge original P3 UID."""
+
+    def __init__(self, *, scope: ExecutionScope, ticket: ExecutionTicket,
+                 db_conn: Callable, bootstrap: GuardBootstrap,
+                 port_factory: Callable, release_enabled: bool = False):
+        if (scope.action != "UID_ATTACH"
+            or scope.source_host == scope.target_host):
+            raise M42BootstrapHold("M42_CROSS_EDGE_SCOPE_REQUIRED")
+        super().__init__(
+            scope=scope, ticket=ticket, db_conn=db_conn,
+            bootstrap=bootstrap, port_factory=port_factory,
+        )
+        self.release_enabled = release_enabled is True
+
+    async def apply(self, scope: ExecutionScope) -> None:
+        from edge_egress_k2_m4_cross_edge_port import GuardedCrossEdgeUIDPort
+        if (not M42_CROSS_EDGE_DEFERRED_ENABLED
+            or not self.release_enabled):
+            raise M42BootstrapHold("M42_CROSS_EDGE_DEFERRED_NOT_RELEASED")
+        if self._started:
+            raise M42BootstrapHold("M42_CROSS_EDGE_ALREADY_ATTEMPTED")
+        self._started = True
+        self._locked(scope)
+        self.bootstrap.run(scope, self.ticket)
+        self._locked(scope)
+        port = self.port_factory(scope, self.ticket)
+        if (type(port) is not GuardedCrossEdgeUIDPort
+            or port.scope != scope or port.ticket != self.ticket
+            or port.db_conn is not self.db_conn
+            or port.release_enabled is not True):
+            raise M42BootstrapHold("M42_CROSS_EDGE_REAL_UID_PORT_REQUIRED")
+        self._port = port
+        await port.apply(scope)

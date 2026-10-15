@@ -187,15 +187,27 @@ class CrossEdgeStoreTests(unittest.TestCase):
                 )
         self.assertIsNone(self.fx.binding())
 
-    def test_multiple_legacy_account_rows_cannot_reserve_same_uid(self):
+    def test_legacy_unique_username_schema_prevents_duplicate_account(self):
+        # The real P3 SQLite schema already has UNIQUE(username): don't
+        # manufacture a schema the production implementation does not use.
+        import sqlite3
         with self.fx.db() as db:
             row = db.execute(
                 "SELECT host,service_type,status FROM ssh_accounts "
                 "WHERE username='nvl0557'",
             ).fetchone()
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute(
+                    "INSERT INTO ssh_accounts(username,host,service_type,status)"
+                    " VALUES (?,?,?,?)", ("nvl0557",)+row,
+                )
+        self.assertIsNone(self.fx.binding())
+
+    def test_inactive_historical_account_still_holds_despite_signed_ingress(self):
+        with self.fx.db() as db:
             db.execute(
-                "INSERT INTO ssh_accounts(username,host,service_type,status)"
-                " VALUES (?,?,?,?)",("nvl0557",)+row,
+                "UPDATE ssh_accounts SET host=?,status=? WHERE username='nvl0557'",
+                ("104.194.144.195","🔴 غیرفعال"),
             )
         with patch(
             "edge_egress_uid_runtime_store.K2_CROSS_EDGE_RUNTIME_STORE_ENABLED",

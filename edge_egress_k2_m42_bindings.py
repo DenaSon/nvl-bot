@@ -276,7 +276,9 @@ class RootM42Bindings:
             raise M42BindingHold("M42_PROTECTED_MODE_UNTRUSTED")
         return observed
 
-    def _post_commit_under_current_6g(self, scope: ExecutionScope) -> bool:
+    def _post_commit_under_current_6g(
+        self, scope: ExecutionScope, ticket: ExecutionTicket | None = None,
+    ) -> bool:
         """Read original 6G and F2, NEVER infer a transfer from a UI flag.
 
         The final P3 evidence check runs after per-UID PROTECTED CAS but before
@@ -286,6 +288,15 @@ class RootM42Bindings:
         """
         from edge_egress_uid_runtime_store import read_binding
         from edge_egress_p3_executor import INTENT_PHASE
+        # Never infer the 6G nonce from a syntactically valid journal value:
+        # the caller must present the exact issued one-shot P3 ticket.
+        if (type(scope) is not ExecutionScope
+            or type(ticket) is not ExecutionTicket
+            or ticket.scope_digest != _scope_digest(scope)
+            or type(ticket.nonce) is not str
+            or not re.fullmatch(r"[a-f0-9]{32}", ticket.nonce)):
+            return False
+        expected_nonce_hash = sha256(ticket.nonce.encode("ascii")).hexdigest()
         try:
             with self.ports.db_conn() as db:
                 binding = read_binding(db, scope.username)
@@ -323,14 +334,20 @@ class RootM42Bindings:
                     and detail.get("edge_id") == scope.edge_id
                     and detail.get("scope_digest") == _scope_digest(scope)
                     and isinstance(detail.get("nonce_hash"),str)
-                    and re.fullmatch(
-                        r"[a-f0-9]{64}", detail["nonce_hash"]
-                    ) is not None
+                    and hmac.compare_digest(
+                        detail["nonce_hash"], expected_nonce_hash
+                    ) if (type(detail) is dict
+                          and type(detail.get("nonce_hash")) is str
+                          and re.fullmatch(r"[a-f0-9]{64}", detail["nonce_hash"]))
+                    else False
                 )
         except (sqlite3.Error,ValueError,TypeError,KeyError):
             return False
 
-    def fresh_p3_evidence(self, scope: ExecutionScope) -> FreshEvidence:
+    def fresh_p3_evidence(
+        self, scope: ExecutionScope, *,
+        expected_ticket: ExecutionTicket | None = None,
+    ) -> FreshEvidence:
         self._gate()
         if not isinstance(scope, ExecutionScope):
             raise M42BindingHold("M42_P3_SCOPE_UNTRUSTED")
@@ -360,7 +377,8 @@ class RootM42Bindings:
         postcommit = bool(
             len(chosen) == 1
             and chosen[0].issues == completed_issues
-            and self._post_commit_under_current_6g(scope)
+            and expected_ticket is not None
+            and self._post_commit_under_current_6g(scope, expected_ticket)
         )
         if (any(issue != 'SHARED_6G_BUSY' for issue in reviewed.global_issues)\
             or not reviewed.target_f4_accepted
@@ -481,7 +499,9 @@ class RootM42Bindings:
             db_conn=self.ports.db_conn,
             acquire_fn=self.ports.acquire_6g,
             journal_fn=self.ports.journal_6g,
-            review_fn=self.fresh_p3_evidence,
+            review_fn=lambda current_scope: self.fresh_p3_evidence(
+                current_scope, expected_ticket=ticket,
+            ),
             host_port=port, release_enabled=True,
             geteuid=self.ports.geteuid, clock=self.ports.now,
         )

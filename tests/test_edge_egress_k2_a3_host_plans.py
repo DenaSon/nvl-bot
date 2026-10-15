@@ -161,6 +161,27 @@ class RootM2ReadOnlyPlanTests(unittest.TestCase):
                 self.src(self.scope,self.ticket)
             planner.assert_not_called()
 
+    def test_next_uid_rejects_candidate_in_protected_db_without_roster(self):
+        prior=SimpleNamespace(uid=1644,guard_sha256=sha256(self.guard).hexdigest())
+        self.mock_sources(roster_exists=True,roster_bytes=b"canonical")
+        with patch.object(a,"load_roster",return_value={"nvl0557":prior}),\
+             patch.object(a,"render_roster",return_value="canonical"),\
+             patch.object(a,"plan_next_uid") as planner:
+            for table in ("edge_egress_uid_runtime","edge_egress_uid_bindings"):
+                with self.subTest(table=table):
+                    status_column="state" if table.endswith("runtime") else "status"
+                    self.fx.c.execute(
+                        "INSERT INTO "+table+" (username,uid,edge_id,edge_ipv4,"
+                        +status_column+") VALUES (?,?,?,?,?)",
+                        ("nvl0555",1636,"e9",TARGET,"PROTECTED"),
+                    )
+                    with self.assertRaisesRegex(
+                        a.A3PlanHold,"CANDIDATE_RUNTIME_ALREADY_BOUND"
+                    ):
+                        self.src(self.scope,self.ticket)
+                    self.fx.c.execute("DELETE FROM "+table)
+            planner.assert_not_called()
+
     def test_roster_changed_never_calls_next_uid_planner(self):
         old=SimpleNamespace(uid=1644,guard_sha256=sha256(self.guard).hexdigest())
         self.mock_sources(roster_exists=True,roster_bytes=b"tampered")

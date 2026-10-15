@@ -451,3 +451,18 @@ class K2CrossEdgeUIDRuntimeStore(Existing6GUIDRuntimeStore):
             or "فعال" not in account[2] or "غیر" in account[2]
             or account[0] not in (source, "", None)):
             raise RuntimeStoreUnsafe("K2_LEGACY_ACCOUNT_CHANGED")
+
+    def stage_pam_admission(self, req: UIDPolicyRequest, *,
+                            source: str) -> None:
+        """Original P3 calls this after packet evidence, before F2 commit.
+
+        The persistent cross-ingress PAM policy must reference the future F2
+        PROTECTED CAS generation, not an early BLOCKED/UNVERIFIED state.
+        """
+        from edge_egress_k2_uid_ingress_egress import stage_6g_cross_edge_binding
+        self._cross_gate(req, source)
+        stage_6g_cross_edge_binding(
+            db_conn=self.db_conn, scope=self.scope, ticket=self.ticket,
+            source_evidence=self.source_evidence, geteuid=self.geteuid,
+            release_enabled=True,
+        )

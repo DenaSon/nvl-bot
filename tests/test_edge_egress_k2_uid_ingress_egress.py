@@ -82,6 +82,27 @@ class K2UIDIngressEgressTests(unittest.TestCase):
             with self.subTest(raw=item[:100]), self.assertRaises(IngressEgressHold):
                 parse_uid_ingress_egress_bindings(item)
 
+    def test_existing_v1_pam_still_denies_cross_edge_ingress(self):
+        # Merely parsing a new root policy cannot change the operational V1
+        # SSH login rule. Any rollout must explicitly wire and independently
+        # verify the new per-UID ingress-vs-egress contract later.
+        import base64
+        from edge_egress_v1_ingress import IngressPeer, verify_ingress
+        row = RuntimeBinding(
+            "nvl0555", 1636, "e9", DST,
+            20009, 1780, 10553, "PROTECTED", 3, 44,
+        )
+        key = base64.b64encode(bytes(range(32))).decode()
+        peers = (IngressPeer("s8", SRC, "10.77.0.8", key),)
+        allowed = key + " 10.77.0.8/32\\n"
+        self.assertFalse(verify_ingress(
+            row, "10.77.0.8", peers, allowed,
+        ))
+        self.assertTrue(verify_ingress(
+            row, "10.77.0.8",
+            (IngressPeer("e9", DST, "10.77.0.8", key),), allowed,
+        ))
+
     def test_empty_policy_does_not_confer_any_cross_edge_permission(self):
         self.assertEqual(parse_uid_ingress_egress_bindings(encode([])), {})
 

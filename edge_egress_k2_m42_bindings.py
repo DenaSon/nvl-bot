@@ -349,21 +349,32 @@ class RootM42Bindings:
         selection = select_migration("SINGLE", (scope.username,), scope.edge_id)
         reviewed = self.review(selection)
         chosen = [a for a in reviewed.accounts if a.selected]
+        # M1 deliberately reports both TARGET_ALREADY_PROTECTED and
+        # PROTECTED_SOURCE_DRIFT after a cross-Edge per-UID commit.  Neither
+        # may authorize a fresh ticket or another UID: accept exactly that
+        # pair *only* while original 6G still owns the verified F2 CAS.
+        completed_issues = (
+            ("TARGET_ALREADY_PROTECTED", "PROTECTED_SOURCE_DRIFT")
+            if cross_ingress else ("TARGET_ALREADY_PROTECTED",)
+        )
+        postcommit = bool(
+            len(chosen) == 1
+            and chosen[0].issues == completed_issues
+            and self._post_commit_under_current_6g(scope)
+        )
         if (any(issue != 'SHARED_6G_BUSY' for issue in reviewed.global_issues)\
             or not reviewed.target_f4_accepted
             or len(chosen) != 1
-            or (
-                chosen[0].issues not in (
-                    (), ("TARGET_ALREADY_PROTECTED",)
-                ) or chosen[0].issues == ("TARGET_ALREADY_PROTECTED",)
-                and not self._post_commit_under_current_6g(scope)
-            )
+            or chosen[0].issues not in ((), completed_issues)
+            or chosen[0].issues == completed_issues and not postcommit
             or chosen[0].username != scope.username
             or chosen[0].uid != scope.uid
             or chosen[0].source_ipv4 != scope.source_host
             or not chosen[0].source_proven
             or chosen[0].active_sessions != 0
-            or chosen[0].protected_edge_id
+            or (chosen[0].protected_edge_id != (
+                scope.edge_id if postcommit else ""
+            ))
             or (cross_ingress and chosen[0].source_edge_id == scope.edge_id)
             or (same_ingress and chosen[0].source_edge_id != scope.edge_id)
             or self.mode() != "0"):

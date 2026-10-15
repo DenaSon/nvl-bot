@@ -197,6 +197,7 @@ class RootM42Bindings:
         ev = self.ports.external_evidence()
         if not isinstance(ev, SignedExternalEvidence):
             raise M42BindingHold("M42_SIGNED_EXTERNAL_EVIDENCE_ABSENT")
+        ev.verify_pre_attach()
         now = self.ports.now()
         if (type(now) is not int or now < ev.observed_at or now >= ev.expires_at
             or now - ev.observed_at > 30):
@@ -418,6 +419,7 @@ class RootM42Bindings:
             "expires_at": proof.expires_at,
             "target_edge": proof.target_edge,
             "target": proof.target_ipv4,
+            "phase": proof.phase,
             "checks": sorted(proof.checks),
             "accounts": [
                 {

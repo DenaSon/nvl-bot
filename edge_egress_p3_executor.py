@@ -22,6 +22,7 @@ from typing import Callable, Protocol
 EXECUTOR_ENABLED = False
 # Never permit mode-0 UID_ATTACH with a generic fake host or 6G callback.
 P3_CROSS_EDGE_LEGACY_UID_ATTACH_ENABLED = False
+P3_UID_POST_COMMIT_PROBE_ENABLED = False
 TICKET_TTL_SECONDS = 120
 INTENT_PHASE = "EGRESS_P3_EXECUTE_INTENT"
 RECOVERY_PHASE = "EGRESS_P3_RECOVERY_REQUIRED"
@@ -299,9 +300,26 @@ class Existing6GGuardedExecutor:
             "edge_id": scope.edge_id, "scope_digest": _scope_digest(scope),
             "nonce_hash": nonce_hash, **details,
         }
+        if self._core_single_host_bound(scope):
+            detail.update(single_uid=True, username=scope.username, uid=scope.uid)
         self.journal_fn(
             operation_id, status=status, detail=detail,
             finished=(status == "SUCCEEDED"), require_running=True,
+        )
+
+    def _core_single_host_bound(self, scope: ExecutionScope) -> bool:
+        from edge_egress_k2_core_prerequisites import CoreGuardBootstrap
+        from edge_egress_k2_m4_bootstrap import (
+            DeferredOriginal6GHostPort, DeferredCrossEdgeOriginal6GHostPort,
+        )
+        port = self.host_port
+        return (
+            P3_UID_POST_COMMIT_PROBE_ENABLED
+            and scope.action in ("UID_ATTACH", "UID_ENROLL_SOURCE")
+            and type(port) in (DeferredOriginal6GHostPort, DeferredCrossEdgeOriginal6GHostPort)
+            and port.scope == scope and port.db_conn is self.db_conn
+            and port.ticket == self._execution_ticket
+            and type(port.bootstrap) is CoreGuardBootstrap
         )
 
     def _legacy_cross_edge_host_bound(self, scope: ExecutionScope) -> bool:
@@ -425,6 +443,12 @@ class Existing6GGuardedExecutor:
             touched = True  # must assume partial mutation on an exception
             await self.host_port.apply(scope)
             self._lease(operation_id, scope, nonce_hash)
+            if self._core_single_host_bound(scope):
+                # The F2 UID is already PROTECTED and independently route-
+                # checked. Permit its real SSH probe while retaining the
+                # SAME original 6G lease; no next migration can start yet.
+                self._journal(operation_id, "RUNNING", INTENT_PHASE, scope,
+                              nonce_hash, probe_only=True)
             if await self.host_port.verify(scope) is not True:
                 raise ExecutorHold("POST_ACTION_PROOF_MISSING")
             self._lease(operation_id, scope, nonce_hash)

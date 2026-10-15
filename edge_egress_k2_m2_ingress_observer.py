@@ -101,3 +101,34 @@ def observe_current_pam_ingress(
     except (PAMIngressHold, OSError, ValueError, TypeError, KeyError,
             subprocess.TimeoutExpired) as exc:
         raise PAMIngressHold("LIVE_PAM_INGRESS_UNAVAILABLE") from exc
+
+
+def record_current_pam_ingress() -> None:
+    """Persist a real sshd account observation, not a caller-supplied source.
+
+    Called after successful admission in the installed PAM process. A
+    concurrent or failed journal write leaves transfer eligibility unknown;
+    it never changes the already independently decided login outcome.
+    """
+    from edge_egress_k2_m2_ingress_journal import (
+        create_root_journal_if_absent, add_authenticated_observation,
+        compare_and_swap_root_journal,
+    )
+    if os.geteuid() != 0:
+        raise PAMIngressHold("ROOT_REQUIRED")
+    name = os.environ.get("PAM_USER", "")
+    uid = pwd.getpwnam(name).pw_uid
+    peers = load_registry()
+    observed = subprocess.run(
+        ["wg", "show", "wg0", "allowed-ips"], capture_output=True,
+        text=True, timeout=3, check=False,
+    )
+    if observed.returncode != 0:
+        raise PAMIngressHold("WG_INVENTORY_UNAVAILABLE")
+    before = create_root_journal_if_absent()
+    after = add_authenticated_observation(
+        before, username=name, uid=uid, pam_env=os.environ,
+        peers=peers, allowed_ips=observed.stdout, now=int(time.time()),
+        geteuid=os.geteuid, resolve_uid=lambda n: pwd.getpwnam(n).pw_uid,
+    )
+    compare_and_swap_root_journal(before, after)

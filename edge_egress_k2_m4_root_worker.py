@@ -25,9 +25,46 @@ from edge_egress_k2_m4_ipc import RootOperatorIPC, handle_accepted_socket, M4IPC
 M4_ROOT_WORKER_ENABLED = False
 SOCKET_NAME = "operator.sock"
 MAX_SECRET_BYTES = 4096
-MAX_MANIFEST_BYTES = 8192
+MAX_MANIFEST_BYTES = 16384
 MAX_SOURCE_BYTES = 2_000_000
 PINNED_SOURCE_FILES = frozenset((
+    "edge_egress_k2_m4_operator.py",
+    "edge_egress_f3_readiness.py",
+    "edge_egress_f4_kernel_audit.py",
+    "edge_egress_f4_pam.py",
+    "edge_egress_f4_preflight.py",
+    "edge_egress_handoff.py",
+    "edge_egress_inventory.py",
+    "edge_egress_k2_core_prerequisites.py",
+    "edge_egress_k2_core_runtime.py",
+    "edge_egress_k2_final_integration.py",
+    "edge_egress_k2_legacy_enrollment.py",
+    "edge_egress_k2_p1_worker.py",
+    "edge_egress_k2_runtime_release.py",
+    "edge_egress_k2_source_cohort.py",
+    "edge_egress_k2_source_enrollment.py",
+    "edge_egress_phase2_console.py",
+    "edge_egress_policy.py",
+    "edge_egress_status.py",
+    "edge_egress_uid_admission.py",
+    "edge_egress_uid_boot.py",
+    "edge_egress_uid_dns.py",
+    "edge_egress_uid_policy.py",
+    "edge_egress_uid_route_state.py",
+    "edge_egress_uid_runtime_kernel.py",
+    "edge_egress_uid_systemd.py",
+    "edge_egress_v1_cloudflare.py",
+    "edge_egress_v1_console.py",
+    "edge_egress_v1_handoff_adapter.py",
+    "edge_egress_v1_live_driver.py",
+    "edge_egress_v1_onboarding.py",
+    "ops/__init__.py",
+    "ops/edge_egress_provision.py",
+    "ops/edge_egress_v1_transport.py",
+    "ops/k2_final_readiness.py",
+    "ops/k2_p3_guard_installer.py",
+    "ops/k2_p3_host_readonly.py",
+    "ops/k2_p3_module_stage.py",
     "edge_egress_k2_a_6g_shared.py",
     "edge_egress_k2_a3_host_plans.py",
     "edge_egress_k2_a_host_factory.py",
@@ -98,7 +135,7 @@ class WorkerPaths:
 
 
 def _read_checked(path: Path, *, maximum: int, owner_uid: int = 0,
-                  strict: bool = False) -> bytes:
+                  strict: bool = False, allow_empty: bool = False) -> bytes:
     """Open no-follow and check *the opened inode*; never follow symlinks."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
@@ -111,7 +148,7 @@ def _read_checked(path: Path, *, maximum: int, owner_uid: int = 0,
                 or (strict and (mode & 0o077)) or info.st_size > maximum):
                 raise RootWorkerHold("M4_UNTRUSTED_ROOT_FILE")
             data = os.read(fd, maximum + 1)
-            if not data or len(data) > maximum:
+            if (not data and not allow_empty) or len(data) > maximum:
                 raise RootWorkerHold("M4_ROOT_FILE_EMPTY_OR_OVERSIZED")
             return data
         finally:
@@ -160,6 +197,7 @@ def verify_reviewed_release(paths: WorkerPaths, *,
             _verify_root_directory(path.parent, group=None, owner_uid=owner_uid)
         actual = hashlib.sha256(_read_checked(
             path, maximum=MAX_SOURCE_BYTES, owner_uid=owner_uid,
+            allow_empty=(name == "ops/__init__.py"),
         )).hexdigest()
         if not hmac.compare_digest(expected, actual):
             raise RootWorkerHold("M4_RELEASE_HASH_MISMATCH")

@@ -198,3 +198,15 @@ def bound_root_client(application) -> RootDirectOperatorClient:
         or type(_ACTIVE_CLIENT) is not RootDirectOperatorClient):
         raise M43ClientHold("K2_ROOT_DIRECT_NOT_REGISTERED")
     return _ACTIVE_CLIENT
+
+
+def native_core_runtime_registered() -> bool:
+    """Presentation check; actual handlers still bind the exact application."""
+    from edge_egress_k2_core_prerequisites import CoreUIDSnapshotSource
+    if (not K2_ROOT_DIRECT_ENABLED or _ACTIVE_APPLICATION is None
+        or type(_ACTIVE_CLIENT) is not RootDirectOperatorClient):
+        return False
+    execute = _ACTIVE_CLIENT.portal.execute_single
+    root = getattr(execute, "__self__", None)
+    factory = getattr(getattr(root, "ports", None), "port_factory", None)
+    return type(getattr(factory, "read_root_snapshot", None)) is CoreUIDSnapshotSource

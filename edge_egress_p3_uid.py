@@ -271,6 +271,12 @@ class GuardedProtectedUIDPort:
         callback()
         return op
 
+    def _precommit_packet(self, req):
+        from ops.k2_p3_uid_worker import IndependentSafety
+        if isinstance(self.safety, IndependentSafety):
+            return self.safety.assert_precommit_dns_ipv6_no_core_leak(req)
+        return self.safety.assert_packet_dns_ipv6_no_core_leak(req)
+
     async def apply(self, scope: ExecutionScope) -> None:
         if self._applied:
             raise ProtectedUIDHold("ONE_SHOT_UID_OPERATION")
@@ -333,7 +339,7 @@ class GuardedProtectedUIDPort:
         self._step(scope, ("ROUTED_UNVERIFIED",),
                    lambda: self.kernel.assert_dns_ipv6(req))
         self._step(scope, ("ROUTED_UNVERIFIED",),
-                   lambda: self.safety.assert_packet_dns_ipv6_no_core_leak(req))
+                   lambda: self._precommit_packet(req))
         if isinstance(self.store, K2CrossEdgeUIDRuntimeStore):
             # Stage future-generation root PAM source record under the SAME
             # original P3/6G intent. The PAM verifier stays DENY until F2

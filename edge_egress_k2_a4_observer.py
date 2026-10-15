@@ -22,7 +22,8 @@ import time
 from typing import Callable
 
 from edge_egress_k2_m42_evidence import (
-    MAX_AGE_SECONDS, REQUIRED_CHECKS, WitnessAccount, decode_evidence,
+    MAX_AGE_SECONDS, REQUIRED_CHECKS, PRE_ATTACH_CHECKS, POST_ATTACH_CHECKS, UID_ROUTE_CHECKS,
+    WitnessAccount, decode_evidence,
 )
 
 A4_OFFCORE_SIGNING_ENABLED = False
@@ -36,6 +37,7 @@ _DOMAINS = {
     "f4_accepted": "client",
     "ssh_sessions": "core-session",
     "ssh_socks_ipv4": "client",
+    "uid_public_ipv4": "uid-client",
     "dns_udp": "client",
     "dns_tcp": "client",
     "nss": "client",
@@ -46,7 +48,7 @@ _DOMAINS = {
     "operator_rescue": "console",
     "neighbour_isolation": "core-capture",
 }
-_CLIENT_IP_CHECKS = frozenset(("ssh_socks_ipv4",))
+_CLIENT_IP_CHECKS = frozenset(("ssh_socks_ipv4", "uid_public_ipv4"))
 
 
 class A4ObserverHold(ValueError):
@@ -92,6 +94,8 @@ def build_observation_report(
     *, probes: tuple[IndependentProbeReceipt, ...],
     sessions: tuple[IndependentSessionReceipt, ...],
     target_edge: str, target_ipv4: str, now: int,
+    phase: str = "LEGACY", scope_digest: str = "", nonce_hash: str = "",
+    operation_id: int | None = None,
 ) -> bytes:
     """Convert complete independent artifacts to the EXISTING signed M42 wire format.
 
@@ -99,9 +103,23 @@ def build_observation_report(
     Every required probe must have a distinct measurement receipt and matching
     target/run identity; missing, failed or outdated => HOLD (no signed READY).
     """
+    if phase not in ("LEGACY", "PRE_ATTACH", "UID_ROUTE", "POST_ATTACH"):
+        raise A4ObserverHold("A4_OBSERVATION_PHASE_INVALID")
+    expected_checks = (PRE_ATTACH_CHECKS if phase == "PRE_ATTACH" else
+                       POST_ATTACH_CHECKS if phase == "POST_ATTACH" else
+                       UID_ROUTE_CHECKS if phase == "UID_ROUTE" else
+                       REQUIRED_CHECKS)
+    if phase in ("UID_ROUTE", "POST_ATTACH"):
+        if (type(scope_digest) is not str or not _DIGEST.fullmatch(scope_digest)
+            or type(nonce_hash) is not str or not _DIGEST.fullmatch(nonce_hash)
+            or type(operation_id) is not int or operation_id <= 0
+            or not isinstance(sessions, tuple) or len(sessions) != 1):
+            raise A4ObserverHold("A4_POST_ATTACH_EXACT_OPERATION_REQUIRED")
+    elif scope_digest != "" or nonce_hash != "" or operation_id is not None:
+        raise A4ObserverHold("A4_PRE_ATTACH_MUST_NOT_CLAIM_TRANSFER")
     if (type(now) is not int or now <= 0
         or not isinstance(probes, tuple)
-        or len(probes) != len(REQUIRED_CHECKS)
+        or len(probes) != len(expected_checks)
         or not isinstance(sessions, tuple) or not 1 <= len(sessions) <= 10
         or not isinstance(target_edge,str)
         or not re.fullmatch(r"[a-z][a-z0-9_-]{1,23}",target_edge)
@@ -114,7 +132,7 @@ def build_observation_report(
     for item in probes:
         if not isinstance(item,IndependentProbeReceipt):
             raise A4ObserverHold("A4_UNTRUSTED_PROBE_RECEIPT")
-        if (item.check not in REQUIRED_CHECKS
+        if (item.check not in expected_checks
             or item.check in by_check
             or item.domain != _DOMAINS[item.check]
             or item.target_edge != target_edge
@@ -139,7 +157,7 @@ def build_observation_report(
         run_ids.add(item.run_id)
         measurements.append((item.check,item.domain,item.probe_id,
                              item.raw_result_sha256,item.observed_at))
-    if set(by_check)!=REQUIRED_CHECKS or len(run_ids)!=1:
+    if set(by_check)!=expected_checks or len(run_ids)!=1:
         raise A4ObserverHold("A4_INDEPENDENT_PROBE_COHORT_INCOMPLETE")
 
     accounts=[]
@@ -185,9 +203,13 @@ def build_observation_report(
         "version":1,"generation":generation,"observed_at":first,
         "expires_at":first+MAX_AGE_SECONDS,
         "target_edge":target_edge,"target_ipv4":target_ipv4,
-        "checks":{check:True for check in sorted(REQUIRED_CHECKS)},
+        "checks":{check:True for check in sorted(expected_checks)},
         "accounts":sorted(accounts,key=lambda x:x["username"]),
     }
+    if phase != "LEGACY":
+        body.update(version=2, phase=phase, scope_digest=scope_digest,
+                    nonce_hash=nonce_hash, operation_id=operation_id,
+                    observed_public_ipv4=(target_ipv4 if phase in ("UID_ROUTE", "POST_ATTACH") else ""))
     if now >= body["expires_at"]:
         raise A4ObserverHold("A4_OBSERVATION_EXPIRED")
     raw=json.dumps(body,sort_keys=True,separators=(",",":")).encode()
@@ -278,7 +300,7 @@ def verify_raw_artifacts(
         if (not isinstance(p,IndependentProbeReceipt)
             or not isinstance(p.probe_id,str)
             or not _IDENTIFIER.fullmatch(p.probe_id)
-            or p.check not in REQUIRED_CHECKS):
+            or p.check not in REQUIRED_CHECKS | UID_ROUTE_CHECKS):
             raise A4ObserverHold("A4_RAW_PROBE_ID_INVALID")
         raw=_read_raw_artifact(
             RAW_ROOT / run_id / ("probe-" + p.probe_id + ".json"),
@@ -323,6 +345,8 @@ def sign_offcore_observation(
     geteuid: Callable[[],int] = os.geteuid,
     clock: Callable[[],int] = lambda: int(time.time()),
     run: Callable = subprocess.run,
+    phase: str = "LEGACY", scope_digest: str = "", nonce_hash: str = "",
+    operation_id: int | None = None,
 ) -> tuple[bytes,bytes]:
     """Sign ONLY a fresh A4 report assembled in this call, never on Core.
 
@@ -338,6 +362,8 @@ def sign_offcore_observation(
     raw=build_observation_report(
         probes=probes,sessions=sessions,target_edge=target_edge,
         target_ipv4=target_ipv4,now=now,
+        phase=phase, scope_digest=scope_digest, nonce_hash=nonce_hash,
+        operation_id=operation_id,
     )
     verify_raw_artifacts(probes=probes,sessions=sessions,geteuid=geteuid)
     try:

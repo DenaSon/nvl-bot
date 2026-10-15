@@ -11,6 +11,7 @@ The PAM hook must be installed only during the final reviewed deployment.
 No host mutation, schema migration, SSH restart, or network action here.
 """
 from __future__ import annotations
+import subprocess
 
 from dataclasses import dataclass
 import hashlib
@@ -158,12 +159,22 @@ def check_account(conn: sqlite3.Connection, username: str, uid: int,
                 # Only this pinned, already-protected UID may have a
                 # separately attested SSH ingress Edge. Legacy login and
                 # unrelated protected UIDs retain their original rules.
-                if (not M4_CROSS_EDGE_PAM_RELEASED
+                from edge_egress_k2_runtime_release import pam_cross_edge_released
+                if (not (M4_CROSS_EDGE_PAM_RELEASED or pam_cross_edge_released())
                     or cross_ingress_probe is None
                     or cross_ingress_probe(row, member.guard_sha256) is not True):
                     return False
             return guard_probe(conn, row)
-        decision = decide_account(conn, username, uid, verified)
+        from edge_egress_k2_runtime_release import (
+            core_single_busy_admission, pam_cross_edge_released,
+        )
+        if pam_cross_edge_released():
+            decision = decide_account(
+                conn, username, uid, verified,
+                scoped_busy_probe=lambda row: core_single_busy_admission(conn, row),
+            )
+        else:
+            decision = decide_account(conn, username, uid, verified)
         return decision.result is AdmissionResult.ALLOW_PROTECTED
     # The roster must be complete BEFORE any PROTECTED runtime row is created.
     # Even if the DB claims PROTECTED, an unlisted identity is not admitted.
@@ -267,12 +278,21 @@ def main() -> int:
         with sqlite3.connect("file:" + FIXED_DB + "?mode=ro",
                              uri=True, timeout=2) as conn:
             conn.execute("PRAGMA query_only=ON")
-            return 0 if check_account(
+            allowed = check_account(
                 conn, name, uid, members,
                 ingress_probe=lambda row: probe_ingress(row, rhost),
                 cross_ingress_probe=lambda row, digest:
                     probe_root_cross_edge_ingress(row, rhost, digest),
-            ) else 1
+            )
+            if allowed:
+                from edge_egress_k2_runtime_release import pam_cross_edge_released
+                if pam_cross_edge_released():
+                    try:
+                        from edge_egress_k2_m2_ingress_observer import record_current_pam_ingress
+                        record_current_pam_ingress()
+                    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+                        pass  # Transfer holds without source; login policy is unchanged.
+            return 0 if allowed else 1
     except (OSError, sqlite3.Error, ValueError, KeyError, LookupError):
         return 1
 

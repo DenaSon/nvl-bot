@@ -155,6 +155,7 @@ class WitnessEnvelopeTests(unittest.TestCase):
             with self.assertRaisesRegex(a4.A4ObserverHold,"NOT_RELEASED"):
                 a4.sign_offcore_observation(probes=receipts(),sessions=sessions(),target_edge="e9",target_ipv4=TARGET,clock=lambda:NOW,geteuid=lambda:0)
 
+    @unittest.skipIf(os.geteuid() == 0, "External observer fixtures require a non-root owner")
     def test_raw_artifacts_mandatory_and_tampering_refused(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d)
@@ -183,6 +184,7 @@ class WitnessEnvelopeTests(unittest.TestCase):
                         probes=probes,sessions=scoped_sessions,
                     )
 
+    @unittest.skipIf(os.geteuid() == 0, "External observer fixtures require a non-root owner")
     def test_raw_missing_and_scope_mismatch_fail_closed(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d)

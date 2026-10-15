@@ -128,6 +128,10 @@ def _operator_runtime_released(plan: MigrationWavePlan) -> bool:
     The registered singleton is rechecked at the callback boundary.
     """
     import os
+    from edge_egress_k2_root_direct import native_core_runtime_registered
+    if (os.geteuid() == 0 and plan.selection.mode == "SINGLE" and _root_can_review(plan)
+        and native_core_runtime_registered()):
+        return True
     from edge_egress_k2_root_direct import K2_ROOT_DIRECT_ENABLED
     from edge_egress_k2_a_host_factory import (
         M4A_REAL_HOST_FACTORY_ENABLED, M4A_CROSS_EDGE_FACTORY_ENABLED,

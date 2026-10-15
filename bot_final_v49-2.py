@@ -29864,6 +29864,19 @@ async def cmd_marzban_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def _post_init(app):
+    # K2 Single shares this application's existing root process and 6G.
+    # Missing release profile is OFF; a failed optional startup must not
+    # prevent the existing bot and its legacy features from starting.
+    try:
+        from pathlib import Path
+        from edge_egress_k2_core_runtime import start_core_single_runtime
+        single = await asyncio.to_thread(
+            start_core_single_runtime, app, db_conn=db_conn,
+            source_root=Path(__file__).resolve().parent,
+        )
+        log.info("K2 Single startup: %s", single.state)
+    except Exception as exc:
+        log.error("K2 Single startup HOLD (%s)", type(exc).__name__)
     # Phase 6H uses a dedicated explicit admin opt-in key. The legacy V89
     # auto_failover_mode/traffic-anomaly path remains notification-only and cannot call failover.
     auto_enabled = (await asyncio.to_thread(_db_get_setting, 'phase6h_auto_failover_enabled', '0')) == '1'

@@ -77,6 +77,7 @@ class IndependentSafety:
     packet_witness: Callable | None = None
     neighbour_witness: Callable | None = None
     now: Callable = lambda: int(time.time())
+    precommit_packet_witness: Callable | None = None
 
     def _manifest(self,req):
         members=load_roster()
@@ -165,6 +166,12 @@ class IndependentSafety:
         # independent packet capture on Core and client-side SOCKS/NSS tests.
         if self.packet_witness(req) is not True:
             raise LiveUIDHold("EXTERNAL_PACKET_DNS_IPV6_EVIDENCE_FAILED")
+
+    def assert_precommit_dns_ipv6_no_core_leak(self, req):
+        if self.precommit_packet_witness is None:
+            return self.assert_packet_dns_ipv6_no_core_leak(req)
+        if self.precommit_packet_witness(req) is not True:
+            raise LiveUIDHold("EXTERNAL_UID_ROUTE_EVIDENCE_FAILED")
 
 
 @dataclass(frozen=True)

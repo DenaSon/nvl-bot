@@ -32,6 +32,7 @@ PROTECTED_RELEASE_SWITCHES = {
     ),
     "edge_egress_p3_executor": (
         "P3_CROSS_EDGE_LEGACY_UID_ATTACH_ENABLED",
+        "P3_UID_POST_COMMIT_PROBE_ENABLED",
     ),
     "edge_egress_uid_runtime_store": (
         "K2_CROSS_EDGE_RUNTIME_STORE_ENABLED",

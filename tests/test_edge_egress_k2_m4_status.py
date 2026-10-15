@@ -78,7 +78,8 @@ class M4WaveStatusTests(unittest.TestCase):
         a=source.index('    elif d.startswith("hpeg_m4_"):')
         b=source.index('    elif d.startswith("hpeg_transfer_"):',a)
         handler=source[a:b]
-        self.assertIn("k2_m44_status_flags.M44_TELEGRAM_STATUS_ENABLED",handler)
+        self.assertIn("k2_root_direct_flags.K2_ROOT_DIRECT_ENABLED",handler)
+        self.assertIn("k2_root_direct_client(context.application).request(",handler)
         self.assertIn('"STATUS",actor_id=actor_id,chat_id=chat_id',handler)
         self.assertIn("k2_m44_root_status_html(root_result,selection)",handler)
         self.assertLess(handler.index("if role != 'admin':"),

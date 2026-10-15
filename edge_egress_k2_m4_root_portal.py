@@ -19,6 +19,7 @@ from edge_egress_k2_migration_inventory import (
 from edge_egress_k2_m3_waves import (
     MigrationWavePlan, WaveApproval, WaveReport, MigrationWaveHold,
     build_wave_plan, m4_same_ingress_reviewed,
+    m4_cross_edge_single_reviewed,
     sign_wave_approval, verify_wave_approval,
     run_migration_wave,
 )
@@ -26,6 +27,9 @@ from edge_egress_p3_executor import ExecutionScope, ExecutionTicket, ExecutionRe
 from edge_egress_k2_m4_checkpoint import DurableWaveCheckpoint
 
 M4_ROOT_PORTAL_ENABLED = False
+# An unchanged Legacy global-mode cross-Edge operation may be prepared ONLY
+# for one UID after F4, M42 and the original P3 host factory all accept it.
+M4_CROSS_EDGE_SINGLE_ENABLED = False
 
 
 class RootPortalHold(ValueError):
@@ -101,13 +105,12 @@ class RootMigrationPortal:
         plan=build_wave_plan(inventory)
         if len(plan.members)>10 or plan.global_blockers or plan.blocked:
             raise RootPortalHold("M4_UNSAFE_OR_OVERSIZED_SELECTION")
-        # The only *actual* reviewed M4 root host factory currently binds
-        # UID_ENROLL_SOURCE on the already-attested target ingress. Cross-
-        # Edge UID_ATTACH is implemented in the original P3 engine but has
-        # no reviewed Legacy mixed-mode root host adapter in M4. Never
-        # manufacture a 90-second operator approval / durable PREPARED row
-        # for an action that the live factory will inevitably reject.
-        if not m4_same_ingress_reviewed(plan):
+        # Cross-Edge remains a separate, single-only reviewed release gate;
+        # no PREPARED approval may authorize an implicit mixed Legacy batch.
+        if not (m4_same_ingress_reviewed(plan) or (
+            M4_CROSS_EDGE_SINGLE_ENABLED
+            and m4_cross_edge_single_reviewed(plan)
+        )):
             raise RootPortalHold("M4_CROSS_EDGE_ATTACH_NOT_RELEASED")
         # P3 UID_ENROLL_SOURCE is explicitly constrained to the unchanged
         # Legacy global setting (0). Check *before* creating an approval;
@@ -138,7 +141,10 @@ class RootMigrationPortal:
         )
         if len(plan.members)>10 or plan.global_blockers or plan.blocked:
             raise RootPortalHold("M4_PLAN_CHANGED_OR_BLOCKED")
-        if not m4_same_ingress_reviewed(plan):
+        if not (m4_same_ingress_reviewed(plan) or (
+            M4_CROSS_EDGE_SINGLE_ENABLED
+            and m4_cross_edge_single_reviewed(plan)
+        )):
             raise RootPortalHold("M4_CROSS_EDGE_ATTACH_NOT_RELEASED")
         refreshed=self.review(plan.selection)
         new_plan=build_wave_plan(refreshed)

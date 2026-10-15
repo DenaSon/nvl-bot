@@ -100,6 +100,16 @@ class RootMigrationPortal:
         plan=build_wave_plan(inventory)
         if len(plan.members)>10 or plan.global_blockers or plan.blocked:
             raise RootPortalHold("M4_UNSAFE_OR_OVERSIZED_SELECTION")
+        # The only *actual* reviewed M4 root host factory currently binds
+        # UID_ENROLL_SOURCE on the already-attested target ingress. Cross-
+        # Edge UID_ATTACH is implemented in the original P3 engine but has
+        # no reviewed Legacy mixed-mode root host adapter in M4. Never
+        # manufacture a 90-second operator approval / durable PREPARED row
+        # for an action that the live factory will inevitably reject.
+        if any(member.source_ipv4 != member.target_ipv4
+               or member.source_edge_id != member.target_edge_id
+               for member in plan.members):
+            raise RootPortalHold("M4_CROSS_EDGE_ATTACH_NOT_RELEASED")
         if self.physical_f4(plan) is not True:
             raise RootPortalHold("M4_PHYSICAL_F4_REQUIRED")
         now=self.clock()
@@ -124,6 +134,10 @@ class RootMigrationPortal:
         )
         if len(plan.members)>10 or plan.global_blockers or plan.blocked:
             raise RootPortalHold("M4_PLAN_CHANGED_OR_BLOCKED")
+        if any(member.source_ipv4 != member.target_ipv4
+               or member.source_edge_id != member.target_edge_id
+               for member in plan.members):
+            raise RootPortalHold("M4_CROSS_EDGE_ATTACH_NOT_RELEASED")
         refreshed=self.review(plan.selection)
         new_plan=build_wave_plan(refreshed)
         if new_plan.digest!=plan.digest:

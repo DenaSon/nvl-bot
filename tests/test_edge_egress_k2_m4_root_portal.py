@@ -93,6 +93,40 @@ class M4RootPortalTests(unittest.IsolatedAsyncioTestCase):
         ).fetchone(),(0,))
         self.assertEqual(self.actions,[])
 
+    def test_cross_edge_single_m4_requires_root_release_and_signed_physical_f4(self):
+        self.witness=lambda n:LiveIngressWitness(
+            n,"s8",SOURCE,NOW-1,"INDEPENDENT_LIVE",
+        )
+        with patch("edge_egress_k2_m4_root_portal.M4_ROOT_PORTAL_ENABLED",True),\
+             patch("edge_egress_k2_m4_root_portal.M4_CROSS_EDGE_SINGLE_ENABLED",True),\
+             patch("edge_egress_k2_m4_checkpoint.M4_CHECKPOINT_RELEASE_ENABLED",True):
+            self.portal.physical_f4=lambda plan:False
+            with self.assertRaisesRegex(RootPortalHold,"PHYSICAL_F4"):
+                self.portal.prepare(self.selection,actor_id=11,chat_id=-222)
+            self.assertEqual(self.fx.c.execute(
+                "SELECT COUNT(*) FROM k2_m4_wave_checkpoints"
+            ).fetchone(),(0,))
+            self.portal.physical_f4=lambda plan:True
+            prepared=self.portal.prepare(
+                self.selection,actor_id=11,chat_id=-222)
+            self.assertEqual(prepared.plan.selection.mode,"SINGLE")
+            self.assertEqual(prepared.plan.members[0].source_edge_id,"s8")
+            self.assertEqual(self.actions,[])
+
+    def test_cross_edge_batch_cannot_prepare_even_with_single_gate(self):
+        self.witness=lambda n:LiveIngressWitness(
+            n,"s8",SOURCE,NOW-1,"INDEPENDENT_LIVE",
+        )
+        selection=select_migration(
+            "BATCH",("nvl0555","nvl0557"),"e9",
+        )
+        with patch("edge_egress_k2_m4_root_portal.M4_ROOT_PORTAL_ENABLED",True),\
+             patch("edge_egress_k2_m4_root_portal.M4_CROSS_EDGE_SINGLE_ENABLED",True),\
+             patch("edge_egress_k2_m4_checkpoint.M4_CHECKPOINT_RELEASE_ENABLED",True):
+            with self.assertRaisesRegex(RootPortalHold,"CROSS_EDGE_ATTACH"):
+                self.portal.prepare(selection,actor_id=11,chat_id=-222)
+        self.assertEqual(self.actions,[])
+
     def test_wrong_protected_mode_denied_before_durable_prepare(self):
         self.portal.current_protected_mode=lambda:"1"
         with patch("edge_egress_k2_m4_root_portal.M4_ROOT_PORTAL_ENABLED",True), \

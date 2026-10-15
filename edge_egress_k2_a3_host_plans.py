@@ -26,6 +26,7 @@ from ops.k2_p3_guard_installer import (
 from ops.k2_m2_guard_append import MultiUIDAppendPlan, plan_next_uid
 
 A3_ROOT_OWNED_PLAN_SOURCE_ENABLED = False
+A3_ROOT_CROSS_EDGE_PLAN_ENABLED = False
 ROOT_PLAN_DIR = Path("/etc/nvl-egress/k2-m4/uid-plans")
 MAX_MANIFEST = 4096
 
@@ -66,8 +67,13 @@ class RootOwnedM2PlanSource:
                  ticket: ExecutionTicket) -> ReviewedRootM2Plan:
         if (not A3_ROOT_OWNED_PLAN_SOURCE_ENABLED
             or self.geteuid()!=0 or not isinstance(scope,ExecutionScope)
-            or scope.action!="UID_ENROLL_SOURCE"
-            or scope.source_host!=scope.target_host
+            or not (
+                scope.action=="UID_ENROLL_SOURCE"
+                and scope.source_host==scope.target_host
+                or A3_ROOT_CROSS_EDGE_PLAN_ENABLED
+                and scope.action=="UID_ATTACH"
+                and scope.source_host!=scope.target_host
+            )
             or not isinstance(ticket,ExecutionTicket)
             or ticket.scope_digest!=_scope_digest(scope)
             or not isinstance(scope.username,str)
@@ -203,6 +209,7 @@ class RootOwnedM2PlanSource:
 # ReviewedUIDHostSnapshot. It is an adapter for the unfinished A3.1 gate,
 # not an authority to declare packet/F4 readiness or change the host.
 A3_ROOT_SNAPSHOT_BINDING_ENABLED = False
+A3_ROOT_CROSS_EDGE_SNAPSHOT_ENABLED = False
 
 
 @dataclass(frozen=True)
@@ -260,14 +267,22 @@ class RootOwnedUIDSnapshotSource:
         from edge_egress_k2_m3_waves import build_wave_plan
         from edge_egress_k2_migration_inventory import select_migration
         from ops.k2_p3_uid_worker import IndependentSafety
+        from edge_egress_k2_m4_cross_edge_port import (
+            CrossEdgeIndependentSafety, root_fresh_source_evidence,
+        )
         from ops.k2_p3_guard_installer import RootFilePort
         from ops.k2_m2_guard_append import CASRootRosterPort
 
         if (not A3_ROOT_SNAPSHOT_BINDING_ENABLED
             or self.geteuid() != 0
             or not isinstance(scope, ExecutionScope)
-            or scope.action != "UID_ENROLL_SOURCE"
-            or scope.source_host != scope.target_host
+            or not (
+                scope.action == "UID_ENROLL_SOURCE"
+                and scope.source_host == scope.target_host
+                or A3_ROOT_CROSS_EDGE_SNAPSHOT_ENABLED
+                and scope.action == "UID_ATTACH"
+                and scope.source_host != scope.target_host
+            )
             or not isinstance(ticket, ExecutionTicket)
             or ticket.scope_digest != _scope_digest(scope)):
             raise A3PlanHold("A3_SNAPSHOT_ROOT_SAME_EDGE_RELEASE_REQUIRED")
@@ -284,8 +299,10 @@ class RootOwnedUIDSnapshotSource:
             or not wave.members[0].selectable):
             raise A3PlanHold("A3_SNAPSHOT_FRESH_INVENTORY_HOLD")
         member = wave.members[0]
+        cross = scope.action == "UID_ATTACH"
         if (member.username != scope.username or member.uid != scope.uid
-            or member.source_edge_id != scope.edge_id
+            or (member.source_edge_id == scope.edge_id if cross else
+                member.source_edge_id != scope.edge_id)
             or member.target_edge_id != scope.edge_id
             or member.source_ipv4 != scope.source_host
             or member.target_ipv4 != scope.target_host):
@@ -349,6 +366,11 @@ class RootOwnedUIDSnapshotSource:
             or safety.db_conn is not self.db_conn
             or safety.target_edge_id != scope.edge_id
             or safety.source_ipv4 != scope.source_host
+            or (cross and (
+                type(safety) is not CrossEdgeIndependentSafety
+                or safety.ingress_edge_id != member.source_edge_id
+                or safety.source_evidence is not root_fresh_source_evidence
+            ))
             or not callable(safety.packet_witness)
             or not callable(safety.neighbour_witness)):
             raise A3PlanHold("A3_SNAPSHOT_PHYSICAL_WITNESS_NOT_BOUND")

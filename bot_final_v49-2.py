@@ -10785,7 +10785,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['k2_m4_selection']=(
                 mode,selection.usernames,selection.target_edge_id
             )
-            rows=k2_m4_preview_buttons(target)
+            rows=k2_m4_preview_buttons(target, inventory=inventory)
             buttons=[[InlineKeyboardButton(title,callback_data=data)
                       for title,data in row] for row in rows]
             await update.message.reply_text(
@@ -24327,7 +24327,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         k2_m4_readonly_preview,db_conn,selection,
                     )
                     display=k2_m4_preview_html(inventory)
-                rows=k2_m4_preview_buttons(edge_id)
+                rows=k2_m4_preview_buttons(
+                    edge_id, inventory=(inventory if action=="refresh" else None),
+                )
             elif action=="prepare":
                 # Root plans are rechecked independently. Never persist the
                 # returned request ID in PicklePersistence/user_data.

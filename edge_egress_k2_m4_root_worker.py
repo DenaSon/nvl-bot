@@ -48,6 +48,10 @@ PINNED_SOURCE_FILES = frozenset((
     "edge_egress_k2_m3_ingress_port.py",
     "edge_egress_p3_uid.py",
     "edge_egress_k2_m4_root_portal.py",
+    # Cross-Edge PAM source and proof checker must be SHA-pinned together.
+    "edge_egress_v1_admission.py",
+    "edge_egress_v1_ingress.py",
+    "edge_egress_k2_uid_ingress_egress.py",
     "edge_egress_k2_m4_checkpoint.py",
     "edge_egress_k2_m3_waves.py",
     "edge_egress_k2_m3_journal.py",

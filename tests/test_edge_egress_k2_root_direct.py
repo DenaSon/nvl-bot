@@ -9,8 +9,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import edge_egress_k2_root_direct as direct
 from edge_egress_k2_root_direct import (
-    RootDirectOperatorClient, bound_root_client,
+    RootDirectOperatorClient, bound_root_client, register_root_portal,
 )
 from edge_egress_k2_m43_client import M43ClientHold
 from edge_egress_k2_m43_workflow import PendingTelegramApproval
@@ -32,14 +33,22 @@ class ExistingRootBotDirectTests(unittest.IsolatedAsyncioTestCase):
         release=patch("edge_egress_k2_root_direct.K2_ROOT_DIRECT_ENABLED",True)
         release.start()
         self.addCleanup(release.stop)
-        self.client=RootDirectOperatorClient(
-            portal=self.fx.portal,geteuid=lambda:0,released=True,
+        guard_app=patch.object(direct,"_ACTIVE_APPLICATION",None)
+        guard_client=patch.object(direct,"_ACTIVE_CLIENT",None)
+        guard_app.start()
+        guard_client.start()
+        self.addCleanup(guard_client.stop)
+        self.addCleanup(guard_app.stop)
+        self.app=SimpleNamespace(bot_data={})
+        self.client=register_root_portal(
+            self.app,portal=self.fx.portal,geteuid=lambda:0,released=True,
         )
 
     async def test_root_bot_direct_single_original_6g_with_no_socket(self):
         selection=self.fx.selection
-        app=SimpleNamespace(bot_data={"k2_root_direct_client":self.client})
-        client=bound_root_client(app)
+        client=bound_root_client(self.app)
+        # Root secrets and P3 factories are never serialized into bot_data.
+        self.assertEqual(self.app.bot_data,{})
         self.assertIs(client,self.client)
         self.assertEqual((await client.request(
             "STATUS",actor_id=ADMIN,chat_id=CHAT,selection=selection,
@@ -83,6 +92,18 @@ class ExistingRootBotDirectTests(unittest.IsolatedAsyncioTestCase):
                 "CONFIRM",actor_id=ADMIN,chat_id=CHAT,
                 request_id=pending.request_id,
             )
+
+    async def test_bind_is_single_app_private_and_never_persisted(self):
+        other=SimpleNamespace(bot_data={})
+        with self.assertRaisesRegex(M43ClientHold,"NOT_REGISTERED"):
+            bound_root_client(other)
+        with self.assertRaisesRegex(M43ClientHold,"BIND_NOT_ACCEPTED"):
+            register_root_portal(
+                self.app,portal=self.fx.portal,geteuid=lambda:0,
+                released=True,
+            )
+        self.assertEqual(self.app.bot_data,{})
+        self.assertIs(bound_root_client(self.app),self.client)
 
     async def test_root_direct_release_off_and_no_global_registration(self):
         app=SimpleNamespace(bot_data={})

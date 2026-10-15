@@ -152,7 +152,7 @@ class K2UIDIngressEgressTests(unittest.TestCase):
             "edge_egress_v1_ingress.load_registry", return_value=peers,
         ), patch(
             "subprocess.run",
-            return_value=SimpleNamespace(returncode=0, stdout=KEY+" 10.77.0.8/32\\n"),
+            return_value=SimpleNamespace(returncode=0, stdout=KEY+" 10.77.0.8/32\n"),
         ) as wg:
             self.assertTrue(probe_root_cross_edge_ingress(
                 row, "10.77.0.8", "f"*64))

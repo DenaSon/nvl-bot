@@ -26,6 +26,9 @@ from edge_egress_k2_m42_evidence import (
 )
 
 A4_OFFCORE_SIGNING_ENABLED = False
+A4_RAW_ARTIFACT_INTEGRITY_ENABLED = False
+RAW_ROOT = Path("/var/lib/nvl-observer/raw")
+MAX_RAW_BYTES = 262144
 PRIVATE_KEY = Path("/etc/nvl-observer/keys/observer-private.pem")
 _DIGEST = re.compile(r"[a-f0-9]{64}\Z")
 _IDENTIFIER = re.compile(r"[a-z][a-z0-9_-]{3,63}\Z")
@@ -192,6 +195,126 @@ def build_observation_report(
     return raw
 
 
+
+def _read_raw_artifact(path: Path, *, run_id: str,
+                       expected_sha: str, owner_uid: int) -> bytes:
+    """Read exactly one owned/no-follow raw artifact, no path from Telegram."""
+    if (not _IDENTIFIER.fullmatch(run_id)
+        or not _DIGEST.fullmatch(expected_sha)
+        or type(owner_uid) is not int or owner_uid <= 0):
+        raise A4ObserverHold("A4_RAW_IDENTITY_UNTRUSTED")
+    for folder in (RAW_ROOT, RAW_ROOT / run_id):
+        try:
+            st = folder.lstat()
+        except OSError as exc:
+            raise A4ObserverHold("A4_RAW_DIRECTORY_MISSING") from exc
+        if (not stat.S_ISDIR(st.st_mode)
+            or st.st_uid not in (0, owner_uid)
+            or stat.S_IMODE(st.st_mode) & 0o077):
+            raise A4ObserverHold("A4_RAW_DIRECTORY_UNTRUSTED")
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_CLOEXEC", 0))
+        try:
+            st = os.fstat(fd)
+            if (not stat.S_ISREG(st.st_mode) or st.st_uid != owner_uid
+                or st.st_nlink != 1 or stat.S_IMODE(st.st_mode) & 0o077
+                or st.st_size <= 0 or st.st_size > MAX_RAW_BYTES):
+                raise A4ObserverHold("A4_RAW_FILE_UNTRUSTED")
+            raw=os.read(fd, MAX_RAW_BYTES + 1)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise A4ObserverHold("A4_RAW_FILE_UNAVAILABLE") from exc
+    if (not 1 <= len(raw) <= MAX_RAW_BYTES
+        or not hmac.compare_digest(sha256(raw).hexdigest(), expected_sha)):
+        raise A4ObserverHold("A4_RAW_BYTES_CHANGED")
+    return raw
+
+
+def _exact_json(raw: bytes, expected: dict) -> None:
+    """Bind exact claim metadata to the raw content, not only its hash."""
+    def unique(pairs):
+        out={}
+        for key,value in pairs:
+            if key in out:
+                raise A4ObserverHold("A4_RAW_DUPLICATE_FIELD")
+            out[key]=value
+        return out
+    try:
+        data=json.loads(raw.decode("utf-8"),object_pairs_hook=unique)
+        if (not isinstance(data,dict) or set(data)!=set(expected)|{"capture"}
+            or any(type(data.get(key)) is not type(value)
+                   or data[key]!=value for key,value in expected.items())
+            or not isinstance(data["capture"],str)
+            or not 32 <= len(data["capture"]) <= MAX_RAW_BYTES // 2):
+            raise ValueError()
+    except (UnicodeError,TypeError,KeyError,ValueError) as exc:
+        raise A4ObserverHold("A4_RAW_CAPTURE_CLAIM_MISMATCH") from exc
+
+
+def verify_raw_artifacts(
+    *, probes: tuple[IndependentProbeReceipt, ...],
+    sessions: tuple[IndependentSessionReceipt, ...],
+    geteuid: Callable[[],int] = os.geteuid,
+) -> None:
+    """A4 integrity gate: ALL referenced external capture files must exist.
+
+    A content hash plus PASS field is not evidence: signed claims must have
+    an owned immutable raw artifact with matching metadata and captured text.
+    This still DOES NOT establish the physical truth of a capture. M5 does.
+    """
+    if (not A4_RAW_ARTIFACT_INTEGRITY_ENABLED or not callable(geteuid)
+        or geteuid() <= 0 or not isinstance(probes,tuple)
+        or not isinstance(sessions,tuple) or not probes or not sessions):
+        raise A4ObserverHold("A4_RAW_ARTIFACT_REVIEW_NOT_RELEASED")
+    runs={p.run_id for p in probes}|{a.run_id for a in sessions}
+    if len(runs)!=1:
+        raise A4ObserverHold("A4_RAW_RUN_ID_CHANGED")
+    run_id=next(iter(runs))
+    if not isinstance(run_id,str) or not _IDENTIFIER.fullmatch(run_id):
+        raise A4ObserverHold("A4_RAW_RUN_ID_INVALID")
+    for p in probes:
+        if (not isinstance(p,IndependentProbeReceipt)
+            or not isinstance(p.probe_id,str)
+            or not _IDENTIFIER.fullmatch(p.probe_id)
+            or p.check not in REQUIRED_CHECKS):
+            raise A4ObserverHold("A4_RAW_PROBE_ID_INVALID")
+        raw=_read_raw_artifact(
+            RAW_ROOT / run_id / ("probe-" + p.probe_id + ".json"),
+            run_id=run_id, expected_sha=p.raw_result_sha256,
+            owner_uid=geteuid(),
+        )
+        _exact_json(raw,{
+            "version":1,"kind":"probe",
+            "run_id":run_id,"probe_id":p.probe_id,
+            "check":p.check,"domain":p.domain,
+            "observed_at":p.observed_at,
+            "target_edge":p.target_edge,"target_ipv4":p.target_ipv4,
+            "outcome":p.outcome,
+            "observed_public_ipv4":p.observed_public_ipv4,
+        })
+    for a in sessions:
+        if (not isinstance(a,IndependentSessionReceipt)
+            or not isinstance(a.username,str)
+            or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}",a.username)
+            or type(a.uid) is not int or a.uid < 1000 or a.uid >= 60000):
+            raise A4ObserverHold("A4_RAW_SESSION_ID_INVALID")
+        raw=_read_raw_artifact(
+            RAW_ROOT / run_id / ("session-" + a.username + "-" +
+                                 str(a.uid) + ".json"),
+            run_id=run_id,expected_sha=a.raw_result_sha256,
+            owner_uid=geteuid(),
+        )
+        _exact_json(raw,{
+            "version":1,"kind":"session","run_id":run_id,
+            "username":a.username,"uid":a.uid,
+            "source_edge":a.source_edge,"source_ipv4":a.source_ipv4,
+            "active_sessions":a.active_sessions,
+            "observed_at":a.observed_at,
+        })
+
+
 def sign_offcore_observation(
     *, probes: tuple[IndependentProbeReceipt, ...],
     sessions: tuple[IndependentSessionReceipt, ...],
@@ -216,6 +339,7 @@ def sign_offcore_observation(
         probes=probes,sessions=sessions,target_edge=target_edge,
         target_ipv4=target_ipv4,now=now,
     )
+    verify_raw_artifacts(probes=probes,sessions=sessions,geteuid=geteuid)
     try:
         info=key_path.lstat()
         parent=key_path.parent.lstat()
@@ -234,6 +358,7 @@ def sign_offcore_observation(
             raise A4ObserverHold("A4_SIGNING_FAILED")
         if not 1 <= len(result.stdout) <= 4096:
             raise A4ObserverHold("A4_INVALID_SIGNATURE_SIZE")
+        verify_raw_artifacts(probes=probes,sessions=sessions,geteuid=geteuid)
         return raw,result.stdout
     except A4ObserverHold:
         raise

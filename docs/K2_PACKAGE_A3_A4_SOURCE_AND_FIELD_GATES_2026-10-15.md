@@ -36,3 +36,15 @@
 **Classification:** Package A source security improvements are delivered here, but Package A as a whole **must not be marked operationally complete** until A3/A4 physical dependencies have passed. Reducing an unresolved gap to a Type/interface is useful but does not constitute a working installed root provider or an independently verified packet observer.
 
 **CI evidence:** linked to the exact final SHA in the PR conversation, never reused from an earlier SHA.
+
+
+## A4.3 — Mandatory raw-measurement byte attestation (2026-10-15)
+
+The off-Core signer now refuses to sign even an otherwise valid complete set of `PASS` measurement receipts unless **all corresponding raw capture files exist and exactly match their submitted SHA-256 and claim metadata**. This closes the prior weak boundary where the signer could accept only an asserted hash without possessing any original measurements.
+
+- New independent default-OFF gate `A4_RAW_ARTIFACT_INTEGRITY_ENABLED=False`, separate from `A4_OFFCORE_SIGNING_ENABLED=False`. The signing path calls `verify_raw_artifacts` **both before and after** the OpenSSL detached-signature operation, and never signs when a raw artifact is missing, mutated, stale, wrong-scope or incorrectly owned.
+- Raw file paths are fixed under the off-Core `/var/lib/nvl-observer/raw/<run_id>/`, derived only from strictly validated probe/session IDs. Each has exact-key metadata and nonempty `capture` text. Probe files: `probe-<probe_id>.json`, session files: `session-<username>-<uid>.json`. Files must be owner-only, regular, single link, and non-symlink; parent directories owner-only. The signer private key is still off Core; no live SSH/WG/PAM interactions are added.
+- Disallows missing raw source, symlink, digest mismatch, duplicate/forged metadata, changed scope and untrusted modes. This is a cryptographic integrity control, **not** independent verification that the raw text actually came from a client or host packet capture. The existing `capture` field is an auditable raw evidence carrier; the external measurement *method* remains a required M5 field deliverable.
+- Regression tests include raw missing/tamper, mode changes, mismatched claims, source-default OFF, and off-Core real detached RSA sign/verify with disposable CI keys.
+
+**Operational status is unchanged**: A4.1 actual independently operated SSH/SOCKS/DNS/NSS/IPv6/Core packet/WG-loss/console probes and review of their source still remain HOLD. A3.1/3.2 remain HOLD. This code must not be used to mark the F4 physical proof READY, unlock 6G or deploy.

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from hashlib import sha256
 import os
 from pathlib import Path
 import shutil
@@ -39,6 +41,43 @@ def sessions():
         active_sessions=0,observed_at=NOW-3,
         raw_result_sha256="b"*64,run_id=RUN,
     ),)
+
+
+def write_raw_artifacts(root):
+    """CI-only raw capture fixtures bound byte-for-byte to every receipt."""
+    run=root/RUN
+    run.mkdir(mode=0o700)
+    out_probes=[]
+    out_sessions=[]
+    for p in receipts():
+        body={
+            "version":1,"kind":"probe",
+            "run_id":p.run_id,"probe_id":p.probe_id,
+            "check":p.check,"domain":p.domain,
+            "observed_at":p.observed_at,
+            "target_edge":p.target_edge,"target_ipv4":p.target_ipv4,
+            "outcome":p.outcome,"observed_public_ipv4":p.observed_public_ipv4,
+            "capture":"CI synthetic witness text - not physical proof "*3,
+        }
+        raw=json.dumps(body,sort_keys=True,separators=(",",":")).encode()
+        path=run/("probe-"+p.probe_id+".json")
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        out_probes.append(replace(p,raw_result_sha256=sha256(raw).hexdigest()))
+    for a in sessions():
+        body={
+            "version":1,"kind":"session","run_id":a.run_id,
+            "username":a.username,"uid":a.uid,
+            "source_edge":a.source_edge,"source_ipv4":a.source_ipv4,
+            "active_sessions":a.active_sessions,"observed_at":a.observed_at,
+            "capture":"CI fake process snapshot, not true session observation "*3,
+        }
+        raw=json.dumps(body,sort_keys=True,separators=(",",":")).encode()
+        path=run/("session-"+a.username+"-"+str(a.uid)+".json")
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        out_sessions.append(replace(a,raw_result_sha256=sha256(raw).hexdigest()))
+    return tuple(out_probes),tuple(out_sessions)
 
 
 class WitnessEnvelopeTests(unittest.TestCase):
@@ -116,6 +155,57 @@ class WitnessEnvelopeTests(unittest.TestCase):
             with self.assertRaisesRegex(a4.A4ObserverHold,"NOT_RELEASED"):
                 a4.sign_offcore_observation(probes=receipts(),sessions=sessions(),target_edge="e9",target_ipv4=TARGET,clock=lambda:NOW,geteuid=lambda:0)
 
+    def test_raw_artifacts_mandatory_and_tampering_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            probes,scoped_sessions=write_raw_artifacts(root)
+            with patch.object(a4,"RAW_ROOT",root):
+                with self.assertRaisesRegex(a4.A4ObserverHold,"NOT_RELEASED"):
+                    a4.verify_raw_artifacts(
+                        probes=probes,sessions=scoped_sessions,
+                    )
+            with patch.object(a4,"RAW_ROOT",root),\
+                 patch.object(a4,"A4_RAW_ARTIFACT_INTEGRITY_ENABLED",True):
+                a4.verify_raw_artifacts(
+                    probes=probes,sessions=scoped_sessions,
+                )
+                raw_path=root/RUN/("probe-"+probes[0].probe_id+".json")
+                original=raw_path.read_bytes()
+                raw_path.write_bytes(original+b"\n")
+                with self.assertRaisesRegex(a4.A4ObserverHold,"CHANGED"):
+                    a4.verify_raw_artifacts(
+                        probes=probes,sessions=scoped_sessions,
+                    )
+                raw_path.write_bytes(original)
+                raw_path.chmod(0o644)
+                with self.assertRaisesRegex(a4.A4ObserverHold,"UNTRUSTED"):
+                    a4.verify_raw_artifacts(
+                        probes=probes,sessions=scoped_sessions,
+                    )
+
+    def test_raw_missing_and_scope_mismatch_fail_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            probes,scoped_sessions=write_raw_artifacts(root)
+            with patch.object(a4,"RAW_ROOT",root),\
+                 patch.object(a4,"A4_RAW_ARTIFACT_INTEGRITY_ENABLED",True):
+                forged=replace(
+                    probes[0],target_edge="e8",
+                    raw_result_sha256=probes[0].raw_result_sha256,
+                )
+                with self.assertRaisesRegex(a4.A4ObserverHold,"MISMATCH"):
+                    a4.verify_raw_artifacts(
+                        probes=(forged,)+probes[1:],
+                        sessions=scoped_sessions,
+                    )
+                raw_path=root/RUN/("session-"+scoped_sessions[0].username+"-"+
+                                   str(scoped_sessions[0].uid)+".json")
+                raw_path.unlink()
+                with self.assertRaisesRegex(a4.A4ObserverHold,"UNAVAILABLE"):
+                    a4.verify_raw_artifacts(
+                        probes=probes,sessions=scoped_sessions,
+                    )
+
     @unittest.skipUnless(shutil.which("openssl"),"OpenSSL unavailable")
     def test_real_offcore_openssl_signature_and_tamper_detection(self):
         # This key is a THROWAWAY CI fixture, never a release signing key.
@@ -135,12 +225,18 @@ class WitnessEnvelopeTests(unittest.TestCase):
                 ["openssl","pkey","-in",str(key),"-pubout","-out",str(public)],
                 check=True,capture_output=True,timeout=10,
             )
-            raw=self.render()
+            measured,session_records=write_raw_artifacts(folder)
+            raw=a4.build_observation_report(
+                probes=measured,sessions=session_records,
+                target_edge="e9",target_ipv4=TARGET,now=NOW,
+            )
             with patch.object(a4,"A4_OFFCORE_SIGNING_ENABLED",True),\
+                 patch.object(a4,"A4_RAW_ARTIFACT_INTEGRITY_ENABLED",True),\
+                 patch.object(a4,"RAW_ROOT",folder),\
                  patch.object(a4,"PRIVATE_KEY",key),\
                  patch.object(a4.time,"time",return_value=NOW):
                 observed,signed=a4.sign_offcore_observation(
-                    probes=receipts(),sessions=sessions(),target_edge="e9",
+                    probes=measured,sessions=session_records,target_edge="e9",
                     target_ipv4=TARGET,key_path=key,clock=lambda:NOW,
                 )
                 self.assertEqual(observed,raw)

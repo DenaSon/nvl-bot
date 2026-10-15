@@ -123,6 +123,16 @@ class RootOwnedM2PlanSource:
                 owned[name]=prior
             if roster_bytes!=render_roster(owned).encode("utf-8"):
                 raise A3PlanHold("A3_ROOT_ROSTER_CAS_PREVIEW_MISMATCH")
+            # A partial prior M2 stage may have left an orphan guard that is
+            # absent from the canonical roster. Refuse NEXT_UID before any
+            # plan is returned; do not silently adopt or overwrite it.
+            try:
+                actual_guards={entry.name for entry in GUARD_DIR.iterdir()}
+            except OSError as exc:
+                raise A3PlanHold("A3_ROOT_GUARD_INVENTORY_UNAVAILABLE") from exc
+            expected_guards={name+".json" for name in roster}
+            if actual_guards != expected_guards:
+                raise A3PlanHold("A3_ORPHANED_OR_MISSING_GUARD_HOLD")
             plan=plan_next_uid(
                 username=scope.username,manifest_bytes=raw,
                 current_roster=roster_bytes,installed_manifests=owned,

@@ -11,7 +11,10 @@ from dataclasses import replace
 from edge_egress_k2_m42_bindings import RootM42Bindings, HostReviewedPorts, RootAdminPolicy
 from edge_egress_k2_m42_evidence import SignedExternalEvidence, WitnessAccount, REQUIRED_CHECKS
 from edge_egress_k2_migration_inventory import LiveIngressWitness
-from edge_egress_p3_executor import ExecutionScope
+from edge_egress_p3_executor import (
+    ExecutionScope, FreshEvidence, issue_execution_ticket, BASE_GATES,
+    ATTACH_GATES,
+)
 from tests.test_edge_egress_k2_migration_inventory import K2M1InventoryTests,NOW,SOURCE,TARGET
 
 
@@ -41,6 +44,11 @@ class M42CrossEdgeFinalEvidenceTests(unittest.TestCase):
             ),
             root_secret=b"t"*48,admin_policy=RootAdminPolicy(frozenset()),
             reviewed_release=True
+        )
+        self.ticket=issue_execution_ticket(
+            self.scope,
+            FreshEvidence("a"*64,NOW,BASE_GATES|ATTACH_GATES),
+            actor_id=11,chat_id=11,now=NOW,
         )
         # Production review is M42.review, already separately checked against
         # root journal+current wg0. This replaces it ONLY inside hermetic tests.
@@ -77,7 +85,9 @@ class M42CrossEdgeFinalEvidenceTests(unittest.TestCase):
             ))
             with patch.object(self.root,"_post_commit_under_current_6g",
                               return_value=True):
-                after=self.root.fresh_p3_evidence(self.scope)
+                after=self.root.fresh_p3_evidence(
+                    self.scope,expected_ticket=self.ticket
+                )
             self.assertEqual(before.digest,after.digest)
             with self.assertRaisesRegex(ValueError,"HOLD"):
                 self.root.fresh_p3_evidence(self.scope)
@@ -93,7 +103,9 @@ class M42CrossEdgeFinalEvidenceTests(unittest.TestCase):
             with patch.object(self.root,"_post_commit_under_current_6g",
                               return_value=True):
                 with self.assertRaisesRegex(ValueError,"HOLD"):
-                    self.root.fresh_p3_evidence(self.scope)
+                    self.root.fresh_p3_evidence(
+                        self.scope,expected_ticket=self.ticket
+                    )
 
 
 if __name__=="__main__":

@@ -13,8 +13,11 @@ from typing import Iterable
 from edge_egress_k2_migration_inventory import (
     MigrationInventory, MigrationInventoryHold, select_migration,
 )
-from edge_egress_k2_m3_waves import (MigrationWavePlan, build_wave_plan,
-                                      m4_same_ingress_reviewed)
+from edge_egress_k2_m3_waves import (
+    MigrationWavePlan, build_wave_plan, m4_same_ingress_reviewed,
+    m4_cross_edge_single_reviewed,
+)
+import edge_egress_k2_m4_root_portal as _root_portal
 
 MAX_INPUT_UIDS = 10
 _NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
@@ -108,19 +111,33 @@ def cancel_buttons(edge_id: str):
     return _button_rows((("❌ انصراف",f"hpeg_m4_cancel_{edge_id}"),))
 
 
+def _root_can_review(plan: MigrationWavePlan) -> bool:
+    # Mirror original root PREPARE eligibility, never infer a release
+    # from a user-facing preview or a generic "ready" flag.
+    return m4_same_ingress_reviewed(plan) or (
+        _root_portal.M4_CROSS_EDGE_SINGLE_ENABLED
+        and m4_cross_edge_single_reviewed(plan)
+    )
+
+
 def preview_html(inventory: MigrationInventory) -> str:
     if not isinstance(inventory,MigrationInventory):
         raise M4UIHold("PREVIEW_UNAVAILABLE")
     plan=build_wave_plan(inventory,wave_size=MAX_INPUT_UIDS)
     chosen=tuple(plan.members)
     total=len(chosen)
-    # Match the actual reviewed M4 live host factory, not the broader M1
-    # read-only inventory. Cross-Edge sources are NOT executable in M4.
-    can_stage=m4_same_ingress_reviewed(plan)
+    # Match the same explicit single-only gate as privileged M4 PREPARE.
+    can_stage=_root_can_review(plan)
     ready=sum(
         m.selectable and not plan.global_blockers
-        and m.source_proven and m.source_edge_id==m.target_edge_id
-        and m.source_ipv4==m.target_ipv4 and not m.protected_edge_id
+        and (m.source_edge_id==m.target_edge_id
+             and m.source_ipv4==m.target_ipv4 or (
+                 _root_portal.M4_CROSS_EDGE_SINGLE_ENABLED
+                 and m.source_edge_id!=m.target_edge_id
+                 and m.source_ipv4!=m.target_ipv4
+                 and inventory.selection.mode=="SINGLE"
+                 and len(chosen)==1
+             ))
         for m in chosen
     )
     held=total-ready
@@ -133,11 +150,7 @@ def preview_html(inventory: MigrationInventory) -> str:
         f"نیازمند بررسی: <b>{held}</b>","",
     ]
     for member in chosen:
-        same_ingress=(member.source_proven
-                      and member.source_edge_id==member.target_edge_id
-                      and member.source_ipv4==member.target_ipv4
-                      and not member.protected_edge_id)
-        sign="✅" if member.selectable and not plan.global_blockers and same_ingress else "⛔️"
+        sign="✅" if member.selectable and can_stage else "⛔️"
         lines.append(f"{sign} <code>{_safe(member.username)}</code> — "+
                      ("آماده بررسی" if sign=="✅" else "نیازمند بررسی"))
     lines.append("")
@@ -165,7 +178,7 @@ def preview_buttons(edge_id: str, *,
             or inventory.selection.target_edge_id != edge_id):
             raise M4UIHold("PREVIEW_SELECTION_INVALID")
         plan=build_wave_plan(inventory,wave_size=MAX_INPUT_UIDS)
-        reviewed=m4_same_ingress_reviewed(plan)
+        reviewed=_root_can_review(plan)
     return _button_rows(
         (("🔐 درخواست تأیید",f"hpeg_m4_prepare_{edge_id}"),)
         if reviewed else (),

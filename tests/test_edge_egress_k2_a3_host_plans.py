@@ -45,7 +45,7 @@ class RootM2ReadOnlyPlanTests(unittest.TestCase):
         )
         self.mockers=[]
 
-    def mock_sources(self,*,roster_exists=False,roster_bytes=b"roster",prior_name="nvl0557"):
+    def mock_sources(self,*,roster_exists=False,roster_bytes=b"roster",prior_name="nvl0557",observed_guards=None):
         names=(
             (a.PAM,self.pam),
             (a.MODULE,self.module),
@@ -60,13 +60,17 @@ class RootM2ReadOnlyPlanTests(unittest.TestCase):
                 if path==key:
                     return value
             raise AssertionError("unreviewed-root-path:"+str(path))
+        guard_names=(
+            (prior_name+".json",) if roster_exists else ()
+        ) if observed_guards is None else observed_guards
+        guard_paths=tuple(a.GUARD_DIR/name for name in guard_names)
         patches=(
             patch.object(a,"_verify_root_directory"),
             patch.object(a,"_read_checked",side_effect=read),
             patch.object(a.BootGuardManifest,"parse",return_value=self.proposed),
             patch.object(a.Path,"is_symlink",return_value=False),
             patch.object(a.Path,"exists",return_value=roster_exists),
-            patch.object(a.Path,"iterdir",return_value=iter(())),
+            patch.object(a.Path,"iterdir",side_effect=lambda:iter(guard_paths)),
             patch.object(a,"A3_ROOT_OWNED_PLAN_SOURCE_ENABLED",True),
         )
         for p in patches:
@@ -130,6 +134,32 @@ class RootM2ReadOnlyPlanTests(unittest.TestCase):
         self.assertEqual(result.plan,"NEXT_PLAN")
         self.assertEqual(planner.call_args.kwargs["installed_manifests"],
                          {"nvl0557":self.guard})
+
+    def test_next_uid_holds_on_orphaned_prior_guard_file(self):
+        prior=SimpleNamespace(uid=1644,guard_sha256=sha256(self.guard).hexdigest())
+        self.mock_sources(
+            roster_exists=True,roster_bytes=b"canonical",
+            observed_guards=("nvl0557.json","orphan.json"),
+        )
+        with patch.object(a,"load_roster",return_value={"nvl0557":prior}),\\
+             patch.object(a,"render_roster",return_value="canonical"),\\
+             patch.object(a,"plan_next_uid") as planner:
+            with self.assertRaisesRegex(a.A3PlanHold,"ORPHANED_OR_MISSING_GUARD"):
+                self.src(self.scope,self.ticket)
+            planner.assert_not_called()
+
+    def test_next_uid_holds_on_missing_prior_guard_in_inventory(self):
+        prior=SimpleNamespace(uid=1644,guard_sha256=sha256(self.guard).hexdigest())
+        self.mock_sources(
+            roster_exists=True,roster_bytes=b"canonical",
+            observed_guards=(),
+        )
+        with patch.object(a,"load_roster",return_value={"nvl0557":prior}),\\
+             patch.object(a,"render_roster",return_value="canonical"),\\
+             patch.object(a,"plan_next_uid") as planner:
+            with self.assertRaisesRegex(a.A3PlanHold,"ORPHANED_OR_MISSING_GUARD"):
+                self.src(self.scope,self.ticket)
+            planner.assert_not_called()
 
     def test_roster_changed_never_calls_next_uid_planner(self):
         old=SimpleNamespace(uid=1644,guard_sha256=sha256(self.guard).hexdigest())

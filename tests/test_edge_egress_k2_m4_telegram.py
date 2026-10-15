@@ -93,6 +93,30 @@ class M4OperatorReadOnlyTests(unittest.TestCase):
         self.assertIn("SESSION_STATE_NOT_ATTESTED",snapshot.selected_issues)
         self.assertFalse(snapshot.inventory_clear)
 
+    def test_prepare_button_requires_fresh_same_ingress_preview(self):
+        selection=select_input("SINGLE","nvl0555","e9")
+        def snapshot(edge,ipv4):
+            return inspect_telegram_migration(
+                self.fx.db,selection,now=NOW,
+                uid_lookup=lambda name:self.fx.uids[name],
+                source_provider=lambda name:LiveIngressWitness(
+                    name,edge,ipv4,NOW-1,"INDEPENDENT_LIVE",
+                ),
+                session_provider=lambda n,u:0,geteuid=lambda:1000,
+            )
+        def callbacks(rows):
+            return [callback for row in rows for _,callback in row]
+        unavailable=snapshot("s8",SOURCE)
+        available=snapshot("e9",TARGET)
+        prepare="hpeg_m4_prepare_e9"
+        self.assertNotIn(prepare,callbacks(preview_buttons("e9")))
+        self.assertNotIn(prepare,callbacks(
+            preview_buttons("e9",inventory=unavailable)))
+        self.assertIn(prepare,callbacks(
+            preview_buttons("e9",inventory=available)))
+        with self.assertRaisesRegex(M4UIHold,"SELECTION_INVALID"):
+            preview_buttons("e8",inventory=available)
+
     def test_independent_source_session_and_f4_preview_never_executes(self):
         selection=select_input("SINGLE","nvl0555","e9")
         witness=lambda name:LiveIngressWitness(
@@ -144,6 +168,7 @@ class M4BotBindingTests(unittest.TestCase):
         self.assertLess(handler.index("if role != 'admin':"),
                         handler.index("k2_m4_readonly_preview"))
         self.assertIn("k2_m4_preview_html",handler)
+        self.assertIn('inventory=(inventory if action=="refresh" else None)',handler)
         self.assertNotIn("Existing6GGuardedExecutor(",handler)
         self.assertNotIn("run_migration_wave(",handler)
         self.assertNotIn("subprocess",handler)
@@ -155,6 +180,7 @@ class M4BotBindingTests(unittest.TestCase):
         self.assertLess(handler.index("if role != 'admin':"),
                         handler.index("k2_m4_readonly_preview"))
         self.assertIn("k2_m4_select_input(mode,text,target)",handler)
+        self.assertIn("k2_m4_preview_buttons(target, inventory=inventory)",handler)
         self.assertNotIn("ExecutionTicket",handler)
         self.assertNotIn("passwd",handler)
 

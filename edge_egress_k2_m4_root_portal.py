@@ -110,6 +110,11 @@ class RootMigrationPortal:
                or member.source_edge_id != member.target_edge_id
                for member in plan.members):
             raise RootPortalHold("M4_CROSS_EDGE_ATTACH_NOT_RELEASED")
+        # P3 UID_ENROLL_SOURCE is explicitly constrained to the unchanged
+        # Legacy global setting (0). Check *before* creating an approval;
+        # never switch the shared protected mode on behalf of one UID.
+        if self.current_protected_mode() != "0":
+            raise RootPortalHold("M4_SAME_EDGE_REQUIRES_LEGACY_MODE")
         if self.physical_f4(plan) is not True:
             raise RootPortalHold("M4_PHYSICAL_F4_REQUIRED")
         now=self.clock()
@@ -142,6 +147,8 @@ class RootMigrationPortal:
         new_plan=build_wave_plan(refreshed)
         if new_plan.digest!=plan.digest:
             raise RootPortalHold("M4_SELECTED_WAVE_CHANGED")
+        if self.current_protected_mode() != "0":
+            raise RootPortalHold("M4_MODE_CHANGED_BEFORE_EXECUTE")
         if self.physical_f4(plan) is not True:
             raise RootPortalHold("M4_F4_EXPIRED_BEFORE_EXECUTE")
         # The root DB consumes exactly this actor/chat/plan approval BEFORE

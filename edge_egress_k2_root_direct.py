@@ -156,11 +156,45 @@ class RootDirectOperatorClient:
             self._executing=False
 
 
-def bound_root_client(application) -> RootDirectOperatorClient:
-    """Resolve the explicit singleton of the EXISTING bot, no auto factory."""
-    bot_data=getattr(application,"bot_data",None)
-    client=(bot_data.get("k2_root_direct_client")
-            if isinstance(bot_data,dict) else None)
-    if type(client) is not RootDirectOperatorClient:
-        raise M43ClientHold("K2_ROOT_DIRECT_NOT_REGISTERED")
+# Process-private root authority MUST NEVER enter application.bot_data or
+# PTB PicklePersistence (where HMAC secrets and execution callbacks may leak).
+# Registration is explicit at reviewed Core startup; one bot poller only.
+_ACTIVE_APPLICATION = None
+_ACTIVE_CLIENT: RootDirectOperatorClient | None = None
+
+
+def register_root_portal(
+    application, *, portal: RootMigrationPortal,
+    geteuid: Callable[[], int] = os.geteuid,
+    released: bool = False,
+) -> RootDirectOperatorClient:
+    """Bind one reviewed root portal to the existing in-memory bot instance.
+
+    No dynamic import, SSH command, socket, arbitrary Telegram factory, or
+    alternate 6G lease. Reject duplicate registration and restart attempts.
+    """
+    global _ACTIVE_APPLICATION, _ACTIVE_CLIENT
+    if (not K2_ROOT_DIRECT_ENABLED or released is not True
+        or not callable(geteuid) or geteuid()!=0
+        or not isinstance(portal,RootMigrationPortal)
+        or portal.release_enabled is not True
+        or portal.geteuid()!=0
+        or application is None
+        or not isinstance(getattr(application,"bot_data",None),dict)
+        or _ACTIVE_CLIENT is not None):
+        raise M43ClientHold("K2_ROOT_DIRECT_BIND_NOT_ACCEPTED")
+    client=RootDirectOperatorClient(
+        portal=portal,geteuid=geteuid,released=True,
+    )
+    _ACTIVE_APPLICATION=application
+    _ACTIVE_CLIENT=client
     return client
+
+
+def bound_root_client(application) -> RootDirectOperatorClient:
+    """Only the registered same-process bot may use the reviewed root port."""
+    if (not K2_ROOT_DIRECT_ENABLED
+        or application is None or application is not _ACTIVE_APPLICATION
+        or type(_ACTIVE_CLIENT) is not RootDirectOperatorClient):
+        raise M43ClientHold("K2_ROOT_DIRECT_NOT_REGISTERED")
+    return _ACTIVE_CLIENT

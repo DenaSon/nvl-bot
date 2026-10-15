@@ -21,8 +21,11 @@ class SingleCrossEdgeSocketIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.fx=M45FullIntegrationTests(
             methodName="test_real_socket_full_green_p3_6g_checkpoint_and_root_readback"
         )
+        # The nested IsolatedAsyncioTestCase has no own asyncio runner.
+        # Register EVERY existing M45 cleanup with this active test runner,
+        # otherwise its patch.stop raises before restoring global release flags.
+        self.fx.addCleanup=self.addCleanup
         self.fx.setUp()
-        self.addCleanup(self.fx.doCleanups)
         self.fx.portal.review=self.review
         for flag in (
             "edge_egress_k2_m3_waves.M3_CROSS_EDGE_LEGACY_SINGLE_ENABLED",

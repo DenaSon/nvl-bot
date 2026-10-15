@@ -139,6 +139,7 @@ class M4OperatorReadOnlyTests(unittest.TestCase):
         self.assertFalse(unknown.inventory_clear)
 
     def test_prepare_button_requires_fresh_same_ingress_preview(self):
+        from unittest.mock import patch
         selection=select_input("SINGLE","nvl0555","e9")
         def snapshot(edge,ipv4):
             return inspect_telegram_migration(
@@ -157,8 +158,14 @@ class M4OperatorReadOnlyTests(unittest.TestCase):
         self.assertNotIn(prepare,callbacks(preview_buttons("e9")))
         self.assertNotIn(prepare,callbacks(
             preview_buttons("e9",inventory=unavailable)))
-        self.assertIn(prepare,callbacks(
+        # A valid source-only preview is NEVER a released root IPC
+        # execution path: the original bot remains UID 0 and worker OFF.
+        self.assertNotIn(prepare,callbacks(
             preview_buttons("e9",inventory=available)))
+        with patch("edge_egress_k2_m4_telegram._operator_runtime_released",
+                   return_value=True):
+            self.assertIn(prepare,callbacks(
+                preview_buttons("e9",inventory=available)))
         with self.assertRaisesRegex(M4UIHold,"SELECTION_INVALID"):
             preview_buttons("e8",inventory=available)
 
@@ -180,9 +187,17 @@ class M4OperatorReadOnlyTests(unittest.TestCase):
             ) for _,callback in row
         ))
         with patch("edge_egress_k2_m4_root_portal.M4_CROSS_EDGE_SINGLE_ENABLED",True):
-            actions=[callback for row in preview_buttons(
-                "e9",inventory=observed
-            ) for _,callback in row]
+            # A sole M4 root flag must not pretend the root worker, original
+            # P3, nonroot bot and IPC are running.
+            self.assertNotIn(prepare,[
+                callback for row in preview_buttons("e9",inventory=observed)
+                for _,callback in row
+            ])
+            with patch("edge_egress_k2_m4_telegram._operator_runtime_released",
+                       return_value=True):
+                actions=[callback for row in preview_buttons(
+                    "e9",inventory=observed
+                ) for _,callback in row]
             self.assertIn(prepare,actions)
             self.assertIn("آماده بررسی: <b>1</b>",preview_html(observed))
         batch=select_input("BATCH","nvl0555 nvl0557","e9")
@@ -199,6 +214,26 @@ class M4OperatorReadOnlyTests(unittest.TestCase):
                 "e9",inventory=observed_batch
             ) for _,callback in row]
             self.assertNotIn(prepare,actions)
+
+    def test_default_runtime_unavailable_even_for_valid_same_edge(self):
+        from edge_egress_k2_m3_waves import build_wave_plan
+        from edge_egress_k2_m4_telegram import _operator_runtime_released
+        selection=select_input("SINGLE","nvl0555","e9")
+        reviewed=inspect_telegram_migration(
+            self.fx.db,selection,now=NOW,
+            uid_lookup=lambda name:self.fx.uids[name],
+            source_provider=lambda name:LiveIngressWitness(
+                name,"e9",TARGET,NOW-1,"INDEPENDENT_LIVE",
+            ),
+            session_provider=lambda *_:0,geteuid=lambda:1000,
+        )
+        self.assertFalse(_operator_runtime_released(
+            build_wave_plan(reviewed,wave_size=1),
+        ))
+        self.assertNotIn("hpeg_m4_prepare_e9",[
+            code for row in preview_buttons("e9",inventory=reviewed)
+            for _,code in row
+        ])
 
     def test_independent_source_session_and_f4_preview_never_executes(self):
         selection=select_input("SINGLE","nvl0555","e9")

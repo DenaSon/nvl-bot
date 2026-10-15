@@ -24,6 +24,8 @@ MAX_BINDING_BYTES = 262144
 
 # Original-6G P3 precommit-only policy stage. Inert until root host acceptance.
 K2_M4_POLICY_STAGE_ENABLED = False
+# Explicit, one-time root provisioning only. Never a Telegram auto-create.
+K2_ROOT_POLICY_INIT_ENABLED = False
 _EDGE = re.compile(r"[a-z][a-z0-9_-]{1,23}\Z")
 _USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
 FIELDS = frozenset(("username", "uid", "ingress_edge", "ingress_ipv4",
@@ -384,3 +386,46 @@ def stage_6g_cross_edge_binding(
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def initialize_empty_root_policy(*, geteuid=None,
+                                 release_enabled: bool = False) -> None:
+    """Create absent V2 policy with O_EXCL+0600 and durable directory fsync.
+
+    This is a separately approved deployment/setup operation, NOT a migration
+    fallback. A present, swapped, or corrupt root policy always raises HOLD.
+    Existing protected clients and other UIDs are never overwritten.
+    """
+    import os
+    if geteuid is None:
+        geteuid = os.geteuid
+    if (not K2_ROOT_POLICY_INIT_ENABLED or release_enabled is not True
+        or not callable(geteuid) or geteuid() != 0):
+        raise IngressEgressHold("K2_ROOT_POLICY_INIT_NOT_RELEASED")
+    try:
+        _trusted_directory(ROOT_BINDINGS.parent)
+        if ROOT_BINDINGS.exists() or ROOT_BINDINGS.is_symlink():
+            raise IngressEgressHold("K2_ROOT_POLICY_ALREADY_EXISTS")
+        payload = b'{"version":2,"bindings":[]}\n'
+        parse_uid_ingress_egress_bindings(payload)
+        fd = os.open(
+            ROOT_BINDINGS, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+            getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        with os.fdopen(fd, "wb") as output:
+            os.fchmod(output.fileno(), 0o600)
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        parent_fd = os.open(
+            ROOT_BINDINGS.parent, os.O_RDONLY | os.O_DIRECTORY
+        )
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+        if _trusted_bytes(ROOT_BINDINGS, MAX_BINDING_BYTES) != payload:
+            raise IngressEgressHold("K2_ROOT_POLICY_INIT_UNVERIFIED")
+    except OSError as exc:
+        raise IngressEgressHold("K2_ROOT_POLICY_INIT_FAILED") from exc

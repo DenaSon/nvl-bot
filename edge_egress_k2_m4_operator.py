@@ -16,7 +16,8 @@ from edge_egress_k2_migration_inventory import (
     MigrationSelection, MigrationInventory, preview_migration,
 )
 from edge_egress_k2_m2_ingress_journal import (
-    DurableIngressHold, make_m1_readonly_ingress_provider,
+    DurableIngressHold, RootReadOnlyIngressEvidence,
+    make_m1_readonly_ingress_provider,
 )
 
 
@@ -51,8 +52,13 @@ def inspect_telegram_migration(
         raise ValueError("M4_INGRESS_PROVIDER_UNTRUSTED")
     if session_provider is not None and not callable(session_provider):
         raise ValueError("M4_SESSION_PROVIDER_UNTRUSTED")
+    # Only the fixed root-owned PAM/WG source class can supply ingress-only
+    # Edge identities. Ordinary Telegram providers never get this privilege.
+    peers=(source_provider.peers
+           if type(source_provider) is RootReadOnlyIngressEvidence else None)
     return preview_migration(
         db_conn,selection,os_uid=uid_fn,
         ingress_witness=source_provider,
         session_count=session_provider,now=ts,
+        trusted_ingress_peers=peers,
     )

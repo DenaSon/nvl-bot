@@ -177,6 +177,42 @@ def verify_readonly_cross_edge_ingress(
         return False
 
 
+
+def probe_root_cross_edge_ingress(
+    row: RuntimeBinding, pam_rhost: str, installed_guard_sha256: str,
+) -> bool:
+    """Read-only PAM-side proof for a committed cross-Edge PROTECTED UID.
+
+    This is not a migration writer or release flag. The exact installed
+    guard digest is supplied by the already-verified V1 roster/manifest.
+    No historical host, default Edge, DNS or Telegram input can authorize
+    an alternate ingress.
+    """
+    if (type(row) is not RuntimeBinding or row.state != "PROTECTED"
+        or type(installed_guard_sha256) is not str):
+        return False
+    try:
+        import subprocess
+        from edge_egress_v1_ingress import load_registry
+        binding = load_root_uid_ingress_egress_bindings().get(row.username)
+        if binding is None:
+            return False
+        peers = load_registry()
+        result = subprocess.run(
+            ["wg", "show", "wg0", "allowed-ips"],
+            text=True, capture_output=True, timeout=3, check=False,
+        )
+        return (result.returncode == 0
+                and verify_readonly_cross_edge_ingress(
+                    policy=binding, runtime=row,
+                    installed_guard_sha256=installed_guard_sha256,
+                    pam_rhost=pam_rhost, peers=peers,
+                    wg_allowed_ips=result.stdout,
+                ))
+    except (OSError, ValueError, TypeError, subprocess.TimeoutExpired):
+        return False
+
+
 def load_root_uid_ingress_egress_bindings(
     path: Path = ROOT_BINDINGS,
 ) -> dict[str, UIDIngressEgressBinding]:

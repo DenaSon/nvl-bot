@@ -27,6 +27,8 @@ from edge_egress_p3_executor import (
 )
 
 M3_WAVE_EXECUTION_ENABLED = False
+# Single verified cross-Edge transfer in unchanged Legacy global mode only.
+M3_CROSS_EDGE_LEGACY_SINGLE_ENABLED = False
 MAX_WAVE_SIZE = 10
 MAX_APPROVAL_AGE_SECONDS = 300
 
@@ -248,6 +250,24 @@ def m4_same_ingress_reviewed(plan: MigrationWavePlan) -> bool:
     )
 
 
+def m4_cross_edge_single_reviewed(plan: MigrationWavePlan) -> bool:
+    """One attested ingress->different egress. Not batch/F4 authorisation."""
+    _assert_plan(plan)
+    return (
+        plan.selection.mode == "SINGLE"
+        and len(plan.members) == 1
+        and not plan.global_blockers and not plan.blocked
+        and plan.wave_size >= 1
+        and all(
+            m.source_proven and m.active_sessions == 0
+            and m.source_edge_id != m.target_edge_id
+            and m.source_ipv4 != m.target_ipv4
+            and m.protected_edge_id == ""
+            for m in plan.members
+        )
+    )
+
+
 def _approval_message(plan: MigrationWavePlan, actor_id: int,
                       chat_id: int, expires_at: int) -> bytes:
     return json.dumps((plan.digest,actor_id,chat_id,expires_at),
@@ -412,9 +432,12 @@ async def run_migration_wave(
                 raise MigrationWaveHold("M3_PROTECTED_MODE_NOT_ATTESTED")
             if (scope.action=="UID_ENROLL_SOURCE" and mode!="0"):
                 raise MigrationWaveHold("M3_SAME_EDGE_REQUIRES_LEGACY_MODE")
-            if (scope.action=="UID_ATTACH" and mode!="1"):
-                # Existing P3 UID_ATTACH rejects mode 0. Do NOT switch
-                # the global mode of 425 mixed Legacy users for one UID.
+            if scope.action=="UID_ATTACH" and mode=="0":
+                if (not M3_CROSS_EDGE_LEGACY_SINGLE_ENABLED
+                    or not m4_cross_edge_single_reviewed(plan)):
+                    raise MigrationWaveHold(
+                        "M3_CROSS_EDGE_REQUIRES_SEPARATE_PROTECTED_ACCEPTANCE")
+            elif scope.action=="UID_ATTACH" and mode!="1":
                 raise MigrationWaveHold(
                     "M3_CROSS_EDGE_REQUIRES_SEPARATE_PROTECTED_ACCEPTANCE")
             ticket=issue_single_ticket(scope,actor_id,chat_id)

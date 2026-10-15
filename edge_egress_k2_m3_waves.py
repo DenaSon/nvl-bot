@@ -226,6 +226,28 @@ def build_wave_plan(inventory: MigrationInventory, *,
     return result
 
 
+def m4_same_ingress_reviewed(plan: MigrationWavePlan) -> bool:
+    """Pure M4 live factory admission contract, never proof of physical F4.
+
+    Legacy cross-edge UID_ATTACH is valid as a *concept* in original P3,
+    but no reviewed M4 host port currently accepts it in mixed Legacy mode.
+    The same criterion must be used by both Telegram preview and root PREPARE
+    so operators cannot see an executable approval for an impossible move.
+    """
+    _assert_plan(plan)
+    return (
+        bool(plan.members) and not plan.global_blockers
+        and not plan.blocked
+        and all(
+            m.source_proven
+            and m.source_edge_id == m.target_edge_id
+            and m.source_ipv4 == m.target_ipv4
+            and m.protected_edge_id == ""
+            for m in plan.members
+        )
+    )
+
+
 def _approval_message(plan: MigrationWavePlan, actor_id: int,
                       chat_id: int, expires_at: int) -> bytes:
     return json.dumps((plan.digest,actor_id,chat_id,expires_at),

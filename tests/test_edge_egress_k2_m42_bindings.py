@@ -134,6 +134,26 @@ class TrustedRootFactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("SOURCE_INGRESS_NOT_ATTESTED",
                       next(a for a in inv.accounts if a.selected).issues)
 
+    def test_root_p3_ticket_rejects_signed_source_scope_mismatch(self):
+        # The M1 inventory uses the external source observer, but a signed
+        # P3 proof still must be independently bound to this exact scope.
+        original=self.bind.review
+        selection=self.selection
+        trusted=original(selection)
+        self.bind.review=lambda s:trusted
+        self.evidence=SignedExternalEvidence(
+            "a"*64,NOW-1,NOW+15,"e9",TARGET,REQUIRED_CHECKS,
+            (WitnessAccount("nvl0555",1636,"s8","172.86.111.69",0),),
+        )
+        scope=b.ExecutionScope(
+            "UID_ENROLL_SOURCE","e9",TARGET,TARGET,
+            username="nvl0555",uid=1636,
+        )
+        with self.assertRaisesRegex(Exception,"SESSION_SCOPE"):
+            self.bind.issue_ticket(scope,11,-222)
+        self.assertEqual(self.bind._outstanding,{})
+        self.assertEqual(self.called,[])
+
     def test_physical_f4_requires_correct_scope_and_current_readiness(self):
         plan=build_wave_plan(self.bind.review(self.selection))
         self.assertTrue(self.bind.physical_f4(plan))

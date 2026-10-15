@@ -23,7 +23,9 @@ from edge_egress_k2_m4_root_worker import _read_checked, _verify_root_directory
 from edge_egress_k2_m4_root_portal import RootMigrationPortal
 from edge_egress_k2_m4_checkpoint import DurableWaveCheckpoint
 from edge_egress_k2_m4_operator import inspect_telegram_migration
-from edge_egress_k2_m2_ingress_journal import make_m1_readonly_ingress_provider
+from edge_egress_k2_m2_ingress_journal import (
+    RootReadOnlyIngressEvidence, make_m1_readonly_ingress_provider,
+)
 from edge_egress_k2_m42_evidence import (
     M42EvidenceHold, SignedExternalEvidence, load_external_evidence,
 )
@@ -234,6 +236,11 @@ class RootM42Bindings:
             self.ports.db_conn, selected, now=now,
             uid_lookup=self.ports.os_uid, source_provider=source,
             session_provider=count, geteuid=self.ports.geteuid,
+            root_ingress_peers=(
+                sources.peers if type(sources) is RootReadOnlyIngressEvidence
+                and self.ports.ingress_provider is make_m1_readonly_ingress_provider
+                else None
+            ),
         )
         evidence.verify_target(
             selected.target_edge_id, result.target_ipv4, selected.usernames,

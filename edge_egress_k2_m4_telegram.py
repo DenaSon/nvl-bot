@@ -152,11 +152,23 @@ def preview_html(inventory: MigrationInventory) -> str:
     return "\n".join(lines)
 
 
-def preview_buttons(edge_id: str):
+def preview_buttons(edge_id: str, *,
+                    inventory: MigrationInventory | None = None):
     if not _EDGE.fullmatch(edge_id):
         raise M4UIHold("EDGE_INVALID")
+    # Default deny: status and post-confirmation views cannot reuse an
+    # earlier preview to mint an actionable approval. A fresh, exact M1
+    # inventory is required to display the PREPARE button at all.
+    reviewed=False
+    if inventory is not None:
+        if (not isinstance(inventory,MigrationInventory)
+            or inventory.selection.target_edge_id != edge_id):
+            raise M4UIHold("PREVIEW_SELECTION_INVALID")
+        plan=build_wave_plan(inventory,wave_size=MAX_INPUT_UIDS)
+        reviewed=m4_same_ingress_reviewed(plan)
     return _button_rows(
-        (("🔐 درخواست تأیید",f"hpeg_m4_prepare_{edge_id}"),),
+        (("🔐 درخواست تأیید",f"hpeg_m4_prepare_{edge_id}"),)
+        if reviewed else (),
         (("🔄 بررسی دوباره",f"hpeg_m4_refresh_{edge_id}"),
          ("📋 وضعیت",f"hpeg_m4_status_{edge_id}")),
         (("👥 انتخاب جدید",f"hpeg_m4_home_{edge_id}"),

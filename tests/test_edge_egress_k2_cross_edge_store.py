@@ -129,6 +129,74 @@ class CrossEdgeStoreTests(unittest.TestCase):
             ).fetchone(), (SOURCE,))
             self.assertIsNone(read_binding(db, "nvl0558"))
 
+    def test_historical_host_may_differ_from_independently_proven_ingress(self):
+        # M1 already accepts this mismatch: root PAM+wg0 is the live source,
+        # ssh_accounts.host is stale metadata. Only this cross-Edge store
+        # may use it; the original default/DNS owner gate remains unchanged.
+        historical = "104.194.144.195"
+        with self.fx.db() as db:
+            db.execute(
+                "UPDATE ssh_accounts SET host=? WHERE username='nvl0557'",
+                (historical,),
+            )
+        with patch(
+            "edge_egress_uid_runtime_store.K2_CROSS_EDGE_RUNTIME_STORE_ENABLED",
+            True,
+        ):
+            store = self.store()
+            reserved = store.reserve_blocked(
+                self.op, self.fx.uid_req, source=SOURCE, dns_port=10553,
+            )
+        self.assertEqual(reserved.state,"BLOCKED")
+        with self.fx.db() as db:
+            self.assertEqual(
+                db.execute(
+                    "SELECT host FROM ssh_accounts WHERE username='nvl0557'"
+                ).fetchone(),(historical,),
+            )
+            self.assertEqual(
+                db.execute(
+                    "SELECT value FROM settings WHERE key='dns_current_ip'"
+                ).fetchone(),("8.8.8.8",),
+            )
+
+    def test_historical_metadata_does_not_bypass_live_source_witness(self):
+        with self.fx.db() as db:
+            db.execute(
+                "UPDATE ssh_accounts SET host=? WHERE username='nvl0557'",
+                ("104.194.144.195",),
+            )
+        bad = self._fresh(allowed=self.key+" 10.77.0.9/32\\n")
+        with patch(
+            "edge_egress_uid_runtime_store.K2_CROSS_EDGE_RUNTIME_STORE_ENABLED",
+            True,
+        ):
+            with self.assertRaises(RuntimeStoreUnsafe):
+                self.store(source_evidence=lambda:bad).reserve_blocked(
+                    self.op,self.fx.uid_req,source=SOURCE,dns_port=10553,
+                )
+        self.assertIsNone(self.fx.binding())
+
+    def test_multiple_legacy_account_rows_cannot_reserve_same_uid(self):
+        with self.fx.db() as db:
+            row = db.execute(
+                "SELECT host,service_type,status FROM ssh_accounts "
+                "WHERE username='nvl0557'",
+            ).fetchone()
+            db.execute(
+                "INSERT INTO ssh_accounts(username,host,service_type,status)"
+                " VALUES (?,?,?,?)",("nvl0557",)+row,
+            )
+        with patch(
+            "edge_egress_uid_runtime_store.K2_CROSS_EDGE_RUNTIME_STORE_ENABLED",
+            True,
+        ):
+            with self.assertRaisesRegex(RuntimeStoreUnsafe,"LEGACY_ACCOUNT_CHANGED"):
+                self.store().reserve_blocked(
+                    self.op,self.fx.uid_req,source=SOURCE,dns_port=10553,
+                )
+        self.assertIsNone(self.fx.binding())
+
     def test_no_untrusted_source_or_nonce_can_reserve(self):
         scenarios = (
             {"source_evidence": lambda: object()},

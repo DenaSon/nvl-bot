@@ -77,12 +77,18 @@ class GuardedCrossEdgeUIDPort:
             raise CrossEdgeUIDHold("K2_CROSS_EDGE_LIVE_INVENTORY_MISSING")
         plan = build_wave_plan(fresh, wave_size=1)
         chosen = plan.members[0] if len(plan.members) == 1 else None
-        # A committed UID is expected to be PROTECTED, so M1 reports
-        # TARGET_ALREADY_PROTECTED. Other changes remain fatal.
+        # On success M1 correctly reports *both* target protection and
+        # source drift: ingress stays on the old Edge while F2 egress has
+        # changed to the new Edge. This exact pair is permitted only after
+        # original P3 independently verified the UID and while this 6G
+        # nonce/op are still RUNNING. Any other issue remains fatal.
+        committed_blockers = (
+            "TARGET_ALREADY_PROTECTED", "PROTECTED_SOURCE_DRIFT"
+        )
         if (not plan.selection.mode == "SINGLE"
             or any(x != "SHARED_6G_BUSY" for x in plan.global_blockers)
             or chosen is None or not fresh.target_f4_accepted
-            or (chosen.blockers != ("TARGET_ALREADY_PROTECTED",)
+            or (chosen.blockers != committed_blockers
                 if committed else chosen.blockers != ())
             or chosen.username != member.username or chosen.uid != member.uid
             or chosen.source_edge_id != member.source_edge_id

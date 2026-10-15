@@ -18,7 +18,8 @@ from edge_egress_k2_migration_inventory import (
 )
 from edge_egress_k2_m3_waves import (
     MigrationWavePlan, WaveApproval, WaveReport, MigrationWaveHold,
-    build_wave_plan, sign_wave_approval, verify_wave_approval,
+    build_wave_plan, m4_same_ingress_reviewed,
+    sign_wave_approval, verify_wave_approval,
     run_migration_wave,
 )
 from edge_egress_p3_executor import ExecutionScope, ExecutionTicket, ExecutionReceipt
@@ -106,9 +107,7 @@ class RootMigrationPortal:
         # no reviewed Legacy mixed-mode root host adapter in M4. Never
         # manufacture a 90-second operator approval / durable PREPARED row
         # for an action that the live factory will inevitably reject.
-        if any(member.source_ipv4 != member.target_ipv4
-               or member.source_edge_id != member.target_edge_id
-               for member in plan.members):
+        if not m4_same_ingress_reviewed(plan):
             raise RootPortalHold("M4_CROSS_EDGE_ATTACH_NOT_RELEASED")
         # P3 UID_ENROLL_SOURCE is explicitly constrained to the unchanged
         # Legacy global setting (0). Check *before* creating an approval;
@@ -139,9 +138,7 @@ class RootMigrationPortal:
         )
         if len(plan.members)>10 or plan.global_blockers or plan.blocked:
             raise RootPortalHold("M4_PLAN_CHANGED_OR_BLOCKED")
-        if any(member.source_ipv4 != member.target_ipv4
-               or member.source_edge_id != member.target_edge_id
-               for member in plan.members):
+        if not m4_same_ingress_reviewed(plan):
             raise RootPortalHold("M4_CROSS_EDGE_ATTACH_NOT_RELEASED")
         refreshed=self.review(plan.selection)
         new_plan=build_wave_plan(refreshed)

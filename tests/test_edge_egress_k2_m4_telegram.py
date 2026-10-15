@@ -162,6 +162,44 @@ class M4OperatorReadOnlyTests(unittest.TestCase):
         with self.assertRaisesRegex(M4UIHold,"SELECTION_INVALID"):
             preview_buttons("e8",inventory=available)
 
+    def test_cross_edge_single_prepare_display_requires_root_gate(self):
+        from unittest.mock import patch
+        selection=select_input("SINGLE","nvl0555","e9")
+        observed=inspect_telegram_migration(
+            self.fx.db,selection,now=NOW,
+            uid_lookup=lambda name:self.fx.uids[name],
+            source_provider=lambda name:LiveIngressWitness(
+                name,"s8",SOURCE,NOW-1,"INDEPENDENT_LIVE",
+            ),
+            session_provider=lambda *_:0,geteuid=lambda:1000,
+        )
+        prepare="hpeg_m4_prepare_e9"
+        self.assertFalse(any(
+            callback==prepare for row in preview_buttons(
+                "e9",inventory=observed
+            ) for _,callback in row
+        ))
+        with patch("edge_egress_k2_m4_root_portal.M4_CROSS_EDGE_SINGLE_ENABLED",True):
+            actions=[callback for row in preview_buttons(
+                "e9",inventory=observed
+            ) for _,callback in row]
+            self.assertIn(prepare,actions)
+            self.assertIn("آماده بررسی: <b>1</b>",preview_html(observed))
+        batch=select_input("BATCH","nvl0555 nvl0557","e9")
+        observed_batch=inspect_telegram_migration(
+            self.fx.db,batch,now=NOW,
+            uid_lookup=lambda name:self.fx.uids[name],
+            source_provider=lambda name:LiveIngressWitness(
+                name,"s8",SOURCE,NOW-1,"INDEPENDENT_LIVE",
+            ),
+            session_provider=lambda *_:0,geteuid=lambda:1000,
+        )
+        with patch("edge_egress_k2_m4_root_portal.M4_CROSS_EDGE_SINGLE_ENABLED",True):
+            actions=[callback for row in preview_buttons(
+                "e9",inventory=observed_batch
+            ) for _,callback in row]
+            self.assertNotIn(prepare,actions)
+
     def test_independent_source_session_and_f4_preview_never_executes(self):
         selection=select_input("SINGLE","nvl0555","e9")
         witness=lambda name:LiveIngressWitness(

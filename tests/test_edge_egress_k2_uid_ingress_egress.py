@@ -89,7 +89,7 @@ class K2UIDIngressEgressTests(unittest.TestCase):
         )
         source=IngressPeer("s8",SRC,"10.77.0.8",KEY)
         peers=(source,)
-        live=KEY+" 10.77.0.8/32\\n"
+        live=KEY+" 10.77.0.8/32\n"
         self.assertTrue(verify_readonly_cross_edge_ingress(
             policy=policy,runtime=runtime,
             installed_guard_sha256="f"*64,pam_rhost="10.77.0.8",
@@ -109,7 +109,7 @@ class K2UIDIngressEgressTests(unittest.TestCase):
         source=IngressPeer("s8",SRC,"10.77.0.8",KEY)
         kwargs=dict(policy=policy,runtime=runtime,
                     installed_guard_sha256="f"*64,pam_rhost="10.77.0.8",
-                    peers=(source,),wg_allowed_ips=KEY+" 10.77.0.8/32\\n")
+                    peers=(source,),wg_allowed_ips=KEY+" 10.77.0.8/32\n")
         variants=[
             dict(pam_rhost="10.77.0.9"),
             dict(pam_rhost="209.200.246.198"),
@@ -118,10 +118,10 @@ class K2UIDIngressEgressTests(unittest.TestCase):
             dict(peers=(IngressPeer("s8",DST,"10.77.0.8",KEY),)),
             dict(peers=(IngressPeer("s8",SRC,"10.77.0.8",FOREIGN_KEY),)),
             dict(peers=(source,source)),
-            dict(wg_allowed_ips=FOREIGN_KEY+" 10.77.0.8/32\\n"),
-            dict(wg_allowed_ips=KEY+" 10.77.0.0/24\\n"),
-            dict(wg_allowed_ips=KEY+" 10.77.0.8/32\\n"+
-                 FOREIGN_KEY+" 10.77.0.0/24\\n"),
+            dict(wg_allowed_ips=FOREIGN_KEY+" 10.77.0.8/32\n"),
+            dict(wg_allowed_ips=KEY+" 10.77.0.0/24\n"),
+            dict(wg_allowed_ips=KEY+" 10.77.0.8/32\n"+
+                 FOREIGN_KEY+" 10.77.0.0/24\n"),
             dict(runtime=RuntimeBinding(
                 "nvl0555",1636,"e9",DST,20009,1780,10553,
                 "PROTECTED",4,44)),

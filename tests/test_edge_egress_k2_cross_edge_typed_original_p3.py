@@ -11,7 +11,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from edge_egress_k2_m3_waves import MigrationMember
+from edge_egress_k2_m3_waves import build_wave_plan
 from edge_egress_k2_m4_cross_edge_port import (
     GuardedCrossEdgeUIDPort, CrossEdgeUIDHold,
 )
@@ -34,10 +34,12 @@ class TypedOriginalP3CrossEdgeTests(unittest.TestCase):
         self.addCleanup(self.h.doCleanups)
         self.scope=self.h.harness.scope
         self.ticket=self.h.harness.ticket
-        self.member=MigrationMember(
-            "nvl0557",1644,SOURCE,"s8",SOURCE,True,
-            "fra1",TARGET,"",0,(),
-        )
+        # Use the actual immutable member from original M1 plan, never
+        # synthesize historical/source fields that can silently disagree.
+        self.member=build_wave_plan(
+            self.preview(select_migration("SINGLE",("nvl0557",),"fra1")),
+            wave_size=1,
+        ).members[0]
         self.port=GuardedCrossEdgeUIDPort(
             member=self.member,scope=self.scope,ticket=self.ticket,
             uid_port=self.h.port,db_conn=self.h.base.conn_factory,

@@ -52,6 +52,7 @@ PINNED_SOURCE_FILES = frozenset((
     "edge_egress_v1_admission.py",
     "edge_egress_v1_ingress.py",
     "edge_egress_k2_uid_ingress_egress.py",
+    "edge_egress_uid_runtime_store.py",
     "edge_egress_k2_m4_checkpoint.py",
     "edge_egress_k2_m3_waves.py",
     "edge_egress_k2_m3_journal.py",

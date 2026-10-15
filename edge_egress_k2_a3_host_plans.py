@@ -302,6 +302,17 @@ class RootOwnedUIDSnapshotSource:
             or reviewed.kind == "NEXT_UID"
                and not isinstance(reviewed.plan, MultiUIDAppendPlan)):
             raise A3PlanHold("A3_SNAPSHOT_M2_PLAN_UNTRUSTED")
+        # Reject an internally inconsistent First/Nth plan even when its
+        # nominal scope is correct. Original M2 rechecks these pins under 6G.
+        if reviewed.kind == "FIRST_UID":
+            plan_pam = reviewed.plan.pam_before_sha256
+            plan_module = reviewed.plan.module_sha256
+        else:
+            plan_pam = reviewed.plan.pam_digest
+            plan_module = reviewed.plan.module_digest
+        if (plan_pam != reviewed.original_pam_sha256
+            or plan_module != reviewed.installed_module_sha256):
+            raise A3PlanHold("A3_SNAPSHOT_ROOT_PLAN_DIGEST_DRIFT")
         # Re-open root PAM with no-follow immediately before building a
         # deferred bootstrap; original M2 rechecks again under its 6G lock.
         pam = _read_checked(PAM, maximum=131072, strict=False)

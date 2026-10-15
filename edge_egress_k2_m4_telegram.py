@@ -13,7 +13,8 @@ from typing import Iterable
 from edge_egress_k2_migration_inventory import (
     MigrationInventory, MigrationInventoryHold, select_migration,
 )
-from edge_egress_k2_m3_waves import MigrationWavePlan, build_wave_plan
+from edge_egress_k2_m3_waves import (MigrationWavePlan, build_wave_plan,
+                                      m4_same_ingress_reviewed)
 
 MAX_INPUT_UIDS = 10
 _NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
@@ -113,23 +114,39 @@ def preview_html(inventory: MigrationInventory) -> str:
     plan=build_wave_plan(inventory,wave_size=MAX_INPUT_UIDS)
     chosen=tuple(plan.members)
     total=len(chosen)
-    held=total-plan.ready_count
+    # Match the actual reviewed M4 live host factory, not the broader M1
+    # read-only inventory. Cross-Edge sources are NOT executable in M4.
+    can_stage=m4_same_ingress_reviewed(plan)
+    ready=sum(
+        m.selectable and not plan.global_blockers
+        and m.source_proven and m.source_edge_id==m.target_edge_id
+        and m.source_ipv4==m.target_ipv4 and not m.protected_edge_id
+        for m in chosen
+    )
+    held=total-ready
     title="یک کاربر" if inventory.selection.mode=="SINGLE" else "گروه کاربران"
     lines=[
         "🔎 <b>بررسی انتقال</b>","",
         f"انتخاب: <b>{title}</b>",
         f"سرور مقصد: <code>{_safe(inventory.selection.target_edge_id)}</code>",
-        f"آماده بررسی: <b>{plan.ready_count}</b>",
+        f"آماده بررسی: <b>{ready}</b>",
         f"نیازمند بررسی: <b>{held}</b>","",
     ]
     for member in chosen:
-        sign="✅" if member.selectable and not plan.global_blockers else "⛔️"
+        same_ingress=(member.source_proven
+                      and member.source_edge_id==member.target_edge_id
+                      and member.source_ipv4==member.target_ipv4
+                      and not member.protected_edge_id)
+        sign="✅" if member.selectable and not plan.global_blockers and same_ingress else "⛔️"
         lines.append(f"{sign} <code>{_safe(member.username)}</code> — "+
                      ("آماده بررسی" if sign=="✅" else "نیازمند بررسی"))
     lines.append("")
     lines.append(
-        "⛔️ اجرای انتقال در این نسخه غیرفعال است؛ "
-        "تا تأیید نهایی مسیر، هیچ حسابی تغییر نمی‌کند."
+        ("⛔️ مسیر این حساب‌ها هنوز آماده انتقال نیست. "
+         "ابتدا وضعیت سرور ورودی بررسی شود."
+         if not can_stage else
+         "⛔️ اجرای انتقال در این نسخه غیرفعال است؛ "
+         "تا تأیید نهایی مسیر، هیچ حسابی تغییر نمی‌کند.")
     )
     # Do not expose internal 6G/PAM/F4 gate names to end users or Telegram.
     return "\n".join(lines)

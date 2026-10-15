@@ -136,6 +136,9 @@ class K2M1InventoryTests(unittest.TestCase):
         from edge_egress_v1_ingress import IngressPeer
         key=base64.b64encode(bytes(range(32))).decode()
         self.c.execute("DELETE FROM edge_egress_allocations WHERE edge_id='s8'")
+        # A rejected read-only inventory exits the shared fixture connection
+        # with rollback. Commit the deliberate source-only F3 setup first.
+        self.c.commit()
         for peers in (
             (IngressPeer("s8",TARGET,"10.77.0.8",key),),
             (IngressPeer("e9",SOURCE,"10.77.0.8",key),),

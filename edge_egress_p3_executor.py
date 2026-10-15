@@ -286,6 +286,7 @@ class Existing6GGuardedExecutor:
         self.geteuid = geteuid or __import__("os").geteuid
         self.clock = clock or (lambda: int(time.time()))
         self._used = False
+        self._execution_ticket = None
 
     def _journal(self, operation_id, status, phase, scope, nonce_hash, **details):
         allowed = {"RUNNING", "SUCCEEDED"}
@@ -324,7 +325,8 @@ class Existing6GGuardedExecutor:
             and port.release_enabled is True
             and isinstance(port.ticket, ExecutionTicket)
             and port.ticket.scope_digest == _scope_digest(scope)
-            and port.ticket.nonce is not None
+            and self._execution_ticket is not None
+            and port.ticket == self._execution_ticket
         )
 
     def _lease(self, operation_id, scope, nonce_hash=None):
@@ -366,6 +368,7 @@ class Existing6GGuardedExecutor:
                 or not re.fullmatch(r"[0-9a-f]{32}", ticket.nonce)
                 or not compare_digest(ticket.scope_digest, _scope_digest(scope))):
             raise ExecutorHold("EXPIRED_OR_UNAUTHORIZED_TICKET")
+        self._execution_ticket = ticket
         # Readiness MUST be re-evaluated inside the acquired lease too.
         fresh = self.review_fn(scope)
         if not isinstance(fresh, FreshEvidence):

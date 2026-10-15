@@ -120,6 +120,68 @@ def _root_can_review(plan: MigrationWavePlan) -> bool:
     )
 
 
+def _operator_runtime_released(plan: MigrationWavePlan) -> bool:
+    """Presentation gating only: never offer CONFIRM for a code-only preview.
+
+    This does NOT authorize execution. Root IPC and the original 6G/P3
+    repeat all their independent checks. In the legacy root bot (UID 0),
+    no PREPARE button is offered even if someone toggles a subset of flags.
+    """
+    import os
+    from edge_egress_k2_m43_client import M43_TELEGRAM_EXECUTION_ENABLED
+    from edge_egress_k2_m4_ipc import M4_UNIX_IPC_ENABLED
+    from edge_egress_k2_m4_root_worker import M4_ROOT_WORKER_ENABLED
+    from ops.k2_m4_root_daemon import M4A_ROOT_DAEMON_RELEASED
+    from edge_egress_k2_a_root_assembly import M4A_ROOT_ASSEMBLY_ENABLED
+    from edge_egress_k2_a_host_factory import (
+        M4A_REAL_HOST_FACTORY_ENABLED, M4A_CROSS_EDGE_FACTORY_ENABLED,
+    )
+    from edge_egress_k2_a3_host_plans import (
+        A3_ROOT_OWNED_PLAN_SOURCE_ENABLED, A3_ROOT_SNAPSHOT_BINDING_ENABLED,
+        A3_ROOT_CROSS_EDGE_PLAN_ENABLED, A3_ROOT_CROSS_EDGE_SNAPSHOT_ENABLED,
+    )
+    from edge_egress_k2_m42_bindings import (
+        M42_LIVE_BINDINGS_ENABLED, M42_CROSS_EDGE_LEGACY_SINGLE_ENABLED,
+    )
+    from edge_egress_k2_m4_root_portal import M4_ROOT_PORTAL_ENABLED
+    from edge_egress_k2_m3_waves import (
+        M3_WAVE_EXECUTION_ENABLED, M3_CROSS_EDGE_LEGACY_SINGLE_ENABLED,
+    )
+    from edge_egress_p3_executor import P3_CROSS_EDGE_LEGACY_UID_ATTACH_ENABLED
+    from edge_egress_k2_m4_bootstrap import M42_CROSS_EDGE_DEFERRED_ENABLED
+    from edge_egress_k2_m4_cross_edge_port import (
+        M4_CROSS_EDGE_UID_PORT_ENABLED, CROSS_EDGE_PAM_SAFETY_ENABLED,
+    )
+    from edge_egress_uid_runtime_store import K2_CROSS_EDGE_RUNTIME_STORE_ENABLED
+    from edge_egress_k2_uid_ingress_egress import K2_M4_POLICY_STAGE_ENABLED
+    if (os.geteuid() == 0 or not _root_can_review(plan)
+        or not all((
+            M43_TELEGRAM_EXECUTION_ENABLED, M4_UNIX_IPC_ENABLED,
+            M4_ROOT_WORKER_ENABLED, M4A_ROOT_DAEMON_RELEASED,
+            M4A_ROOT_ASSEMBLY_ENABLED, M4A_REAL_HOST_FACTORY_ENABLED,
+            A3_ROOT_OWNED_PLAN_SOURCE_ENABLED, A3_ROOT_SNAPSHOT_BINDING_ENABLED,
+            M42_LIVE_BINDINGS_ENABLED, M4_ROOT_PORTAL_ENABLED,
+            M3_WAVE_EXECUTION_ENABLED,
+        ))):
+        return False
+    if m4_cross_edge_single_reviewed(plan):
+        return all((
+            M3_CROSS_EDGE_LEGACY_SINGLE_ENABLED,
+            _root_portal.M4_CROSS_EDGE_SINGLE_ENABLED,
+            M42_CROSS_EDGE_LEGACY_SINGLE_ENABLED,
+            M4A_CROSS_EDGE_FACTORY_ENABLED,
+            A3_ROOT_CROSS_EDGE_PLAN_ENABLED,
+            A3_ROOT_CROSS_EDGE_SNAPSHOT_ENABLED,
+            P3_CROSS_EDGE_LEGACY_UID_ATTACH_ENABLED,
+            M42_CROSS_EDGE_DEFERRED_ENABLED,
+            M4_CROSS_EDGE_UID_PORT_ENABLED,
+            CROSS_EDGE_PAM_SAFETY_ENABLED,
+            K2_CROSS_EDGE_RUNTIME_STORE_ENABLED,
+            K2_M4_POLICY_STAGE_ENABLED,
+        ))
+    return True
+
+
 def preview_html(inventory: MigrationInventory) -> str:
     if not isinstance(inventory,MigrationInventory):
         raise M4UIHold("PREVIEW_UNAVAILABLE")
@@ -178,7 +240,7 @@ def preview_buttons(edge_id: str, *,
             or inventory.selection.target_edge_id != edge_id):
             raise M4UIHold("PREVIEW_SELECTION_INVALID")
         plan=build_wave_plan(inventory,wave_size=MAX_INPUT_UIDS)
-        reviewed=_root_can_review(plan)
+        reviewed=_operator_runtime_released(plan)
     return _button_rows(
         (("🔐 درخواست تأیید",f"hpeg_m4_prepare_{edge_id}"),)
         if reviewed else (),

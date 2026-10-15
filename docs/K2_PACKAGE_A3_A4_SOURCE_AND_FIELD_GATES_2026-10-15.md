@@ -119,3 +119,23 @@ The existing migration UI lists the selected target Edge. **It does not prove th
 - `RootM42Bindings` now reclaims only expired *root-side P3 tickets* before enforcing its 20-ticket bound, after validating every pending entry and clock. This mirrors the previously repaired IPC PREPARE queue; it cannot delete DB checkpoints or a real 6G lease. Tests cover expiry, active capacity and corrupt pending state.
 
 **Field verdict: HOLD.** These are concrete fail-closed fixes, **not** a functional cross-Edge migration implementation. Do not enable `UID_ATTACH`, assume e9 customer egress, change global protected mode, authorize batch M7, install the root daemon, or merge auto-deploying master on the basis of CI. Actual cross-edge source-proof and port integration, safe privileged-worker operation/nonroot bot separation, independent A4 evidence and M5/M6 host acceptance remain required.
+
+
+## M4 single-UID admission/UI handoff — shared source contract (2026-10-15)
+
+This update **does not** authorize cross-Edge attach or merge.
+
+- Added the single pure `m4_same_ingress_reviewed(plan)` contract in the original M3 wave module, shared by the original `RootMigrationPortal.prepare/execute` and the Telegram presentation. A Legacy UID must be unprotected, independently source-attested, idle, and arrive **on the selected target Edge** already; only then is the current reviewed per-UID host source compatible. All existing F4/6G/root gates remain separate and default OFF.
+- Fixed a misleading M4 Telegram preview: earlier `M1.inventory_clear` for an s8→e9 source could produce green **“ready for review”** even though the actual Root port required SAME-EDGE and would HOLD. Cross-Edge selections now display 0 ready/1 needing review (or matching counts), without developer/internal error strings.
+- Changed `preview_buttons` to **default deny PREPARE** without a freshly supplied exact source inventory. Wired the two existing handlers in `bot_final_v49-2.py` to pass their read-only just-observed inventory for first preview and REFRESH. STATUS and post-CONFIRM screens have no inherited PREPARE affordance. Root still always independently re-checks the source and F4 at PREPARE and CONFIRM.
+- Root ticket issuance now binds the original signed off-Core F4 account row's **source_edge** and **source_ipv4** to the exact P3 `ExecutionScope`, not merely matching UID/target; a source drift after M1 inventory cannot produce a signed ticket. Regression tests cover this mismatch without host mutation.
+- Added source-level negative tests for cross-Edge UI/root disagreement, preview→button coupling and all-administrator scope pinning. Existing Telegram callback names, actions and user workflow remain unchanged.
+
+### Concrete unresolved dependencies — do not call M4 code closed
+
+1. **Mixed-Legacy cross-Edge:** original `UID_ATTACH` requires global protected mode=1; the real runtime store's `_owner` also requires historical SSH source/default/DNS identity; actual PAM/WG guard and `IndependentSafety` conflate ingress source and protected egress target. Supporting s8 ingress→e9 egress without moving all Legacy users needs an independently reviewed source/target split, fail-closed per-UID boot admission and real 6G port. It cannot be implemented safely by just changing mode 1 to 0 or faking the current SAME-EDGE port.
+2. **Privileged execution:** the 29,961-line historical bot has numerous unrelated root-only actions. Nonroot one-poller conversion with all legacy actions retained, root daemon real fixed assembly, systemd identity and rollback acceptance are not implemented. `ops/k2_m4_root_daemon.py:main()` still exits 78.
+3. **Field:** independently produced signed off-Core F4 captures, M5 disposable VPS Telegram/SSH/SOCKS/DNS/NSS/IPv6/WG-loss/rescue checks, and then the specifically authorized ONE real user M6 remain unperformed.
+4. **No auto-deploy:** PR #148 stays DRAFT, stacked on M3; `master`, `nvlbot.service`, kernel policies, customer routes and records remain untouched. Never batch M7 before explicit approval after verified M6.
+
+**Status:** M4 UI/root-admission consistency and independent source-ticket binding improved. **M4 operational closure: HOLD**, pending the three nontrivial gaps above and operator-run acceptance. CI is source/simulation evidence, never field proof.

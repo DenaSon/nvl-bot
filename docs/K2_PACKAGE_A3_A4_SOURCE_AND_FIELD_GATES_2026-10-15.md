@@ -70,3 +70,16 @@ Scope: **fix an existing M4 migration safety gap, no feature expansion**.
 - Added synthetic negative tests for orphaned/missing guards and candidate runtime/binding identity collision; exact-HEAD CI runs are authoritative, not earlier green results.
 
 **Boundary remains unchanged:** this is only read-only A3.1 plan hardening. No live `ReviewedUIDHostSnapshot`, independently accepted physical F4/session/packet witness, root daemon activation, non-root legacy-bot cutover, customer migration or master merge occurred. A3.1/A3.2/A4 operational gates are **HOLD** until real disposable-host and Telegram acceptance. Never toggle release switches to mask an incomplete gate.
+
+
+## A3.1 continuation — existing DeferredOriginal6GHostPort snapshot wiring (2026-10-15)
+
+This is **closure work on the existing M4 A3.1 gate**, not a new feature or operational release.
+
+- \`RootOwnedUIDSnapshotSource\` reads the original one-user M1 selection again with a trusted inventory provider; refuses any different ingress UID/Edge/IP, missing F4/session readiness or blockers. It then obtains the existing \`RootOwnedM2PlanSource\` exact root-only First/Nth plan, re-reads PAM and verifies its original SHA and the manifest's UID/Edge/DNS scope.
+- The source builds the existing \`ReviewedUIDHostSnapshot\` and original \`GuardBootstrap\` with real \`RootFilePort\` for first UID or \`CASRootRosterPort\` for next UID. Both remain fully **deferred** until \`DeferredOriginal6GHostPort.apply\` checks the already-persisted original P3/6G intent. No planning-time Linux, PAM, DNS, WG, or customer mutation.
+- \`RootHostSafetyGates\` only binds vetted independent callbacks and \`IndependentSafety\`; the mere presence of callback objects cannot certify F4 packets. Missing/incorrect bindings or PAM hash drift => HOLD. Two independent explicit source-release flags remain OFF.
+- \`assemble_reviewed_root\` now additionally requires a **typed root-owned Snapshot source with identical DB/root/OS UID providers**, rather than accepting an arbitrary \`read_root_snapshot\` function; original 6G callbacks still must come from the same original provider.
+- Synthetic regression covers source default OFF, cross-edge denial, first/next concrete deferred port types, PAM drift, missing external safety and factory-to-deferred integration; root assembly rejects arbitrary snapshot functions.
+
+**Still blocked from server-ready acceptance:** A3.2 existing privileged bot action audit and proven one-poller nonroot cutover; installed reviewed Root Daemon/systemd/socket; independently operated external physical packet/SSH/SOCKS/DNS/NSS/IPv6/session/WG-loss/console rescue witnesses and exact F4 signature provenance; non-customer disposable VPS Telegram E2E. The new snapshot reader is only source wiring, not a running factory on Core. Do **not** remove default-OFF flags, forge physical PASS, merge to \`master\`, or call M4 operationally complete before these independent gates pass.

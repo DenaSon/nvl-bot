@@ -105,6 +105,37 @@ class OriginalP3CrossEdgeStagingTests(unittest.TestCase):
         self.assertEqual(row.state, "PROTECTED")
         self.assertIn("packet", self.base.safety.events)
 
+    def test_p3_actual_policy_and_f2_commit_with_unpooled_historical_host(self):
+        # End-to-end original P3/F2+staged PAM policy on disposable SQLite.
+        # Unlike root PAM+wg0, ssh_accounts.host can be old/unpooled.
+        historical = "104.194.144.195"
+        with self.base.db() as db:
+            db.execute(
+                "UPDATE ssh_accounts SET host=? WHERE username='nvl0557'",
+                (historical,),
+            )
+        with self.pinned():
+            asyncio.run(self.port.apply(self.harness.scope))
+            self.assertTrue(asyncio.run(
+                self.port.verify(self.harness.scope)))
+        records = parse_uid_ingress_egress_bindings(
+            self.policy_path.read_bytes()
+        )
+        record = records["nvl0557"]
+        with self.base.db() as db:
+            row = read_binding(db, "nvl0557")
+            stored_host = db.execute(
+                "SELECT host FROM ssh_accounts WHERE username='nvl0557'"
+            ).fetchone()
+        self.assertEqual(stored_host, (historical,))
+        self.assertEqual((row.state, row.generation),("PROTECTED",3))
+        self.assertTrue(record.matches_runtime(
+            row,installed_guard_sha256=self.base.roster["nvl0557"].guard_sha256,
+        ))
+        self.assertEqual(record.ingress_ipv4,SOURCE)
+        self.assertEqual(record.egress_ipv4,self.harness.scope.target_host)
+        self.assertNotEqual(record.ingress_ipv4,record.egress_ipv4)
+
     def test_disabled_policy_writer_keeps_f2_uncommitted_and_6g_running(self):
         with self.pinned(), patch(
             "edge_egress_k2_uid_ingress_egress.K2_M4_POLICY_STAGE_ENABLED",

@@ -339,6 +339,16 @@ class RootOwnedSnapshotWiringTests(unittest.TestCase):
             self.call_bound(pam_hash="0"*64)
         self.assertEqual(self.calls,[])
 
+    def test_m2_plan_pam_and_module_digest_drift_rejected(self):
+        from dataclasses import replace
+        wrong_first=replace(self.plan,module_sha256="0"*64)
+        with self.assertRaisesRegex(a.A3PlanHold,"ROOT_PLAN_DIGEST_DRIFT"):
+            self.call_bound(plan=wrong_first)
+        wrong_next=replace(self.next_plan(),pam_digest="0"*64)
+        with self.assertRaisesRegex(a.A3PlanHold,"ROOT_PLAN_DIGEST_DRIFT"):
+            self.call_bound("NEXT_UID",wrong_next)
+        self.assertEqual(self.calls,[])
+
     def test_unbound_external_safety_rejected(self):
         from dataclasses import replace
         self.gates=replace(self.gates,safety=None)

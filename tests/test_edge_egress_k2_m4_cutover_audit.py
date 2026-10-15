@@ -26,10 +26,17 @@ def worker_paths():
 
 class AuditLegacyBotSourceTests(unittest.TestCase):
     def test_real_repo_legacy_bot_has_privileged_dependencies(self):
-        # This is the CURRENT checked-out bot in CI; do not rely on a
-        # guessed text summary or the previous v54 deployment.
+        # The bot contains Python 3.12+ f-string grammar. 3.11 cannot parse
+        # its AST, so the audit MUST report HOLD there, not guess clearance.
+        import sys
         root=Path(__file__).resolve().parents[1]
         source=(root / "bot_final_v49-2.py").read_bytes()
+        if sys.version_info < (3, 12):
+            with self.assertRaisesRegex(
+                CutoverAuditHold,"LEGACY_BOT_SOURCE_UNPARSABLE"
+            ):
+                inspect_legacy_source(source)
+            return
         digest,uses=inspect_legacy_source(source)
         self.assertEqual(len(digest),64)
         self.assertGreater(len(uses),5)

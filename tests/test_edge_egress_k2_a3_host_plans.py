@@ -141,8 +141,8 @@ class RootM2ReadOnlyPlanTests(unittest.TestCase):
             roster_exists=True,roster_bytes=b"canonical",
             observed_guards=("nvl0557.json","orphan.json"),
         )
-        with patch.object(a,"load_roster",return_value={"nvl0557":prior}),\\
-             patch.object(a,"render_roster",return_value="canonical"),\\
+        with patch.object(a,"load_roster",return_value={"nvl0557":prior}),\
+             patch.object(a,"render_roster",return_value="canonical"),\
              patch.object(a,"plan_next_uid") as planner:
             with self.assertRaisesRegex(a.A3PlanHold,"ORPHANED_OR_MISSING_GUARD"):
                 self.src(self.scope,self.ticket)
@@ -154,8 +154,8 @@ class RootM2ReadOnlyPlanTests(unittest.TestCase):
             roster_exists=True,roster_bytes=b"canonical",
             observed_guards=(),
         )
-        with patch.object(a,"load_roster",return_value={"nvl0557":prior}),\\
-             patch.object(a,"render_roster",return_value="canonical"),\\
+        with patch.object(a,"load_roster",return_value={"nvl0557":prior}),\
+             patch.object(a,"render_roster",return_value="canonical"),\
              patch.object(a,"plan_next_uid") as planner:
             with self.assertRaisesRegex(a.A3PlanHold,"ORPHANED_OR_MISSING_GUARD"):
                 self.src(self.scope,self.ticket)

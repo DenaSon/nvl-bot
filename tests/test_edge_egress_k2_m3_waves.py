@@ -157,6 +157,46 @@ class M3WaveTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("CROSS_EDGE",res.halt_reason)
         self.assertEqual(self.tickets,[])
 
+    async def test_cross_edge_legacy_single_requires_separate_release(self):
+        from edge_egress_k2_m3_waves import (
+            m4_cross_edge_single_reviewed,
+        )
+        plan=self.plan()
+        self.assertTrue(m4_cross_edge_single_reviewed(plan))
+        args=self.dispatcher()
+        args["current_protected_mode"]=lambda:"0"
+        args.update(dict(actor_id=1001,chat_id=-55,
+                         approval_secret=SECRET,release_enabled=True,
+                         geteuid=lambda:0,clock=lambda:NOW))
+        with patch("edge_egress_k2_m3_waves.M3_WAVE_EXECUTION_ENABLED",True):
+            denied=await run_migration_wave(
+                plan,self.approval(plan),**args)
+            self.assertTrue(denied.halted)
+            self.assertEqual(self.tickets,[])
+            with patch("edge_egress_k2_m3_waves.M3_CROSS_EDGE_LEGACY_SINGLE_ENABLED",True):
+                result=await run_migration_wave(
+                    plan,self.approval(plan),**args)
+        self.assertTrue(result.all_verified)
+        self.assertEqual(len(self.tickets),1)
+        self.assertEqual(self.scopes[0].action,"UID_ATTACH")
+
+    async def test_cross_edge_legacy_batch_stays_hold_even_with_single_flag(self):
+        from edge_egress_k2_m3_waves import m4_cross_edge_single_reviewed
+        plan=self.plan(("nvl0555","nvl0557"),"BATCH")
+        self.assertFalse(m4_cross_edge_single_reviewed(plan))
+        args=self.dispatcher()
+        args["current_protected_mode"]=lambda:"0"
+        args.update(dict(actor_id=1001,chat_id=-55,
+                         approval_secret=SECRET,release_enabled=True,
+                         geteuid=lambda:0,clock=lambda:NOW))
+        with patch("edge_egress_k2_m3_waves.M3_WAVE_EXECUTION_ENABLED",True),\
+             patch("edge_egress_k2_m3_waves.M3_CROSS_EDGE_LEGACY_SINGLE_ENABLED",True):
+            denied=await run_migration_wave(
+                plan,self.approval(plan),**args)
+        self.assertTrue(denied.halted)
+        self.assertEqual(self.tickets,[])
+        self.assertEqual(denied.progress[0].status,"HOLD")
+
     async def test_unrecognized_mode_is_hold_before_ticket(self):
         plan=self.plan()
         args=self.dispatcher()

@@ -4,6 +4,7 @@ These tests intentionally do not activate PAM, WireGuard, routing or P3.
 """
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 import unittest
@@ -14,10 +15,13 @@ from edge_egress_k2_uid_ingress_egress import (
     FIELDS, IngressEgressHold, ROOT_BINDINGS,
     UIDIngressEgressBinding, parse_uid_ingress_egress_bindings,
     load_root_uid_ingress_egress_bindings,
+    verify_readonly_cross_edge_ingress,
 )
 
 SRC = "172.86.111.69"
 DST = "45.61.163.75"
+KEY = base64.b64encode(bytes(range(32))).decode("ascii")
+FOREIGN_KEY = base64.b64encode(bytes(range(1,33))).decode("ascii")
 
 
 def record(**changes):
@@ -25,6 +29,7 @@ def record(**changes):
         username="nvl0555", uid=1636, ingress_edge="s8",
         ingress_ipv4=SRC, egress_edge="e9", egress_ipv4=DST,
         runtime_generation=3, operation_id=44, guard_sha256="f"*64,
+        ingress_wg_public_key=KEY,
     )
     row.update(changes)
     return row
@@ -76,6 +81,60 @@ class K2UIDIngressEgressTests(unittest.TestCase):
             self.assertFalse(policy.matches_runtime(
                 row,installed_guard_sha256=digest))
 
+    def test_cross_edge_transport_is_only_a_readonly_attestation(self):
+        from edge_egress_v1_ingress import IngressPeer, verify_ingress
+        policy=parse_uid_ingress_egress_bindings(encode([record()]))["nvl0555"]
+        runtime=RuntimeBinding(
+            "nvl0555",1636,"e9",DST,20009,1780,10553,"PROTECTED",3,44,
+        )
+        source=IngressPeer("s8",SRC,"10.77.0.8",KEY)
+        peers=(source,)
+        live=KEY+" 10.77.0.8/32\\n"
+        self.assertTrue(verify_readonly_cross_edge_ingress(
+            policy=policy,runtime=runtime,
+            installed_guard_sha256="f"*64,pam_rhost="10.77.0.8",
+            peers=peers,wg_allowed_ips=live,
+        ))
+        # A successful independent source check is NOT a permissive PAM
+        # rule: historical V1 still explicitly rejects cross-edge login.
+        self.assertFalse(verify_ingress(
+            runtime,"10.77.0.8",peers,live))
+
+    def test_cross_edge_transport_denies_wrong_peer_key_and_stale_6g(self):
+        from edge_egress_v1_ingress import IngressPeer
+        policy=parse_uid_ingress_egress_bindings(encode([record()]))["nvl0555"]
+        runtime=RuntimeBinding(
+            "nvl0555",1636,"e9",DST,20009,1780,10553,"PROTECTED",3,44,
+        )
+        source=IngressPeer("s8",SRC,"10.77.0.8",KEY)
+        kwargs=dict(policy=policy,runtime=runtime,
+                    installed_guard_sha256="f"*64,pam_rhost="10.77.0.8",
+                    peers=(source,),wg_allowed_ips=KEY+" 10.77.0.8/32\\n")
+        variants=[
+            dict(pam_rhost="10.77.0.9"),
+            dict(pam_rhost="209.200.246.198"),
+            dict(pam_rhost="10.77.0.1"),
+            dict(peers=(IngressPeer("e9",SRC,"10.77.0.8",KEY),)),
+            dict(peers=(IngressPeer("s8",DST,"10.77.0.8",KEY),)),
+            dict(peers=(IngressPeer("s8",SRC,"10.77.0.8",FOREIGN_KEY),)),
+            dict(peers=(source,source)),
+            dict(wg_allowed_ips=FOREIGN_KEY+" 10.77.0.8/32\\n"),
+            dict(wg_allowed_ips=KEY+" 10.77.0.0/24\\n"),
+            dict(wg_allowed_ips=KEY+" 10.77.0.8/32\\n"+
+                 FOREIGN_KEY+" 10.77.0.0/24\\n"),
+            dict(runtime=RuntimeBinding(
+                "nvl0555",1636,"e9",DST,20009,1780,10553,
+                "PROTECTED",4,44)),
+            dict(runtime=RuntimeBinding(
+                "nvl0555",1636,"e9",DST,20009,1780,10553,
+                "PROTECTED",3,45)),
+            dict(installed_guard_sha256="0"*64),
+        ]
+        for change in variants:
+            with self.subTest(change=change):
+                self.assertFalse(verify_readonly_cross_edge_ingress(
+                    **{**kwargs,**change}))
+
     def test_invalid_or_ambiguous_root_policy_is_rejected(self):
         bad = [
             encode([record(uid=True)]),
@@ -85,6 +144,7 @@ class K2UIDIngressEgressTests(unittest.TestCase):
             encode([record(operation_id=True)]),
             encode([record(guard_sha256="fake")]),
             encode([record(guard_sha256="F"*64)]),
+            encode([record(ingress_wg_public_key="not-a-key")]),
             encode([record(uid=100)]),
             encode([record(username="root")]),
             encode([record(username="nvl0555;x")]),

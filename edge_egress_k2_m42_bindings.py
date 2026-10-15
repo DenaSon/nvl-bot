@@ -316,6 +316,28 @@ class RootM42Bindings:
             gates=BASE_GATES | ATTACH_GATES | SOURCE_ENROLL_GATES,
         )
 
+    def _prune_expired_one_shot_tickets(self) -> None:
+        """Reclaim only expired unconsumed root ticket cache entries.
+
+        Original P3/6G nonce and journal authority is never mutated. A
+        malformed clock or cache entry holds *before* any partial eviction.
+        """
+        now=self.ports.now()
+        if type(now) is not int or now<=0:
+            raise M42BindingHold("M42_TICKET_CLOCK_UNTRUSTED")
+        expired=[]
+        for nonce, record in self._outstanding.items():
+            if (type(nonce) is not str or not isinstance(record,tuple)
+                or len(record)!=2 or not isinstance(record[0],ExecutionScope)
+                or not isinstance(record[1],ExecutionTicket)
+                or record[1].nonce!=nonce
+                or type(record[1].expires_at) is not int):
+                raise M42BindingHold("M42_TICKET_QUEUE_CORRUPT")
+            if record[1].expires_at<=now:
+                expired.append(nonce)
+        for nonce in expired:
+            del self._outstanding[nonce]
+
     def issue_ticket(self, scope: ExecutionScope,
                      actor: int, chat: int) -> ExecutionTicket:
         self._gate()
@@ -325,8 +347,9 @@ class RootM42Bindings:
         ticket = issue_execution_ticket(
             scope, fresh, actor_id=actor, chat_id=chat, now=self.ports.now(),
         )
-        # Bound one-shot ticket cache: never grow without limit and never
-        # evict an in-flight approval to make room for a new one.
+        # Only expired root-only tickets can be reclaimed; live one-shot
+        # approvals are never evicted just to make room for new requests.
+        self._prune_expired_one_shot_tickets()
         if len(self._outstanding) >= 20:
             raise M42BindingHold("M42_ROOT_TICKET_QUEUE_FULL")
         self._outstanding[ticket.nonce] = (scope, ticket)

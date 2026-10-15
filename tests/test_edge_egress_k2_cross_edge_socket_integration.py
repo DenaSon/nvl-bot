@@ -1,9 +1,9 @@
-"""Single Cross-Edge through the ORIGINAL Telegram->AF_UNIX->M3/P3/6G chain.
+"""Cross-Edge M4 IPC must REFUSE a simulated untyped P3 host port.
 
-This is an integration harness: RootOperatorIPC uses kernel AF_UNIX
-SO_PEERCRED and actual disposable SQLite original 6G journal/checkpoint.
-The host/packet proof is intentionally synthetic and NO customer, real WG,
-PAM, socket service, or production VPS is touched. It is NOT field release.
+The legacy-mode cross-edge P3 exception ONLY works with an exact typed
+DeferredCrossEdgeOriginal6GHostPort and one-shot 6G ticket. The M45 synthetic
+host cannot be used to fake a successful customer cutover; this regression
+proves fail-closed behavior over the real AF_UNIX stream. No VPS touched.
 """
 import unittest
 from unittest.mock import patch
@@ -51,7 +51,7 @@ class SingleCrossEdgeSocketIntegrationTests(unittest.IsolatedAsyncioTestCase):
             now=self.fx.now,
         )
 
-    async def test_true_cross_edge_target_with_original_single_6g_and_ipc(self):
+    async def test_cross_edge_untyped_host_cannot_fake_6g_success(self):
         inventory=self.review(self.fx.selection)
         member=next(x for x in inventory.accounts if x.selected)
         self.assertEqual((member.source_edge_id,member.source_ipv4),("s8",SOURCE))
@@ -63,23 +63,26 @@ class SingleCrossEdgeSocketIntegrationTests(unittest.IsolatedAsyncioTestCase):
         prepared=await self.fx.prepare()
         self.assertEqual(prepared.selection.mode,"SINGLE")
         self.assertFalse(self.fx.original_rows())
-        accepted=await self.fx.confirm()
-        self.assertEqual(accepted["state"],"COMPLETED",accepted)
-        self.assertEqual(accepted["completed"],1)
-        self.assertEqual(len(self.fx.original_rows()),1)
-        self.assertEqual(self.fx.original_rows()[0][1],"SUCCEEDED")
-        self.assertEqual((await self.fx.status())["wave_state"],"RECEIPTS_RECORDED")
-        self.assertEqual(self.fx.effects.count("synthetic-host-apply"),1)
+        refused=await self.fx.confirm()
+        self.assertEqual(refused["state"],"HOLD",refused)
+        self.assertEqual(refused["completed"],0)
+        self.assertFalse(self.fx.original_rows())
+        self.assertEqual(self.fx.effects.count("synthetic-host-apply"),0)
+        self.assertEqual(self.fx.effects.count("original-6g-acquired"),0)
+        with self.fx.db() as conn:
+            self.assertEqual(conn.execute(
+                "SELECT value FROM settings WHERE key='edge_egress_protected_mode'"
+            ).fetchone(),("0",))
 
-    async def test_cross_edge_abort_and_unchanged_legacy_global_mode(self):
+    async def test_fake_cross_edge_partial_failure_cannot_mutate_any_uid(self):
         self.fx.fail_after_apply=True
         await self.fx.prepare()
         result=await self.fx.confirm()
         self.assertEqual(result["state"],"HOLD")
-        self.assertTrue(self.fx.original_rows(),result)
-        self.assertEqual(self.fx.original_rows()[0][1],"RUNNING")
-        self.assertEqual(self.fx.effects.count("synthetic-host-freeze"),1)
-        self.assertTrue((await self.fx.status())["unresolved"])
+        self.assertEqual(result["completed"],0)
+        self.assertFalse(self.fx.original_rows())
+        self.assertEqual(self.fx.effects.count("synthetic-host-apply"),0)
+        self.assertEqual(self.fx.effects.count("synthetic-host-freeze"),0)
         with self.fx.db() as conn:
             self.assertEqual(conn.execute(
                 "SELECT value FROM settings "

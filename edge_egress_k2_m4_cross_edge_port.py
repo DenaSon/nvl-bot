@@ -116,3 +116,91 @@ class GuardedCrossEdgeUIDPort:
     async def freeze_or_hold(self, scope: ExecutionScope) -> None:
         if self._started and scope == self.scope:
             await self.uid_port.freeze_or_hold(scope)
+
+
+def root_fresh_source_evidence():
+    """Production-only CURRENT PAM journal + WireGuard owner; no fake source.
+
+    This function has no Telegram-provided parameters. Reopens root-only
+    registry and journal and queries live wg0 at each 6G step.
+    """
+    import subprocess
+    import time
+    from edge_egress_k2_m2_ingress_journal import make_m1_readonly_ingress_provider
+    return make_m1_readonly_ingress_provider(
+        now=int(time.time()), run=subprocess.run,
+    )
+
+
+from dataclasses import dataclass
+from ops.k2_p3_uid_worker import IndependentSafety
+
+
+CROSS_EDGE_PAM_SAFETY_ENABLED = False
+
+
+@dataclass
+class CrossEdgeIndependentSafety(IndependentSafety):
+    """Same original P3 safety, with different *observed* SSH ingress.
+
+    Override only the legacy same-IP PAM ingress predicate. All original
+    account idleness, neighbour isolation and independent packet proof remain
+    inherited, mandatory and unchanged.
+    """
+    ingress_edge_id: str = ""
+    source_evidence: Callable = root_fresh_source_evidence
+
+    def assert_pam_ingress_boot(self, req):
+        from edge_egress_k2_m2_ingress_journal import RootReadOnlyIngressEvidence
+        from edge_egress_f4_pam import verify_installed_gate_digest
+        from edge_egress_f4_preflight import sshd_connection_spec
+        from edge_egress_f3_readiness import read_readiness, admission_eligible
+        from edge_egress_uid_boot import BootGuardApplier
+        from edge_egress_v1_admission import inspect_pam
+        from ops.k2_p3_host_readonly import trusted_pam_config
+        from ops.k2_p3_uid_worker import _checked, LiveUIDHold
+        if (not CROSS_EDGE_PAM_SAFETY_ENABLED
+            or not callable(self.source_evidence)
+            or self.source_evidence is not root_fresh_source_evidence
+            or not isinstance(self.ingress_rhost, str)
+            or not self.ingress_rhost.startswith("10.77.0.")
+            or not isinstance(self.ingress_edge_id, str)
+            or self.ingress_edge_id == self.target_edge_id
+            or req.spec.edge_id != self.target_edge_id
+            or req.spec.edge_public_ipv4 == self.source_ipv4
+            or not verify_installed_gate_digest(self.reviewed_module_sha256)):
+            raise LiveUIDHold("K2_CROSS_EDGE_PAM_NOT_ATTESTED")
+        manifest = self._manifest(req)
+        sshd_spec = sshd_connection_spec(
+            username=req.username, local_addr=self.ssh_local_addr,
+            remote_addr=self.ingress_rhost,
+            local_port=self.ssh_local_port,
+        )
+        if not inspect_pam(
+            trusted_pam_config(),
+            _checked("sshd", "-T", "-C", sshd_spec),
+        ):
+            raise LiveUIDHold("K2_CROSS_EDGE_EFFECTIVE_SSHD_UNVERIFIED")
+        observed = self.source_evidence()
+        if type(observed) is not RootReadOnlyIngressEvidence:
+            raise LiveUIDHold("K2_ROOT_LIVE_INGRESS_SOURCE_REQUIRED")
+        try:
+            witness = observed(req.username)
+        except (ValueError, OSError, KeyError) as exc:
+            raise LiveUIDHold("K2_PAM_JOURNAL_WG_NOT_CURRENT") from exc
+        matches = [
+            peer for peer in observed.peers
+            if peer.edge_id == self.ingress_edge_id
+            and peer.edge_ipv4 == self.source_ipv4
+            and peer.ingress_ipv4 == self.ingress_rhost
+        ]
+        if (witness.username != req.username or witness.edge_id != self.ingress_edge_id
+            or witness.edge_ipv4 != self.source_ipv4 or len(matches) != 1):
+            raise LiveUIDHold("K2_CROSS_EDGE_WG_KEY_OR_SOURCE_DRIFT")
+        with self.db_conn() as db:
+            readiness = read_readiness(db, req.spec.edge_id)
+            if (readiness is None
+                or readiness.edge_ipv4 != req.spec.edge_public_ipv4
+                or not admission_eligible(readiness, now=self.now())):
+                raise LiveUIDHold("K2_TARGET_F4_NOT_ACCEPTED")
+        BootGuardApplier().verify(manifest, require_frozen=True)

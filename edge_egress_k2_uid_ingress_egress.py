@@ -250,7 +250,9 @@ def stage_6g_cross_edge_binding(
     )
     from edge_egress_uid_runtime_store import read_binding
     from edge_egress_v1_admission import load_roster, checked_guard
-    from edge_egress_k2_m2_ingress_journal import RootReadOnlyIngressEvidence
+    from edge_egress_k2_m2_ingress_journal import (
+        RootReadOnlyIngressEvidence, _validated as parse_authenticated_pam_journal,
+    )
     from edge_egress_v1_ingress import IngressPeer
 
     if (not K2_M4_POLICY_STAGE_ENABLED or release_enabled is not True
@@ -269,14 +271,25 @@ def stage_6g_cross_edge_binding(
         if type(observed) is not RootReadOnlyIngressEvidence:
             raise IngressEgressHold("K2_ROOT_PAM_WG_SOURCE_REQUIRED")
         witness = observed(scope.username)
+        # Pin the exact PAM_RHOST/WG key from authenticated root journal,
+        # not an arbitrary peer using the same ingress Edge public IP.
+        journal_record = parse_authenticated_pam_journal(observed.raw).get(
+            scope.username
+        )
         matches = [
             p for p in observed.peers if type(p) is IngressPeer
-            and p.edge_id == witness.edge_id
-            and p.edge_ipv4 == witness.edge_ipv4
+            and journal_record is not None
+            and p.edge_id == journal_record.edge_id
+            and p.edge_ipv4 == journal_record.edge_ipv4
+            and p.ingress_ipv4 == journal_record.ingress_ipv4
+            and p.wg_public_key == journal_record.wg_public_key
         ]
         if (witness.username != scope.username
             or witness.edge_ipv4 != scope.source_host
             or witness.edge_id == scope.edge_id
+            or journal_record is None
+            or journal_record.uid != scope.uid
+            or journal_record.username != scope.username
             or len(matches) != 1):
             raise IngressEgressHold("K2_PAM_INGRESS_SCOPE_CHANGED")
         roster = load_roster()

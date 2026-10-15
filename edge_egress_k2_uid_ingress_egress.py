@@ -24,7 +24,8 @@ MAX_BINDING_BYTES = 262144
 _EDGE = re.compile(r"[a-z][a-z0-9_-]{1,23}\Z")
 _USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
 FIELDS = frozenset(("username", "uid", "ingress_edge", "ingress_ipv4",
-                    "egress_edge", "egress_ipv4"))
+                    "egress_edge", "egress_ipv4", "runtime_generation",
+                    "operation_id", "guard_sha256"))
 
 
 class IngressEgressHold(ValueError):
@@ -39,14 +40,22 @@ class UIDIngressEgressBinding:
     ingress_ipv4: str
     egress_edge: str
     egress_ipv4: str
+    runtime_generation: int
+    operation_id: int
+    guard_sha256: str
 
-    def matches_runtime(self, row: RuntimeBinding) -> bool:
+    def matches_runtime(self, row: RuntimeBinding, *,
+                        installed_guard_sha256: str | None = None) -> bool:
         return (
             type(row) is RuntimeBinding
             and row.username == self.username and row.uid == self.uid
             and row.edge_id == self.egress_edge
             and row.edge_ipv4 == self.egress_ipv4
             and row.state == "PROTECTED"
+            and row.generation == self.runtime_generation
+            and row.last_operation_id == self.operation_id
+            and type(installed_guard_sha256) is str
+            and installed_guard_sha256 == self.guard_sha256
         )
 
 
@@ -76,7 +85,7 @@ def parse_uid_ingress_egress_bindings(raw: bytes) -> dict[str, UIDIngressEgressB
     try:
         obj = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
         if (type(obj) is not dict or set(obj) != {"version", "bindings"}
-            or type(obj["version"]) is not int or obj["version"] != 1
+            or type(obj["version"]) is not int or obj["version"] != 2
             or type(obj["bindings"]) is not list
             or len(obj["bindings"]) > 2000):
             raise IngressEgressHold("INGRESS_EGRESS_BINDINGS_SCHEMA")
@@ -97,6 +106,11 @@ def parse_uid_ingress_egress_bindings(raw: bytes) -> dict[str, UIDIngressEgressB
                 or not _public_ipv4(b.ingress_ipv4)
                 or not _public_ipv4(b.egress_ipv4)
                 or b.ingress_ipv4 == b.egress_ipv4
+                or type(b.runtime_generation) is not int
+                or b.runtime_generation < 1
+                or type(b.operation_id) is not int or b.operation_id <= 0
+                or type(b.guard_sha256) is not str
+                or not re.fullmatch(r"[a-f0-9]{64}", b.guard_sha256)
                 or b.username in result or b.uid in seen_uids):
                 raise IngressEgressHold("INGRESS_EGRESS_IDENTITY_INVALID")
             seen_uids.add(b.uid)

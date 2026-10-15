@@ -291,11 +291,11 @@ class RootOwnedSnapshotWiringTests(unittest.TestCase):
             pam_hash or sha256(self.pam).hexdigest(),"a"*64,
         )
 
-    def call_bound(self,kind="FIRST_UID",plan=None,pam_hash=None):
+    def call_bound(self,kind="FIRST_UID",plan=None,pam_hash=None,pam_bytes=None):
         item=self.root_plan(kind,plan if plan is not None else self.plan,pam_hash)
         with patch.object(a,"A3_ROOT_SNAPSHOT_BINDING_ENABLED",True),\
              patch.object(a.RootOwnedM2PlanSource,"__call__",return_value=item),\
-             patch.object(a,"_read_checked",return_value=self.pam),\
+             patch.object(a,"_read_checked",return_value=(self.pam if pam_bytes is None else pam_bytes)),\
              patch.object(a.BootGuardManifest,"parse",return_value=self.manifest):
             return self.adapter(self.scope,self.ticket)
 
@@ -336,7 +336,7 @@ class RootOwnedSnapshotWiringTests(unittest.TestCase):
 
     def test_root_pam_drift_denied_before_gates_or_bootstrap(self):
         with self.assertRaisesRegex(a.A3PlanHold,"PAM_CHANGED"):
-            self.call_bound(pam_hash="0"*64)
+            self.call_bound(pam_bytes=b"unexpected PAM drift on disk")
         self.assertEqual(self.calls,[])
 
     def test_m2_plan_pam_and_module_digest_drift_rejected(self):

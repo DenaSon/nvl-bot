@@ -4,11 +4,12 @@ from __future__ import annotations
 import json
 import os
 import socket
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from edge_egress_k2_m4_ipc import (
-    M4IPCReject,RootOperatorIPC,handle_accepted_socket,
+    M4IPCReject,RootOperatorIPC,PendingRequest,handle_accepted_socket,
 )
 from tests.test_edge_egress_k2_m4_root_portal import M4RootPortalTests
 from tests.test_edge_egress_k2_migration_inventory import NOW
@@ -57,6 +58,60 @@ class M4UnixOperatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fx.actions,["ticket","mutation"])
         with self.assertRaisesRegex(M4IPCReject,"MISSING"):
             await self.call(confirm)
+
+    def _fill_pending(self, *, expires_at):
+        from edge_egress_k2_m4_root_portal import PreparedWave
+        for n in range(20):
+            rid=f"{n:032x}"
+            prepared=PreparedWave(
+                plan=None,approval=SimpleNamespace(expires_at=expires_at)
+            )
+            self.ipc._pending[rid]=PendingRequest(prepared,11,-222)
+
+    async def test_expired_root_approvals_no_longer_exhaust_ipc_queue(self):
+        self._fill_pending(expires_at=NOW-1)
+        self.assertEqual(len(self.ipc._pending),20)
+        new=await self.call(self.prepare_message())
+        self.assertEqual(new["state"],"PREPARED")
+        self.assertEqual(len(self.ipc._pending),1)
+        self.assertIn(new["request_id"],self.ipc._pending)
+        # Reaping stale volatile IDs is NOT authorization to replay them.
+        expired=dict(action="CONFIRM",request_id=f"{0:032x}",
+                     actor_id=11,chat_id=-222)
+        with self.assertRaisesRegex(M4IPCReject,"MISSING"):
+            await self.call(expired)
+        # Only the fresh PREPARE has entered the durable root checkpoint.
+        self.assertEqual(self.fx.c.execute(
+            "SELECT COUNT(*) FROM k2_m4_wave_checkpoints"
+        ).fetchone()[0],1)
+        self.assertEqual(self.fx.actions,[])
+
+    async def test_live_prepares_remain_bounded_and_not_evicted(self):
+        self._fill_pending(expires_at=NOW+60)
+        with self.assertRaisesRegex(M4IPCReject,"QUEUE_FULL"):
+            await self.call(self.prepare_message())
+        self.assertEqual(len(self.ipc._pending),20)
+        self.assertEqual(self.fx.c.execute(
+            "SELECT COUNT(*) FROM k2_m4_wave_checkpoints"
+        ).fetchone()[0],0)
+        self.assertEqual(self.fx.actions,[])
+
+    async def test_untrusted_time_and_partial_queue_are_fail_closed(self):
+        self._fill_pending(expires_at=NOW-1)
+        self.ipc.portal.clock=lambda:True
+        with self.assertRaisesRegex(M4IPCReject,"TIME_UNTRUSTED"):
+            await self.call(self.prepare_message())
+        self.assertEqual(len(self.ipc._pending),20)
+        self.ipc.portal.clock=lambda:NOW
+        first=next(iter(self.ipc._pending))
+        from edge_egress_k2_m4_root_portal import PreparedWave
+        self.ipc._pending[first]=PendingRequest(
+            PreparedWave(None,SimpleNamespace(expires_at=True)),11,-222
+        )
+        with self.assertRaisesRegex(M4IPCReject,"STATE_UNTRUSTED"):
+            await self.call(self.prepare_message())
+        self.assertEqual(len(self.ipc._pending),20)
+        self.assertEqual(self.fx.actions,[])
 
     async def test_no_wrong_uid_or_chat_prepare_even_with_credentials(self):
         with self.assertRaisesRegex(M4IPCReject,"PEER"):

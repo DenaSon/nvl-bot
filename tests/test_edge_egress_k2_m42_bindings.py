@@ -116,6 +116,52 @@ class TrustedRootFactoryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(another.admin(11,-222))
 
+    def test_signed_root_source_can_classify_ingress_only_edge_not_authorize_attach(self):
+        import base64
+        from edge_egress_v1_ingress import IngressPeer
+        from edge_egress_k2_m2_ingress_journal import (
+            RootReadOnlyIngressEvidence,IngressRecord,encode_records,
+        )
+        from tests.test_edge_egress_k2_migration_inventory import SOURCE
+        self.fx.c.execute(
+            "DELETE FROM edge_egress_allocations WHERE edge_id='s8'"
+        )
+        self.fx.c.commit()
+        key=base64.b64encode(bytes(range(32))).decode()
+        peer=IngressPeer("s8",SOURCE,"10.77.0.8",key)
+        evidence=RootReadOnlyIngressEvidence(
+            encode_records({"nvl0555":IngressRecord(
+                "nvl0555",1636,"s8",SOURCE,"10.77.0.8",key,NOW-1
+            )}), (peer,),key+" 10.77.0.8/32\n",NOW,
+            lambda n:self.fx.uids[n],
+        )
+        self.evidence=SignedExternalEvidence(
+            "a"*64,NOW-1,NOW+15,"e9",TARGET,REQUIRED_CHECKS,
+            (WitnessAccount("nvl0555",1636,"s8",SOURCE,0),),
+        )
+        def pinned(*,now,run,geteuid,resolve_uid):
+            return evidence
+        with patch.object(b,"make_m1_readonly_ingress_provider",pinned):
+            self.bind.ports=b.HostReviewedPorts(**{
+                **self.ports.__dict__,"ingress_provider":pinned
+            })
+            reviewed=self.bind.review(self.selection)
+            self.assertTrue(reviewed.inventory_clear)
+            selected=[a for a in reviewed.accounts if a.selected]
+            self.assertEqual(len(selected),1)
+            self.assertEqual(
+                (selected[0].source_edge_id,selected[0].source_ipv4),
+                ("s8",SOURCE),
+            )
+            self.assertFalse(reviewed.can_execute)
+            cross=b.ExecutionScope(
+                "UID_ATTACH","e9",SOURCE,TARGET,
+                username="nvl0555",uid=1636,
+            )
+            with self.assertRaisesRegex(b.M42BindingHold,"ONLY_SAME_EDGE"):
+                self.bind.issue_ticket(cross,11,-222)
+            self.assertEqual(self.called,[])
+
     def test_signed_session_count_one_never_ready(self):
         self.evidence=SignedExternalEvidence(
             "a"*64,NOW-1,NOW+15,"e9",TARGET,REQUIRED_CHECKS,

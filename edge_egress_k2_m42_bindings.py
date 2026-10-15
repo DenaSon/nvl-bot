@@ -40,6 +40,9 @@ from edge_egress_p3_executor import (
 )
 
 M42_LIVE_BINDINGS_ENABLED = False
+# Never issue original 6G UID_ATTACH in Legacy mode unless a separate
+# reviewed physical single transfer path is explicitly released.
+M42_CROSS_EDGE_LEGACY_SINGLE_ENABLED = False
 ADMIN_FILE = Path("/etc/nvl-egress/k2-m4/admin-policy.json")
 MAX_ADMIN_BYTES = 8192
 
@@ -277,17 +280,33 @@ class RootM42Bindings:
         self._gate()
         if not isinstance(scope, ExecutionScope):
             raise M42BindingHold("M42_P3_SCOPE_UNTRUSTED")
-        if scope.action != "UID_ENROLL_SOURCE" or (
-            scope.source_host != scope.target_host
-        ):
-            # Cross-Edge mixed Legacy UID_ATTACH remains an explicit HOLD.
+        same_ingress = (
+            scope.action == "UID_ENROLL_SOURCE"
+            and scope.source_host == scope.target_host
+        )
+        cross_ingress = (
+            M42_CROSS_EDGE_LEGACY_SINGLE_ENABLED
+            and scope.action == "UID_ATTACH"
+            and scope.source_host != scope.target_host
+        )
+        if not (same_ingress or cross_ingress):
             raise M42BindingHold("M42_ONLY_SAME_EDGE_LEGACY_ALLOWED")
         from edge_egress_k2_migration_inventory import select_migration
         selection = select_migration("SINGLE", (scope.username,), scope.edge_id)
         reviewed = self.review(selection)
+        chosen = [a for a in reviewed.accounts if a.selected]
         if (any(issue != 'SHARED_6G_BUSY' for issue in reviewed.global_issues)\
             or not reviewed.target_f4_accepted
-            or any(a.selected and a.issues for a in reviewed.accounts)
+            or len(chosen) != 1
+            or chosen[0].issues
+            or chosen[0].username != scope.username
+            or chosen[0].uid != scope.uid
+            or chosen[0].source_ipv4 != scope.source_host
+            or not chosen[0].source_proven
+            or chosen[0].active_sessions != 0
+            or chosen[0].protected_edge_id
+            or (cross_ingress and chosen[0].source_edge_id == scope.edge_id)
+            or (same_ingress and chosen[0].source_edge_id != scope.edge_id)
             or self.mode() != "0"):
             raise M42BindingHold("M42_P3_FRESH_EVIDENCE_HOLD")
         proof = self._proof()
@@ -295,12 +314,15 @@ class RootM42Bindings:
         # Target-only identity and UID are insufficient to authorize a 6G
         # ticket if the operator moved the SSH ingress between witnesses.
         proof.verify_account(
-            scope.username, scope.uid, source_edge=scope.edge_id,
+            scope.username, scope.uid,
+            source_edge=chosen[0].source_edge_id,
             source_ipv4=scope.source_host,
         )
         if (proof.target_edge != scope.edge_id or
             proof.target_ipv4 != scope.target_host):
             raise M42BindingHold("M42_P3_EXTERNAL_SCOPE_DRIFT")
+        if cross_ingress and len(chosen) != 1:
+            raise M42BindingHold("M42_CROSS_EDGE_SINGLE_REQUIRED")
         # Bind a P3 ticket to the complete signed observation, not only
         # generation/time. A witness replacement with identical metadata
         # but different accounts, checks or validity must invalidate P3.
@@ -326,7 +348,8 @@ class RootM42Bindings:
                                   separators=(",", ":")).encode()).hexdigest()
         return FreshEvidence(
             digest=digest, checked_at=self.ports.now(),
-            gates=BASE_GATES | ATTACH_GATES | SOURCE_ENROLL_GATES,
+            gates=BASE_GATES | ATTACH_GATES |
+                  (SOURCE_ENROLL_GATES if same_ingress else frozenset()),
         )
 
     def _prune_expired_one_shot_tickets(self) -> None:

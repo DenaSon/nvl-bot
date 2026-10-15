@@ -165,6 +165,7 @@ def preview_migration(
     ingress_witness: Callable[[str], LiveIngressWitness | None] | None = None,
     session_count: Callable[[str, int], int | None] | None = None,
     now: int | None = None,
+    trusted_ingress_peers: tuple | None = None,
 ) -> MigrationInventory:
     """Inventory all active SSH rows, and assess only explicitly selected UIDs.
 
@@ -191,6 +192,32 @@ def preview_migration(
         raise MigrationInventoryHold("UNTRUSTED_INGRESS_PROVIDER")
     if session_count is not None and not callable(session_count):
         raise MigrationInventoryHold("UNTRUSTED_SESSION_PROVIDER")
+
+    # The legacy SSH ingress registry is NOT the F3 Egress allocation
+    # registry. A root-owned PAM/WG observer can prove ingress-only Edges,
+    # which have no per-UID egress route table of their own. This is a
+    # read-only source classification, never a new executable migration.
+    trusted_edges: dict[str, str] = {}
+    trusted_snapshot: tuple[tuple[str,str,str,str],...] = ()
+    if trusted_ingress_peers is not None:
+        from edge_egress_v1_ingress import (
+            IngressPeer, render_registry, parse_registry,
+        )
+        if (type(trusted_ingress_peers) is not tuple
+            or not trusted_ingress_peers
+            or any(type(p) is not IngressPeer for p in trusted_ingress_peers)):
+            raise MigrationInventoryHold("M1_ROOT_INGRESS_PEERS_INVALID")
+        try:
+            verified=parse_registry(
+                render_registry(list(trusted_ingress_peers)).encode("utf-8")
+            )
+        except (ValueError,TypeError,KeyError) as exc:
+            raise MigrationInventoryHold("M1_ROOT_INGRESS_PEERS_INVALID") from exc
+        trusted_snapshot=tuple(sorted(
+            (p.edge_id,p.edge_ipv4,p.ingress_ipv4,p.wg_public_key)
+            for p in verified
+        ))
+        trusted_edges={p.edge_id:p.edge_ipv4 for p in verified}
 
     global_issues: list[str] = []
     accounts: list[UserInventory] = []
@@ -226,6 +253,17 @@ def preview_migration(
             ).fetchall()
             by_edge = {eid: ip for eid,ip,status,table in allocations
                        if _ipv4(ip) and status == "STAGED"}
+            for eid,ip in trusted_edges.items():
+                # Do not reinterpret an existing F3 Edge under another IP,
+                # nor accept two claimed owners of the same public IP.
+                if (any(row[0] == eid and row[1] != ip for row in allocations)
+                    or any(row[0] != eid and row[1] == ip
+                           for row in allocations)
+                    or any(k != eid and v == ip
+                           for k,v in by_edge.items())):
+                    raise MigrationInventoryHold(
+                        "M1_ROOT_INGRESS_EGRESS_IDENTITY_CONFLICT")
+                by_edge[eid]=ip
             targets = [r for r in allocations if r[0] == selection.target_edge_id]
             if len(targets) != 1 or targets[0][2] != "STAGED" or not _ipv4(targets[0][1]):
                 global_issues.append("TARGET_F3_NOT_STAGED")
@@ -389,6 +427,7 @@ def preview_migration(
             snap = (
                 selection.mode,selection.usernames,selection.target_edge_id,
                 target_ip,tuple(hosts),tuple(allocations),
+                trusted_snapshot,
                 readiness_identity,tuple(runtime),tuple(bindings),
                 tuple(frozen_source),
                 tuple((a.username,a.uid,a.source_edge_id,a.source_ipv4,

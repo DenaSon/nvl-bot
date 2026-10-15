@@ -16,7 +16,7 @@ from edge_egress_k2_a3_host_plans import (
     RootOwnedM2PlanSource, RootOwnedUIDSnapshotSource,
 )
 from edge_egress_k2_m42_bindings import (
-    HostReviewedPorts, RootAdminPolicy,
+    HostReviewedPorts, RootAdminPolicy, LegacyCurrentAdminRole,
 )
 from edge_egress_k2_m4_root_worker import WorkerPaths, RootWorkerHold
 
@@ -150,7 +150,7 @@ class ReviewedAssemblyTests(unittest.TestCase):
             acquire_6g=self.callbacks.acquire,
             journal_6g=self.callbacks.journal,
             port_factory=self.factory,
-            live_admin_role=lambda a,c:False,
+            live_admin_role=LegacyCurrentAdminRole(self.db),
             protected_mode=lambda:"0",
             os_uid=self.os_uid,geteuid=self.root_uid,
         )
@@ -218,6 +218,16 @@ class ReviewedAssemblyTests(unittest.TestCase):
         altered=HostReviewedPorts(**{
             **self.ports.__dict__,
             "acquire_6g":lambda *args:None,
+        })
+        with patch.object(a,"M4A_ROOT_ASSEMBLY_ENABLED",True):
+            with self.assertRaisesRegex(a.M4AAssemblyHold,"NOT_AUTHORIZED"):
+                a.assemble_reviewed_root(
+                    paths=self.p,ports=altered,release_enabled=True,
+                )
+
+    def test_untrusted_live_admin_callback_cannot_be_assembled(self):
+        altered=HostReviewedPorts(**{
+            **self.ports.__dict__,"live_admin_role":lambda *_:True,
         })
         with patch.object(a,"M4A_ROOT_ASSEMBLY_ENABLED",True):
             with self.assertRaisesRegex(a.M4AAssemblyHold,"NOT_AUTHORIZED"):

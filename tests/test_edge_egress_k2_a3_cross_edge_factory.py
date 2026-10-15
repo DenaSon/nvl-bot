@@ -53,6 +53,10 @@ class CrossEdgeRootPlanFactoryIntegrationTests(unittest.TestCase):
             selection.usernames,ingress_witness=lambda name:
             LiveIngressWitness(name,"s8",SOURCE,NOW-1,"INDEPENDENT_LIVE")
         )
+        # A3 captured the old same-edge callback during its constructor.
+        # Both A3 and M4A must consume the SAME current cross-edge M1
+        # provider, not two independently authored/frozen snapshots.
+        fx.adapter.inventory_provider=fx.review
         self.host=host_factory.ReviewedM2P3HostFactory(
             db_conn=fx.fx.db,read_root_snapshot=fx.adapter,
             os_uid=fx.uid,geteuid=fx.root,release_enabled=True,

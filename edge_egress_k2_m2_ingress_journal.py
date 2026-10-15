@@ -226,6 +226,28 @@ def compare_and_swap_root_journal(before: bytes, after: bytes, *,
             temp.unlink()
 
 
+@dataclass(frozen=True)
+class RootReadOnlyIngressEvidence:
+    """PAM journal and CURRENT root registry/WG ownership, read-only.
+
+    This is the only typed source of extra ingress-only Edge identities for
+    root M1 review. It is NOT F4 and NEVER permits UID_ATTACH execution.
+    """
+    raw: bytes
+    peers: tuple[IngressPeer, ...]
+    allowed_ips: str
+    now: int
+    resolve_uid: Callable[[str], int]
+
+    def __call__(self, username: str) -> LiveIngressWitness:
+        uid=self.resolve_uid(username)
+        return verified_recent_observation(
+            self.raw,username=username,uid=uid,peers=self.peers,
+            allowed_ips=self.allowed_ips,now=self.now,
+            resolve_uid=self.resolve_uid,
+        )
+
+
 def make_m1_readonly_ingress_provider(
     *, now: int, run, geteuid: Callable[[],int] = os.geteuid,
     resolve_uid: Callable[[str],int] =
@@ -249,9 +271,7 @@ def make_m1_readonly_ingress_provider(
     except (OSError,TypeError,ValueError) as exc:
         raise DurableIngressHold("WG_PEER_READ_UNAVAILABLE") from exc
 
-    def evidence(username: str) -> LiveIngressWitness:
-        uid=resolve_uid(username)
-        return verified_recent_observation(
-            raw,username=username,uid=uid,peers=peers,
-            allowed_ips=result.stdout,now=now,resolve_uid=resolve_uid)
-    return evidence
+    return RootReadOnlyIngressEvidence(
+        raw=raw,peers=peers,allowed_ips=result.stdout,now=now,
+        resolve_uid=resolve_uid,
+    )

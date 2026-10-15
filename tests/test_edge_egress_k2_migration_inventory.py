@@ -101,6 +101,52 @@ class K2M1InventoryTests(unittest.TestCase):
         self.assertTrue(u.source_proven)
         self.assertNotEqual(u.historical_host,u.source_ipv4)
 
+    def test_attested_ingress_only_edge_not_mistaken_for_egress_allocation(self):
+        import base64
+        from edge_egress_v1_ingress import IngressPeer
+        key=base64.b64encode(bytes(range(32))).decode()
+        self.c.execute(
+            "DELETE FROM edge_egress_allocations WHERE edge_id='s8'"
+        )
+        # Source is independently observed on s8, but s8 has no F3 Egress
+        # allocation. An exact root-owned Registry + WG observation can
+        # identify s8 for read-only planning; never for live P3 execute.
+        missing=self.preview()
+        self.assertIn("SOURCE_WITNESS_INVALID_OR_STALE",
+                      self.selected(missing)[0].issues)
+        peers=(IngressPeer("s8",SOURCE,"10.77.0.8",key),)
+        accepted=self.preview(trusted_ingress_peers=peers)
+        self.assertTrue(accepted.inventory_clear)
+        self.assertFalse(accepted.can_execute)
+        self.assertEqual(
+            (self.selected(accepted)[0].source_edge_id,
+             self.selected(accepted)[0].source_ipv4),
+            ("s8",SOURCE),
+        )
+        self.assertNotEqual(missing.fingerprint,accepted.fingerprint)
+        # The target still needs its independent F3/F4 acceptance.
+        self.c.execute(
+            "UPDATE edge_egress_readiness SET state='STAGED' WHERE edge_id='e9'"
+        )
+        self.assertFalse(self.preview(
+            trusted_ingress_peers=peers).inventory_clear)
+
+    def test_ingress_registry_conflict_and_invalid_peers_hold_before_inventory(self):
+        import base64
+        from edge_egress_v1_ingress import IngressPeer
+        key=base64.b64encode(bytes(range(32))).decode()
+        self.c.execute("DELETE FROM edge_egress_allocations WHERE edge_id='s8'")
+        for peers in (
+            (IngressPeer("s8",TARGET,"10.77.0.8",key),),
+            (IngressPeer("e9",SOURCE,"10.77.0.8",key),),
+            (IngressPeer("s8",SOURCE,"10.77.0.8",key),
+             IngressPeer("s8",SOURCE,"10.77.0.9",key)),
+            (IngressPeer("s8",SOURCE,"10.77.0.8","fake"),),
+        ):
+            with self.subTest(peers=peers),self.assertRaises(MigrationInventoryHold):
+                self.preview(trusted_ingress_peers=peers)
+        self.assertFalse(self.preview().inventory_clear)
+
     def test_missing_trusted_ingress_cannot_fall_back_to_host(self):
         snap=self.preview(ingress_witness=None)
         u=self.selected(snap)[0]

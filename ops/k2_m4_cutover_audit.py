@@ -151,6 +151,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--bot-uid", type=int, required=True)
     parser.add_argument("--ipc-gid", type=int, required=True)
+    parser.add_argument(
+        "--details", action="store_true",
+        help="Show at most 64 source callsites without command arguments",
+    )
     args = parser.parse_args(argv)
     try:
         result = inspect_cutover(WorkerPaths(
@@ -170,6 +174,12 @@ def main(argv: list[str] | None = None) -> int:
             "can_deploy": False,
             "can_release": False,
         }
+        if args.details:
+            output["call_sites"] = [
+                {"kind": item.expression, "line": item.line}
+                for item in result.privileged_uses[:64]
+            ]
+            output["call_sites_truncated"] = len(result.privileged_uses) > 64
     except (RootWorkerHold, CutoverAuditHold, ValueError, OSError):
         output = {
             "status": "HOLD",

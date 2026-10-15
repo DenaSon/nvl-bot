@@ -121,18 +121,14 @@ def _root_can_review(plan: MigrationWavePlan) -> bool:
 
 
 def _operator_runtime_released(plan: MigrationWavePlan) -> bool:
-    """Presentation gating only: never offer CONFIRM for a code-only preview.
+    """Presentation only; the original root portal independently authorizes.
 
-    This does NOT authorize execution. Root IPC and the original 6G/P3
-    repeat all their independent checks. In the legacy root bot (UID 0),
-    no PREPARE button is offered even if someone toggles a subset of flags.
+    Same-process ROOT bot, one existing poller. The source release flags
+    alone never bypass the root portal's real F4/P3/6G safety checks.
+    The registered singleton is rechecked at the callback boundary.
     """
     import os
-    from edge_egress_k2_m43_client import M43_TELEGRAM_EXECUTION_ENABLED
-    from edge_egress_k2_m4_ipc import M4_UNIX_IPC_ENABLED
-    from edge_egress_k2_m4_root_worker import M4_ROOT_WORKER_ENABLED
-    from ops.k2_m4_root_daemon import M4A_ROOT_DAEMON_RELEASED
-    from edge_egress_k2_a_root_assembly import M4A_ROOT_ASSEMBLY_ENABLED
+    from edge_egress_k2_root_direct import K2_ROOT_DIRECT_ENABLED
     from edge_egress_k2_a_host_factory import (
         M4A_REAL_HOST_FACTORY_ENABLED, M4A_CROSS_EDGE_FACTORY_ENABLED,
     )
@@ -154,11 +150,9 @@ def _operator_runtime_released(plan: MigrationWavePlan) -> bool:
     )
     from edge_egress_uid_runtime_store import K2_CROSS_EDGE_RUNTIME_STORE_ENABLED
     from edge_egress_k2_uid_ingress_egress import K2_M4_POLICY_STAGE_ENABLED
-    if (os.geteuid() == 0 or not _root_can_review(plan)
+    if (os.geteuid() != 0 or not _root_can_review(plan)
         or not all((
-            M43_TELEGRAM_EXECUTION_ENABLED, M4_UNIX_IPC_ENABLED,
-            M4_ROOT_WORKER_ENABLED, M4A_ROOT_DAEMON_RELEASED,
-            M4A_ROOT_ASSEMBLY_ENABLED, M4A_REAL_HOST_FACTORY_ENABLED,
+            K2_ROOT_DIRECT_ENABLED, M4A_REAL_HOST_FACTORY_ENABLED,
             A3_ROOT_OWNED_PLAN_SOURCE_ENABLED, A3_ROOT_SNAPSHOT_BINDING_ENABLED,
             M42_LIVE_BINDINGS_ENABLED, M4_ROOT_PORTAL_ENABLED,
             M3_WAVE_EXECUTION_ENABLED,

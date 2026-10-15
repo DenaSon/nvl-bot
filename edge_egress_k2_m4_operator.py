@@ -29,6 +29,7 @@ def inspect_telegram_migration(
     session_provider: Callable | None = None,
     geteuid: Callable[[],int] = os.geteuid,
     run: Callable = subprocess.run,
+    root_ingress_peers: tuple | None = None,
 ) -> MigrationInventory:
     """Preview only. Optional injected providers support hermetic tests.
 
@@ -54,7 +55,8 @@ def inspect_telegram_migration(
         raise ValueError("M4_SESSION_PROVIDER_UNTRUSTED")
     # Only the fixed root-owned PAM/WG source class can supply ingress-only
     # Edge identities. Ordinary Telegram providers never get this privilege.
-    peers=(source_provider.peers
+    peers=(root_ingress_peers if root_ingress_peers is not None
+           else source_provider.peers
            if type(source_provider) is RootReadOnlyIngressEvidence else None)
     return preview_migration(
         db_conn,selection,os_uid=uid_fn,

@@ -76,19 +76,52 @@ def scan_legacy_bot_source(raw: bytes) -> PrivilegeAuditReport:
     class Visitor(ast.NodeVisitor):
         def __init__(self):
             self.stack=[]
+            # Resolve static import aliases before deciding whether a call is
+            # privileged. Without this, 'from subprocess import run as r'
+            # and 'import os as operating_system' can evade the A3 inventory.
+            # This remains flow-insensitive: an alias hit is a review lead,
+            # never proof of a safe or authorized non-root cutover.
+            self.aliases=[{}]
+
+        def visit_Import(self,node):
+            for entry in node.names:
+                local=entry.asname or entry.name.split(".")[0]
+                original=entry.name if entry.asname else entry.name.split(".")[0]
+                self.aliases[-1][local]=original
+
+        def visit_ImportFrom(self,node):
+            if node.level != 0 or not node.module:
+                return
+            for entry in node.names:
+                if entry.name=="*":
+                    name=".".join(self.stack) if self.stack else "<module>"
+                    hits.append(PrivilegedCallsite(
+                        name,node.lineno,node.module+".*","manual-review"))
+                    continue
+                local=entry.asname or entry.name
+                self.aliases[-1][local]=node.module+"."+entry.name
+
+        def resolve(self,target):
+            first,sep,rest=target.partition(".")
+            for aliases in reversed(self.aliases):
+                if first in aliases:
+                    return aliases[first]+(sep+rest if sep else "")
+            return target
 
         def visit_FunctionDef(self,node):
             nonlocal total
             total+=1
             self.stack.append(node.name)
+            self.aliases.append({})
             self.generic_visit(node)
+            self.aliases.pop()
             self.stack.pop()
 
         visit_AsyncFunctionDef=visit_FunctionDef
 
         def visit_Call(self,node):
             nonlocal dynamic
-            target=identifier(node.func)
+            target=self.resolve(identifier(node.func))
             name=".".join(self.stack) if self.stack else "<module>"
             if target in _ROOT_CALLS:
                 hits.append(PrivilegedCallsite(name,node.lineno,target,"root-or-command"))

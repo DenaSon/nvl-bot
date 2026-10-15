@@ -135,6 +135,99 @@ class K2UIDIngressEgressTests(unittest.TestCase):
                 self.assertFalse(verify_readonly_cross_edge_ingress(
                     **{**kwargs,**change}))
 
+    def test_root_pam_probe_requires_committed_uid_file_and_live_wg(self):
+        from types import SimpleNamespace
+        from edge_egress_v1_ingress import IngressPeer
+        from edge_egress_k2_uid_ingress_egress import probe_root_cross_edge_ingress
+        row = RuntimeBinding(
+            "nvl0555", 1636, "e9", DST,
+            20009, 1780, 10553, "PROTECTED", 3, 44,
+        )
+        policy = parse_uid_ingress_egress_bindings(encode([record()]))
+        peers = (IngressPeer("s8", SRC, "10.77.0.8", KEY),)
+        with patch(
+            "edge_egress_k2_uid_ingress_egress.load_root_uid_ingress_egress_bindings",
+            return_value=policy,
+        ), patch(
+            "edge_egress_v1_ingress.load_registry", return_value=peers,
+        ), patch(
+            "subprocess.run",
+            return_value=SimpleNamespace(returncode=0, stdout=KEY+" 10.77.0.8/32\\n"),
+        ) as wg:
+            self.assertTrue(probe_root_cross_edge_ingress(
+                row, "10.77.0.8", "f"*64))
+            self.assertFalse(probe_root_cross_edge_ingress(
+                row, "10.77.0.9", "f"*64))
+            self.assertFalse(probe_root_cross_edge_ingress(
+                row, "10.77.0.8", "0"*64))
+            wg.assert_called_with(
+                ["wg", "show", "wg0", "allowed-ips"],
+                text=True, capture_output=True, timeout=3, check=False,
+            )
+        with patch(
+            "edge_egress_k2_uid_ingress_egress.load_root_uid_ingress_egress_bindings",
+            return_value={},
+        ), patch("subprocess.run") as wg:
+            self.assertFalse(probe_root_cross_edge_ingress(
+                row, "10.77.0.8", "f"*64))
+            wg.assert_not_called()
+        with patch(
+            "edge_egress_k2_uid_ingress_egress.load_root_uid_ingress_egress_bindings",
+            side_effect=IngressEgressHold("untrusted"),
+        ):
+            self.assertFalse(probe_root_cross_edge_ingress(
+                row, "10.77.0.8", "f"*64))
+
+    def test_v1_pam_only_uses_cross_edge_after_explicit_release(self):
+        from types import SimpleNamespace
+        from edge_egress_v1_admission import (
+            AdmissionResult, Member, check_account,
+        )
+        row = RuntimeBinding(
+            "nvl0555", 1636, "e9", DST,
+            20009, 1780, 10553, "PROTECTED", 3, 44,
+        )
+        request = SimpleNamespace(
+            username="nvl0555", uid=1636, priority=1780,
+            spec=SimpleNamespace(
+                edge_id="e9", edge_public_ipv4=DST, route_table=20009,
+            ),
+        )
+        member = Member("nvl0555", 1636, "f"*64)
+        seen = []
+        def cross(runtime, digest):
+            seen.append((runtime, digest))
+            return True
+        def decide(_conn, _name, _uid, verify):
+            result = (AdmissionResult.ALLOW_PROTECTED
+                      if verify(row) else AdmissionResult.ALLOW_LEGACY)
+            return SimpleNamespace(result=result)
+        kwargs = dict(
+            conn=object(), username="nvl0555", uid=1636,
+            members={"nvl0555": member},
+            guard_loader=lambda _: SimpleNamespace(
+                request=request, dns_port=10553,
+            ),
+            guard_probe=lambda _db, _row: True,
+            ingress_probe=lambda _row: False,
+            cross_ingress_probe=cross,
+        )
+        with patch(
+            "edge_egress_v1_admission.decide_account", side_effect=decide,
+        ):
+            # Root policy on disk must never enable PAM by itself.
+            self.assertFalse(check_account(**kwargs))
+            self.assertEqual(seen, [])
+            with patch(
+                "edge_egress_v1_admission.M4_CROSS_EDGE_PAM_RELEASED", True,
+            ):
+                self.assertTrue(check_account(**kwargs))
+                self.assertEqual(seen, [(row, "f"*64)])
+                self.assertFalse(check_account(
+                    **{**kwargs, "cross_ingress_probe": lambda *_: False}))
+                # Wrong UID is denied *before* any alternate-source proof.
+                self.assertFalse(check_account(**{**kwargs, "uid": 1637}))
+
     def test_invalid_or_ambiguous_root_policy_is_rejected(self):
         bad = [
             encode([record(uid=True)]),

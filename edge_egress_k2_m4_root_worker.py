@@ -61,6 +61,7 @@ PINNED_SOURCE_FILES = frozenset((
     "edge_egress_p3_executor.py",
     "ops/k2_m4_root_daemon.py",
     "ops/k2_m4_cutover_audit.py",
+    "ops/k2_m4_plan_stage.py",
     "ops/k2_m2_first_uid.py",
     "ops/k2_m2_guard_append.py",
     "ops/k2_m2_guard_recovery.py",

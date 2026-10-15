@@ -1,10 +1,10 @@
-"""Package A: reviewed SAME-INGRESS M2 -> real P3 UID host composition.
+"""Package A: reviewed SAME-INGRESS or gated SINGLE cross-Edge M2 -> P3 UID port.
 
 No Telegram-controlled factory, plugin importer, command, alternate kernel or
 additional 6G ledger. Source-only and default OFF. An actual authorized
 installation must supply a vetted *read-only* snapshot of existing root files.
 Every M2 mutation is deferred until original P3/6G intent is durable.
-Cross-edge legacy transitions are deliberately not accepted here.
+Cross-Edge remains individually gated and unavailable until field release.
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from typing import Callable
 
 from edge_egress_k2_m4_bootstrap import (
     GuardBootstrap, DeferredOriginal6GHostPort,
+    DeferredCrossEdgeOriginal6GHostPort,
 )
 from edge_egress_k2_m3_ingress_port import (
     GuardedVerifiedIngressUIDPort, VerifiedIngressContract,
@@ -21,6 +22,11 @@ from edge_egress_k2_m3_ingress_port import (
 from edge_egress_k2_m3_waves import MigrationMember, build_wave_plan
 from edge_egress_k2_migration_inventory import select_migration
 from edge_egress_k2_source_enrollment import SameEdge6GUIDRuntimeStore
+from edge_egress_uid_runtime_store import K2CrossEdgeUIDRuntimeStore
+from edge_egress_k2_m4_cross_edge_port import (
+    CrossEdgeIndependentSafety, GuardedCrossEdgeUIDPort,
+    root_fresh_source_evidence,
+)
 from edge_egress_p3_executor import ExecutionScope, ExecutionTicket, _scope_digest
 from edge_egress_p3_uid import NEW, GuardedProtectedUIDPort, review_protected_uid
 from edge_egress_uid_policy import UIDPolicyRequest
@@ -31,6 +37,7 @@ from ops.k2_p3_guard_installer import GuardInstallPlan, RootFilePort
 from ops.k2_m2_guard_append import MultiUIDAppendPlan, CASRootRosterPort
 
 M4A_REAL_HOST_FACTORY_ENABLED = False
+M4A_CROSS_EDGE_FACTORY_ENABLED = False
 
 
 class M4AHostHold(ValueError):
@@ -79,13 +86,19 @@ class ReviewedM2P3HostFactory:
         if (not M4A_REAL_HOST_FACTORY_ENABLED
             or self.release_enabled is not True or self.geteuid() != 0
             or not isinstance(scope, ExecutionScope)
-            or scope.action != "UID_ENROLL_SOURCE"
-            or scope.source_host != scope.target_host
+            or not (
+                scope.action == "UID_ENROLL_SOURCE"
+                and scope.source_host == scope.target_host
+                or M4A_CROSS_EDGE_FACTORY_ENABLED
+                and scope.action == "UID_ATTACH"
+                and scope.source_host != scope.target_host
+            )
             or not isinstance(ticket, ExecutionTicket)
             or ticket.scope_digest != _scope_digest(scope)
             or not callable(review)):
             raise M4AHostHold("M4A_SAME_EDGE_ROOT_RELEASE_REQUIRED")
 
+        cross = scope.action == "UID_ATTACH"
         # Root source and F4/session evidence are recomputed here. No
         # historical ssh_accounts.host fallback or Telegram-provided facts.
         selection = select_migration("SINGLE", (scope.username,), scope.edge_id)
@@ -94,7 +107,8 @@ class ReviewedM2P3HostFactory:
         member = wave.members[0] if len(wave.members) == 1 else None
         if (wave.global_blockers
             or member is None or not member.selectable
-            or member.source_edge_id != scope.edge_id
+            or (member.source_edge_id == scope.edge_id if cross else
+                member.source_edge_id != scope.edge_id)
             or member.source_ipv4 != scope.source_host
             or member.target_edge_id != scope.edge_id
             or member.target_ipv4 != scope.target_host
@@ -129,7 +143,12 @@ class ReviewedM2P3HostFactory:
             or spec.safety.packet_witness is None
             or spec.safety.neighbour_witness is None
             or spec.safety.target_edge_id != scope.edge_id
-            or spec.safety.source_ipv4 != scope.source_host):
+            or spec.safety.source_ipv4 != scope.source_host
+            or (cross and (
+                type(spec.safety) is not CrossEdgeIndependentSafety
+                or spec.safety.ingress_edge_id != member.source_edge_id
+                or spec.safety.source_evidence is not root_fresh_source_evidence
+            ))):
             raise M4AHostHold("M4A_BOOTSTRAP_OR_PHYSICAL_PORT_UNVERIFIED")
         if (bootstrap.kind == "FIRST_UID"
             and not isinstance(bootstrap.kwargs.get("port"),RootFilePort)):
@@ -149,10 +168,18 @@ class ReviewedM2P3HostFactory:
                 roster_loader=load_roster, guard_loader=checked_guard,
                 os_uid_for_username=self.os_uid,
             )
-            store = SameEdge6GUIDRuntimeStore(
-                self.db_conn, self.os_uid, scope=scope, ticket=ticket,
-                shared_edge_enabled=True,
-            )
+            if cross:
+                store = K2CrossEdgeUIDRuntimeStore(
+                    self.db_conn, self.os_uid, scope=scope, ticket=ticket,
+                    ingress_edge_id=member.source_edge_id,
+                    source_evidence=root_fresh_source_evidence,
+                    geteuid=self.geteuid, reviewed_release=True,
+                )
+            else:
+                store = SameEdge6GUIDRuntimeStore(
+                    self.db_conn, self.os_uid, scope=scope, ticket=ticket,
+                    shared_edge_enabled=True,
+                )
             kernel = LocalLinuxProtectedRuntimeKernel(explicitly_enabled=True)
             uid_port = GuardedProtectedUIDPort(
                 db_conn=self.db_conn, plan=plan, ticket=ticket,
@@ -160,12 +187,24 @@ class ReviewedM2P3HostFactory:
                 roster_loader=load_roster, guard_loader=checked_guard,
                 os_uid_for_username=self.os_uid, release_enabled=True,
             )
+            if cross:
+                return GuardedCrossEdgeUIDPort(
+                    member=member, scope=scope, ticket=ticket,
+                    uid_port=uid_port, db_conn=self.db_conn,
+                    live_inventory=review, release_enabled=True,
+                )
             return GuardedVerifiedIngressUIDPort(
                 contract=VerifiedIngressContract(member,scope),
                 ticket=ticket,uid_port=uid_port,db_conn=self.db_conn,
                 live_inventory=review,release_enabled=True,
             )
 
+        if cross:
+            return DeferredCrossEdgeOriginal6GHostPort(
+                scope=scope, ticket=ticket, db_conn=self.db_conn,
+                bootstrap=bootstrap, port_factory=after_bootstrap,
+                release_enabled=True,
+            )
         return DeferredOriginal6GHostPort(
             scope=scope, ticket=ticket, db_conn=self.db_conn,
             bootstrap=bootstrap,port_factory=after_bootstrap,

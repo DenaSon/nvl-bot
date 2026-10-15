@@ -276,6 +276,60 @@ class RootM42Bindings:
             raise M42BindingHold("M42_PROTECTED_MODE_UNTRUSTED")
         return observed
 
+    def _post_commit_under_current_6g(self, scope: ExecutionScope) -> bool:
+        """Read original 6G and F2, NEVER infer a transfer from a UI flag.
+
+        The final P3 evidence check runs after per-UID PROTECTED CAS but before
+        the original 6G journal becomes SUCCEEDED. M1 then reports
+        TARGET_ALREADY_PROTECTED. Accept that *single* issue only for the
+        exact still-RUNNING nonce-bearing operation and protected mapping.
+        """
+        from edge_egress_uid_runtime_store import read_binding
+        from edge_egress_p3_executor import INTENT_PHASE
+        try:
+            with self.ports.db_conn() as db:
+                binding = read_binding(db, scope.username)
+                if (binding is None or binding.state != "PROTECTED"
+                    or binding.uid != scope.uid
+                    or binding.edge_id != scope.edge_id
+                    or binding.edge_ipv4 != scope.target_host):
+                    return False
+                mapped = db.execute(
+                    "SELECT uid,edge_id,edge_ipv4,status "
+                    "FROM edge_egress_uid_bindings WHERE username=?",
+                    (scope.username,),
+                ).fetchone()
+                if mapped != (
+                    scope.uid,scope.edge_id,scope.target_host,"PROTECTED"
+                ):
+                    return False
+                rows = db.execute(
+                    "SELECT id,status,source_host,target_host,detail_json "
+                    "FROM failover_operations WHERE status='RUNNING'"
+                ).fetchall()
+                if len(rows) != 1:
+                    return False
+                op_id,status,source,target,raw = rows[0]
+                if (op_id != binding.last_operation_id
+                    or source != scope.source_host
+                    or target != scope.target_host):
+                    return False
+                detail = json.loads(raw)
+                return (
+                    type(detail) is dict
+                    and detail.get("kind") == "K2_P3A"
+                    and detail.get("phase") == INTENT_PHASE
+                    and detail.get("action") == scope.action
+                    and detail.get("edge_id") == scope.edge_id
+                    and detail.get("scope_digest") == _scope_digest(scope)
+                    and isinstance(detail.get("nonce_hash"),str)
+                    and re.fullmatch(
+                        r"[a-f0-9]{64}", detail["nonce_hash"]
+                    ) is not None
+                )
+        except (sqlite3.Error,ValueError,TypeError,KeyError):
+            return False
+
     def fresh_p3_evidence(self, scope: ExecutionScope) -> FreshEvidence:
         self._gate()
         if not isinstance(scope, ExecutionScope):
@@ -298,7 +352,12 @@ class RootM42Bindings:
         if (any(issue != 'SHARED_6G_BUSY' for issue in reviewed.global_issues)\
             or not reviewed.target_f4_accepted
             or len(chosen) != 1
-            or chosen[0].issues
+            or (
+                chosen[0].issues not in (
+                    (), ("TARGET_ALREADY_PROTECTED",)
+                ) or chosen[0].issues == ("TARGET_ALREADY_PROTECTED",)
+                and not self._post_commit_under_current_6g(scope)
+            )
             or chosen[0].username != scope.username
             or chosen[0].uid != scope.uid
             or chosen[0].source_ipv4 != scope.source_host
@@ -321,8 +380,6 @@ class RootM42Bindings:
         if (proof.target_edge != scope.edge_id or
             proof.target_ipv4 != scope.target_host):
             raise M42BindingHold("M42_P3_EXTERNAL_SCOPE_DRIFT")
-        if cross_ingress and len(chosen) != 1:
-            raise M42BindingHold("M42_CROSS_EDGE_SINGLE_REQUIRED")
         # Bind a P3 ticket to the complete signed observation, not only
         # generation/time. A witness replacement with identical metadata
         # but different accounts, checks or validity must invalidate P3.

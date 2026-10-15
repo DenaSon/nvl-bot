@@ -292,6 +292,44 @@ class TrustedRootFactoryTests(unittest.IsolatedAsyncioTestCase):
             self.bind.issue_ticket(cross,11,-222)
         self.assertEqual(self.called,[])
 
+    def test_cross_edge_single_ticket_uses_independent_source_and_dedicated_release(self):
+        from dataclasses import replace
+        from tests.test_edge_egress_k2_migration_inventory import SOURCE
+        from edge_egress_p3_executor import ExecutionScope
+        external=SignedExternalEvidence(
+            "a"*64,NOW-1,NOW+15,"e9",TARGET,REQUIRED_CHECKS,
+            (WitnessAccount("nvl0555",1636,"s8",SOURCE,0),),
+        )
+        ports=replace(
+            self.ports,
+            external_evidence=lambda:external,
+            ingress_provider=lambda **kwargs: (
+                lambda name:LiveIngressWitness(
+                    name,"s8",SOURCE,NOW-1,"INDEPENDENT_LIVE")
+            ),
+        )
+        rooted=b.RootM42Bindings(
+            ports=ports,root_secret=b"k"*48,
+            admin_policy=b.RootAdminPolicy(frozenset({(11,-222)})),
+            reviewed_release=True,
+        )
+        scope=ExecutionScope(
+            "UID_ATTACH","e9",SOURCE,TARGET,username="nvl0555",uid=1636,
+        )
+        with self.assertRaisesRegex(b.M42BindingHold,"ONLY_SAME_EDGE"):
+            rooted.fresh_p3_evidence(scope)
+        with patch.object(b,"M42_CROSS_EDGE_LEGACY_SINGLE_ENABLED",True):
+            fresh=rooted.fresh_p3_evidence(scope)
+            self.assertNotIn("SOURCE_EDGE_F4",fresh.gates)
+            ticket=rooted.issue_ticket(scope,11,-222)
+            self.assertEqual(ticket.scope_digest,
+                             b._scope_digest(scope))
+            external=replace(external,accounts=(
+                WitnessAccount("nvl0555",1636,"s7",SOURCE,0),
+            ))
+            with self.assertRaises((b.M42BindingHold,ValueError)):
+                rooted.fresh_p3_evidence(scope)
+
     def test_unknown_or_expired_evidence_denied(self):
         self.evidence=SignedExternalEvidence(
             "a"*64,NOW-50,NOW-1,"e9",TARGET,REQUIRED_CHECKS,

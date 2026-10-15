@@ -440,16 +440,19 @@ class K2CrossEdgeUIDRuntimeStore(Existing6GUIDRuntimeStore):
                 for peer in observed.peers
             ) != 1):
             raise RuntimeStoreUnsafe("K2_INGRESS_NOT_INDEPENDENTLY_PINNED")
-        # Historical host is only a negative consistency guard, not evidence
-        # of current transport. Never switch default Edge or global DNS.
-        account = conn.execute(
+        # M1 treats ssh_accounts.host as historical metadata; only
+        # authenticated root PAM journal and live wg0 can prove SSH ingress.
+        # A different historical host must not veto real source evidence.
+        # Require exactly one active SSH account; never rewrite its host.
+        accounts = conn.execute(
             "SELECT host,service_type,status FROM ssh_accounts WHERE username=?",
             (req.username,),
-        ).fetchone()
-        if (not account or account[1] != "ssh"
-            or not isinstance(account[2], str)
-            or "فعال" not in account[2] or "غیر" in account[2]
-            or account[0] not in (source, "", None)):
+        ).fetchall()
+        if (len(accounts) != 1 or accounts[0][1] != "ssh"
+            or not isinstance(accounts[0][2], str)
+            or "فعال" not in accounts[0][2] or "غیر" in accounts[0][2]
+            or (accounts[0][0] is not None
+                and type(accounts[0][0]) is not str)):
             raise RuntimeStoreUnsafe("K2_LEGACY_ACCOUNT_CHANGED")
 
     def stage_pam_admission(self, req: UIDPolicyRequest, *,

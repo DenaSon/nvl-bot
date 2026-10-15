@@ -17,6 +17,7 @@ from typing import Callable
 
 from edge_egress_k2_m42_bindings import (
     HostReviewedPorts, RootM42Bindings, load_root_admin_policy,
+    LegacyCurrentAdminRole,
 )
 from edge_egress_k2_m42_evidence import load_external_evidence
 from edge_egress_k2_m2_ingress_journal import make_m1_readonly_ingress_provider
@@ -151,6 +152,8 @@ def assemble_reviewed_root(
         or ports.port_factory.read_root_snapshot.geteuid is not ports.geteuid
         or ports.port_factory.os_uid is not ports.os_uid
         or ports.port_factory.geteuid is not ports.geteuid
+        or type(ports.live_admin_role) is not LegacyCurrentAdminRole
+        or ports.live_admin_role.db_conn is not ports.db_conn
         or ports.external_evidence is not load_external_evidence
         or ports.ingress_provider is not make_m1_readonly_ingress_provider):
         raise M4AAssemblyHold("M4A_ROOT_ASSEMBLY_NOT_AUTHORIZED")

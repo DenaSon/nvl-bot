@@ -96,3 +96,13 @@ This is **closure work on the existing M4 A3.1 gate**, not a new feature or oper
 - **Unfinished A3.2:** preserving **all** legacy privileged/account/SSH/host actions while moving the only Telegram poller to non-root requires a reviewed and tested privilege transition or pre-existing compatible route for those actions. No generic root command RPC or parallel bot has been added here. Root Daemon entrypoint still exits 78; default-off gates remain OFF.
 
 **Release verdict remains HOLD.** No `master` merge, no release flags enabled, no systemd User change and no live migration. The current work is testable source hardening; field testing must come only after safe service integration.
+
+
+## M4 IPC/A3.2 continuation — bounded PREPARE queue and live revocation (2026-10-15)
+
+- The existing root AF_UNIX `RootOperatorIPC` now discards **only** expired, process-local opaque `PREPARE` request IDs before enforcing its fixed limit of 20 outstanding approvals. Without reclamation, twenty expired approvals could permanently block fresh legitimate requests until restarting the root worker. The original durable checkpoint records, `failover_operations`, 6G lock, and authenticated confirm state are **never modified** during reclamation.
+- A malformed in-memory pending entry or invalid clock fails closed **without partial pruning**. Fresh pending approvals remain reserved and cannot be evicted to bypass the queue limit. Expired request IDs cannot be confirmed/replayed after reclamation.
+- Added targeted IPC regression tests for expiry reclamation, live-queue saturation, corrupted clock/entry, and admin revocation **after PREPARE but before CONFIRM**. The latter must refuse execution and consume the one-shot confirmation even after a later re-login, preserving original P3/6G safety.
+- This is existing M4 reliability and A3.2 access-boundary closure, **not** a new admin/customer feature or permission to activate the root worker.
+
+**Remaining operative HOLD:** the root worker entrypoint intentionally exits 78; `nvlbot.service` still has many historical privileged operations; no nonroot one-poller cutover, real external F4 witness, physical SSH/SOCKS egress acceptance, or Legacy cross-Edge `UID_ATTACH` was accepted. PR #148 stays Draft and **must not** merge into production-triggering `master` until the later operator-run disposable host/Telegram acceptance. CI successes and regressions prove only source-level behavior.

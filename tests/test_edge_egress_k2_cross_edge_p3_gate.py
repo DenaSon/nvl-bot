@@ -21,6 +21,9 @@ class CrossEdgeLegacyP3GateTests(unittest.TestCase):
         self.fx = ExecutorTests(methodName="test_global_source_default_off_and_requires_explicit_gate")
         self.fx.setUp()
         self.addCleanup(self.fx.doCleanups)
+        # A bound method lookup is a distinct Python object each time;
+        # the real P3 6G port requires the EXACT DB callable identity.
+        self.db_conn = self.fx.conn
         self.scope = ExecutionScope(
             "UID_ATTACH", "e7", self.fx.scope.source_host,
             self.fx.scope.target_host, username="nvl0557",uid=1644,
@@ -32,12 +35,12 @@ class CrossEdgeLegacyP3GateTests(unittest.TestCase):
         self.bootstrap = GuardBootstrap(
             self.scope,self.ticket,"FIRST_UID",{
                 "scope":self.scope,"ticket":self.ticket,
-                "db_conn":self.fx.conn,"release_enabled":True,
+                "db_conn":self.db_conn,"release_enabled":True,
             },
         )
         self.port = DeferredCrossEdgeOriginal6GHostPort(
             scope=self.scope,ticket=self.ticket,
-            db_conn=self.fx.conn,bootstrap=self.bootstrap,
+            db_conn=self.db_conn,bootstrap=self.bootstrap,
             port_factory=lambda *args:None,release_enabled=True,
         )
         self.port.apply = AsyncMock(return_value=None)
@@ -46,6 +49,7 @@ class CrossEdgeLegacyP3GateTests(unittest.TestCase):
 
     def _engine(self, port=None):
         engine=self.fx.engine()
+        engine.db_conn=self.db_conn
         engine.host_port=self.port if port is None else port
         return engine
 

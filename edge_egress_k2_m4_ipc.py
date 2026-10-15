@@ -97,6 +97,28 @@ class RootOperatorIPC:
         self.released=released
         self._pending: dict[str,PendingRequest]={}
 
+    def _prune_expired_prepares(self) -> None:
+        """Reclaim ONLY expired in-memory one-shot request IDs.
+
+        Never delete or rewrite root DB checkpoints, P3 receipts or 6G
+        leases. A stale request can no longer consume a finite IPC slot
+        forever; unresolved RUNNING/HOLD checkpoints remain untouched and
+        are still checked independently before any future operation.
+        """
+        now=self.portal.clock()
+        if type(now) is not int or now <= 0:
+            raise M4IPCReject("IPC_PENDING_TIME_UNTRUSTED")
+        expirations=[]
+        for request_id,pending in self._pending.items():
+            if (not isinstance(pending,PendingRequest)
+                or not isinstance(pending.prepared,PreparedWave)
+                or type(pending.prepared.approval.expires_at) is not int):
+                raise M4IPCReject("IPC_PENDING_STATE_UNTRUSTED")
+            if pending.prepared.approval.expires_at <= now:
+                expirations.append(request_id)
+        for request_id in expirations:
+            del self._pending[request_id]
+
     def _gate(self,peer_uid:int, *, peer_only:bool=False,
               action:str|None=None) -> None:
         if (self.released is not True or self.geteuid()!=0
@@ -161,6 +183,7 @@ class RootOperatorIPC:
             # M7 independent batch approval is not inherited from M4.
             if selection.mode != "SINGLE" and not M4_BATCH_RELEASE_ENABLED:
                 raise M4IPCReject("IPC_BATCH_NOT_RELEASED")
+            self._prune_expired_prepares()
             if len(self._pending)>=20:
                 raise M4IPCReject("IPC_PENDING_QUEUE_FULL")
             prepared=self.portal.prepare(

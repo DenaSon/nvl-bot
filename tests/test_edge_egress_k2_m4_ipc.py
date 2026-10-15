@@ -113,6 +113,20 @@ class M4UnixOperatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.ipc._pending),20)
         self.assertEqual(self.fx.actions,[])
 
+    async def test_legacy_cross_edge_prepare_denied_at_root_ipc_without_checkpoint(self):
+        from edge_egress_k2_migration_inventory import LiveIngressWitness
+        from tests.test_edge_egress_k2_migration_inventory import SOURCE
+        self.fx.witness=lambda n:LiveIngressWitness(
+            n,"s8",SOURCE,NOW-1,"INDEPENDENT_LIVE",
+        )
+        with self.assertRaisesRegex(Exception,"CROSS_EDGE_ATTACH"):
+            await self.call(self.prepare_message())
+        self.assertEqual(self.fx.fx.c.execute(
+            "SELECT COUNT(*) FROM k2_m4_wave_checkpoints"
+        ).fetchone(),(0,))
+        self.assertEqual(self.ipc._pending,{})
+        self.assertEqual(self.fx.actions,[])
+
     async def test_no_wrong_uid_or_chat_prepare_even_with_credentials(self):
         with self.assertRaisesRegex(M4IPCReject,"PEER"):
             await self.call(self.prepare_message(),uid=0)

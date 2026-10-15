@@ -94,7 +94,7 @@ class K2UIDIngressEgressTests(unittest.TestCase):
         )
         key = base64.b64encode(bytes(range(32))).decode()
         peers = (IngressPeer("s8", SRC, "10.77.0.8", key),)
-        allowed = key + " 10.77.0.8/32\\n"
+        allowed = key + " 10.77.0.8/32\n"
         self.assertFalse(verify_ingress(
             row, "10.77.0.8", peers, allowed,
         ))

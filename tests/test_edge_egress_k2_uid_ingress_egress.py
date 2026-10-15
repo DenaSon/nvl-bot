@@ -24,13 +24,14 @@ def record(**changes):
     row = dict(
         username="nvl0555", uid=1636, ingress_edge="s8",
         ingress_ipv4=SRC, egress_edge="e9", egress_ipv4=DST,
+        runtime_generation=3, operation_id=44, guard_sha256="f"*64,
     )
     row.update(changes)
     return row
 
 
 def encode(items, **changes):
-    document = dict(version=1, bindings=items)
+    document = dict(version=2, bindings=items)
     document.update(changes)
     return json.dumps(document, separators=(",", ":")).encode("utf-8")
 
@@ -45,18 +46,45 @@ class K2UIDIngressEgressTests(unittest.TestCase):
             "nvl0555", 1636, "e9", DST,
             20009, 1780, 10553, "PROTECTED", 3, 44,
         )
-        self.assertTrue(row.matches_runtime(runtime))
+        self.assertTrue(row.matches_runtime(
+            runtime,installed_guard_sha256="f"*64))
         self.assertFalse(row.matches_runtime(
             RuntimeBinding("nvl0555", 1636, "s8", SRC,
-                           20008, 1780, 10553, "PROTECTED", 3, 44)))
+                           20008, 1780, 10553, "PROTECTED", 3, 44),
+            installed_guard_sha256="f"*64))
         self.assertFalse(row.matches_runtime(
             RuntimeBinding("nvl0555", 1636, "e9", DST,
-                           20009, 1780, 10553, "HOLD", 3, 44)))
+                           20009, 1780, 10553, "HOLD", 3, 44),
+            installed_guard_sha256="f"*64))
         self.assertFalse(row.matches_runtime(object()))
+
+    def test_stale_runtime_generation_operation_or_guard_digest_denies(self):
+        policy = parse_uid_ingress_egress_bindings(encode([record()]))["nvl0555"]
+        for generation, operation in ((2,44),(4,44),(3,43),(3,45)):
+            with self.subTest(generation=generation,operation=operation):
+                row = RuntimeBinding(
+                    "nvl0555",1636,"e9",DST,20009,1780,10553,
+                    "PROTECTED",generation,operation,
+                )
+                self.assertFalse(policy.matches_runtime(
+                    row,installed_guard_sha256="f"*64))
+        row = RuntimeBinding(
+            "nvl0555",1636,"e9",DST,20009,1780,10553,
+            "PROTECTED",3,44,
+        )
+        for digest in (None,"e"*64,"F"*64,"f"*63):
+            self.assertFalse(policy.matches_runtime(
+                row,installed_guard_sha256=digest))
 
     def test_invalid_or_ambiguous_root_policy_is_rejected(self):
         bad = [
             encode([record(uid=True)]),
+            encode([record(runtime_generation=0)]),
+            encode([record(runtime_generation=True)]),
+            encode([record(operation_id=0)]),
+            encode([record(operation_id=True)]),
+            encode([record(guard_sha256="fake")]),
+            encode([record(guard_sha256="F"*64)]),
             encode([record(uid=100)]),
             encode([record(username="root")]),
             encode([record(username="nvl0555;x")]),
@@ -71,9 +99,9 @@ class K2UIDIngressEgressTests(unittest.TestCase):
             encode([record(), record(username="nvl0557")]),
             encode([record(), record(username="nvl0557", uid=1636)]),
             encode([record(extra="unapproved")]),
-            encode([record()], version=2),
-            b'{"version":1,"version":1,"bindings":[]}',
-            b'{"version":1,"bindings":[{"username":"a","username":"b"}]}',
+            encode([record()], version=1),
+            b'{"version":2,"version":2,"bindings":[]}',
+            b'{"version":2,"bindings":[{"username":"a","username":"b"}]}',
             b'{}',
             b'\x00invalid',
             b"x" * 262145,

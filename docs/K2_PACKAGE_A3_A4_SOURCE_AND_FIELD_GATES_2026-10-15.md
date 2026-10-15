@@ -60,3 +60,13 @@ The off-Core signer now refuses to sign even an otherwise valid complete set of 
 - The file is now included in the sealed root-worker source SHA manifest. Synthetic tests cover default-OFF, wrong root/scope, first/next plans, old protected UID, and root-roster byte drift.
 
 **Still required to close A3:** on-host reviewed gate binding for the generated plans, independent external packet/console evidence; dedicated privilege-safe RPC for existing legacy bot root features, admin live-session authority and a proven one-bot nonroot cutover. CI without an audited live Core/Edge cannot assert these items.
+
+## A3.1 follow-up — strict root inventory reconciliation (2026-10-15)
+
+Scope: **fix an existing M4 migration safety gap, no feature expansion**.
+
+- For an existing protected roster, `RootOwnedM2PlanSource` now requires the entire root-owned Guard directory inventory to equal the exact `<username>.json` set derived from the verified roster. An orphan, missing guard or partial first/next UID stage stops NEXT_UID before building a plan; no implicit repair/adoption.
+- The next-UID planner also checks both original F2 tables (`edge_egress_uid_runtime` and `edge_egress_uid_bindings`): an existing row for the selected username **or numeric UID** outside the approved root roster stops the plan. Missing tables, unreadable DB and incomplete filesystem reads remain HOLD.
+- Added synthetic negative tests for orphaned/missing guards and candidate runtime/binding identity collision; exact-HEAD CI runs are authoritative, not earlier green results.
+
+**Boundary remains unchanged:** this is only read-only A3.1 plan hardening. No live `ReviewedUIDHostSnapshot`, independently accepted physical F4/session/packet witness, root daemon activation, non-root legacy-bot cutover, customer migration or master merge occurred. A3.1/A3.2/A4 operational gates are **HOLD** until real disposable-host and Telegram acceptance. Never toggle release switches to mask an incomplete gate.

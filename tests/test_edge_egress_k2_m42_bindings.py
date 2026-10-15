@@ -62,6 +62,49 @@ class TrustedRootFactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(inventory.target_f4_accepted)
         self.assertFalse(inventory.global_issues)
 
+    def test_original_current_admin_db_without_historical_fallback(self):
+        self.fx.c.execute(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)"
+        )
+        admin=b.LegacyCurrentAdminRole(self.fx.db)
+        self.assertFalse(admin(11,11))
+        self.fx.c.execute(
+            "INSERT INTO settings VALUES ('historical_admin_ids','11')"
+        )
+        self.assertFalse(admin(11,11))
+        self.fx.c.execute(
+            "INSERT INTO settings VALUES ('admin_chat_ids','11,42')"
+        )
+        self.assertTrue(admin(11,11))
+        self.assertTrue(admin(42,42))
+        self.assertFalse(admin(11,-222))
+        self.assertFalse(admin(42,11))
+        self.assertFalse(admin(True,True))
+        self.fx.c.execute(
+            "DELETE FROM settings WHERE key='admin_chat_ids'"
+        )
+        self.assertFalse(admin(11,11))
+
+    def test_corrupt_current_admin_login_list_denied(self):
+        self.fx.c.execute(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)"
+        )
+        self.fx.c.execute(
+            "INSERT INTO settings VALUES ('admin_chat_ids','11')"
+        )
+        admin=b.LegacyCurrentAdminRole(self.fx.db)
+        self.assertTrue(admin(11,11))
+        for invalid in ("11,11","11,"," 11","011","-1",
+                        "11,foo","0","11,"+"1"*24):
+            with self.subTest(invalid=invalid):
+                self.fx.c.execute(
+                    "UPDATE settings SET value=? WHERE key='admin_chat_ids'",
+                    (invalid,),
+                )
+                self.assertFalse(admin(11,11))
+        self.fx.c.execute("DROP TABLE settings")
+        self.assertFalse(admin(11,11))
+
     def test_operator_requires_root_policy_and_current_role(self):
         self.assertTrue(self.bind.admin(11,-222))
         self.assertFalse(self.bind.admin(11,-333))

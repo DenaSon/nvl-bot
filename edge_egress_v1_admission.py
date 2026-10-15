@@ -39,6 +39,10 @@ SHA = re.compile(r"^[0-9a-f]{64}$")
 MAX_ROSTER_BYTES = 262144
 MAX_GUARD_BYTES = 4096
 
+# Cross-Edge PAM admission is never enabled by a root policy file alone.
+# The 6G-owned policy writer and disposable-host witness must ship first.
+M4_CROSS_EDGE_PAM_RELEASED = False
+
 
 class AdmissionHold(ValueError):
     pass
@@ -124,7 +128,7 @@ def checked_guard(member: Member, directory: Path = GUARD_DIR) -> BootGuardManif
 def check_account(conn: sqlite3.Connection, username: str, uid: int,
                   members: dict[str, Member], guard_loader=checked_guard,
                   guard_probe=probe_local_guards,
-                  ingress_probe=None) -> bool:
+                  ingress_probe=None, cross_ingress_probe=None) -> bool:
     """Pure policy boundary over existing F2 decision, with durable roster."""
     member = members.get(username)
     # A renamed/reused OS UID must never obtain legacy rights.
@@ -149,8 +153,15 @@ def check_account(conn: sqlite3.Connection, username: str, uid: int,
                 return False
             # SSH transport peer must map to the pinned Edge's wg0 key.
             # Missing H evidence always DENIES a protected login.
-            if ingress_probe is None or not ingress_probe(row):
-                return False
+            same_edge = ingress_probe is not None and ingress_probe(row)
+            if not same_edge:
+                # Only this pinned, already-protected UID may have a
+                # separately attested SSH ingress Edge. Legacy login and
+                # unrelated protected UIDs retain their original rules.
+                if (not M4_CROSS_EDGE_PAM_RELEASED
+                    or cross_ingress_probe is None
+                    or cross_ingress_probe(row, member.guard_sha256) is not True):
+                    return False
             return guard_probe(conn, row)
         decision = decide_account(conn, username, uid, verified)
         return decision.result is AdmissionResult.ALLOW_PROTECTED
@@ -251,6 +262,7 @@ def main() -> int:
         # PAM_RHOST is set by sshd/PAM from the TCP peer, not SSH SendEnv.
         # If Edge ingress is not SNATed to its own wg0 /32, fail closed.
         from edge_egress_v1_ingress import probe_ingress
+        from edge_egress_k2_uid_ingress_egress import probe_root_cross_edge_ingress
         rhost = os.environ.get("PAM_RHOST", "")
         with sqlite3.connect("file:" + FIXED_DB + "?mode=ro",
                              uri=True, timeout=2) as conn:
@@ -258,6 +270,8 @@ def main() -> int:
             return 0 if check_account(
                 conn, name, uid, members,
                 ingress_probe=lambda row: probe_ingress(row, rhost),
+                cross_ingress_probe=lambda row, digest:
+                    probe_root_cross_edge_ingress(row, rhost, digest),
             ) else 1
     except (OSError, sqlite3.Error, ValueError, KeyError, LookupError):
         return 1

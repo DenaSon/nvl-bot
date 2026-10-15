@@ -106,7 +106,28 @@ class M4OperatorReadOnlyTests(unittest.TestCase):
         )
         self.assertTrue(snapshot.inventory_clear)
         self.assertFalse(snapshot.can_execute)
-        self.assertIn("غیرفعال",preview_html(snapshot))
+        rendered=preview_html(snapshot)
+        self.assertIn("آماده بررسی: <b>0</b>",rendered)
+        self.assertIn("نیازمند بررسی: <b>1</b>",rendered)
+        self.assertIn("سرور ورودی",rendered)
+        self.assertNotIn("✅ <code>nvl0555</code>",rendered)
+
+    def test_already_at_target_ingress_displayed_as_reviewed_not_released(self):
+        selection=select_input("SINGLE","nvl0555","e9")
+        witness=lambda name:LiveIngressWitness(
+            name,"e9",TARGET,NOW-1,"INDEPENDENT_LIVE",
+        )
+        preview=inspect_telegram_migration(
+            self.fx.db,selection,now=NOW,
+            uid_lookup=lambda name:self.fx.uids[name],
+            source_provider=witness,
+            session_provider=lambda n,u:0,geteuid=lambda:1000,
+        )
+        self.assertTrue(preview.inventory_clear)
+        rendered=preview_html(preview)
+        self.assertIn("آماده بررسی: <b>1</b>",rendered)
+        self.assertIn("✅ <code>nvl0555</code>",rendered)
+        self.assertIn("غیرفعال",rendered)
 
 
 class M4BotBindingTests(unittest.TestCase):

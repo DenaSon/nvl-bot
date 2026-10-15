@@ -163,3 +163,17 @@ This update **does not** authorize cross-Edge attach or merge.
 To complete this gate later, the existing PAM reader must be explicitly reviewed to consume only this exact root policy while continuing to verify live SSH PAM_RHOST↔WG0 public-key ownership, PROTECTED runtime Egress identity, 6G quiescence and per-UID frozen/DNS/IPv6 packet safety. Critically, a root 6G-owned, crash-safe *writer* must persist identity and per-UID DENY state in correct order before such a policy is relied upon. A manually copied root policy or a green parser test is **not** deployment authorization. Existing Legacy admission and root break-glass must remain intact. Host-level M5 evidence then validates the real SSH/SOCKS data path.
 
 **Status:** root policy type/parser and hermetic negative tests added; **PAM integration, P3/6G migration and operational M4 = HOLD**. No release flags enabled, no `master` merge.
+
+
+## M4 UID ingress/egress admission-proof strengthening — draft-only (2026-10-15)
+
+The uninstalled per-UID source→egress **root policy schema is now V2**. Each record still pins the exact `username/uid`, SSH ingress Edge/public IPv4, protected Internet-egress Edge/public IPv4, and now additionally:
+- `ingress_wg_public_key`: exact 32-byte base64 WireGuard peer key for the current SSH ingress;
+- `runtime_generation` and `operation_id`: exact `PROTECTED` runtime CAS generation and original 6G operation ID;
+- `guard_sha256`: digest of the **installed** per-UID deny-first boot manifest (not metadata from `ssh_accounts.host`).
+
+`UIDIngressEgressBinding.matches_runtime` now rejects any change in protected UID, Egress identity, state, 6G operation, runtime generation or independently supplied installed manifest digest. Previous V1 draft JSON is deliberately rejected; this is **not** a production format migration because no writer/PAM consumer has been installed.
+
+New `verify_readonly_cross_edge_ingress` is a **pure proof checker**, not an SSH admission callback. Given root-pinned policy, current protected RuntimeBinding, installed guard digest, authenticated PAM_RHOST, root-owned ingress peer registry and current `wg show wg0 allowed-ips` text, it fails closed unless all exact identities agree, source is valid wg0 /32, the expected public key currently owns the address, and **no other WireGuard key overlaps that source IP**. It refuses duplicate/forged peers and drifted operation/guard. Unlike the original V1 `verify_ingress`, its pure result may be TRUE for s8 ingress/e9 egress, but **V1 PAM remains unmodified and continues to DENY** such a login. Only an independently reviewed, root 6G-owned writer and hard-gated PAM integration could change that later, with F4/M5 physical acceptance.
+
+Added negative/positive hermetic tests for stale runtime generation or 6G op, changed guard digest, invalid WireGuard key, spoofed PAM_RHOST, changed peer public identity or key, overlapping allowed-ips, reused registry peer, and old V1 unchanged behavior. No release flags, new dispatcher command, running daemon, customer state, SSH route or DNS changed. **M4 operational acceptance remains HOLD.**

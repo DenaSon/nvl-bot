@@ -2,6 +2,30 @@
 
 # K2 Phase 3 — manual release, rollback and real acceptance
 
+## Pinned df52 → febcc code upgrade
+
+The legacy-ingress correction merged in PR #155 at
+`febcc45c505e5bdc6a712745651dd8f87c2e1f91`. The application bundle digest is
+`3381ed21691fe2fd0406d27fc0f51fe45b7a83d4fca94370afcd2752b8ca88cf`;
+package manifest digest is
+`3af297eab2f087128cd7bc8b32d456dab91d0a5a61df534eb77ec3606722154d`.
+
+Use `ops/k2_core_code_publish_febcc.py` from its separately reviewed helper
+commit. It accepts only the exact installed df52 release manifest and matching
+critical live source, and verifies the new immutable package. The only runtime
+delta is four files (bot, native observer, transfer presentation, onboarding)
+and the release manifest. Stage path is `/root/nvl-k2-febcc45c505e`.
+It makes a new SQLite/code backup, restarts only nvlbot, observes stable PID,
+and preserves the original plan/code rollback mechanism and newer DB activity.
+Unknown source/profile/operation state holds before publication.
+
+This is one-time manual code deployment, not a per-user manager procedure.
+It does not enable Single/operations/Batch, install PAM/guards, change wg0,
+stop the e12 transport, alter customer routes, or manufacture field acceptance.
+The existing full backup and old code publisher must not be rerun for this patch.
+After code publication, one-time field qualification/runtime release is still
+required before the owner's nvl0555 Telegram trial. Green CI cannot supply it.
+
 This is a source handoff, not a deployment record. The owner explicitly chose
 manual SSH deployment after UI/UX development. The existing production record
 and backups remain historical evidence; refresh actual host state before use.

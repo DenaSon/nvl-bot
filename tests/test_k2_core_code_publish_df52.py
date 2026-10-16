@@ -21,7 +21,8 @@ class CoreCodePublishTests(unittest.TestCase):
         base = Path(self.tmp.name)
         project = Path(__file__).resolve().parents[1]
         spec = importlib.util.spec_from_file_location(
-            'publisher_under_test', project/'ops/k2_core_code_publish_df52.py')
+            'publisher_under_test', project/getattr(self, 'publisher_file',
+                'ops/k2_core_code_publish_df52.py'))
         self.pub = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.pub)
         p = self.pub
@@ -135,7 +136,7 @@ class CoreCodePublishTests(unittest.TestCase):
 
     def test_enabled_profile_blocks_before_stopping_bot(self):
         p = self.pub
-        p.CONFIG.mkdir(parents=True)
+        p.CONFIG.mkdir(parents=True,exist_ok=True)
         (p.CONFIG/'core-runtime.json').write_text('{"enabled":true}')
         with self.assertRaisesRegex(RuntimeError,'RUNTIME_PROFILE_CHANGED'):
             p.deploy()

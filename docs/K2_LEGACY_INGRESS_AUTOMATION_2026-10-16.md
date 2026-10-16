@@ -29,6 +29,13 @@ not authenticate the user's current ingress.
 
 ## Source correction
 
+PR #155 merged at `febcc45c505e5bdc6a712745651dd8f87c2e1f91` after
+2,492 full source tests, 2,492 extracted-root tests and 1,745 stage tests on
+each supported Python version. This source is not installed on Core yet.
+The separately reviewed `ops/k2_core_code_publish_febcc.py` handles the exact
+one-time df52 → febcc code delta; adding that helper does not change the
+application release SHA. Its execution and runtime enablement remain unconfirmed.
+
 The existing native review now recognizes an unregistered legacy candidate
 without requiring the manager to run a Core command or edit JSON. It requires
 one active DB listener, exact live wg0 endpoint/key/32 ownership, no overlapping

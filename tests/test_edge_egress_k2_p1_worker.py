@@ -4,6 +4,7 @@ Does not start WireGuard, SSH, iptables, systemd, DNS, PAM or user routes.
 """
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 import unittest
 from types import SimpleNamespace
@@ -156,6 +157,166 @@ class Phase1TransportActivationTests(unittest.TestCase):
         with self.assertRaisesRegex(Phase1Hold,"UNSAFE_ACTIVE_RELAY"):
             self.start()
         self.assertEqual(self.events,[])
+
+    def initial_core(self, default=None):
+        self.conn.execute("DELETE FROM host_pool")
+        if default is not None:
+            self.conn.execute("INSERT INTO host_pool VALUES(?,1,?)", (CORE, default))
+        self.conn.execute("INSERT INTO settings VALUES('edge_egress_protected_mode','0')")
+        self.conn.commit()
+
+    def real_f3(self):
+        import base64
+        from edge_egress_inventory import ensure_schema
+        from edge_egress_f3_readiness import install_readiness_schema
+        from ops.edge_egress_provision import EgressSpec
+        ensure_schema(self.conn)
+        install_readiness_schema(self.conn)
+        self.pin = replace(self.pin,
+            core_wg_pub=base64.b64encode(b'a'*32).decode(),
+            edge_wg_pub=base64.b64encode(b'b'*32).decode())
+        self.spec = EgressSpec('e8', EDGE, CORE, '10.79.8.0/30',
+                               '10.80.8.0/30', 'eth0', 52008, 20008)
+        from edge_egress_k2_p1_worker import register_stage_allocation
+        def register(db_conn, op, source, pin, spec, _peer):
+            register_stage_allocation(db_conn, op, source, pin, spec, pin.edge_wg_pub)
+        return register
+
+    def test_first_edge_with_empty_pool_registers_real_f3_without_customer_changes(self):
+        self.initial_core()
+        register = self.real_f3()
+        before = self.conn.execute('SELECT * FROM settings ORDER BY key').fetchall()
+        result = self.start(register_f3=register)
+        source, target, status, raw = self.conn.execute(
+            'SELECT source_host,target_host,status,detail_json FROM failover_operations'
+        ).fetchone()
+        self.assertEqual((source, target, status), (CORE, EDGE, 'SUCCEEDED'))
+        self.assertEqual(json.loads(raw)['source_mode'], 'INITIAL_CORE')
+        self.assertEqual(json.loads(raw)['source_pool'], [])
+        self.assertFalse(result['customer_ready'])
+        self.assertEqual(self.conn.execute('SELECT * FROM host_pool').fetchall(), [])
+        self.assertEqual(self.conn.execute('SELECT * FROM settings ORDER BY key').fetchall(), before)
+        self.assertEqual(self.conn.execute('SELECT host FROM ssh_accounts').fetchall(), [(SOURCE,)])
+        self.assertEqual(self.conn.execute('SELECT status FROM edge_egress_allocations').fetchall(), [('STAGED',)])
+        self.assertEqual(self.conn.execute('SELECT state FROM edge_egress_readiness').fetchall(), [('STAGED',)])
+
+    def test_first_edge_accepts_core_pool_row_without_setting_default(self):
+        for default in (0, 1):
+            with self.subTest(default=default):
+                if default == 0:
+                    self.initial_core(default)
+                else:
+                    self.conn.execute('UPDATE host_pool SET is_default=1')
+                    self.conn.execute('DELETE FROM failover_operations')
+                    self.conn.commit()
+                self.start()
+                self.assertEqual(self.conn.execute('SELECT * FROM host_pool').fetchall(),
+                                 [(CORE, 1, default)])
+                raw = self.conn.execute('SELECT detail_json FROM failover_operations').fetchone()[0]
+                self.assertEqual(json.loads(raw)['source_pool'], [[CORE, 1, default]])
+
+    def test_missing_default_on_existing_edge_is_not_initial_core(self):
+        self.conn.execute('UPDATE host_pool SET is_default=0')
+        self.conn.commit()
+        with self.assertRaisesRegex(Phase1Hold, 'UNSAFE_ACTIVE_RELAY'):
+            self.start()
+        self.assertEqual(self.events, [])
+
+    def test_initial_core_rejects_any_other_pool_row_even_inactive(self):
+        self.initial_core(0)
+        self.conn.execute('INSERT INTO host_pool VALUES(?,0,0)', (SOURCE,))
+        self.conn.commit()
+        with self.assertRaisesRegex(Phase1Hold, 'UNSAFE_ACTIVE_RELAY'):
+            self.start()
+        self.assertEqual(self.events, [])
+
+    def test_initial_core_requires_explicit_unprotected_mode(self):
+        self.initial_core()
+        for value in ('1', 'unknown', None):
+            with self.subTest(value=value):
+                if value is None:
+                    self.conn.execute("DELETE FROM settings WHERE key='edge_egress_protected_mode'")
+                else:
+                    self.conn.execute("UPDATE settings SET value=? WHERE key='edge_egress_protected_mode'", (value,))
+                self.conn.commit()
+                with self.assertRaisesRegex(Phase1Hold, 'UNSAFE_ACTIVE_RELAY'):
+                    self.start()
+                self.assertEqual(self.events, [])
+
+    def test_initial_core_rejects_any_runtime_or_binding_row_before_host_io(self):
+        self.initial_core()
+        for table in ('edge_egress_uid_runtime', 'edge_egress_uid_bindings'):
+            with self.subTest(table=table):
+                self.conn.execute('CREATE TABLE '+table+'(username TEXT)')
+                self.conn.execute('INSERT INTO '+table+" VALUES('held-user')")
+                self.conn.commit()
+                with self.assertRaisesRegex(Phase1Hold, 'HAS_PROTECTED_UID'):
+                    self.start()
+                self.assertEqual(self.events, [])
+                self.conn.execute('DELETE FROM '+table)
+                self.conn.commit()
+
+    def test_initial_core_pool_drift_keeps_recovery_hold_before_core_start(self):
+        self.initial_core()
+        original = self.remote
+        def drift(pin, action):
+            result = original(pin, action)
+            if action == 'ensure':
+                self.conn.execute('INSERT INTO host_pool VALUES(?,1,0)', (CORE,))
+                self.conn.commit()
+            return result
+        self.remote = drift
+        with self.assertRaisesRegex(Phase1Hold, 'HELD_FOR_REVIEW'):
+            self.start()
+        self.assertNotIn('core:ensure', self.events)
+        status, raw = self.conn.execute('SELECT status,detail_json FROM failover_operations').fetchone()
+        self.assertEqual(status, 'RUNNING')
+        self.assertEqual(json.loads(raw)['phase'], RECOVERY)
+
+    def test_initial_core_mode_drift_after_acquire_stops_before_any_host_write(self):
+        self.initial_core()
+        acquire = self.acquire
+        def drift(source, target):
+            result = acquire(source, target)
+            self.conn.execute("UPDATE settings SET value='1' WHERE key='edge_egress_protected_mode'")
+            self.conn.commit()
+            return result
+        self.acquire = drift
+        with self.assertRaisesRegex(Phase1Hold, 'HELD_FOR_REVIEW'):
+            self.start()
+        self.assertNotIn('edge:ensure', self.events)
+
+    def test_initial_core_allows_empty_protected_tables(self):
+        self.initial_core()
+        self.conn.executescript('CREATE TABLE edge_egress_uid_runtime(username TEXT);'
+                                'CREATE TABLE edge_egress_uid_bindings(username TEXT);')
+        self.assertTrue(self.start()['transport_up'])
+
+    def test_initial_core_protected_uid_drift_under_f3_transaction_refuses_stage(self):
+        self.initial_core()
+        register = self.real_f3()
+        def drift(db_conn, *args):
+            self.conn.execute('CREATE TABLE edge_egress_uid_runtime(username TEXT)')
+            self.conn.execute("INSERT INTO edge_egress_uid_runtime VALUES('another-user')")
+            self.conn.commit()
+            register(db_conn, *args)
+        with self.assertRaisesRegex(Phase1Hold, 'HELD_FOR_REVIEW'):
+            self.start(register_f3=drift)
+        self.assertEqual(self.conn.execute('SELECT * FROM edge_egress_allocations').fetchall(), [])
+        self.assertEqual(self.conn.execute('SELECT * FROM edge_egress_readiness').fetchall(), [])
+        self.assertEqual(self.conn.execute('SELECT status FROM failover_operations').fetchone()[0], 'RUNNING')
+
+    def test_initial_core_marker_removal_cannot_turn_into_legacy_relay_intent(self):
+        self.initial_core(1)
+        original = self.journal
+        def lose_context(operation_id, *, detail, **kwargs):
+            detail = {key: value for key, value in detail.items()
+                      if key not in ('source_mode', 'source_pool')}
+            original(operation_id, detail=detail, **kwargs)
+        self.journal = lose_context
+        with self.assertRaisesRegex(Phase1Hold, 'HELD_FOR_REVIEW'):
+            self.start()
+        self.assertNotIn('edge:ensure', self.events)
 
     def test_readonly_inspection_does_not_modify_database(self):
         trace=[]

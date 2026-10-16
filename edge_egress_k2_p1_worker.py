@@ -274,6 +274,47 @@ def inspect_phase1(edge_id: str, *, db_conn: Callable,
             "customer_ready":False}
 
 
+def _activation_source(db, pin: StagePin) -> tuple[str, dict]:
+    """Identify the unchanged baseline without inventing a previous relay.
+
+    A new Core may have no pool row, or its own active non-Edge row. This
+    exception is only for isolated transport staging with no protected UID.
+    Its exact pool snapshot is bound to the existing durable 6G intent.
+    """
+    if db.execute("SELECT 1 FROM host_pool WHERE host=?",
+                  (pin.edge_ipv4,)).fetchone():
+        raise Phase1Hold("UNSAFE_ACTIVE_RELAY_OWNERSHIP")
+    defaults = db.execute(
+        "SELECT host FROM host_pool WHERE is_default=1 AND active=1"
+    ).fetchall()
+    if len(defaults) == 1 and defaults[0][0] != pin.core_ipv4:
+        return defaults[0][0], {}
+    pool = db.execute(
+        "SELECT host,active,is_default FROM host_pool ORDER BY host"
+    ).fetchall()
+    if (pool not in ([], [(pin.core_ipv4, 1, 0)], [(pin.core_ipv4, 1, 1)])
+            or db.execute("SELECT value FROM settings WHERE "
+                          "key='edge_egress_protected_mode'").fetchall() != [("0",)]):
+        raise Phase1Hold("UNSAFE_ACTIVE_RELAY_OWNERSHIP")
+    for table in ("edge_egress_uid_runtime", "edge_egress_uid_bindings"):
+        if (db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                       (table,)).fetchone()
+                and db.execute("SELECT 1 FROM " + table + " LIMIT 1").fetchone()):
+            raise Phase1Hold("INITIAL_CORE_HAS_PROTECTED_UID")
+    return pin.core_ipv4, {"source_mode": "INITIAL_CORE",
+                           "source_pool": [list(row) for row in pool]}
+
+
+def _check_source(db, source: str, pin: StagePin, intent: dict, reason: str) -> None:
+    try:
+        current, context = _activation_source(db, pin)
+    except Phase1Hold as exc:
+        raise Phase1Hold(reason) from exc
+    if (current != source or any(intent.get(key) != context.get(key)
+                                for key in ("source_mode", "source_pool"))):
+        raise Phase1Hold(reason)
+
+
 def _check_lease(db_conn, op_id: int, source: str, target: str,
                  *, pin: StagePin) -> None:
     """Recheck the exact durable 6G intent and ownership on each host step.
@@ -285,20 +326,15 @@ def _check_lease(db_conn, op_id: int, source: str, target: str,
             "SELECT id,source_host,target_host,detail_json "
             "FROM failover_operations WHERE status='RUNNING'"
         ).fetchall()
-        defaults = db.execute(
-            "SELECT host FROM host_pool WHERE is_default=1 AND active=1"
-        ).fetchall()
-        collision = db.execute(
-            "SELECT 1 FROM host_pool WHERE host=?", (target,),
-        ).fetchone()
-    if len(rows) != 1 or rows[0][:3] != (op_id, source, target):
-        raise Phase1Hold("SHARED_6G_LEASE_LOST")
-    if len(defaults) != 1 or defaults[0] != (source,) or collision:
-        raise Phase1Hold("RELAY_OWNERSHIP_CHANGED")
-    try:
-        detail = json.loads(rows[0][3])
-    except (ValueError, TypeError) as exc:
-        raise Phase1Hold("6G_INTENT_MISSING") from exc
+        if len(rows) != 1 or rows[0][:3] != (op_id, source, target):
+            raise Phase1Hold("SHARED_6G_LEASE_LOST")
+        try:
+            detail = json.loads(rows[0][3])
+        except (ValueError, TypeError) as exc:
+            raise Phase1Hold("6G_INTENT_MISSING") from exc
+        if not isinstance(detail, dict):
+            raise Phase1Hold("6G_INTENT_MISMATCH")
+        _check_source(db, source, pin, detail, "RELAY_OWNERSHIP_CHANGED")
     if (not isinstance(detail, dict)
             or detail.get("kind") != "K2_P1"
             or detail.get("phase") != INTENT
@@ -378,14 +414,7 @@ def register_stage_allocation(db_conn: Callable, operation_id: int,
                 or intent.get("edge_sha")!=pin.edge_sha
                 or intent.get("customers_moved")!=0):
             raise Phase1Hold("PHASE1_INTENT_NOT_DURABLE")
-        default=db.execute(
-            "SELECT host FROM host_pool WHERE active=1 AND is_default=1",
-        ).fetchall()
-        collision=db.execute(
-            "SELECT 1 FROM host_pool WHERE host=?",(pin.edge_ipv4,),
-        ).fetchone()
-        if default != [(source,)] or collision is not None:
-            raise Phase1Hold("RELAY_CHANGED_DURING_F3")
+        _check_source(db, source, pin, intent, "RELAY_CHANGED_DURING_F3")
         reservation=reserve_allocation(
             db,spec,core_public_key=pin.core_wg_pub,
             edge_public_key=pin.edge_wg_pub,
@@ -416,16 +445,7 @@ def activate_phase1(edge_id: str, *, db_conn: Callable,
     pin = load_pin(edge_id)
     spec, peer, core_path = _check_stage(pin)
     with db_conn() as db:
-        sources = db.execute(
-            "SELECT host FROM host_pool WHERE is_default=1 AND active=1"
-        ).fetchall()
-        collision = db.execute(
-            "SELECT 1 FROM host_pool WHERE host=?", (pin.edge_ipv4,)
-        ).fetchone()
-    if (len(sources) != 1 or sources[0][0] in
-            (pin.edge_ipv4, pin.core_ipv4) or collision):
-        raise Phase1Hold("UNSAFE_ACTIVE_RELAY_OWNERSHIP")
-    source = sources[0][0]
+        source, source_context = _activation_source(db, pin)
     core_state = observe(spec, "core", peer)
     edge_state = remote_transport(pin, "inspect")
     if core_state not in ("ABSENT", "UP") or edge_state not in ("ABSENT", "UP"):
@@ -435,7 +455,7 @@ def activate_phase1(edge_id: str, *, db_conn: Callable,
         raise Phase1Hold("SHARED_6G_BUSY")
     intent = {"kind":"K2_P1", "phase":INTENT, "edge_id":pin.edge_id,
               "core_sha":pin.core_sha, "edge_sha":pin.edge_sha,
-              "customers_moved":0}
+              "customers_moved":0, **source_context}
     try:
         journal(op_id, status="RUNNING", detail=intent, require_running=True)
         _check_lease(db_conn, op_id, source, pin.edge_ipv4, pin=pin)

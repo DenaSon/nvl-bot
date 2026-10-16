@@ -43,11 +43,18 @@ class OperatorUXTests(unittest.TestCase):
         self.assertIn("مدیریت خروجی",html)
         self.assertNotIn("144.172.84.82",html)
         self.assertIn("fra1",dashboard_html(self.board,active_edge="fra1"))
-        self.assertEqual([len(row) for row in grid],[2,1,2,1,1])
+        self.assertEqual([len(row) for row in grid],[2,1,2,2,1])
         self.assertEqual(grid[0][0][1],"hpeg_edge_fra1")
         self.assertEqual(grid[-1][0][1],"apps_home")
         for banned in ("6G","SHA","PAM","F4","Stage","Kernel","Phase","UID"):
             self.assertNotIn(banned,html)
+
+    def test_orphan_inventory_is_reachable_without_any_registered_server(self):
+        board=replace(self.board,cards=(),total=0)
+        rows=dashboard_buttons(board)
+        self.assertIn(("🧹 منابع باقی‌مانده","hpeg_orphans"),sum(rows,[]))
+        self.assertTrue(all(1<=len(row)<=2 for row in rows))
+        self.assertFalse(any(cb.startswith('hpeg_edge_') for row in rows for _,cb in row))
 
     def test_pagination_and_no_extra_page(self):
         board=replace(self.board,page=0,total=17)

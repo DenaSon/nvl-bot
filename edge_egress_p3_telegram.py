@@ -66,7 +66,7 @@ def dashboard_buttons(board) -> list[list[tuple[str,str]]]:
         buttons.append(page_row)
     buttons.extend((
         [("➕ افزودن Edge","hpeg_wizard"),("❔ راهنما","hpeg_steps")],
-        [("🔄 بروزرسانی",f"hpeg_page_{board.page}")],
+        [("🔄 بروزرسانی",f"hpeg_page_{board.page}"),("🧹 منابع باقی‌مانده","hpeg_orphans")],
         [("↩️ برنامه‌ها","apps_home")],
     ))
     return buttons

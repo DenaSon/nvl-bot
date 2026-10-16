@@ -5,12 +5,34 @@ from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+import subprocess
 from unittest.mock import patch
 
 from ops import k2_lab_core_copy as lab
 
 
 class IsolatedLabCopyTests(unittest.TestCase):
+    def test_unknown_systemd_unit_exit_status_is_handled_without_mutation(self):
+        for state in ('not-found','loaded',''):
+            with self.subTest(state=state), \
+                 patch.object(lab.os,'geteuid',return_value=0), \
+                 patch.object(lab,'local_ipv4s',return_value={lab.LAB_IP}), \
+                 patch.object(Path,'read_text',return_value='ID=ubuntu\nVERSION_ID="24.04"\n'), \
+                 patch.object(Path,'exists',return_value=False), \
+                 patch.object(Path,'is_symlink',return_value=False), \
+                 patch.object(lab,'read',return_value='amd64'), \
+                 patch.object(lab.pwd,'getpwnam',side_effect=KeyError), \
+                 patch.object(lab.pwd,'getpwuid',side_effect=KeyError), \
+                 patch.object(lab.subprocess,'run',return_value=subprocess.CompletedProcess(
+                     ['systemctl'],4,stdout=state+'\n',stderr='')) as run:
+                if state=='not-found':
+                    lab.preflight_lab()
+                else:
+                    with self.assertRaisesRegex(RuntimeError,'LAB_BOT_UNIT_ALREADY_EXISTS'):
+                        lab.preflight_lab()
+                self.assertEqual(run.call_count,1)
+                self.assertEqual(run.call_args.args[0][:2],['systemctl','show'])
+
     def test_rotated_production_token_is_still_the_same_forbidden_bot(self):
         old='123456789:'+('a'*30)
         for new in (old,'123456789:'+('b'*30)):

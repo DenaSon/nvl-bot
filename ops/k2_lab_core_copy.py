@@ -84,7 +84,9 @@ def preflight_lab():
                  '/etc/systemd/system/ssh.service.d/00-nvl-lab.conf'):
         p = Path(path)
         require(not p.exists() and not p.is_symlink(), 'LAB_NOT_FRESH: ' + path)
-    require(read(['systemctl', 'show', 'nvlbot', '-p', 'LoadState', '--value']) == 'not-found',
+    unit = subprocess.run(['systemctl', 'show', 'nvlbot', '-p', 'LoadState', '--value'],
+                          capture_output=True, text=True)
+    require(unit.stdout.strip() == 'not-found',
             'LAB_BOT_UNIT_ALREADY_EXISTS')
     for username, uid in (('nvlrescue', None), ('nvltest1', 1636),
                           ('nvltest2', 1637), ('nvltest3', 1638)):

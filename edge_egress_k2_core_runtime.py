@@ -74,8 +74,15 @@ class CoreHostSources:
         self.observations = None
 
     def protected_mode(self):
-        if not load_core_profile().enabled:
+        profile=load_core_profile()
+        if not profile.enabled:
             raise CoreRuntimeHold("CORE_SINGLE_RELEASE_DISABLED")
+        if profile.lab_trial is not None:
+            from edge_egress_k2_runtime_release import validate_lab_trial
+            release=json.loads(_read_checked(Path('/etc/nvl-egress/k2-m4/release.json'),
+                                            maximum=16384,strict=True))
+            validate_lab_trial(self.db_conn,release_sha=release['git_sha'],
+                               digest=profile.lab_trial_sha256)
         with self.db_conn() as db:
             rows = db.execute("SELECT value FROM settings "
                               "WHERE key='edge_egress_protected_mode'").fetchall()
@@ -243,7 +250,7 @@ class CoreHostSources:
             independent_rescue_ok=lambda: "operator_rescue" in self.pre(scope).checks,
             independent_f4_ok=lambda current_scope: (
                 current_scope == scope and bool(
-                    {'f4_accepted','release_qualified'} & self.pre(scope).checks)
+                    {'f4_accepted','release_qualified','lab_trial_authorized'} & self.pre(scope).checks)
             ),
             mixed_legacy_pam_ok=mixed_pam, account_idle_ok=self.idle,
             sshd_effective_probe=lambda: _checked("sshd", "-T", "-C", context),
@@ -359,7 +366,8 @@ def start_core_single_runtime(application, *, db_conn,
         from edge_egress_k2_core_observer import CorePhysicalObservations
         from edge_egress_k2_core_operations import CoreOperationalBindings,CoreOperationalHostFactory
         observations=CorePhysicalObservations(db_conn=db_conn,host=host,
-            qualification_sha256=profile.field_acceptance_sha256,release_sha=release_sha)
+            qualification_sha256=profile.field_acceptance_sha256 or profile.lab_trial_sha256,
+            release_sha=release_sha,lab_trial=profile.lab_trial is not None)
         host.observations=observations
         factory=CoreOperationalHostFactory(new_factory=factory,host=host,observations=observations)
         root_class=CoreOperationalBindings

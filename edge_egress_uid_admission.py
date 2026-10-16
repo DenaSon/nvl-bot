@@ -128,7 +128,11 @@ def probe_local_guards(conn: sqlite3.Connection, row: RuntimeBinding) -> bool:
         return False
     # An Edge proven in a disposable lab is NOT a customer-admissible Edge.
     if not admission_eligible(read_readiness(conn, row.edge_id)):
-        return False
+        # Explicitly bounded isolated-lab trials use their own private grant,
+        # exact Single receipt and the same physical guard checks below.
+        from edge_egress_k2_runtime_release import lab_trial_pam_target
+        if not lab_trial_pam_target(conn,row):
+            return False
     spec = EgressSpec(
         edge_id=row.edge_id, edge_public_ipv4=allocation[0],
         core_public_ipv4=allocation[1], tunnel_network=allocation[2],

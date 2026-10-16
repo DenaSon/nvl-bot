@@ -30,6 +30,8 @@ from edge_egress_k2_runtime_release import _root_bytes
 
 QUALIFICATION=Path("/etc/nvl-egress/k2-m4/field-acceptance.json")
 CORE_PRE_CHECKS=(PRE_ATTACH_CHECKS-{'f4_accepted'})|{'release_qualified'}
+LAB_PRE_CHECKS=frozenset(('lab_trial_authorized','ssh_sessions','operator_rescue',
+                          'neighbour_isolation'))
 PROBE_ENV={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C'}
 
 
@@ -45,7 +47,7 @@ class CorePreAttachEvidence(SignedExternalEvidence):
     that UID; no F4 readiness row is manufactured for a new Edge.
     """
     def verify_pre_attach(self):
-        if self.phase!='PRE_ATTACH' or self.checks!=CORE_PRE_CHECKS:
+        if self.phase!='PRE_ATTACH' or self.checks not in (CORE_PRE_CHECKS,LAB_PRE_CHECKS):
             raise CoreObservationHold('NATIVE_PRE_ATTACH_MEASUREMENTS_REQUIRED')
 
 
@@ -488,16 +490,22 @@ class PinnedEdgeClientProbe:
 
 class CorePhysicalObservations:
     """Concrete root-only collector, composed once at existing bot startup."""
-    def __init__(self,*,db_conn,host,qualification_sha256,release_sha):
+    def __init__(self,*,db_conn,host,qualification_sha256,release_sha,lab_trial=False):
         self.db_conn,self.host=db_conn,host
         self.qualification_sha256=qualification_sha256
         self.release_sha=release_sha
+        self.lab_trial=lab_trial is True
         self.client= PinnedEdgeClientProbe(db_conn)
         self._current=None
         self._transport_cache=None
         self.uid_intent=None
 
     def _qualification(self,core_ip):
+        if self.lab_trial:
+            from edge_egress_k2_runtime_release import validate_lab_trial
+            validate_lab_trial(self.db_conn,release_sha=self.release_sha,
+                               digest=self.qualification_sha256,core_ipv4=core_ip)
+            return
         from edge_egress_f4_release import parse_evidence_json,check_release_evidence
         raw=_root_bytes(QUALIFICATION,16384,private=True)
         if sha256(raw).hexdigest()!=self.qualification_sha256:
@@ -527,9 +535,12 @@ class CorePhysicalObservations:
         from edge_egress_k2_runtime_release import load_core_profile
         profile=load_core_profile()
         if (not profile.enabled or not profile.operations_enabled
-            or profile.field_acceptance_sha256!=self.qualification_sha256):
+            or (profile.field_acceptance_sha256 if not self.lab_trial else
+                profile.lab_trial_sha256)!=self.qualification_sha256):
             raise CoreObservationHold('CORE_OPERATIONS_RELEASE_REVOKED_OR_CHANGED')
         pin=load_stage_pin(edge_id)
+        if self.lab_trial and (pin.edge_id!='e2' or pin.edge_ipv4!='144.172.84.112'):
+            raise CoreObservationHold('LAB_TRIAL_TARGET_NOT_AUTHORIZED')
         self._qualification(pin.core_ipv4)
         with self.db_conn() as db:
             ready=read_readiness(db,edge_id)
@@ -553,10 +564,14 @@ class CorePhysicalObservations:
             separators=(',',':')).encode()).hexdigest()
 
     def target_qualified(self,req):
+        if self.lab_trial:
+            self._trial_scope(req.spec.edge_id,(req.username,))
         pin,_=self.qualify_target(req.spec.edge_id)
         return req.spec.edge_public_ipv4==pin.edge_ipv4
 
     def pre(self,selection):
+        if self.lab_trial:
+            self._trial_scope(selection.target_edge_id,selection.usernames)
         neighbours=self._neighbours('')
         pin,digest=self.qualify_target(selection.target_edge_id)
         from edge_egress_k2_m2_ingress_journal import (
@@ -588,10 +603,16 @@ class CorePhysicalObservations:
             self.qualification_sha256,[asdict(a) for a in accounts]),
             sort_keys=True,separators=(',',':')).encode()).hexdigest()
         self._current=CorePreAttachEvidence(generation,now,now+30,
-            selection.target_edge_id,pin.edge_ipv4,CORE_PRE_CHECKS,tuple(accounts),
+            selection.target_edge_id,pin.edge_ipv4,
+            LAB_PRE_CHECKS if self.lab_trial else CORE_PRE_CHECKS,tuple(accounts),
             phase='PRE_ATTACH')
         self.target_digest=digest
         return self._current
+
+    def _trial_scope(self,edge_id,names):
+        from edge_egress_k2_runtime_release import validate_lab_trial
+        validate_lab_trial(self.db_conn,release_sha=self.release_sha,
+            digest=self.qualification_sha256,edge_id=edge_id,usernames=names)
 
     def current(self):
         if self._current is None:
@@ -614,6 +635,8 @@ class CorePhysicalObservations:
         return rr,bb,roster
 
     def post(self,scope,ticket,*,phase):
+        if self.lab_trial:
+            self._trial_scope(scope.edge_id,(scope.username,))
         if phase not in ('UID_ROUTE','POST_ATTACH'):
             raise CoreObservationHold('AUTOMATIC_OBSERVATION_PHASE_INVALID')
         op=assert_guarded_6g_intent(self.db_conn,scope,ticket)

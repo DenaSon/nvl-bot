@@ -24510,14 +24510,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             actor_id=update.effective_user.id
             chat_id=update.effective_chat.id
             message_id=query.message.message_id
-            if action in ("home","cancel"):
+            if (action in ("home","cancel")
+                or action in ("single","batch","all")
+                and not k2_root_direct_flags.K2_ROOT_DIRECT_ENABLED):
                 context.user_data.pop('state',None)
                 context.user_data.pop('k2_m4_target_edge',None)
                 context.user_data.pop('k2_m4_selection',None)
                 context.user_data.pop('k2_m4_make_active',None)
                 k2_m43_approvals.discard(actor_id,chat_id)
-                display=k2_m4_home_html(edge_id)
-                rows=k2_m4_home_buttons(edge_id)
+                available=k2_root_direct_flags.K2_ROOT_DIRECT_ENABLED
+                display=k2_m4_home_html(edge_id,available=available)
+                rows=k2_m4_home_buttons(edge_id,available=available)
                 last=context.user_data.get('k2_m4_last_selection')
                 if isinstance(last,(tuple,list)) and len(last)==3 and last[2]==edge_id:
                     rows.insert(-1,[("📋 آخرین انتقال",f"hpeg_m4_status_{edge_id}")])

@@ -135,8 +135,17 @@ def _checked_ingress_registry(peer: IngressPeer) -> list[IngressPeer]:
     return existing
 
 
-def _publish_registry(peer: IngressPeer) -> None:
-    """Atomic last step after both Stage folders exist; no silent overwrite."""
+def _publish_registry(peer: IngressPeer, *, guard=None, allow_existing=False) -> None:
+    """Append one checked identity, preserving all existing peers.
+
+    Onboarding calls this after both stages exist. Native legacy discovery
+    additionally rechecks its authenticated source immediately before publish.
+    An exact concurrent append may be reused only by that guarded caller.
+    """
+    if allow_existing and not callable(guard):
+        raise OnboardHold("AUTHENTICATED_INGRESS_GUARD_REQUIRED")
+    if guard is not None:
+        guard()
     directory = REGISTRY.parent
     _make_dir(directory)
     lock_path = directory / ".v1-ingress-peers.lock"
@@ -148,6 +157,10 @@ def _publish_registry(peer: IngressPeer) -> None:
         if st.st_uid != 0 or st.st_mode & 0o077:
             raise OnboardHold("REGISTRY_LOCK_PERMISSIONS")
         fcntl.flock(fd, fcntl.LOCK_EX)
+        if guard is not None:
+            guard()
+        if allow_existing and peer in load_registry():
+            return
         old = _checked_ingress_registry(peer)
         text = render_registry(old + [peer])
         name = None
@@ -161,6 +174,8 @@ def _publish_registry(peer: IngressPeer) -> None:
                 temp.write(text)
                 temp.flush()
                 os.fsync(temp.fileno())
+            if guard is not None:
+                guard()
             os.replace(name, REGISTRY)
             dirfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
             try:

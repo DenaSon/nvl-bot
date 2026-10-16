@@ -7,7 +7,7 @@ be accepted at release time; this module never invents that evidence or F4.
 """
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from hashlib import sha256
 import json
 import os
@@ -164,6 +164,133 @@ class PinnedEdgeClientProbe:
     def __init__(self,db_conn):
         self.db_conn=db_conn
 
+    def _legacy_candidate(self, username, uid, hint):
+        """Discover a candidate, never source evidence, from the live peer.
+
+        The historical account host must still be an active known listener.
+        Successful pinned SSH authentication AND a new trusted Core sshd
+        acceptance record are required before this identity can be published.
+        """
+        import ipaddress
+        import pwd
+        from edge_egress_v1_ingress import NET, _networks
+        from edge_egress_v1_onboarding import planned_peer, assert_live_ingress
+        if os.geteuid()!=0 or pwd.getpwnam(username).pw_uid!=uid:
+            raise CoreObservationHold('SOURCE_PROBE_ROOT_UID_REQUIRED')
+        with self.db_conn() as db:
+            account=db.execute("SELECT host FROM ssh_accounts WHERE username=? "
+                "AND service_type='ssh' AND status LIKE '%فعال%' "
+                "AND status NOT LIKE '%غیر%'",(username,)).fetchall()
+            if 'service_port' not in {row[1] for row in db.execute('PRAGMA table_info(host_pool)')}:
+                raise CoreObservationHold('SOURCE_PROBE_RECONNECT_TO_KNOWN_EDGE')
+            listener=db.execute('SELECT active,service_port FROM host_pool WHERE host=?',
+                                (hint,)).fetchall()
+        if (account!=[(hint,)] or len(listener)!=1 or listener[0][0]!=1
+            or type(listener[0][1]) is not int or not 1<=listener[0][1]<=65535):
+            raise CoreObservationHold('SOURCE_PROBE_RECONNECT_TO_KNOWN_EDGE')
+        try:
+            if str(ipaddress.IPv4Address(hint))!=hint or not ipaddress.IPv4Address(hint).is_global:
+                raise ValueError()
+            endpoints=checked(['wg','show','wg0','endpoints'])
+            keys=[parts[0] for line in endpoints.splitlines()
+                if len(parts:=line.split())==2
+                and re.fullmatch(re.escape(hint)+r':[0-9]{1,5}',parts[1])]
+            allowed=checked(['wg','show','wg0','allowed-ips'])
+            networks=_networks(allowed)
+            if len(keys)!=1:
+                raise ValueError()
+            sources=[str(n.network_address) for n in networks.get(keys[0],())
+                if n.version==4 and n.prefixlen==32 and n.network_address in NET
+                and str(n.network_address)!='10.77.0.1']
+            if len(sources)!=1:
+                raise ValueError()
+            peer=planned_peer(sources[0],hint,keys[0])
+            assert_live_ingress(peer,allowed)
+        except (ValueError,TypeError) as exc:
+            raise CoreObservationHold('SOURCE_PROBE_LEGACY_PEER_UNVERIFIED') from exc
+        with self.db_conn() as db:
+            identities=db.execute('SELECT edge_id FROM edge_egress_allocations WHERE edge_public_ipv4=?',
+                                  (hint,)).fetchall()
+            if len(identities)>1:
+                raise CoreObservationHold('SOURCE_PROBE_LEGACY_IDENTITY_CONFLICT')
+            if identities:
+                # Preserve an already allocated identity (older installations
+                # need not have used the wizard's eN naming convention).
+                peer=replace(peer,edge_id=identities[0][0])
+                from edge_egress_v1_ingress import render_registry
+                render_registry([peer])
+            rows=db.execute('SELECT edge_public_ipv4 FROM edge_egress_allocations WHERE edge_id=?',
+                            (peer.edge_id,)).fetchall()
+        if any(row!=(hint,) for row in rows):
+            raise CoreObservationHold('SOURCE_PROBE_LEGACY_IDENTITY_CONFLICT')
+        from edge_egress_k2_p1_worker import PIN_ROOT, load_stage_pin
+        pin_path=PIN_ROOT/(peer.edge_id+'.json')
+        if pin_path.exists() or pin_path.is_symlink():
+            try:
+                pin=load_stage_pin(peer.edge_id)
+                if pin.edge_ipv4!=hint or pin.ingress_ipv4!=peer.ingress_ipv4:
+                    raise ValueError()
+            except (ValueError,OSError) as exc:
+                raise CoreObservationHold('SOURCE_PROBE_LEGACY_IDENTITY_CONFLICT') from exc
+        return peer
+
+    @staticmethod
+    def _ssh_cursor():
+        try:
+            raw=checked(['journalctl','-b','-n','1','--no-pager','-o','json',
+                         '--output-fields=__CURSOR,_BOOT_ID'])
+            rows=[json.loads(line) for line in raw.splitlines() if line.strip()]
+            if len(rows)!=1:
+                raise ValueError()
+            cursor,boot=rows[0]['__CURSOR'],rows[0]['_BOOT_ID']
+            if (type(cursor) is not str or not re.fullmatch(r'[A-Za-z0-9;=._-]{1,1024}',cursor)
+                or type(boot) is not str or not re.fullmatch(r'[a-f0-9]{32}',boot)):
+                raise ValueError()
+            return cursor,boot
+        except (ValueError,TypeError,KeyError,OSError,subprocess.SubprocessError) as exc:
+            raise CoreObservationHold('SOURCE_PROBE_SSH_JOURNAL_REQUIRED') from exc
+
+    @staticmethod
+    def _accepted_legacy_source(cursor, username, expected_rhost):
+        """Read Core's actual SSH peer, never an Edge-reported PAM address."""
+        cursor,boot=cursor
+        deadline=time.monotonic()+2
+        pattern=re.compile(r'Accepted password for '+re.escape(username)+
+                           r' from ([0-9.]+) port ([0-9]{1,5}) ssh2')
+        while True:
+            try:
+                raw=checked(['journalctl','-b','--after-cursor',cursor,'-n','257',
+                    '--no-pager','-o','json','--output-fields=MESSAGE,_UID,_EXE,_PID,_BOOT_ID',
+                    'SYSLOG_IDENTIFIER=sshd','_UID=0'])
+            except (ValueError,OSError,subprocess.SubprocessError) as exc:
+                raise CoreObservationHold('SOURCE_PROBE_SSH_JOURNAL_REQUIRED') from exc
+            try:
+                if len(raw)>262144:
+                    raise ValueError()
+                entries=[json.loads(line) for line in raw.splitlines() if line.strip()]
+                if len(entries)>256:
+                    raise ValueError()
+                accepted=[]
+                for entry in entries:
+                    message=entry.get('MESSAGE')
+                    match=pattern.fullmatch(message) if type(message) is str else None
+                    if match:
+                        if (entry.get('_UID')!='0' or entry.get('_BOOT_ID')!=boot
+                            or entry.get('_EXE') not in ('/usr/sbin/sshd','/usr/lib/openssh/sshd-session')
+                            or type(entry.get('_PID')) is not str or not entry['_PID'].isdecimal()
+                            or int(entry['_PID'])<=1 or not 1<=int(match[2])<=65535):
+                            raise ValueError()
+                        accepted.append(match[1])
+                if accepted:
+                    if accepted!=[expected_rhost]:
+                        raise ValueError()
+                    return
+            except (ValueError,TypeError,KeyError,AttributeError) as exc:
+                raise CoreObservationHold('SOURCE_PROBE_SSH_INGRESS_AMBIGUOUS') from exc
+            if time.monotonic()>=deadline:
+                raise CoreObservationHold('SOURCE_PROBE_SSH_INGRESS_NOT_OBSERVED')
+            time.sleep(.1)
+
     def _request(self,username,source):
         import secrets
         from edge_egress_k2_p1_worker import load_stage_pin as source_pin
@@ -261,7 +388,9 @@ class PinnedEdgeClientProbe:
 
         Historical host is only a connection hint. A pinned external Edge
         must open real customer SSH/SOCKS to the exact Core host key. A
-        failed login, missing registry/port or changed WG owner writes nothing.
+        failed login, unobserved Core SSH peer or changed WG owner cannot
+        publish source evidence. A legacy peer can be registered automatically
+        only after that actual authenticated Core observation.
         """
         from edge_egress_v1_ingress import load_registry,_networks
         from edge_egress_k2_m2_ingress_journal import (
@@ -284,9 +413,19 @@ class PinnedEdgeClientProbe:
         old=records.get(username)
         hint=old.edge_ipv4 if old is not None and old.uid==uid else hints[0][0]
         candidates=[p for p in peers if p.edge_ipv4==hint]
-        if len(candidates)!=1:
+        legacy=not candidates
+        if legacy:
+            peer=self._legacy_candidate(username,uid,hint)
+            # Full registry validation rejects reused IDs, addresses or keys.
+            from edge_egress_v1_ingress import render_registry
+            try:
+                render_registry(list(peers)+[peer])
+            except ValueError as exc:
+                raise CoreObservationHold('SOURCE_PROBE_LEGACY_IDENTITY_CONFLICT') from exc
+        elif len(candidates)==1:
+            peer=candidates[0]
+        else:
             raise CoreObservationHold('SOURCE_PROBE_RECONNECT_TO_KNOWN_EDGE')
-        peer=candidates[0]
         def ownership():
             current=load_registry()
             allowed=checked(['wg','show','wg0','allowed-ips'])
@@ -295,18 +434,34 @@ class PinnedEdgeClientProbe:
             except ValueError as exc:
                 raise CoreObservationHold('SOURCE_PROBE_WG_OWNERSHIP_CHANGED') from exc
             src=ip_address(peer.ingress_ipv4)
-            if (peer not in current
+            if ((peer not in current and not legacy)
                 or ip_network(peer.ingress_ipv4+'/32') not in ranges.get(peer.wg_public_key,())
                 or any(src in n for k,ns in ranges.items() if k!=peer.wg_public_key for n in ns)
                 or pwd.getpwnam(username).pw_uid!=uid):
                 raise CoreObservationHold('SOURCE_PROBE_WG_OWNERSHIP_CHANGED')
+            if legacy:
+                if self._legacy_candidate(username,uid,hint)!=peer:
+                    raise CoreObservationHold('SOURCE_PROBE_LEGACY_PEER_CHANGED')
+                # An exact concurrent authenticated registration is harmless;
+                # any conflicting identity must remain a hold.
+                from edge_egress_v1_ingress import render_registry
+                try:
+                    render_registry(list(current) if peer in current else list(current)+[peer])
+                except ValueError as exc:
+                    raise CoreObservationHold('SOURCE_PROBE_LEGACY_IDENTITY_CONFLICT') from exc
             return current,allowed
         ownership()
+        cursor=self._ssh_cursor() if legacy else None
         started=int(time.time())
         request=self._request(username,peer)
         request.update(mode='SOURCE',target_ipv4='',operation_id=None,
             scope_digest=sha256((username+str(uid)+peer.edge_id+peer.wg_public_key).encode()).hexdigest())
         self._run(target_edge_id,request)
+        if legacy:
+            self._accepted_legacy_source(cursor,username,peer.ingress_ipv4)
+            ownership()
+            from edge_egress_v1_onboarding import _publish_registry
+            _publish_registry(peer,guard=ownership,allow_existing=True)
         current,allowed=ownership()
         now=int(time.time())
         # Persist only after the authenticated forwarding transaction. The

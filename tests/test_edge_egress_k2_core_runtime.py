@@ -169,6 +169,28 @@ class CoreStartupTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(direct.native_operations_registered())
         self.assertFalse(direct.K2_ROOT_DIRECT_BATCH_ENABLED)
 
+    def test_lab_profile_registers_same_native_portal_and_scoped_batch_without_field_report(self):
+        profile=CoreReleaseProfile(True,'a'*64,True,True,'',
+                                  {'purpose':'ISOLATED_LAB_TRIAL'},'c'*64)
+        for flag in ('edge_egress_k2_core_operations.CORE_OPERATIONS_ENABLED',
+                     'edge_egress_k2_core_reassignment.CORE_REASSIGNMENT_ENABLED',
+                     'edge_egress_k2_migration_inventory.M1_INDEPENDENT_EGRESS_ENABLED',
+                     'edge_egress_k2_m3_waves.M3_COHORT_OPERATIONS_ENABLED',
+                     'edge_egress_k2_root_direct.K2_ROOT_DIRECT_BATCH_ENABLED'):
+            p=patch(flag,False);p.start();self.addCleanup(p.stop)
+        with patch.object(runtime,'load_core_profile',return_value=profile),\
+             patch.object(runtime,'_read_checked',return_value=json.dumps({
+                 'git_sha':'d'*40,'files':{'edge_egress_v1_admission.py':'a'*64}}).encode()),\
+             patch('edge_egress_k2_runtime_release.validate_lab_trial') as validate:
+            self.start()
+        validate.assert_called_once_with(self.fx.db,release_sha='d'*40,digest='c'*64)
+        root=direct.bound_root_client(self.app).portal.execute_single.__self__
+        self.assertTrue(direct.native_operations_registered())
+        self.assertTrue(direct.K2_ROOT_DIRECT_BATCH_ENABLED)
+        self.assertTrue(root.observations.lab_trial)
+        self.assertEqual(root.observations.qualification_sha256,'c'*64)
+        self.assertEqual(self.app.bot_data,{})
+
 
 if __name__ == "__main__":
     unittest.main()

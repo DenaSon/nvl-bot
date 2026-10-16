@@ -31,6 +31,7 @@ class RootWorkerSealingTests(unittest.TestCase):
         security.mkdir(mode=0o700)
         runtime = root / "run"
         runtime.mkdir(mode=0o750)
+        runtime.chmod(0o750)  # Exact fixture mode, independent of caller umask.
         self.owner = os.getuid()
         self.gid = os.getgid()
         self.paths = WorkerPaths(

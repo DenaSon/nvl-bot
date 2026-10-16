@@ -19,6 +19,12 @@ class SourceBundleTests(unittest.TestCase):
         (self.repo/'edge_egress_k2_m4_root_worker.py').write_text(
             'PINNED_SOURCE_FILES=frozenset(("bot_final_v49-2.py","edge_egress_k2_m4_root_worker.py"))\n')
         (self.repo/'.env').write_text('TEST_SECRET=excluded\n')
+        (self.repo/'.env.example').write_text('EXAMPLE=fixture\n')
+        (self.repo/'.env.production').write_text('TEST_SECRET=also-excluded\n')
+        examples=self.repo/'ops'/'examples';examples.mkdir(parents=True)
+        (examples/'edge_egress_fra1.json').write_text('{"edge_id":"fra1"}\n')
+        (examples/'edge_egress_stg1.json').write_text('{"edge_id":"stg1"}\n')
+        (examples/'private.json').write_text('{"TEST_SECRET":"excluded"}\n')
         (self.repo/'master_bot.db').write_bytes(b'excluded fake db')
         self.git('add','.');self.git('commit','-qm','source fixture')
         self.commit=self.git('rev-parse','HEAD').decode().strip()
@@ -37,9 +43,15 @@ class SourceBundleTests(unittest.TestCase):
         second=self.base/'second.tar'
         self.assertEqual(build(self.repo,self.commit,second),(digest,manifest))
         stage=self.unpack(out)
-        self.assertEqual(verify(stage,self.commit,manifest),3)
+        self.assertEqual(verify(stage,self.commit,manifest),6)
         self.assertEqual((stage/'bot_final_v49-2.py').read_text(),'print("reviewed")\n')
         self.assertFalse((stage/'.env').exists());self.assertFalse((stage/'master_bot.db').exists())
+        self.assertEqual((stage/'.env.example').read_text(),'EXAMPLE=fixture\n')
+        for edge in ('fra1','stg1'):
+            self.assertEqual(json.loads((stage/'ops'/'examples'/f'edge_egress_{edge}.json').read_text()),
+                             {'edge_id':edge})
+        self.assertFalse((stage/'.env.production').exists())
+        self.assertFalse((stage/'ops'/'examples'/'private.json').exists())
         release=json.loads((stage/'release.json').read_bytes())
         self.assertEqual(release['git_sha'],self.commit)
         self.assertEqual(sha256(out.read_bytes()).hexdigest(),digest)

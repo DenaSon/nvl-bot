@@ -66,8 +66,9 @@ class PersistenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             stage = Path(tmp) / "stage"
             fixture(stage)
+            stage.chmod(0o755)  # Explicitly unsafe even for root with umask 077.
             with self.assertRaisesRegex(p.EgressHold, "STAGE_PERMISSIONS"):
-                p.stage_hash(stage)  # temp directory is not root-owned 0700
+                p.stage_hash(stage)
             link = Path(tmp) / "linked"
             link.symlink_to(stage)
             with self.assertRaisesRegex(p.EgressHold, "STAGE_SYMLINK"):

@@ -64,6 +64,23 @@ def write_new(path, data, mode=0o600):
     path.chmod(mode)
 
 
+def install_lab_egress_schema(db_path, *, python, source_root):
+    """Use the shipped canonical migrations before starting the fresh lab bot."""
+    run([python, '-B', '-c', '''
+import sqlite3, sys
+from edge_egress_inventory import ensure_schema
+from edge_egress_f3_readiness import install_readiness_schema
+from edge_egress_protected_mapping import install_protected_mapping_schema
+from edge_egress_uid_runtime_store import install_runtime_schema
+with sqlite3.connect(sys.argv[1]) as db:
+    ensure_schema(db)
+    install_readiness_schema(db)
+    install_protected_mapping_schema(db)
+    install_runtime_schema(db)
+print('LAB_EGRESS_SCHEMAS=OK')
+''', str(db_path)], cwd=source_root)
+
+
 def local_ipv4s():
     return {a['local'] for row in json.loads(read(['ip', '-j', '-4', 'addr', 'show']))
             for a in row.get('addr_info', ()) if a.get('family') == 'inet'}
@@ -274,6 +291,7 @@ def install_lab(stage):
     # Native schema only; __main__/polling/background jobs do not run here.
     run([py, '-B', '-c', 'import runpy; b=runpy.run_path("/root/bot_final_v49-2.py",'
          'run_name="nvl_lab_schema"); b["init_db"](); print("LAB_SCHEMA=OK")'], cwd=ROOT)
+    install_lab_egress_schema(ROOT/'master_bot.db', python=py, source_root=ROOT)
     access = ['TEST BOT: @' + test_bot['username'], 'BOT LOGIN: labadmin',
               'BOT PASSWORD: ' + env['MASTER_PASS'],
               'SSH RECOVERY: nvlrescue@' + LAB_IP + ':22',

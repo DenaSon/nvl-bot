@@ -9,6 +9,19 @@ for the final integrated tree.
 
 ### Core staging correction, 2026-10-16
 
+The owner confirmed corrected staging of `df52db715c4042b8b2bbe2817b5d12b4bf8e36c0`
+at `/root/nvl-k2-df52db715c40-C30PtE`: exact bundle/manifest digests, 403 files
+verified, 42 affected host tests OK and existing bot active. The pinned one-shot
+code publisher is `ops/k2_core_code_publish_df52.py`. Fetch its exact reviewed
+Git commit into a private staging file using the Core's existing Git connection,
+verify its SHA256, then run it manually. This helper publishes the already-tested
+df52 application stage; adding the helper does not change that application
+release SHA or require rebuilding its stage. It does not enable the K2 profile.
+It records the code delta and previous hashes/modes/owners, backs up SQLite,
+stops/starts only nvlbot, and supports code rollback without rewinding newer DB
+activity. Interrupted/racing original operations remain recorded for inspection.
+Owner stdout confirming publication and Telegram acceptance is still required.
+
 Owner-run staging of merged `34816de57160cb8456686e1fe6976310e62f742f`
 verified the immutable package but failed regression tests: the bundler omitted
 committed `.env.example` and the stg1 example JSON; two permission fixtures

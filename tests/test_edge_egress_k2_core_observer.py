@@ -228,6 +228,7 @@ class AuthenticatedSourceRefreshTests(fixture.CoreFixture):
         def cas(before,after):
             self.assertEqual(before,self.raw);self.raw=after
         settings=(
+            patch.object(observer.os,'geteuid',return_value=0),
             patch('edge_egress_k2_m2_ingress_journal.serialized_root_journal',side_effect=nullcontext),
             patch('edge_egress_k2_m2_ingress_journal.create_root_journal_if_absent',side_effect=lambda:self.raw),
             patch('edge_egress_k2_m2_ingress_journal.compare_and_swap_root_journal',side_effect=cas),

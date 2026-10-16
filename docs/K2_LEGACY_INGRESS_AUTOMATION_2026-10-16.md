@@ -33,6 +33,8 @@ The existing native review now recognizes an unregistered legacy candidate
 without requiring the manager to run a Core command or edit JSON. It requires
 one active DB listener, exact live wg0 endpoint/key/32 ownership, no overlapping
 peer, no reused registry/allocation/stage-pin identity, and the same OS UID.
+An existing unique source allocation keeps its original Edge ID; discovery
+does not create a second identity for the same public IP.
 These facts select a candidate only. The existing pinned SSH/SOCKS client must
 actually authenticate the selected account through that public listener.
 
@@ -54,11 +56,17 @@ states when Core setup is incomplete instead of offering a ready-looking menu.
 
 ## Validation and remaining acceptance
 
-The focused 116-test set passed. Added synthetic tests cover
+Focused regression tests cover
 automatic discovery through real disposable SQLite, trusted Core SSH observation,
 authentication failure, wrong/duplicate/missing acceptance, wrong boot or log
 producer, WG drift, identity reuse and atomic append drift/idempotence. They are
 not live SSH, kernel, reboot or external-device acceptance.
+
+The first CI head found one old source-refresh fixture that implicitly depended
+on the runner being root. Its intended root observation is now explicit, with
+a separate regression proving a genuinely nonroot process cannot discover or
+register a source. Production root checks are unchanged. Exact final-head CI
+results belong in the pull request.
 
 The source correction is not installed on Core merely by committing/merging it.
 One-time release/Core field qualification and runtime enablement remain pending;

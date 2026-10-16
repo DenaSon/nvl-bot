@@ -40,6 +40,7 @@ class LegacyDiscoveryTests(CoreFixture):
             db.execute('ALTER TABLE host_pool ADD COLUMN service_port INTEGER')
             db.execute('UPDATE host_pool SET service_port=2252')
             db.execute('UPDATE ssh_accounts SET host=? WHERE username=?',(SOURCE,'nvl0555'))
+            db.execute("DELETE FROM edge_egress_allocations WHERE edge_id='s8'")
         def cas(before,after):
             self.assertEqual(before,self.raw)
             self.raw=after
@@ -101,6 +102,22 @@ class LegacyDiscoveryTests(CoreFixture):
         self.assertEqual(self.raw,before)
         self.publish.assert_not_called()
 
+    def test_existing_allocated_source_identity_is_preserved_without_creating_an_alias(self):
+        self.peer=replace(self.peer,edge_id='s8')
+        with self.db() as db:
+            db.execute("INSERT INTO edge_egress_allocations VALUES('s8',?,'STAGED',20008)",(SOURCE,))
+        proof=self.client.refresh_source('nvl0555','e12')
+        self.assertEqual(proof.edge_id,'s8')
+        self.assertNotIn('e8',tuple(p.edge_id for p in self.peers))
+
+    def test_duplicate_allocations_for_one_source_are_not_silently_adopted(self):
+        with self.db() as db:
+            db.execute("INSERT INTO edge_egress_allocations VALUES('s8',?,'STAGED',20008)",(SOURCE,))
+            db.execute("INSERT INTO edge_egress_allocations VALUES('x8',?,'STAGED',20018)",(SOURCE,))
+        with self.assertRaisesRegex(ValueError,'IDENTITY_CONFLICT'):
+            self.client.refresh_source('nvl0555','e12')
+        self.client._run.assert_not_called()
+
     def test_real_core_peer_must_equal_the_candidate_not_the_historical_host(self):
         self.accept_rhost='10.77.0.12'
         with self.assertRaisesRegex(ValueError,'INGRESS_AMBIGUOUS'):
@@ -119,6 +136,13 @@ class LegacyDiscoveryTests(CoreFixture):
         with self.assertRaisesRegex(ValueError,'KNOWN_EDGE'):
             self.client.refresh_source('nvl0555','e12')
         self.client._run.assert_not_called()
+
+    def test_nonroot_process_cannot_discover_or_register_a_source(self):
+        with patch.object(observer.os,'geteuid',return_value=1001):
+            with self.assertRaisesRegex(ValueError,'ROOT_UID_REQUIRED'):
+                self.client.refresh_source('nvl0555','e12')
+        self.client._run.assert_not_called()
+        self.publish.assert_not_called()
 
     def test_wrong_live_wireguard_endpoint_cannot_trigger_login(self):
         original=self.command

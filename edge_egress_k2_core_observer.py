@@ -7,7 +7,7 @@ be accepted at release time; this module never invents that evidence or F4.
 """
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from hashlib import sha256
 import json
 import os
@@ -209,6 +209,16 @@ class PinnedEdgeClientProbe:
         except (ValueError,TypeError) as exc:
             raise CoreObservationHold('SOURCE_PROBE_LEGACY_PEER_UNVERIFIED') from exc
         with self.db_conn() as db:
+            identities=db.execute('SELECT edge_id FROM edge_egress_allocations WHERE edge_public_ipv4=?',
+                                  (hint,)).fetchall()
+            if len(identities)>1:
+                raise CoreObservationHold('SOURCE_PROBE_LEGACY_IDENTITY_CONFLICT')
+            if identities:
+                # Preserve an already allocated identity (older installations
+                # need not have used the wizard's eN naming convention).
+                peer=replace(peer,edge_id=identities[0][0])
+                from edge_egress_v1_ingress import render_registry
+                render_registry([peer])
             rows=db.execute('SELECT edge_public_ipv4 FROM edge_egress_allocations WHERE edge_id=?',
                             (peer.edge_id,)).fetchall()
         if any(row!=(hint,) for row in rows):

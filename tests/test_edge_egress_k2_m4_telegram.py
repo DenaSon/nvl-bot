@@ -1,0 +1,314 @@
+"""M4 actual existing-bot wizard; small Persian UI, admin role before scan."""
+from __future__ import annotations
+from pathlib import Path
+import re
+import unittest
+
+from edge_egress_k2_m4_telegram import (
+    M4UIHold,parse_callback,select_input,home_html,home_buttons,
+    prompt_html,preview_html,preview_buttons,failure_html,
+)
+from edge_egress_k2_m4_operator import inspect_telegram_migration
+from edge_egress_k2_migration_inventory import (
+    LiveIngressWitness,select_migration,
+)
+from tests.test_edge_egress_k2_migration_inventory import (
+    K2M1InventoryTests,NOW,SOURCE,TARGET,
+)
+
+
+class M4PresentationTests(unittest.TestCase):
+    def test_callback_is_bounded_and_edge_scoped(self):
+        self.assertEqual(parse_callback("hpeg_m4_home_e9"),("home","e9"))
+        for v in (
+            "hpeg_m4_home_../e9","hpeg_m4_execute_e9",
+            "hpeg_m4_home_e9;rm -rf","hpeg_m4_single_",
+            "hpeg_m4_yes_e9","hpeg_m4_home_"+("a"*75),
+        ):
+            with self.subTest(v=v),self.assertRaises(M4UIHold):
+                parse_callback(v)
+
+    def test_one_and_ten_are_strictly_selected(self):
+        s=select_input("SINGLE","nvl0555","e9")
+        self.assertEqual(s.usernames,("nvl0555",))
+        b=select_input("BATCH","nvl0555، nvl0557\nnvl0558","e9")
+        self.assertEqual(b.usernames,("nvl0555","nvl0557","nvl0558"))
+        for mode,raw in (
+            ("SINGLE","nvl0555,nvl0557"),
+            ("BATCH","nvl0555,nvl0555"),
+            ("BATCH","nvl0555; echo ROOT"),
+            ("BATCH",",".join("nvl%04d"%i for i in range(11))),
+            ("SINGLE","@nvl0555"),
+            ("BATCH","*"),
+        ):
+            with self.subTest(mode=mode,raw=raw),self.assertRaises(M4UIHold):
+                select_input(mode,raw,"e9")
+
+    def test_two_column_ui_short_and_without_implementation_words(self):
+        rows=home_buttons("e9")
+        self.assertTrue(all(len(row)<=2 for row in rows))
+        self.assertEqual(rows[0][0][1],"hpeg_m4_single_e9")
+        self.assertEqual(rows[0][1][1],"hpeg_m4_batch_e9")
+        self.assertIn("انتقال کاربران",home_html("e9"))
+        self.assertIn("nvl0555",prompt_html("e9","SINGLE"))
+        self.assertIn("۱۰",prompt_html("e9","BATCH"))
+        for callback in (x[1] for row in rows+preview_buttons("e9") for x in row):
+            self.assertLessEqual(len(callback.encode()),64)
+        for word in ("P3", "F4", "6G", "BootGuard", "UID"):
+            self.assertNotIn(word,home_html("e9"))
+
+    def test_untrusted_username_html_never_injected(self):
+        self.assertNotIn("<script>",failure_html())
+
+
+class M4OperatorReadOnlyTests(unittest.TestCase):
+    def setUp(self):
+        self.fx=K2M1InventoryTests()
+        self.fx.setUp()
+        self.addCleanup(self.fx.doCleanups)
+
+    def test_absent_witness_must_be_hold_even_if_db_host_looks_valid(self):
+        selection=select_input("SINGLE","nvl0555","e9")
+        preview=inspect_telegram_migration(
+            self.fx.db,selection,now=NOW,
+            uid_lookup=lambda n:self.fx.uids[n],geteuid=lambda:1000,
+            session_provider=None,
+        )
+        self.assertFalse(preview.inventory_clear)
+        self.assertIn("SOURCE_INGRESS_NOT_ATTESTED",
+                      preview.selected_issues)
+        self.assertIn("نیازمند بررسی",preview_html(preview))
+        self.assertFalse(preview.can_execute)
+
+    def test_attested_source_without_session_provider_still_hold(self):
+        selection=select_input("SINGLE","nvl0555","e9")
+        witness=lambda name:LiveIngressWitness(
+            name,"s8",SOURCE,NOW-1,"INDEPENDENT_LIVE",
+        )
+        snapshot=inspect_telegram_migration(
+            self.fx.db,selection,now=NOW,
+            uid_lookup=lambda name:self.fx.uids[name],
+            source_provider=witness,geteuid=lambda:1000,
+        )
+        self.assertIn("SESSION_STATE_NOT_ATTESTED",snapshot.selected_issues)
+        self.assertFalse(snapshot.inventory_clear)
+
+    def test_root_pam_wg_source_without_f3_allocation_is_readonly(self):
+        import base64
+        from edge_egress_v1_ingress import IngressPeer
+        from edge_egress_k2_m2_ingress_journal import (
+            RootReadOnlyIngressEvidence,IngressRecord,encode_records,
+        )
+        self.fx.c.execute(
+            "DELETE FROM edge_egress_allocations WHERE edge_id='s8'"
+        )
+        key=base64.b64encode(bytes(range(32))).decode()
+        peer=IngressPeer("s8",SOURCE,"10.77.0.8",key)
+        proof=RootReadOnlyIngressEvidence(
+            raw=encode_records({"nvl0555":IngressRecord(
+                "nvl0555",1636,"s8",SOURCE,"10.77.0.8",key,NOW-1
+            )}),
+            peers=(peer,),allowed_ips=key+" 10.77.0.8/32\n",
+            now=NOW,resolve_uid=lambda n:self.fx.uids[n],
+        )
+        selection=select_input("SINGLE","nvl0555","e9")
+        observed=inspect_telegram_migration(
+            self.fx.db,selection,now=NOW,
+            uid_lookup=lambda n:self.fx.uids[n],
+            source_provider=proof,
+            session_provider=lambda *_:0,
+            geteuid=lambda:1000,
+        )
+        self.assertTrue(observed.inventory_clear)
+        self.assertEqual(observed.accounts[0].source_edge_id,"s8")
+        self.assertFalse(observed.can_execute)
+        rows=preview_buttons("e9",inventory=observed)
+        self.assertFalse(any(
+            callback=="hpeg_m4_prepare_e9"
+            for row in rows for _,callback in row
+        ))
+        # A generic untrusted source callback cannot supply the extra
+        # registry peers: its observation is not sufficient even to classify.
+        unknown=inspect_telegram_migration(
+            self.fx.db,selection,now=NOW,
+            uid_lookup=lambda n:self.fx.uids[n],
+            source_provider=lambda _:proof("nvl0555"),
+            session_provider=lambda *_:0,
+            geteuid=lambda:1000,
+        )
+        self.assertFalse(unknown.inventory_clear)
+
+    def test_prepare_button_requires_fresh_same_ingress_preview(self):
+        from unittest.mock import patch
+        selection=select_input("SINGLE","nvl0555","e9")
+        def snapshot(edge,ipv4):
+            return inspect_telegram_migration(
+                self.fx.db,selection,now=NOW,
+                uid_lookup=lambda name:self.fx.uids[name],
+                source_provider=lambda name:LiveIngressWitness(
+                    name,edge,ipv4,NOW-1,"INDEPENDENT_LIVE",
+                ),
+                session_provider=lambda n,u:0,geteuid=lambda:1000,
+            )
+        def callbacks(rows):
+            return [callback for row in rows for _,callback in row]
+        unavailable=snapshot("s8",SOURCE)
+        available=snapshot("e9",TARGET)
+        prepare="hpeg_m4_prepare_e9"
+        self.assertNotIn(prepare,callbacks(preview_buttons("e9")))
+        self.assertNotIn(prepare,callbacks(
+            preview_buttons("e9",inventory=unavailable)))
+        # A valid source-only preview is NEVER a released root IPC
+        # execution path: the original bot remains UID 0 and worker OFF.
+        self.assertNotIn(prepare,callbacks(
+            preview_buttons("e9",inventory=available)))
+        with patch("edge_egress_k2_m4_telegram._operator_runtime_released",
+                   return_value=True):
+            self.assertIn(prepare,callbacks(
+                preview_buttons("e9",inventory=available)))
+        with self.assertRaisesRegex(M4UIHold,"SELECTION_INVALID"):
+            preview_buttons("e8",inventory=available)
+
+    def test_cross_edge_single_prepare_display_requires_root_gate(self):
+        from unittest.mock import patch
+        selection=select_input("SINGLE","nvl0555","e9")
+        observed=inspect_telegram_migration(
+            self.fx.db,selection,now=NOW,
+            uid_lookup=lambda name:self.fx.uids[name],
+            source_provider=lambda name:LiveIngressWitness(
+                name,"s8",SOURCE,NOW-1,"INDEPENDENT_LIVE",
+            ),
+            session_provider=lambda *_:0,geteuid=lambda:1000,
+        )
+        prepare="hpeg_m4_prepare_e9"
+        self.assertFalse(any(
+            callback==prepare for row in preview_buttons(
+                "e9",inventory=observed
+            ) for _,callback in row
+        ))
+        with patch("edge_egress_k2_m4_root_portal.M4_CROSS_EDGE_SINGLE_ENABLED",True):
+            # A sole M4 root flag must not pretend the root worker, original
+            # P3, nonroot bot and IPC are running.
+            self.assertNotIn(prepare,[
+                callback for row in preview_buttons("e9",inventory=observed)
+                for _,callback in row
+            ])
+            with patch("edge_egress_k2_m4_telegram._operator_runtime_released",
+                       return_value=True):
+                actions=[callback for row in preview_buttons(
+                    "e9",inventory=observed
+                ) for _,callback in row]
+            self.assertIn(prepare,actions)
+            self.assertIn("آماده بررسی: <b>1</b>",preview_html(observed))
+        batch=select_input("BATCH","nvl0555 nvl0557","e9")
+        observed_batch=inspect_telegram_migration(
+            self.fx.db,batch,now=NOW,
+            uid_lookup=lambda name:self.fx.uids[name],
+            source_provider=lambda name:LiveIngressWitness(
+                name,"s8",SOURCE,NOW-1,"INDEPENDENT_LIVE",
+            ),
+            session_provider=lambda *_:0,geteuid=lambda:1000,
+        )
+        with patch("edge_egress_k2_m4_root_portal.M4_CROSS_EDGE_SINGLE_ENABLED",True):
+            actions=[callback for row in preview_buttons(
+                "e9",inventory=observed_batch
+            ) for _,callback in row]
+            self.assertNotIn(prepare,actions)
+
+    def test_default_runtime_unavailable_even_for_valid_same_edge(self):
+        from edge_egress_k2_m3_waves import build_wave_plan
+        from edge_egress_k2_m4_telegram import _operator_runtime_released
+        selection=select_input("SINGLE","nvl0555","e9")
+        reviewed=inspect_telegram_migration(
+            self.fx.db,selection,now=NOW,
+            uid_lookup=lambda name:self.fx.uids[name],
+            source_provider=lambda name:LiveIngressWitness(
+                name,"e9",TARGET,NOW-1,"INDEPENDENT_LIVE",
+            ),
+            session_provider=lambda *_:0,geteuid=lambda:1000,
+        )
+        self.assertFalse(_operator_runtime_released(
+            build_wave_plan(reviewed,wave_size=1),
+        ))
+        self.assertNotIn("hpeg_m4_prepare_e9",[
+            code for row in preview_buttons("e9",inventory=reviewed)
+            for _,code in row
+        ])
+
+    def test_independent_source_session_and_f4_preview_never_executes(self):
+        selection=select_input("SINGLE","nvl0555","e9")
+        witness=lambda name:LiveIngressWitness(
+            name,"s8",SOURCE,NOW-1,"INDEPENDENT_LIVE",
+        )
+        snapshot=inspect_telegram_migration(
+            self.fx.db,selection,now=NOW,
+            uid_lookup=lambda name:self.fx.uids[name],
+            source_provider=witness,
+            session_provider=lambda n,u:0,geteuid=lambda:1000,
+        )
+        self.assertTrue(snapshot.inventory_clear)
+        self.assertFalse(snapshot.can_execute)
+        rendered=preview_html(snapshot)
+        self.assertIn("آماده بررسی: <b>0</b>",rendered)
+        self.assertIn("نیازمند بررسی: <b>1</b>",rendered)
+        self.assertIn("سرور ورودی",rendered)
+        self.assertNotIn("✅ <code>nvl0555</code>",rendered)
+
+    def test_already_at_target_ingress_displayed_as_reviewed_not_released(self):
+        selection=select_input("SINGLE","nvl0555","e9")
+        witness=lambda name:LiveIngressWitness(
+            name,"e9",TARGET,NOW-1,"INDEPENDENT_LIVE",
+        )
+        preview=inspect_telegram_migration(
+            self.fx.db,selection,now=NOW,
+            uid_lookup=lambda name:self.fx.uids[name],
+            source_provider=witness,
+            session_provider=lambda n,u:0,geteuid=lambda:1000,
+        )
+        self.assertTrue(preview.inventory_clear)
+        rendered=preview_html(preview)
+        self.assertIn("آماده بررسی: <b>1</b>",rendered)
+        self.assertIn("✅ <code>nvl0555</code>",rendered)
+        self.assertIn("غیرفعال",rendered)
+
+
+class M4BotBindingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.bot=(Path(__file__).resolve().parents[1]/
+                 "bot_final_v49-2.py").read_text(encoding="utf-8")
+
+    def test_existing_callback_handler_and_admin_gate(self):
+        start=self.bot.index('    elif d.startswith("hpeg_m4_"):')
+        end=self.bot.index('    elif d.startswith("hpeg_transfer_"):',start)
+        handler=self.bot[start:end]
+        self.assertIn("k2_m4_parse_callback(d)",handler)
+        self.assertLess(handler.index("if role != 'admin':"),
+                        handler.index("_k2_m4_review_selected"))
+        self.assertIn("_k2_m4_review_selected",handler)
+        self.assertIn("k2_m4_preview_buttons(edge_id)",handler)
+        self.assertNotIn("Existing6GGuardedExecutor(",handler)
+        self.assertNotIn("run_migration_wave(",handler)
+        self.assertNotIn("subprocess",handler)
+
+    def test_text_handler_before_legacy_edge_wizard_and_admin_checked(self):
+        start=self.bot.index("    if state in ('K2_M4_SINGLE', 'K2_M4_BATCH'):")
+        end=self.bot.index("    # D1-C2B: a protected-mode legacy Edge",start)
+        handler=self.bot[start:end]
+        self.assertLess(handler.index("if role != 'admin':"),
+                        handler.index("_k2_m4_review_selected"))
+        self.assertIn("k2_m4_select_input(mode,text,target)",handler)
+        self.assertIn("_k2_m4_review_selected(context,view,selection)",handler)
+        self.assertNotIn("ExecutionTicket",handler)
+        self.assertNotIn("passwd",handler)
+
+    def test_existing_edge_transfer_panel_links_to_new_ui(self):
+        from edge_egress_k2_final_integration import (
+            transfer_preview_buttons,TransferPreview,
+        )
+        # Binding is part of real imported production presenter.
+        import inspect
+        self.assertIn("hpeg_m4_home_",inspect.getsource(transfer_preview_buttons))
+
+if __name__=="__main__":
+    unittest.main()

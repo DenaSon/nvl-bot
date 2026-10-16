@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import stat
 
 from ops.edge_egress_provision import EgressSpec, preflight
 
@@ -22,6 +23,7 @@ FILES = ("manifest.json", "wg.conf", "up.sh", "down.sh")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 SAFE_PATH = re.compile(r"^/[A-Za-z0-9_./-]+$")
 AGENT = "/opt/nvl-egress/ops/edge_egress_v1_transport.py"
+UNIT_ROOT = Path('/etc/systemd/system')
 
 
 class EgressHold(ValueError):
@@ -174,6 +176,87 @@ def render_unit(stage: Path, role: str, digest: str) -> str:
         "# No ExecStop: never tear down transport used by SSH sessions.\n\n"
         "[Install]\nWantedBy=multi-user.target\n"
     )
+
+
+def install_persistence(stage: Path,role: str,digest: str,*,guard) -> None:
+    """Install only an absent/exact dedicated oneshot; never stop SSH/wg0.
+
+    Core callers must supply the existing 6G intent guard. On the new empty
+    Edge, the pinned SSH transaction bounds the same fixed-artifact action.
+    No READY promotion, background observer or privileged customer action.
+    """
+    if os.geteuid()!=0 or not callable(guard):
+        raise EgressHold('ROOT_GUARDED_PERSISTENCE_REQUIRED')
+    guard()
+    spec,_=pinned(stage,role,digest)
+    data=render_unit(stage,role,digest).encode()
+    parent=UNIT_ROOT.lstat()
+    if parent.st_uid!=0 or not stat.S_ISDIR(parent.st_mode) or parent.st_mode & 0o022:
+        raise EgressHold('TRANSPORT_UNIT_DIRECTORY_UNTRUSTED')
+    unit=UNIT_ROOT/('nvl-egress-transport-'+spec.edge_id+'.service')
+    guard()
+    if unit.exists() or unit.is_symlink():
+        fd=os.open(unit,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+        try:
+            info=os.fstat(fd)
+            if (info.st_uid!=0 or not stat.S_ISREG(info.st_mode) or info.st_nlink!=1
+                or info.st_mode & 0o022 or os.read(fd,16385)!=data):
+                raise EgressHold('TRANSPORT_UNIT_DRIFT_REQUIRES_REVIEW')
+        finally:os.close(fd)
+    else:
+        fd=os.open(unit,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
+        with os.fdopen(fd,'wb') as out:
+            out.write(data);out.flush();os.fsync(out.fileno())
+        fd=os.open(UNIT_ROOT,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(fd)
+        finally:os.close(fd)
+    for args in (('daemon-reload',),('enable','--now',unit.name),
+                 ('is-enabled','--quiet',unit.name),('is-active','--quiet',unit.name)):
+        guard()
+        result=subprocess.run(['systemctl',*args],capture_output=True,text=True,timeout=75,check=False)
+        if result.returncode:
+            raise EgressHold('TRANSPORT_PERSISTENCE_NOT_CONFIRMED')
+    guard()
+
+
+def stage_transport_modules(sources: dict,*,guard) -> None:
+    """Only the pinned transport's three Python files on a new Edge."""
+    expected={'ops/__init__.py','ops/edge_egress_provision.py','ops/edge_egress_v1_transport.py'}
+    if (os.geteuid()!=0 or set(sources)!=expected or sources['ops/__init__.py']!=b''
+        or any(type(raw) is not bytes or len(raw)>600000 for raw in sources.values())):
+        raise EgressHold('TRANSPORT_AGENT_SOURCES_UNTRUSTED')
+    root=Path('/opt/nvl-egress')
+    info=root.parent.lstat()
+    if info.st_uid!=0 or not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o022:
+        raise EgressHold('TRANSPORT_AGENT_PARENT_UNTRUSTED')
+    for folder in (root,root/'ops'):
+        guard()
+        if not folder.exists() and not folder.is_symlink():folder.mkdir(mode=0o755)
+        info=folder.lstat()
+        if info.st_uid!=0 or not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o022:
+            raise EgressHold('TRANSPORT_AGENT_DIRECTORY_UNTRUSTED')
+    for name,data in sources.items():
+        guard()
+        path=root/name
+        if path.exists() or path.is_symlink():
+            fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+            try:
+                info=os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid!=0
+                    or info.st_nlink!=1 or info.st_mode & 0o022
+                    or os.read(fd,600001)!=data):
+                    raise EgressHold('TRANSPORT_AGENT_SOURCE_DRIFT')
+            finally:os.close(fd)
+        else:
+            fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o644)
+            os.fchmod(fd,0o644)
+            with os.fdopen(fd,'wb') as out:
+                out.write(data);out.flush();os.fsync(out.fileno())
+    for folder in (root,root/'ops'):
+        fd=os.open(folder,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(fd)
+        finally:os.close(fd)
+    guard()
 
 
 def main(argv=None) -> int:

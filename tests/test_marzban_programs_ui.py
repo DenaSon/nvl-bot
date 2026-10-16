@@ -28,7 +28,8 @@ class MarzbanProgramsUITests(unittest.TestCase):
         ):
             self.assertIn(label, region)
             self.assertIn(callback, region)
-        self.assertIn("برنامه‌ها › زیرساخت Marzban", region)
+        self.assertIn("🧩 <b>برنامه‌ها</b>", region)
+        self.assertIn("مدیریت خروجی", region)
 
     def test_v2ray_dashboard_no_longer_owns_nodes_or_hosts(self):
         region = self._region(

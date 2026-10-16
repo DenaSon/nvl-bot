@@ -22,7 +22,7 @@ class Phase2CallbackContracts(unittest.TestCase):
         self.assertEqual(self.source.count('    elif d == "hpeg_status" or d.startswith("hpeg_page_"):'), 1)
         self.assertIn('read_egress_dashboard, db_conn, page=page',
                       self.handler)
-        self.assertIn('egress_dashboard_html(board)', self.handler)
+        self.assertIn('egress_dashboard_html(board,active_edge=', self.handler)
         self.assertIn('callback_data="hpeg_wizard"', self.handler)
         self.assertIn('egress_dashboard_buttons(board)', self.handler)
         self.assertIn('hpeg_page_', self.handler)

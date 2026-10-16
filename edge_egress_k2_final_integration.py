@@ -127,6 +127,9 @@ def transfer_preview_buttons(preview: TransferPreview) -> list[list[tuple[str, s
         [("👤 بررسی یک کاربر", f"hpeg_user_{eid}"),
          ("🔄 بررسی دوباره", f"hpeg_transfer_{eid}")],
     ]
+    # M4 unified Single/Batch read-only operator workflow; never a
+    # privileged execute callback until independent physical acceptance.
+    result.append([("👥 انتقال کاربران", f"hpeg_m4_home_{eid}")])
     if preview.can_probe:
         result.append([("🌍 تست IP خروجی", f"hpeg_probe_{eid}")])
     result.append([("◀️ جزئیات سرور", f"hpeg_edge_{eid}")])

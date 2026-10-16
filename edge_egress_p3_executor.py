@@ -20,6 +20,9 @@ from typing import Callable, Protocol
 
 # There is no implicit live port or Telegram authorisation.
 EXECUTOR_ENABLED = False
+# Never permit mode-0 UID_ATTACH with a generic fake host or 6G callback.
+P3_CROSS_EDGE_LEGACY_UID_ATTACH_ENABLED = False
+P3_UID_POST_COMMIT_PROBE_ENABLED = False
 TICKET_TTL_SECONDS = 120
 INTENT_PHASE = "EGRESS_P3_EXECUTE_INTENT"
 RECOVERY_PHASE = "EGRESS_P3_RECOVERY_REQUIRED"
@@ -284,6 +287,7 @@ class Existing6GGuardedExecutor:
         self.geteuid = geteuid or __import__("os").geteuid
         self.clock = clock or (lambda: int(time.time()))
         self._used = False
+        self._execution_ticket = None
 
     def _journal(self, operation_id, status, phase, scope, nonce_hash, **details):
         allowed = {"RUNNING", "SUCCEEDED"}
@@ -296,9 +300,63 @@ class Existing6GGuardedExecutor:
             "edge_id": scope.edge_id, "scope_digest": _scope_digest(scope),
             "nonce_hash": nonce_hash, **details,
         }
+        if self._core_single_host_bound(scope):
+            detail.update(single_uid=True, username=scope.username, uid=scope.uid)
         self.journal_fn(
             operation_id, status=status, detail=detail,
             finished=(status == "SUCCEEDED"), require_running=True,
+        )
+
+    def _core_single_host_bound(self, scope: ExecutionScope) -> bool:
+        from edge_egress_k2_core_reassignment import CoreReassignmentPort,CORE_REASSIGNMENT_ENABLED
+        from edge_egress_k2_core_prerequisites import CoreGuardBootstrap
+        from edge_egress_k2_m4_bootstrap import (
+            DeferredOriginal6GHostPort, DeferredCrossEdgeOriginal6GHostPort,
+        )
+        port = self.host_port
+        if (P3_UID_POST_COMMIT_PROBE_ENABLED and CORE_REASSIGNMENT_ENABLED
+            and type(port) is CoreReassignmentPort and port.scope==scope
+            and port.db_conn is self.db_conn and port.ticket==self._execution_ticket
+            and scope.action in ('UID_ATTACH','UID_ENROLL_SOURCE')):
+            return True
+        return (
+            P3_UID_POST_COMMIT_PROBE_ENABLED
+            and scope.action in ("UID_ATTACH", "UID_ENROLL_SOURCE")
+            and type(port) in (DeferredOriginal6GHostPort, DeferredCrossEdgeOriginal6GHostPort)
+            and port.scope == scope and port.db_conn is self.db_conn
+            and port.ticket == self._execution_ticket
+            and type(port.bootstrap) is CoreGuardBootstrap
+        )
+
+    def _legacy_cross_edge_host_bound(self, scope: ExecutionScope) -> bool:
+        """Only the original M4 reviewed deferred port may bypass mode=1.
+
+        The port still must install real root PAM/UID guards after original
+        6G intent and use the typed cross-Edge F2 CAS store. No arbitrary
+        host_port, preview bool, or Telegram-supplied marker is accepted.
+        """
+        from edge_egress_k2_m4_bootstrap import (
+            DeferredCrossEdgeOriginal6GHostPort,
+        )
+        port = self.host_port
+        from edge_egress_k2_core_reassignment import CoreReassignmentPort,CORE_REASSIGNMENT_ENABLED
+        if (CORE_REASSIGNMENT_ENABLED and P3_CROSS_EDGE_LEGACY_UID_ATTACH_ENABLED
+            and type(port) is CoreReassignmentPort and port.scope==scope
+            and port.db_conn is self.db_conn and port.ticket==self._execution_ticket
+            and scope.action=='UID_ATTACH' and port.release_enabled is True):
+            return True
+        return (
+            P3_CROSS_EDGE_LEGACY_UID_ATTACH_ENABLED
+            and scope.action == "UID_ATTACH"
+            and scope.source_host != scope.target_host
+            and type(port) is DeferredCrossEdgeOriginal6GHostPort
+            and port.scope == scope
+            and port.db_conn is self.db_conn
+            and port.release_enabled is True
+            and isinstance(port.ticket, ExecutionTicket)
+            and port.ticket.scope_digest == _scope_digest(scope)
+            and self._execution_ticket is not None
+            and port.ticket == self._execution_ticket
         )
 
     def _lease(self, operation_id, scope, nonce_hash=None):
@@ -312,7 +370,10 @@ class Existing6GGuardedExecutor:
                     "SELECT value FROM settings "
                     "WHERE key='edge_egress_protected_mode'"
                 ).fetchone()
-                expected = ("0",) if scope.action == "UID_ENROLL_SOURCE" else ("1",)
+                expected = ("0",) if (
+                    scope.action == "UID_ENROLL_SOURCE"
+                    or self._legacy_cross_edge_host_bound(scope)
+                ) else ("1",)
                 if mode != expected:
                     raise ExecutorHold(
                         "SOURCE_ENROLL_REQUIRES_LEGACY_MODE"
@@ -337,6 +398,7 @@ class Existing6GGuardedExecutor:
                 or not re.fullmatch(r"[0-9a-f]{32}", ticket.nonce)
                 or not compare_digest(ticket.scope_digest, _scope_digest(scope))):
             raise ExecutorHold("EXPIRED_OR_UNAUTHORIZED_TICKET")
+        self._execution_ticket = ticket
         # Readiness MUST be re-evaluated inside the acquired lease too.
         fresh = self.review_fn(scope)
         if not isinstance(fresh, FreshEvidence):
@@ -353,7 +415,10 @@ class Existing6GGuardedExecutor:
                     "SELECT value FROM settings "
                     "WHERE key='edge_egress_protected_mode'"
                 ).fetchone()
-                expected = ("0",) if scope.action == "UID_ENROLL_SOURCE" else ("1",)
+                expected = ("0",) if (
+                    scope.action == "UID_ENROLL_SOURCE"
+                    or self._legacy_cross_edge_host_bound(scope)
+                ) else ("1",)
                 if mode != expected:
                     raise ExecutorHold(
                         "SOURCE_ENROLL_REQUIRES_LEGACY_MODE"
@@ -390,6 +455,12 @@ class Existing6GGuardedExecutor:
             touched = True  # must assume partial mutation on an exception
             await self.host_port.apply(scope)
             self._lease(operation_id, scope, nonce_hash)
+            if self._core_single_host_bound(scope):
+                # The F2 UID is already PROTECTED and independently route-
+                # checked. Permit its real SSH probe while retaining the
+                # SAME original 6G lease; no next migration can start yet.
+                self._journal(operation_id, "RUNNING", INTENT_PHASE, scope,
+                              nonce_hash, probe_only=True)
             if await self.host_port.verify(scope) is not True:
                 raise ExecutorHold("POST_ACTION_PROOF_MISSING")
             self._lease(operation_id, scope, nonce_hash)

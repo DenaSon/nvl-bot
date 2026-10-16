@@ -46,7 +46,8 @@ class AdmissionDecision:
 
 
 def decide_account(conn: sqlite3.Connection, username: str, actual_uid: int,
-                   protected_guard_probe: Callable[[RuntimeBinding], bool]
+                   protected_guard_probe: Callable[[RuntimeBinding], bool],
+                   *, scoped_busy_probe: Callable[[RuntimeBinding], bool] | None = None,
                    ) -> AdmissionDecision:
     """Fail closed for ANY ambiguous DB, mapping, kernel or shared-6G state."""
     denied = lambda reason: AdmissionDecision(AdmissionResult.DENY, reason)
@@ -101,7 +102,7 @@ def decide_account(conn: sqlite3.Connection, username: str, actual_uid: int,
             "SELECT 1 FROM failover_operations "
             "WHERE status='RUNNING' LIMIT 1"
         ).fetchone()
-        if busy:
+        if busy and (scoped_busy_probe is None or scoped_busy_probe(row) is not True):
             return denied("SHARED_6G_OPERATION_ACTIVE")
         if not protected_guard_probe(row):
             return denied("KERNEL_DNS_BOOT_GUARD_NOT_VERIFIED")

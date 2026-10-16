@@ -19,7 +19,7 @@ from typing import Callable
 MODULE_STAGING_ENABLED = False
 SOURCE = Path("/root/nvl-release")
 TARGET = Path("/opt/nvl-egress")
-NAME = re.compile(r"(?:edge_egress_[a-z0-9_]+\.py|ops/(?:__init__|edge_egress_[a-z0-9_]+)\.py)\Z")
+NAME = re.compile(r"(?:edge_egress_[a-z0-9_]+\.py|ops/(?:__init__|edge_egress_[a-z0-9_]+|k2_[a-z0-9_]+)\.py)\Z")
 SHA = re.compile(r"[a-f0-9]{64}\Z")
 REQUIRED = frozenset({
     "edge_egress_v1_admission.py",
@@ -58,12 +58,12 @@ def _deps(tree: ast.AST) -> set[str]:
                 names.add(node.module)
                 if node.module=="ops":
                     names.update("ops."+alias.name for alias in node.names
-                                 if alias.name.startswith("edge_egress_"))
+                                 if alias.name.startswith(("edge_egress_", "k2_")))
     result=set()
     for name in names:
         if name.startswith("edge_egress_"):
             result.add(name.split(".")[0]+".py")
-        if name.startswith("ops.edge_egress_"):
+        if name.startswith(("ops.edge_egress_", "ops.k2_")):
             result.add(name.replace(".","/")+".py")
     return result
 
@@ -174,10 +174,12 @@ def stage_module_bundle(
     _owned_dir(Path("/opt"),readable=True)
     if not TARGET.exists() and not TARGET.is_symlink():
         TARGET.mkdir(mode=0o755)
+        TARGET.chmod(0o755)
     _owned_dir(TARGET,readable=True)
     ops=TARGET/"ops"
     if not ops.exists() and not ops.is_symlink():
         ops.mkdir(mode=0o755)
+        ops.chmod(0o755)
     _owned_dir(ops,readable=True)
     for name in sorted(blobs):
         path=TARGET.joinpath(*name.split("/"))
@@ -199,6 +201,7 @@ def create_public_root_module(path:Path, raw:bytes) -> None:
     fd=os.open(path,flags,0o644)
     try:
         with os.fdopen(fd,"wb") as f:
+            os.fchmod(f.fileno(),0o644)
             f.write(raw)
             f.flush()
             os.fsync(f.fileno())

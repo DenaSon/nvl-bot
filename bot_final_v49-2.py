@@ -308,6 +308,7 @@ from edge_egress_lifecycle import (
     legacy_new_edge_gate,
 )
 from edge_egress_handoff import is_egress_recovery_hold
+from edge_egress_k2_a_6g_shared import acquire_original_6g, update_original_6g
 from edge_egress_v1_6h import evaluate_j_switch
 from edge_egress_legacy_fence import (
     LEGACY_PROTECTED_BINDINGS_BLOCKED,
@@ -353,6 +354,7 @@ from edge_egress_p3_telegram import (
     dashboard_buttons as egress_dashboard_buttons,
     edge_html as egress_detail_html,
     detail_buttons as egress_detail_buttons,
+    maintenance_buttons as egress_maintenance_buttons,
     transport_html as egress_health_html,
     stage_html as egress_stage_html,
     actions_html as egress_actions_html,
@@ -376,6 +378,158 @@ from edge_egress_k2_final_integration import (
     transfer_preview_html as k2_transfer_preview_html,
     transfer_preview_buttons as k2_transfer_preview_buttons,
 )
+from edge_egress_k2_m4_telegram import (
+    M4UIHold, parse_callback as k2_m4_parse_callback,
+    select_input as k2_m4_select_input,
+    home_html as k2_m4_home_html,
+    home_buttons as k2_m4_home_buttons,
+    prompt_html as k2_m4_prompt_html,
+    cancel_buttons as k2_m4_cancel_buttons,
+    preview_html as k2_m4_preview_html,
+    preview_buttons as k2_m4_preview_buttons,
+    failure_html as k2_m4_failure_html,
+)
+from edge_egress_k2_m4_operator import (
+    inspect_telegram_migration as k2_m4_readonly_preview,
+)
+from edge_egress_k2_m4_status import (
+    inspect_telegram_wave_status as k2_m4_readonly_status,
+    status_html as k2_m4_status_html,
+    root_checkpoint_status_html as k2_m44_root_status_html,
+)
+import edge_egress_k2_root_direct as k2_root_direct_flags
+from edge_egress_k2_root_direct import (
+    bound_root_client as k2_root_direct_client,
+    native_review as k2_native_review,
+    native_prepare_edge as k2_native_prepare_edge,
+    native_operations_registered as k2_native_operations_registered,
+)
+from edge_egress_k2_migration_inventory import select_migration as k2_selected_scope
+from edge_egress_k2_m43_client import (
+    M43ClientHold,
+)
+from edge_egress_k2_m43_workflow import (
+    APPROVALS as k2_m43_approvals,
+    PendingTelegramApproval as K2M43Pending,
+    confirmation_html as k2_m43_confirmation_html,
+    confirmation_buttons as k2_m43_confirmation_buttons,
+    result_html as k2_m43_result_html,
+    halted_html as k2_m43_halted_html,
+    cancel_html as k2_m43_cancel_html,
+)
+
+
+from edge_egress_k2_operator_ui import (
+    VIEWS as k2_ui_views, error_html as k2_ui_error,
+    running_html as k2_ui_running, running_buttons as k2_ui_running_buttons,
+    accounts_page as k2_ui_accounts_page, parse_page as k2_ui_parse_page,
+    detail_button as k2_ui_detail_button,
+)
+
+
+def _k2_ui_markup(rows):
+    return InlineKeyboardMarkup([[InlineKeyboardButton(label,callback_data=data)
+        for label,data in row] for row in rows])
+
+
+async def _k2_ui_background(context,query,edge_id,worker,*,reviewing=True,selection=None):
+    """Release PTB's serial update handler; never cancel host I/O on navigation."""
+    actor_id=query.from_user.id
+    chat_id=query.message.chat_id
+    skipped=()
+    try:
+        old=k2_ui_views.get(actor_id,chat_id,query.message.message_id,edge_id)
+        if selection is not None and old.selection==selection:
+            skipped=old.skipped
+    except ValueError:
+        pass
+    screen=k2_ui_views.begin(actor_id,chat_id,query.message.message_id,edge_id,
+        selection=selection,skipped=skipped)
+    await query.edit_message_text(k2_ui_running(edge_id,reviewing=reviewing),
+        parse_mode='HTML',reply_markup=_k2_ui_markup(
+            k2_ui_running_buttons(edge_id,reviewing=reviewing)))
+    async def run():
+        try:
+            display,rows=await worker(screen)
+        except Exception as exc:
+            log.warning('K2 operator screen requires status inspection (%s)',type(exc).__name__)
+            screen.kind='error'
+            display=k2_ui_error(exc,executing=not reviewing)
+            rows=k2_m4_preview_buttons(edge_id)
+        # A late answer cannot overwrite a different page or resurrect an
+        # approval discarded by navigation. Host completion is NOT cancelled.
+        if not k2_ui_views.current(actor_id,chat_id,screen):
+            return
+        with contextlib.suppress(Exception):
+            await query.edit_message_text(display,parse_mode='HTML',
+                reply_markup=_k2_ui_markup(rows))
+    spawn_bg_task(run())
+
+
+async def _k2_m4_inventory_all(context,query,edge_id,*,activate_relay=False):
+    edge_id_checked(edge_id)
+    actor_id=query.from_user.id
+    chat_id=query.message.chat_id
+    k2_m43_approvals.discard(actor_id,chat_id)
+    context.user_data.pop('state',None)
+    context.user_data.pop('k2_m4_selection',None)
+    async def review(screen):
+        result=await k2_root_direct_client(context.application).request(
+            'ALL',actor_id=actor_id,chat_id=chat_id,edge_id=edge_id,activate_relay=activate_relay)
+        selection=result['selection']
+        skipped=result['skipped']
+        screen.skipped=skipped
+        if not k2_ui_views.current(actor_id,chat_id,screen):
+            return '',[]
+        if selection is None:
+            if activate_relay and skipped and all(reason=='TARGET_ALREADY_PROTECTED' for _,reason in skipped):
+                selection=k2_selected_scope('BATCH',tuple(name for name,_ in skipped),edge_id)
+                screen.selection=selection
+                screen.kind='skipped'
+                context.user_data['k2_m4_selection']=(selection.mode,selection.usernames,edge_id)
+                context.user_data['k2_m4_make_active']=True
+                return ('تمام حساب‌ها روی این خروجی ثبت شده‌اند.\nبرای انتخاب خروجی فعال، بررسی نهایی را ادامه دهید.',
+                    [[('ادامه و تأیید',f'hpeg_m4_prepare_{edge_id}')],
+                     k2_ui_detail_button(edge_id),[('❌ انصراف',f'hpeg_m4_cancel_{edge_id}')]])
+            screen.kind='skipped'
+            return (f'حساب واجد شرایطی برای انتقال پیدا نشد.\nحساب‌های کنارگذاشته‌شده: {len(skipped)}\n\n💡 دلیل هر حساب را از جزئیات ببینید.',
+                [k2_ui_detail_button(edge_id),[('👥 انتخاب کاربران',f'hpeg_m4_home_{edge_id}'),
+                                             ('↩️ مدیریت خروجی','hpeg_status')]])
+        screen.selection=selection
+        screen.activate_relay=activate_relay
+        inventory=await k2_native_review(context.application,selection,actor_id=actor_id,chat_id=chat_id)
+        if not k2_ui_views.current(actor_id,chat_id,screen):
+            return '',[]
+        context.user_data['k2_m4_selection']=(selection.mode,selection.usernames,edge_id)
+        context.user_data['k2_m4_make_active']=activate_relay
+        screen.kind='preview';screen.payload=inventory
+        text=k2_m4_preview_html(inventory)+f'\n\nکنارگذاشته‌شده در بررسی اولیه: {len(skipped)}'
+        if activate_relay:
+            text+='\n⭐ خروجی فعال فقط پس از تأیید مسیر تمام حساب‌های فعال ثبت می‌شود.'
+        rows=k2_m4_preview_buttons(edge_id,inventory=inventory)
+        rows.insert(1,k2_ui_detail_button(edge_id))
+        return text,rows
+    await _k2_ui_background(context,query,edge_id,review)
+
+
+async def _k2_m4_review_selected(context,query,selection):
+    actor_id=query.from_user.id;chat_id=query.message.chat_id
+    edge_id=selection.target_edge_id
+    async def review(screen):
+        if k2_native_operations_registered():
+            inventory=await k2_native_review(context.application,selection,
+                actor_id=actor_id,chat_id=chat_id)
+        else:
+            inventory=await asyncio.to_thread(k2_m4_readonly_preview,db_conn,selection)
+        if k2_ui_views.current(actor_id,chat_id,screen):
+            context.user_data['k2_m4_selection']=(selection.mode,selection.usernames,edge_id)
+        screen.kind='preview';screen.payload=inventory
+        rows=k2_m4_preview_buttons(edge_id,inventory=inventory)
+        rows.insert(1,k2_ui_detail_button(edge_id))
+        return k2_m4_preview_html(inventory),rows
+    await _k2_ui_background(context,query,edge_id,review,selection=selection)
+
+
 from edge_egress_k2_p1_worker import (
     Phase1Hold, inspect_phase1, activate_phase1, probe_phase1,
 )
@@ -3101,41 +3255,15 @@ def _db_rollback_failover_account_state(
 
 
 def _db_acquire_failover_lock(source_host, target_host, *, mode=FAILOVER_MODE_MANUAL):
-    """Acquire the single persisted Phase 6G failover lock."""
-    now_dt = datetime.now()
-    now = now_dt.strftime("%Y-%m-%d %H:%M:%S")
-    with db_conn() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute(
-            "SELECT id, updated_at, detail_json FROM failover_operations "
-            "WHERE status=? ORDER BY id DESC LIMIT 1",
-            (FAILOVER_STATUS_RUNNING,),
-        ).fetchone()
-        if row:
-            lock_id, updated_at, detail_json = row
-            # An interrupted protected Egress cutover must not have its 6G
-            # shared lock auto-recovered while routes/DB/DNS may be uncertain.
-            if is_egress_recovery_hold(detail_json):
-                return None, lock_id
-            try:
-                age = (now_dt - _parse_flexible_datetime(updated_at)).total_seconds()
-            except Exception:
-                age = FAILOVER_LOCK_STALE_SECONDS + 1
-            if age <= FAILOVER_LOCK_STALE_SECONDS:
-                return None, lock_id
-            conn.execute(
-                "UPDATE failover_operations SET status=?, updated_at=?, finished_at=?, "
-                "error=COALESCE(error, 'stale lock recovered by Phase 6G') WHERE id=?",
-                (FAILOVER_STATUS_ABORTED_STALE, now, now, lock_id),
-            )
-
-        cur = conn.execute(
-            "INSERT INTO failover_operations "
-            "(mode, source_host, target_host, status, started_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (mode, source_host, target_host, FAILOVER_STATUS_RUNNING, now, now),
-        )
-        return cur.lastrowid, None
+    """Legacy wrapper over the ONE shared original Phase 6G lease."""
+    from edge_egress_k2_a_6g_shared import acquire_original_6g
+    return acquire_original_6g(
+        db_conn,source_host,target_host,mode=mode,
+        stale_seconds=FAILOVER_LOCK_STALE_SECONDS,
+        parse_datetime=_parse_flexible_datetime,
+        clock=lambda: datetime.now(),
+        allow_legacy_stale_recovery=True,
+    )
 
 
 def _db_update_failover_operation(
@@ -3152,38 +3280,15 @@ def _db_update_failover_operation(
     finished=False,
     require_running=False,
 ):
-    fields = ["updated_at=?"]
-    values = [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
-    updates = {
-        "status": status,
-        "account_count": account_count,
-        "moved_count": moved_count,
-        "previous_default_host": previous_default_host,
-        "previous_dns_ip": previous_dns_ip,
-        "core_fallback_ip": core_fallback_ip,
-        "error": error,
-        "detail_json": None if detail is None else json.dumps(detail, ensure_ascii=False),
-    }
-    for name, value in updates.items():
-        if value is not None:
-            fields.append(f"{name}=?")
-            values.append(value)
-    if finished:
-        fields.append("finished_at=?")
-        values.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    # D1-C2B2: a protected stage write must be fenced to its live 6G
-    # operation, so an expired/stolen lock cannot be marked SUCCEEDED.
-    values.append(operation_id)
-    if require_running:
-        values.append(FAILOVER_STATUS_RUNNING)
-    with db_conn() as conn:
-        cur = conn.execute(
-            f"UPDATE failover_operations SET {', '.join(fields)} WHERE id=?"
-            + (" AND status=?" if require_running else ""),
-            values,
-        )
-        if require_running and cur.rowcount != 1:
-            raise RuntimeError("SHARED_6G_LOCK_NO_LONGER_RUNNING")
+    """Legacy wrapper over the same original 6G journal/CAS SQL."""
+    from edge_egress_k2_a_6g_shared import update_original_6g
+    return update_original_6g(
+        db_conn,operation_id,status=status,account_count=account_count,
+        moved_count=moved_count,previous_default_host=previous_default_host,
+        previous_dns_ip=previous_dns_ip,core_fallback_ip=core_fallback_ip,
+        error=error,detail=detail,finished=finished,
+        require_running=require_running,clock=lambda: datetime.now(),
+    )
 
 
 def _db_get_latest_failover_operation():
@@ -3896,11 +4001,13 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
         await app.bot.send_message(
             chat_id,
             f"❌ راه‌اندازیِ Edge <code>{esc(edge_ip)}</code> بعد از {_provision_timeout} ثانیه بدون پاسخ موند "
-            f"(احتمالاً شبکه قطع/گیر کرده) — عملیات لغو شد. دوباره امتحان کنید.",
+            "ممکن است بخشی از راه‌اندازی انجام شده باشد؛ ابتدا وضعیت سرور را بررسی کنید و نصب را تکرار نکنید.",
             parse_mode="HTML")
         return False, None, None
     if not ok:
-        await app.bot.send_message(chat_id, err, parse_mode="HTML")
+        await app.bot.send_message(chat_id,
+            "⛔️ راه‌اندازی کامل نشد. ابتدا وضعیت سرور را بررسی کنید؛ نصب را تکرار نکنید."
+            if egress_stage_requested else err, parse_mode="HTML")
         return False, None, None
 
     # I — opt-in dedicated Egress STAGING added to the existing Edge wizard.
@@ -3933,9 +4040,8 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
             log.exception('I dedicated Egress stage HOLD for Edge %s', edge_ip)
             await app.bot.send_message(
                 chat_id,
-                "⛔️ <b>Ingress ساخته شد، اما Egress در وضعیت HOLD است.</b>\\n"
-                "Stage و رجیستری کامل تأیید نشدند؛ Edge هنوز برای کاربران محافظت‌شده آماده نیست. "
-                "بدون بررسی وضعیت جزئی روی سرورها، عملیات را دوباره اجرا نکنید.",
+                "⛔️ <b>آماده‌سازی خروجی کامل نشد.</b>\n"
+                "بخشی از نصب انجام شده است. ابتدا وضعیت سرور را بررسی کنید؛ نصب را تکرار نکنید.",
                 parse_mode="HTML",
             )
             return False, edge_ip, result
@@ -3975,13 +4081,24 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
     if egress_stage_requested:
         # No default/DNS/UID switch on the new protected-aware entrypoint.
         html, edge_id = egress_staged_edge_result(edge_ip, result)
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📤 فعال‌سازی خروجی", callback_data=f"hpeg_p1_open_{edge_id}"),
-             InlineKeyboardButton("🔎 بررسی اتصال", callback_data=f"hpeg_stage_{edge_id}")],
-            [InlineKeyboardButton("🔀 تغییر مسیر ترافیک", callback_data=f"hpeg_relay_{edge_id}")],
-            [InlineKeyboardButton("📋 بررسی آماده‌سازی",
-                                  callback_data=f"hpeg_review_edge_{edge_id}")],
-            [InlineKeyboardButton("◀️ سرورها", callback_data="hpeg_status")],
+        if k2_native_operations_registered():
+            try:
+                result['automatic_transport']=await k2_native_prepare_edge(
+                    app,edge_id,actor_id=chat_id,chat_id=chat_id)
+                html=('✅ <b>سرور جدید آماده بررسی انتقال است</b>\n\n'
+                      f'سرور: <code>{esc(edge_id)}</code>\n'
+                      f'IP خروجی تونل: <code>{esc(edge_ip)}</code>\n\n'
+                      'برای تغییر خروجی کاربران، انتقال تکی یا گروهی را انتخاب کنید.')
+            except Exception:
+                log.warning('K2 automatic Edge preparation HOLD')
+                await app.bot.send_message(chat_id,
+                    '⛔️ نصب سرور ثبت شد؛ آماده‌سازی خروجی کامل نشد. از وضعیت سرور پیگیری کنید؛ نصب را تکرار نکنید.')
+                return False,edge_ip,result
+        kb = _k2_ui_markup([
+            [("👥 انتقال کاربران",f"hpeg_m4_home_{edge_id}"),
+             ("⭐ انتخاب خروجی فعال",f"hpeg_relay_{edge_id}")],
+            [("🔎 وضعیت سرور",f"hpeg_edge_{edge_id}"),
+             ("↩️ مدیریت خروجی","hpeg_status")],
         ])
         await app.bot.send_message(
             chat_id, html, parse_mode="HTML", reply_markup=kb,
@@ -6834,6 +6951,7 @@ PORTAL_DISPLAY_NAME = "NeVeL"  # 🔒 نام ثابت پورتال و مدیری
 def _build_admin_programs_kb():
     """Infrastructure and operational tools available only to NVL administrators."""
     return [
+        [InlineKeyboardButton("🌐 مدیریت خروجی", callback_data="hpeg_status")],
         [
             InlineKeyboardButton("🖥 نودها", callback_data="apps_marzban_nodes"),
             InlineKeyboardButton("🌐 هاست‌ها", callback_data="apps_marzban_hosts"),
@@ -6856,10 +6974,17 @@ async def _show_admin_programs_hub(target, context):
         return
 
     context.user_data.pop('state', None)
+    actor=getattr(getattr(target,'from_user',None),'id',None)
+    message=getattr(target,'message',target)
+    chat=getattr(message,'chat_id',None)
+    if actor and chat:
+        k2_ui_views.navigate(actor,chat)
+        k2_m43_approvals.discard(actor,chat)
     text = (
-        "🧩 <b>برنامه‌ها › زیرساخت Marzban</b>\n"
+        "🧩 <b>برنامه‌ها</b>\n"
         "━━━━━━━━━━━━━━\n"
-        "ابزارهای زیرساختی Marzban از مدیریت کاربران جدا شده‌اند.\n\n"
+        "یک ابزار را انتخاب کنید.\n\n"
+        "🌐 <b>مدیریت خروجی</b> — راه‌اندازی Edge و تغییر IP خروجی کاربران SSH\n"
         "🖥 <b>نودها</b> — وضعیت، تنظیمات، راه‌اندازی و اتصال Node\n"
         "🌐 <b>هاست‌ها</b> — Inboundها و Public Hostها\n"
         "🚚 <b>انتقال</b> — مهاجرت کنترل‌شده سرور اصلی Marzban\n"
@@ -10781,6 +10906,54 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     role = context.user_data.get('role')
     chat_id = update.effective_chat.id
 
+    if role == 'admin' and state in ('K2_M4_SINGLE','K2_M4_BATCH','EDGE_NEW_IP','EDGE_NEW_ROOTPASS','EDGE_NEW_PORT') and text in (
+        '🧩 برنامه‌ها','🧩 برنامه ها','🏠 منوی اصلی'):
+        context.user_data.pop('state',None)
+        k2_ui_views.navigate(update.effective_user.id,chat_id)
+        k2_m43_approvals.discard(update.effective_user.id,chat_id)
+        _EDGE_PROVISION_SECRETS.pop(chat_id,None)
+        state=None
+    if role == 'admin' and state in ('EDGE_NEW_IP','EDGE_NEW_ROOTPASS','EDGE_NEW_PORT') and text.strip() in ('لغو','انصراف','/cancel'):
+        _EDGE_PROVISION_SECRETS.pop(chat_id,None)
+        for key in ('state','edge_new_ip','egress_new_edge_requested'):
+            context.user_data.pop(key,None)
+        await update.message.reply_text('راه‌اندازی لغو شد.',reply_markup=_k2_ui_markup(
+            [[('↩️ مدیریت خروجی','hpeg_status')]]))
+        return
+
+    # K2 M4: existing-bot, admin-only Single/Batch selection. Persist no
+    # root approval, SSH secret, operator ticket or 6G nonce in Pickle.
+    if state in ('K2_M4_SINGLE', 'K2_M4_BATCH'):
+        context.user_data.pop('state', None)
+        target=context.user_data.pop('k2_m4_target_edge',None)
+        context.user_data.pop('k2_m4_selection',None)
+        if role != 'admin':
+            await update.message.reply_text("⛔️ فقط مدیر")
+            return
+        k2_m43_approvals.discard(update.effective_user.id,chat_id)
+        try:
+            mode='SINGLE' if state=='K2_M4_SINGLE' else 'BATCH'
+            if text.strip() in ('لغو','انصراف','/cancel'):
+                await update.message.reply_text('درخواست لغو شد.',reply_markup=_k2_ui_markup(
+                    k2_m4_home_buttons(target)))
+                return
+            selection=k2_m4_select_input(mode,text,target)
+            context.user_data.pop('k2_m4_make_active',None)
+            message=await update.message.reply_text('⏳ در حال بررسی کاربران…')
+            # Query-shaped local adapter; no Telegram callback or authority
+            # is manufactured. Only display APIs are reused here.
+            from types import SimpleNamespace
+            view=SimpleNamespace(from_user=update.effective_user,message=message,
+                                 edit_message_text=message.edit_text)
+            await _k2_m4_review_selected(context,view,selection)
+        except Exception as exc:
+            # Invalid input remains editable in the current one-shot prompt.
+            context.user_data['state']=state
+            context.user_data['k2_m4_target_edge']=target
+            await update.message.reply_text(k2_ui_error(exc),parse_mode='HTML',
+                reply_markup=_k2_ui_markup(k2_m4_cancel_buttons(target)))
+        return
+
     # D1-C2B: a protected-mode legacy Edge text wizard must be vetoed BEFORE
     # collecting root credentials, changing host_pool or starting remote SSH.
     # All protected Edge changes will eventually route through the same
@@ -13022,14 +13195,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif state == 'EDGE_NEW_IP':
         ip = text.strip()
-        if not re.match(r'^\d{1,3}(\.\d{1,3}){3}$', ip):
+        from ipaddress import IPv4Address
+        try:
+            ip_ok=str(IPv4Address(ip))==ip and IPv4Address(ip).is_global
+        except ValueError:
+            ip_ok=False
+        if not ip_ok:
             await update.message.reply_text("❌ فرمت IP درست نیست (مثال: 104.194.134.158). دوباره بفرستید:")
             return
         context.user_data['edge_new_ip'] = ip
         context.user_data['state'] = 'EDGE_NEW_ROOTPASS'
         await update.message.reply_text(
-            "۲) رمز روتِ همین سرور را بفرستید (فقط همین یک‌بار استفاده می‌شود؛ پیام شما بلافاصله "
-            "بعد از خواندن از چت حذف خواهد شد و هرگز روی دیسک ذخیره نمی‌شود):")
+            "۲ از ۳ · رمز root سرور جدید را بفرستید.\n"
+            "💡 رمز فقط برای راه‌اندازی استفاده می‌شود؛ بات تلاش می‌کند پیام را حذف کند.\n"
+            "برای انصراف «لغو» را بفرستید.")
 
     elif state == 'EDGE_NEW_ROOTPASS':
         chat_id = update.effective_chat.id
@@ -13041,12 +13220,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['state'] = 'EDGE_NEW_PORT'
         default_port = await asyncio.to_thread(_db_get_setting, 'port', '2252')
         await update.message.reply_text(
-            f"✅ رمز دریافت و پیام حذف شد.\n\n"
-            f"۳) پورت SSH مشتری‌ها را بفرستید (اگر مطمئن نیستید همین را بفرستید: {default_port}):")
+            f"✅ رمز دریافت شد.\n\n"
+            f"۳ از ۳ · پورت اتصال SSH کاربران را بفرستید.\nمثال: <code>{esc(default_port)}</code>\n"
+            "💡 این پورت برای اتصال کاربران است. برای انصراف «لغو» را بفرستید.",parse_mode="HTML")
 
     elif state == 'EDGE_NEW_PORT':
-        if not text.strip().isdigit():
-            await update.message.reply_text("❌ فقط عدد بفرستید:")
+        if not text.strip().isascii() or not text.strip().isdigit() or not 1 <= int(text.strip()) <= 65535:
+            await update.message.reply_text("❌ پورت باید عددی بین ۱ تا ۶۵۵۳۵ باشد. دوباره بفرستید:")
             return
         customer_port = text.strip()
         chat_id = update.effective_chat.id
@@ -13075,8 +13255,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 with contextlib.suppress(Exception):
                     await context.application.bot.send_message(
                         chat_id, "⛔️ نصب Edge با خطای غیرمنتظره متوقف شد؛ "
-                        "ممکن است تغییرات ورودی یا Stage نیمه‌کاره باقی مانده باشد. "
-                        "بدون بررسی وضعیت، Wizard را مجدداً اجرا نکنید.")
+                        "ممکن است بخشی از راه‌اندازی انجام شده باشد. "
+                        "ابتدا وضعیت سرور را بررسی کنید؛ نصب را تکرار نکنید.")
 
         spawn_bg_task(_provision_task_guarded())
 
@@ -13249,7 +13429,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_port = await asyncio.to_thread(_db_get_host_admin_ssh_port, target_ip, 22)
         safe_clear_context(context)
         if paramiko is None:
-            await update.message.reply_text("❌ کتابخانهٔ paramiko روی Core نصب نیست.")
+            await update.message.reply_text("⛔️ ابزار اتصال به سرور در دسترس نیست؛ راه‌اندازی شروع نشد.")
         else:
             def _connect_and_install():
                 ssh = None
@@ -13838,7 +14018,6 @@ async def _render_host_pool_panel(query, page=0):
     kb.append([InlineKeyboardButton("🚀 افزودن Edge جدید (VPS از قبل‌خریداری‌شده)", callback_data="hp_addedge")])
     kb.append([InlineKeyboardButton("🌍 دامنهٔ ثابت + Cloudflare", callback_data="hp_cf_settings")])
     kb.append([InlineKeyboardButton("🛡 فیلترینگ و دسترسی", callback_data="hp_filtering")])
-    kb.append([InlineKeyboardButton("🛡 مدیریت Egress", callback_data="hpeg_status")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="ipsvc_menu")])
     cf_cfg = await asyncio.to_thread(_cf_get_config)
     if _cf_configured(cf_cfg):
@@ -15708,6 +15887,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_auth(context): return
     query = update.callback_query; await query.answer(); d = query.data
     role, ag_id = context.user_data.get('role'), context.user_data.get('agent_id', 0)
+    if role == 'admin' and (d in ('apps_home','hpeg_status','hpeg_wizard','uact_back_to_menu')
+        or d.startswith(('hpeg_edge_','hpeg_more_','hpeg_page_',
+                         'hpeg_m4_home_','hpeg_m4_cancel_','hpeg_m4_single_','hpeg_m4_batch_'))):
+        k2_ui_views.navigate(update.effective_user.id,update.effective_chat.id)
+        k2_m43_approvals.discard(update.effective_user.id,update.effective_chat.id)
+        if context.user_data.get('state') in ('EDGE_NEW_IP','EDGE_NEW_ROOTPASS','EDGE_NEW_PORT'):
+            _EDGE_PROVISION_SECRETS.pop(update.effective_chat.id,None)
+            for key in ('state','edge_new_ip','egress_new_edge_requested'):
+                context.user_data.pop(key,None)
+        if context.user_data.get('state') in ('K2_M4_SINGLE','K2_M4_BATCH','EGRESS_PHASE2_USER_PREVIEW'):
+            context.user_data.pop('state',None)
 
     # D1-C2B: one early check for manual Edge-management callbacks, including
     # activation, bulk account moves and removal of operational wg0 peers.
@@ -21170,6 +21360,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🎯 تبدیل یک سرور Edge آماده‌به‌کار به رله فعال (Active Edge)
     elif d.startswith("srv_mkactive_") and role == 'admin':
         target_ip = d.replace("srv_mkactive_", "").strip()
+        if k2_native_operations_registered():
+            with db_conn() as _db:
+                _edges=_db.execute('SELECT edge_id FROM edge_egress_allocations WHERE edge_public_ipv4=? AND status=\'STAGED\'',(target_ip,)).fetchall()
+            if len(_edges)!=1:
+                await query.message.reply_text('⛔️ خروجی این سرور هنوز آماده نشده است.')
+                return
+            try:
+                await _k2_m4_inventory_all(context,query,_edges[0][0],activate_relay=True)
+            except Exception:
+                await query.message.reply_text(k2_m4_failure_html(),parse_mode='HTML')
+            return
         await query.edit_message_text(f"⏳ در حال انتقال دامنه و ترافیک به سرور <code>{esc(target_ip)}</code>...\nلطفاً چند لحظه صبر کنید.", parse_mode="HTML")
         
         async def _make_edge_active():
@@ -24122,6 +24323,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("⛔️ فقط مدیر")
             return
         edge_id = d[len("hpeg_relay_"):]
+        if k2_native_operations_registered():
+            try:
+                await _k2_m4_inventory_all(context,query,edge_id,activate_relay=True)
+            except Exception:
+                await query.message.reply_text(k2_m4_failure_html(),parse_mode='HTML')
+            return
         context.user_data.pop("k2_p2_switch_ticket", None)
         try:
             edge_id_checked(edge_id)
@@ -24238,15 +24445,227 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 log.warning("K2 protected relay returned HOLD op=%s reason=%s",
                             outcome.operation_id,outcome.reason)
                 await query.message.reply_text(
-                    "⛔️ عملیات کامل نشد. وضعیت مسیر ممکن است نیازمند "
-                    "بررسی دستی باشد؛ بدون بررسی قفل 6G، عملیات را تکرار نکنید."
+                    "⛔️ عملیات کامل نشد؛ ابتدا وضعیت کاربران و سرور را بررسی کنید. درخواست را تکرار نکنید."
                 )
         except Exception:
             log.exception("K2 protected relay guarded operation HOLD")
             await query.message.reply_text(
-                "⛔️ عملیات به نتیجه قطعی نرسید؛ تا بررسی قفل 6G و "
-                "وضعیت کاربران، اجرای مجدد ممنوع است."
+                "⛔️ نتیجهٔ عملیات قطعی نیست؛ ابتدا وضعیت کاربران را بررسی کنید و درخواست را تکرار نکنید."
             )
+        return
+
+    elif d.startswith("hpeg_list_") or d.startswith("hpeg_scan_") or d.startswith("hpeg_summary_"):
+        if role != 'admin':
+            await query.message.reply_text("⛔️ فقط مدیر")
+            return
+        try:
+            if d.startswith('hpeg_summary_'):
+                edge_id=edge_id_checked(d[len('hpeg_summary_'):])
+                screen=k2_ui_views.get(update.effective_user.id,update.effective_chat.id,
+                    query.message.message_id,edge_id)
+                if screen.kind=='preview':
+                    display=k2_m4_preview_html(screen.payload)
+                    rows=k2_m4_preview_buttons(edge_id,inventory=screen.payload)
+                elif screen.kind=='result':
+                    display=k2_m43_result_html(screen.payload,selection=screen.selection)
+                    rows=k2_m4_preview_buttons(edge_id)
+                elif screen.kind=='status':
+                    display=k2_m44_root_status_html(screen.payload,screen.selection)
+                    rows=k2_m4_preview_buttons(edge_id)
+                else:
+                    display='فهرست حساب‌های کنارگذاشته‌شده؛ برای دلیل هر حساب جزئیات را ببینید.'
+                    rows=k2_m4_home_buttons(edge_id)
+                rows.insert(0,k2_ui_detail_button(edge_id))
+            elif d.startswith('hpeg_list_'):
+                page,edge_id=k2_ui_parse_page(d)
+                screen=k2_ui_views.get(update.effective_user.id,update.effective_chat.id,
+                    query.message.message_id,edge_id)
+                display,rows=k2_ui_accounts_page(screen,page)
+            else:
+                edge_id=edge_id_checked(d[len('hpeg_scan_'):])
+                screen=k2_ui_views.get(update.effective_user.id,update.effective_chat.id,
+                    query.message.message_id,edge_id)
+                if screen.kind!='running':
+                    raise M4UIHold("UI_SCREEN_EXPIRED")
+                client=k2_root_direct_client(context.application)
+                client._gate(update.effective_user.id,update.effective_chat.id)
+                done,total=client._review_progress
+                display=k2_ui_running(edge_id,reviewing=True)
+                if total:
+                    display+=f"\nبررسی‌شده: {done} از {total} حساب"
+                rows=k2_ui_running_buttons(edge_id,reviewing=True)
+            await query.edit_message_text(display,parse_mode='HTML',reply_markup=_k2_ui_markup(rows))
+        except Exception as exc:
+            await query.message.reply_text(k2_ui_error(exc),parse_mode='HTML',
+                reply_markup=_k2_ui_markup([[('↩️ مدیریت خروجی','hpeg_status')]]))
+        return
+
+    elif d.startswith("hpeg_m4_"):
+        # Reuse the existing admin bot; never execute root code in a callback.
+        if role != 'admin':
+            await query.message.reply_text("⛔️ فقط مدیر")
+            return
+        try:
+            action,edge_id=k2_m4_parse_callback(d)
+            actor_id=update.effective_user.id
+            chat_id=update.effective_chat.id
+            message_id=query.message.message_id
+            if action in ("home","cancel"):
+                context.user_data.pop('state',None)
+                context.user_data.pop('k2_m4_target_edge',None)
+                context.user_data.pop('k2_m4_selection',None)
+                context.user_data.pop('k2_m4_make_active',None)
+                k2_m43_approvals.discard(actor_id,chat_id)
+                display=k2_m4_home_html(edge_id)
+                rows=k2_m4_home_buttons(edge_id)
+                last=context.user_data.get('k2_m4_last_selection')
+                if isinstance(last,(tuple,list)) and len(last)==3 and last[2]==edge_id:
+                    rows.insert(-1,[("📋 آخرین انتقال",f"hpeg_m4_status_{edge_id}")])
+            elif action=='all':
+                await _k2_m4_inventory_all(context,query,edge_id)
+                return
+            elif action=='stop':
+                response=await k2_root_direct_client(context.application).request(
+                    'STOP',actor_id=actor_id,chat_id=chat_id)
+                await query.message.reply_text('⏸ توقف ثبت شد؛ پس از پایان بررسی یا حساب جاری ادامه داده نمی‌شود.'
+                    if response['state']=='STOP_REQUESTED' else 'عملیاتی در حال اجرا نیست.')
+                return
+            elif action in ("single","batch"):
+                context.user_data.pop('k2_m4_selection',None)
+                context.user_data.pop('k2_m4_make_active',None)
+                k2_m43_approvals.discard(actor_id,chat_id)
+                mode="SINGLE" if action=="single" else "BATCH"
+                context.user_data['state']=(
+                    "K2_M4_SINGLE" if mode=="SINGLE" else "K2_M4_BATCH"
+                )
+                context.user_data['k2_m4_target_edge']=edge_id
+                display=k2_m4_prompt_html(edge_id,mode)
+                rows=k2_m4_cancel_buttons(edge_id)
+            elif action in ("refresh","status","recover"):
+                k2_m43_approvals.discard(actor_id,chat_id)
+                data=context.user_data.get('k2_m4_selection')
+                if action in ('status','recover'):
+                    # Names are a display selector, never an approval or a
+                    # second checkpoint. Root rechecks actor and receipts.
+                    try:
+                        current=k2_ui_views.get(actor_id,chat_id,message_id,edge_id)
+                        if current.selection is not None:
+                            scope=current.selection
+                            data=(scope.mode,scope.usernames,scope.target_edge_id)
+                    except ValueError:
+                        last=context.user_data.get('k2_m4_last_selection')
+                        if isinstance(last,(tuple,list)) and len(last)==3 and last[2]==edge_id:
+                            data=last
+                if (not isinstance(data,(tuple,list)) or len(data)!=3
+                    or data[2]!=edge_id or not isinstance(data[1],(tuple,list))):
+                    raise M4UIHold("M4_SELECTION_EXPIRED")
+                selection=k2_selected_scope(data[0],tuple(data[1]),edge_id)
+                if action=='recover':
+                    response=await k2_root_direct_client(context.application).request(
+                        'RECONCILE',actor_id=actor_id,chat_id=chat_id,selection=selection)
+                    display=(f"✅ بررسی ادامهٔ عملیات تمام شد.\nدرخواست‌های قبلی بسته‌شده: {response['closed']}"
+                        "\nهیچ انتقالی تکرار نشد. برای ادامه، کاربران باقی‌مانده را دوباره انتخاب کنید.")
+                elif action=="status":
+                    if k2_root_direct_flags.K2_ROOT_DIRECT_ENABLED:
+                        # Root-owned checkpoint and original 6G read view.
+                        # No local DB fallback if the root service disappears;
+                        # a timeout must never turn UNKNOWN_INFLIGHT to idle.
+                        root_result=await k2_root_direct_client(context.application).request(
+                            "STATUS",actor_id=actor_id,chat_id=chat_id,
+                            selection=selection,
+                        )
+                        display=k2_m44_root_status_html(root_result,selection)
+                    else:
+                        # Legacy read-only snapshot is NOT a restart-safe
+                        # root checkpoint view or independent packet proof.
+                        overview=await asyncio.to_thread(
+                            k2_m4_readonly_status,db_conn,selection,
+                        )
+                        display=k2_m4_status_html(overview)
+                else:
+                    await _k2_m4_review_selected(context,query,selection)
+                    return
+                rows=k2_m4_preview_buttons(edge_id)
+                if action=='status' and k2_root_direct_flags.K2_ROOT_DIRECT_ENABLED:
+                    screen=k2_ui_views.begin(actor_id,chat_id,message_id,edge_id,
+                        selection=selection,kind='status',payload=root_result)
+                    rows.insert(0,k2_ui_detail_button(edge_id))
+                    if root_result['busy']:
+                        rows.insert(0,[("⏸ توقف پس از حساب جاری",f"hpeg_m4_stop_{edge_id}")])
+            elif action=="prepare":
+                # Root plans are rechecked independently. Never persist the
+                # returned request ID in PicklePersistence/user_data.
+                k2_m43_approvals.discard(actor_id,chat_id)
+                data=context.user_data.get('k2_m4_selection')
+                if (not isinstance(data,(tuple,list)) or len(data)!=3
+                    or data[2]!=edge_id or not isinstance(data[1],(tuple,list))):
+                    raise M43ClientHold("M43_SELECTED_SCOPE_MISSING")
+                selection=k2_selected_scope(data[0],tuple(data[1]),edge_id)
+                epoch=k2_m43_approvals.begin(actor_id,chat_id)
+                activate_relay=context.user_data.get('k2_m4_make_active') is True
+                async def prepare(screen):
+                    try:
+                        prepared=await k2_root_direct_client(context.application).request(
+                            'PREPARE',actor_id=actor_id,chat_id=chat_id,
+                            selection=selection,activate_relay=activate_relay)
+                        pending=K2M43Pending.create(selection=selection,
+                            actor_id=actor_id,chat_id=chat_id,message_id=message_id,
+                            result=prepared,activate_relay=activate_relay)
+                        if not k2_ui_views.current(actor_id,chat_id,screen):
+                            k2_m43_approvals.discard(actor_id,chat_id)
+                            return '',[]
+                        k2_m43_approvals.finish(pending,epoch)
+                        screen.kind='confirmation'
+                        return k2_m43_confirmation_html(pending),k2_m43_confirmation_buttons(edge_id)
+                    finally:
+                        k2_m43_approvals.release(actor_id,chat_id)
+                try:
+                    await _k2_ui_background(context,query,edge_id,prepare,selection=selection)
+                except BaseException:
+                    k2_m43_approvals.release(actor_id,chat_id)
+                    raise
+                return
+            elif action in ("confirm","abort"):
+                # Synchronously consume the volatile one-shot confirmation
+                # before any await; a lost IPC reply MUST NOT be replayed.
+                pending=k2_m43_approvals.consume(
+                    actor_id=actor_id,chat_id=chat_id,
+                    message_id=message_id,edge_id=edge_id,
+                )
+                client=k2_root_direct_client(context.application)
+                if action=="confirm":
+                    context.user_data['k2_m4_last_selection']=(
+                        pending.selection.mode,pending.selection.usernames,edge_id)
+                    async def execute(screen):
+                        response=await client.request('CONFIRM',actor_id=actor_id,chat_id=chat_id,
+                            request_id=pending.request_id)
+                        display=k2_m43_result_html(response,selection=pending.selection)
+                        screen.kind='result';screen.payload=response
+                        return display,[k2_ui_detail_button(edge_id)]+k2_m4_preview_buttons(edge_id)
+                    await _k2_ui_background(context,query,edge_id,execute,
+                        reviewing=False,selection=pending.selection)
+                    return
+                else:
+                    response=await client.request(
+                        "CANCEL",actor_id=actor_id,chat_id=chat_id,
+                        request_id=pending.request_id,
+                    )
+                    if response.get("state")!="CANCELLED":
+                        raise M43ClientHold("M43_CANCEL_NOT_ACKNOWLEDGED")
+                    display=k2_m43_cancel_html()
+                    rows=k2_m4_home_buttons(edge_id)
+            else:
+                raise M4UIHold("M4_ACTION_UNSUPPORTED")
+            buttons=[[InlineKeyboardButton(title,callback_data=data)
+                      for title,data in row] for row in rows]
+            await query.edit_message_text(
+                display,parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        except Exception as exc:
+            log.warning('K2 operator callback needs inspection (%s)',type(exc).__name__)
+            await query.message.reply_text(k2_ui_error(exc),parse_mode='HTML',
+                reply_markup=_k2_ui_markup([[('↩️ مدیریت خروجی','hpeg_status')]]))
         return
 
     elif d.startswith("hpeg_transfer_"):
@@ -24311,12 +24730,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for row in egress_dashboard_buttons(board)
             ]
             await query.edit_message_text(
-                egress_dashboard_html(board), parse_mode="HTML",
+                egress_dashboard_html(board,active_edge=await asyncio.to_thread(
+                    _db_get_setting,"k2_active_egress_edge","")), parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
         except Exception:
             log.exception("Egress Phase 2 admin dashboard unavailable")
-            await query.message.reply_text("⛔️ وضعیت Egress قابل بررسی نیست؛ هیچ تغییری انجام نشد.")
+            await query.message.reply_text("⛔️ وضعیت خروجی قابل بررسی نیست؛ کمی بعد دوباره بررسی کنید.")
         return
 
     elif d == "hpeg_orphans":
@@ -24347,10 +24767,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif (d.startswith("hpeg_edge_") or d.startswith("hpeg_probe_")
           or d.startswith("hpeg_health_") or d.startswith("hpeg_actions_")
-          or d.startswith("hpeg_stage_") or d.startswith("hpeg_user_")):
+          or d.startswith("hpeg_stage_") or d.startswith("hpeg_user_")
+          or d.startswith("hpeg_more_")):
         if role != 'admin':
             await query.message.reply_text("⛔️ فقط مدیر")
             return
+        is_more = d.startswith("hpeg_more_")
         is_probe = d.startswith("hpeg_probe_")
         is_health = d.startswith("hpeg_health_")
         is_actions = d.startswith("hpeg_actions_")
@@ -24358,7 +24780,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_user = d.startswith("hpeg_user_")
         prefix = ("hpeg_probe_" if is_probe else "hpeg_health_" if is_health
                   else "hpeg_actions_" if is_actions else "hpeg_stage_" if is_stage
-                  else "hpeg_user_" if is_user else "hpeg_edge_")
+                  else "hpeg_user_" if is_user else "hpeg_more_" if is_more else "hpeg_edge_")
         edge_id = d[len(prefix):]
         try:
             edge_id_checked(edge_id)
@@ -24401,11 +24823,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 html = (egress_health_html(card, result) if is_health
                         else egress_actions_html(card, result))
             else:
-                html = egress_detail_html(card)
+                html = egress_detail_html(card,active_edge=await asyncio.to_thread(
+                    _db_get_setting,"k2_active_egress_edge",""))
             buttons = [
                 [InlineKeyboardButton(label, callback_data=callback)
                  for label, callback in row]
-                for row in egress_detail_buttons(card)
+                for row in (egress_maintenance_buttons(card) if is_more else egress_detail_buttons(card))
             ]
             await query.edit_message_text(
                 html, parse_mode="HTML",
@@ -24901,10 +25324,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # query.message.reply_text استفاده می‌کنیم که یک پیام واقعی توی چت می‌فرستد و همیشه دیده می‌شود.
         try:
             if role != 'admin':
-                await query.message.reply_text(f"⛔️ دسترسی نداری. role فعلی شما: {role!r}")
+                await query.message.reply_text("⛔️ فقط مدیر")
                 return
             if paramiko is None:
-                await query.message.reply_text("❌ کتابخانهٔ paramiko روی Core نصب نیست.")
+                await query.message.reply_text("⛔️ ابزار اتصال به سرور در دسترس نیست؛ راه‌اندازی شروع نشد.")
                 return
             # Per-session opt-in only; the global onboarding toggle is unchanged.
             integrated = (d == "hpeg_wizard")
@@ -24916,7 +25339,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             log.exception("خطای غیرمنتظره در دکمهٔ hp_addedge")
             # Avoid echoing exception details or remote credentials into Telegram.
-            await query.message.reply_text("⛔️ بازکردن Wizard ممکن نشد؛ هیچ عملیات نصب جدیدی شروع نشد.")
+            await query.message.reply_text("⛔️ راه‌اندازی باز نشد؛ کمی بعد دوباره تلاش کنید.")
         return
 
     elif d.startswith("hpdef_migrate_") and role == 'admin':
@@ -29706,6 +30129,19 @@ async def cmd_marzban_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def _post_init(app):
+    # K2 Single shares this application's existing root process and 6G.
+    # Missing release profile is OFF; a failed optional startup must not
+    # prevent the existing bot and its legacy features from starting.
+    try:
+        from pathlib import Path
+        from edge_egress_k2_core_runtime import start_core_single_runtime
+        single = await asyncio.to_thread(
+            start_core_single_runtime, app, db_conn=db_conn,
+            source_root=Path(__file__).resolve().parent,
+        )
+        log.info("K2 Single startup: %s", single.state)
+    except Exception as exc:
+        log.error("K2 Single startup HOLD (%s)", type(exc).__name__)
     # Phase 6H uses a dedicated explicit admin opt-in key. The legacy V89
     # auto_failover_mode/traffic-anomaly path remains notification-only and cannot call failover.
     auto_enabled = (await asyncio.to_thread(_db_get_setting, 'phase6h_auto_failover_enabled', '0')) == '1'

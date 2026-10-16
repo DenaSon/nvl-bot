@@ -34,9 +34,12 @@ def render_ssh_systemd_bundle(manifest: BootGuardManifest) -> SSHSystemdBundle:
     username = request.username
     guard = "nvl-egress-guard-" + username + ".service"
     dns = "nvl-egress-dns-" + username + ".service"
+    from edge_egress_v1_admission import render_v1_guard_unit
+    persistent=manifest.ingress_return and manifest.shared_edge
     bundle = SSHSystemdBundle(
-        guard, dns, render_ssh_required_unit(manifest),
-        render_dns_required_unit(request, manifest.dns_port), "",
+        guard, dns, (render_v1_guard_unit(manifest) if persistent else render_ssh_required_unit(manifest)),
+        render_dns_required_unit(request, manifest.dns_port)
+        + ("\n[Install]\nWantedBy=multi-user.target\n" if persistent else ""), "",
     )
     verify_bundle(bundle)
     return bundle

@@ -15,7 +15,7 @@ from edge_egress_phase2_retire import RetirePlan
 from edge_egress_phase2_review import OperatorReview
 from edge_egress_p3_telegram import (
     P3F_LIVE_EXECUTION_ENABLED, dashboard_html, dashboard_buttons,
-    edge_html, detail_buttons, actions_html, transport_html, stage_html,
+    edge_html, detail_buttons, maintenance_buttons, actions_html, transport_html, stage_html,
     review_html, retire_html, steps_html, orphan_html,
     user_prompt_html, user_result_html, wizard_prompt, wizard_result,
 )
@@ -40,13 +40,21 @@ class OperatorUXTests(unittest.TestCase):
     def test_dashboard_is_compact_and_two_columns(self):
         html=dashboard_html(self.board)
         grid=dashboard_buttons(self.board)
-        self.assertIn("مدیریت سرورها",html)
-        self.assertIn("144.172.84.82",html)
+        self.assertIn("مدیریت خروجی",html)
+        self.assertNotIn("144.172.84.82",html)
+        self.assertIn("fra1",dashboard_html(self.board,active_edge="fra1"))
         self.assertEqual([len(row) for row in grid],[2,1,2,2,1])
         self.assertEqual(grid[0][0][1],"hpeg_edge_fra1")
-        self.assertEqual(grid[2][1][1],"hpeg_orphans")
+        self.assertEqual(grid[-1][0][1],"apps_home")
         for banned in ("6G","SHA","PAM","F4","Stage","Kernel","Phase","UID"):
             self.assertNotIn(banned,html)
+
+    def test_orphan_inventory_is_reachable_without_any_registered_server(self):
+        board=replace(self.board,cards=(),total=0)
+        rows=dashboard_buttons(board)
+        self.assertIn(("🧹 منابع باقی‌مانده","hpeg_orphans"),sum(rows,[]))
+        self.assertTrue(all(1<=len(row)<=2 for row in rows))
+        self.assertFalse(any(cb.startswith('hpeg_edge_') for row in rows for _,cb in row))
 
     def test_pagination_and_no_extra_page(self):
         board=replace(self.board,page=0,total=17)
@@ -59,10 +67,11 @@ class OperatorUXTests(unittest.TestCase):
     def test_detail_layout_preserves_inspection_user_review_and_delete(self):
         grid=detail_buttons(self.card)
         self.assertTrue(all(1<=len(row)<=2 for row in grid))
-        callbacks=[callback for row in grid for _,callback in row]
-        self.assertEqual(len(callbacks),len(set(callbacks)))
+        callbacks=[callback for row in grid+maintenance_buttons(self.card) for _,callback in row]
+        self.assertEqual(len([cb for row in grid for _,cb in row]),
+                         len(set(cb for row in grid for _,cb in row)))
         for needed in ("hpeg_edge_fra1","hpeg_user_fra1","hpeg_health_fra1",
-                       "hpeg_stage_fra1","hpeg_review_edge_fra1",
+                       "hpeg_stage_fra1","hpeg_m4_home_fra1",
                        "hpeg_actions_fra1","hpeg_retire_open_fra1"):
             self.assertIn(needed,callbacks)
         self.assertIn("hpeg_probe_fra1",callbacks)

@@ -16,7 +16,7 @@ from edge_egress_p3_executor import (
 )
 from edge_egress_uid_policy import UIDPolicyRequest
 from edge_egress_uid_runtime_store import (
-    Existing6GUIDRuntimeStore, RuntimeBinding, read_binding,
+    Existing6GUIDRuntimeStore, K2CrossEdgeUIDRuntimeStore, RuntimeBinding, read_binding,
 )
 from edge_egress_v1_admission import load_roster, checked_guard, Member
 
@@ -271,6 +271,12 @@ class GuardedProtectedUIDPort:
         callback()
         return op
 
+    def _precommit_packet(self, req):
+        from ops.k2_p3_uid_worker import IndependentSafety
+        if isinstance(self.safety, IndependentSafety):
+            return self.safety.assert_precommit_dns_ipv6_no_core_leak(req)
+        return self.safety.assert_packet_dns_ipv6_no_core_leak(req)
+
     async def apply(self, scope: ExecutionScope) -> None:
         if self._applied:
             raise ProtectedUIDHold("ONE_SHOT_UID_OPERATION")
@@ -281,6 +287,10 @@ class GuardedProtectedUIDPort:
         )
         op = self._check(scope, first)
         self._operation_id = op
+        if isinstance(self.store, K2CrossEdgeUIDRuntimeStore) and p.purpose != NEW:
+            # A subsequent cross-Edge resume must have its own reviewed
+            # policy-generation rollover; never silently reuse a stale one.
+            raise ProtectedUIDHold("K2_CROSS_EDGE_NEW_UID_ONLY")
         if p.purpose != FREEZE:
             # Frozen a troubled UID is an emergency containment action.
             # Do not require healthy PAM/DNS/Edge or idle sessions to deny.
@@ -329,7 +339,15 @@ class GuardedProtectedUIDPort:
         self._step(scope, ("ROUTED_UNVERIFIED",),
                    lambda: self.kernel.assert_dns_ipv6(req))
         self._step(scope, ("ROUTED_UNVERIFIED",),
-                   lambda: self.safety.assert_packet_dns_ipv6_no_core_leak(req))
+                   lambda: self._precommit_packet(req))
+        if isinstance(self.store, K2CrossEdgeUIDRuntimeStore):
+            # Stage future-generation root PAM source record under the SAME
+            # original P3/6G intent. The PAM verifier stays DENY until F2
+            # commits PROTECTED. Stage failure stops before that commit.
+            self._step(scope, ("ROUTED_UNVERIFIED",),
+                       lambda: self.store.stage_pam_admission(
+                           req, source=scope.source_host,
+                       ))
         self._step(scope, ("ROUTED_UNVERIFIED",),
                    lambda: self.store.commit_protected(
                        op, req, source=scope.source_host,

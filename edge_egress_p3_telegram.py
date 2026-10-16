@@ -26,22 +26,22 @@ def _state(card) -> str:
         return "⛔ نیاز به بررسی"
     if card.f4_valid and card.pool_active:
         return "✅ بررسی‌شده"
-    if card.pool_active:
+    if card.pool_active or card.allocation == "STAGED":
         return "🟡 در انتظار بررسی"
     return "⚪️ غیرفعال"
 
 
-def dashboard_html(board) -> str:
+def dashboard_html(board, *, active_edge: str = "") -> str:
     if not board.registry_trusted:
         note = "⚠️ اطلاعات برخی سرورها در دسترس نیست."
     else:
         note = "برای مدیریت، یک سرور را انتخاب کنید."
     return "\n".join((
-        "🛡 <b>مدیریت سرورها</b>", "",
-        f"⭐ سرور پیش‌فرض: <code>{_safe(board.default_ip)}</code>",
+        "🌐 <b>مدیریت خروجی کاربران</b>", "",
+        f"⭐ خروجی فعال: <code>{_safe(active_edge)}</code>",
         f"🖥 تعداد سرورها: <b>{board.total}</b>",
-        *(("⚠️ نشانی سرویس نیاز به بررسی دارد.",)
-          if board.default_ip != board.dns_ip else ()),
+        "",
+        "💡 با تغییر خروجی، حساب روی سرور مرکزی می‌ماند و IP اینترنت کاربر از سرور انتخابی خواهد بود.",
         "",
         note,
     ))
@@ -65,14 +65,14 @@ def dashboard_buttons(board) -> list[list[tuple[str,str]]]:
     if page_row:
         buttons.append(page_row)
     buttons.extend((
-        [("➕ افزودن سرور","hpeg_wizard"),("🧹 پاکسازی","hpeg_orphans")],
-        [("🔄 بروزرسانی",f"hpeg_page_{board.page}"),("❔ راهنما","hpeg_steps")],
-        [("◀️ بازگشت","hp_menu")],
+        [("➕ افزودن Edge","hpeg_wizard"),("❔ راهنما","hpeg_steps")],
+        [("🔄 بروزرسانی",f"hpeg_page_{board.page}"),("🧹 منابع باقی‌مانده","hpeg_orphans")],
+        [("↩️ برنامه‌ها","apps_home")],
     ))
     return buttons
 
 
-def edge_html(card) -> str:
+def edge_html(card, *, active_edge: str = "") -> str:
     return "\n".join((
         f"🖥 <b>سرور {_safe(card.edge_id)}</b>", "",
         f"🌐 نشانی: <code>{_safe(card.ip)}</code>",
@@ -81,33 +81,46 @@ def edge_html(card) -> str:
                      else "🟡 ثبت‌شده؛ در انتظار فعال‌سازی" if card.ingress_verified
                      else "⚪️ نیازمند بررسی"),
         "📤 خروجی: " + ("✅ بررسی‌شده" if card.f4_valid else "🟡 تأییدنشده"),
-        "⭐ پیش‌فرض: " + ("بله" if card.pool_default else "خیر"),
+        "⭐ خروجی فعال: " + ("بله" if active_edge == card.edge_id else "خیر"),
         "",
-        "برای ادامه، یک گزینه را انتخاب کنید.",
+        "💡 افزودن سرور به‌تنهایی خروجی کاربران را تغییر نمی‌دهد؛ ابتدا کاربران را انتخاب و انتقال را تأیید کنید.",
     ))
 
 
 def detail_buttons(card, current: str = "") -> list[list[tuple[str,str]]]:
     eid=edge_id_checked(card.edge_id)
-    buttons=[
-        [("🔎 بررسی اتصال",f"hpeg_health_{eid}"),
-         ("🌍 تست IP",f"hpeg_probe_{eid}")],
-        [("🔀 تغییر مسیر ترافیک",f"hpeg_relay_{eid}"),
-         ("👤 کاربران",f"hpeg_user_{eid}")],
-        [("🧭 بررسی وضعیت",f"hpeg_actions_{eid}"),
-         ("🧪 آزمایش VPS",f"hpeg_lab_{eid}")],
-        [("📤 فعال‌سازی خروجی",f"hpeg_p1_open_{eid}"),
-         ("🌍 تست خروجی",f"hpeg_p1_probe_{eid}")],
-        [("📋 آماده‌سازی",f"hpeg_review_edge_{eid}"),
-         ("📦 اطلاعات اتصال",f"hpeg_stage_{eid}")],
-        [("🗑 حذف سرور",f"hpeg_retire_open_{eid}"),
+    connection=[("🔎 بررسی اتصال",f"hpeg_health_{eid}")]
+    if card.can_probe:
+        connection.append(("🌍 تست IP خروجی",f"hpeg_probe_{eid}"))
+    elif (not card.pool_active and card.ingress_verified
+          and card.allocation=="STAGED" and card.stage_pin):
+        # Isolated candidates deliberately never join the legacy host pool.
+        # Reuse P1's independent pinned/two-sided read-only probe; do not
+        # loosen the legacy console's pool-active safety gate.
+        connection=[("🌍 تست اتصال و IP",f"hpeg_p1_probe_{eid}")]
+    return [
+        [("👥 انتقال کاربران",f"hpeg_m4_home_{eid}"),
+         ("⭐ انتخاب خروجی فعال",f"hpeg_relay_{eid}")],
+        connection,
+        [("⚙️ جزئیات و نگهداری",f"hpeg_more_{eid}"),
          ("🔄 بروزرسانی",f"hpeg_edge_{eid}")],
-        [("◀️ سرورها","hpeg_status")],
+        [("↩️ مدیریت خروجی","hpeg_status")],
     ]
-    # A probe is only offered if the existing health gate permits it.
-    if not card.can_probe:
-        buttons[0]=[buttons[0][0]]
-    return buttons
+
+
+def maintenance_buttons(card):
+    eid=edge_id_checked(card.edge_id)
+    return [
+        [("👤 بررسی حساب",f"hpeg_user_{eid}"),
+         ("📦 اطلاعات اتصال",f"hpeg_stage_{eid}")],
+        [("📤 آماده‌سازی اتصال",f"hpeg_p1_open_{eid}"),
+         ("🌍 تست اتصال خروجی",f"hpeg_p1_probe_{eid}")],
+        [("🧭 وضعیت سرور",f"hpeg_actions_{eid}"),
+         ("🧪 بررسی سلامت",f"hpeg_lab_{eid}")],
+        [("🗑 حذف سرور",f"hpeg_retire_open_{eid}"),
+         ("🧹 منابع باقی‌مانده","hpeg_orphans")],
+        [("◀️ سرور",f"hpeg_edge_{eid}")],
+    ]
 
 
 def transport_html(card, status) -> str:
@@ -142,7 +155,7 @@ def actions_html(card,status) -> str:
         f"سرور: <code>{_safe(card.edge_id)}</code>",
         "وضعیت: " + ("✅ بررسی‌شده" if not reasons else "🟡 نیاز به بررسی"),
         *(("\nموارد قابل بررسی: "+ "، ".join(reasons),) if reasons else ()),
-        "\nعملیات حساس فعلاً در دسترس نیست.",
+        "\nبرای انتقال کاربران، از صفحهٔ سرور اقدام کنید.",
     ))
 
 
@@ -174,11 +187,15 @@ def retire_html(plan) -> str:
 
 
 def steps_html() -> str:
-    return ("❔ <b>راهنمای سرورها</b>\n\n"
-            "۱. سرور جدید را اضافه کنید.\n"
-            "۲. اتصال و وضعیت آن را بررسی کنید.\n"
-            "۳. برای حذف، از صفحه همان سرور اقدام کنید.\n\n"
-            "عملیات در دسترس، مطابق وضعیت سرور نمایش داده می‌شوند.")
+    return ("❔ <b>راهنمای مدیریت خروجی</b>\n\n"
+            "۱. Edge جدید را اضافه و اتصال آن را بررسی کنید.\n"
+            "۲. سرور را باز کنید و «انتقال کاربران» را بزنید.\n"
+            "۳. یک کاربر، یک گروه یا همهٔ کاربران واجد شرایط را انتخاب کنید.\n"
+            "۴. نتیجهٔ بررسی را بخوانید و انتقال را تأیید کنید.\n\n"
+            "💡 «خروجی فعال» پس از تأیید مسیر همهٔ حساب‌های فعال ثبت می‌شود. "
+            "کاربرانی که اتصال فعال دارند، فعلاً منتقل نمی‌شوند.\n\n"
+            "حساب و نام کاربری روی سرور مرکزی می‌ماند؛ IP اینترنت از Edge خارج می‌شود. "
+            "این انتخاب کاربران جدید آینده را خودکار منتقل نمی‌کند.")
 
 
 def user_prompt_html(edge_id: str) -> str:
@@ -234,7 +251,9 @@ def wizard_prompt(*, integrated: bool) -> str:
         raise ValueError("INVALID_EDGE_WIZARD_MODE")
     return ("➕ <b>افزودن سرور</b>\n\n"
             "نشانی IP عمومی سرور جدید را ارسال کنید.\n"
-            "سرور باید تازه و آماده راه‌اندازی باشد.")
+            "سرور باید تازه و آماده راه‌اندازی باشد.\n\n"
+            "💡 در سه گام IP، رمز و پورت اتصال کاربران را می‌گیریم. "
+            "بعد از ارسال پورت، نصب شروع می‌شود. برای انصراف «لغو» را بفرستید.")
 
 
 def wizard_result(edge_ip: str, result: dict) -> tuple[str,str]:
@@ -246,8 +265,8 @@ def wizard_result(edge_ip: str, result: dict) -> tuple[str,str]:
         "✅ <b>سرور اضافه شد</b>\n\n"
         f"شناسه: <code>{_safe(eid)}</code>\n"
         f"نشانی: <code>{_safe(edge_ip)}</code>\n\n"
-        "📦 آماده‌سازی اولیه ثبت شد. مسیر خروجی کاربران هنوز فعال نیست.\\n"
-        "برای ادامه، اطلاعات اتصال را بررسی کنید.",
+        "📦 آماده‌سازی اولیه ثبت شد. مسیر خروجی کاربران هنوز فعال نیست.\n"
+        "برای ادامه، صفحهٔ سرور را باز کنید و وضعیت اتصال را ببینید.",
         eid,
     )
 

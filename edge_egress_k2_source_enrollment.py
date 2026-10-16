@@ -91,6 +91,23 @@ class SameEdge6GUIDRuntimeStore(Existing6GUIDRuntimeStore):
         self.scope = scope
         self.ticket = ticket
 
+    def _source_owner(self, conn, req, source):
+        from edge_egress_k2_core_operations import CORE_OPERATIONS_ENABLED
+        if not CORE_OPERATIONS_ENABLED or self.qualified_target is None:
+            return super()._source_owner(conn, req, source)
+        from edge_egress_k2_m4_cross_edge_port import root_fresh_source_evidence
+        witness=root_fresh_source_evidence()(req.username)
+        if (req.username!=self.scope.username or req.uid!=self.scope.uid
+            or req.spec.edge_id!=self.scope.edge_id or source!=self.scope.source_host
+            or witness.edge_id!=req.spec.edge_id or witness.edge_ipv4!=source
+            or req.spec.edge_public_ipv4!=source):
+            raise RuntimeStoreUnsafe('SAME_EDGE_LIVE_INGRESS_CHANGED')
+        accounts=conn.execute('SELECT service_type,status FROM ssh_accounts WHERE username=?',
+                              (req.username,)).fetchall()
+        if (len(accounts)!=1 or accounts[0][0]!='ssh' or type(accounts[0][1]) is not str
+            or 'فعال' not in accounts[0][1] or 'غیر' in accounts[0][1]):
+            raise RuntimeStoreUnsafe('SAME_EDGE_ACCOUNT_CHANGED')
+
     def _lock(self, conn, op_id: int, source: str, target: str) -> None:
         if (type(op_id) is not int or op_id <= 0
                 or source != target or source != self.scope.source_host

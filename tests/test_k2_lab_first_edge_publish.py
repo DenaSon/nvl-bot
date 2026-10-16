@@ -63,6 +63,8 @@ class LabFirstEdgePublishTests(unittest.TestCase):
                  patch.object(lab.publisher, 'deploy') as deploy, \
                  patch.object(lab.publisher, 'restore') as restore, \
                  patch.object(lab, '__file__', str(stage/'source/ops/k2_lab_first_edge_publish.py')), \
+                 patch.object(Path, 'is_symlink', return_value=False), \
+                 patch.object(Path, 'resolve', autospec=True, side_effect=lambda path: path), \
                  patch.object(Path, 'read_bytes', return_value=(
                      '{"git_sha":"'+commit+'","files":[]}').encode()), \
                  patch.object(lab.os, 'umask'), \

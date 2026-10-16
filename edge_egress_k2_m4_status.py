@@ -121,7 +121,7 @@ def root_checkpoint_status_html(result: dict, selection: MigrationSelection) -> 
         "NO_CHECKPOINT":"⚪️ سابقه تأییدشده‌ای یافت نشد",
         "PREPARED":"🟡 در انتظار تأیید",
         "EXPIRED":"⚪️ درخواست قبلی منقضی شد",
-        "UNKNOWN_INFLIGHT":"⛔️ وضعیت اجرا نامشخص است",
+        "UNKNOWN_INFLIGHT":"⏳ عملیات هنوز نتیجهٔ نهایی ندارد",
         "RECEIPTS_RECORDED":"🟡 رسیدهای انتقال ثبت شده‌اند",
         "HOLD":"⛔️ انتقال نیازمند بررسی است",
     }
@@ -131,7 +131,7 @@ def root_checkpoint_status_html(result: dict, selection: MigrationSelection) -> 
         "RECEIPT_SCOPED":"🟡 رسید اصلی ثبت و تطبیق شد",
         "RECEIPT_UNVERIFIED":"⛔️ رسید نیازمند بررسی است",
         "HOLD":"⛔️ متوقف شده",
-        "DEFERRED":"⚪️ انجام نشده",
+        "DEFERRED":"⚪️ انجام نشده؛ پس از توقف باقی ماند",
     }
     state=result.get("wave_state")
     if (state not in titles or type(result.get("busy")) is not bool
@@ -140,10 +140,13 @@ def root_checkpoint_status_html(result: dict, selection: MigrationSelection) -> 
     lines=["📋 <b>وضعیت انتقال</b>","",
            "مقصد: <code>"+escape(selection.target_edge_id)+"</code>",
            titles[state],""]
+    counts={key:sum(u.get("state")==key for u in result["users"]) for key in labels}
+    lines.append(f"نتیجهٔ تطبیق‌داده‌شده: {counts['RECEIPT_SCOPED']} از {len(result['users'])} حساب")
+    names=set(selection.usernames)
     for index,item in enumerate(result["users"]):
         name=item.get("username")
         status=item.get("state")
-        if name not in selection.usernames or status not in labels:
+        if name not in names or status not in labels:
             raise M4StatusHold("ROOT_STATUS_USER_UNTRUSTED")
         if index<20:
             lines.append("<code>"+escape(name)+"</code> — "+labels[status])
@@ -151,8 +154,8 @@ def root_checkpoint_status_html(result: dict, selection: MigrationSelection) -> 
         verified=sum(u['state']=='RECEIPT_SCOPED' for u in result['users'])
         lines.append(f"رسید تأییدشده: {verified} از {len(result['users'])} حساب")
     if result["busy"] or result["unresolved"]:
-        lines.extend(("","⛔️ ابتدا وضعیت انتقال باید بررسی شود؛ "
-                      "اجرای مجدد خودکار مجاز نیست."))
+        lines.extend(("","⛔️ حسابِ در حال اجرا را دوباره منتقل نکنید. "
+                      "برای توقف، از دکمهٔ توقف استفاده کنید؛ نتیجه را دوباره بررسی کنید."))
     lines.extend(("","این گزارش تنها وضعیت رسیدها و سوابق است؛ "
                   "اتصال واقعی باید جداگانه تأیید شود."))
     return "\n".join(lines)

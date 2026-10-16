@@ -78,7 +78,9 @@ def home_html(edge_id: str) -> str:
             f"سرور مقصد: <code>{_safe(edge_id)}</code>\n"
             "انتقال تکی، گروهی یا همه کاربران واجد شرایط را انتخاب کنید.\n\n"
             "کاربران به‌ترتیب بررسی و منتقل می‌شوند. "
-            "حساب‌های دیگر بدون تغییر می‌مانند.")
+            "حساب‌های دیگر بدون تغییر می‌مانند.\n\n"
+            "💡 حساب روی سرور مرکزی می‌ماند؛ فقط IP خروجی اینترنت تغییر می‌کند. "
+            "اتصال فعال کاربر باید پیش از انتقال بسته شود.")
 
 
 def home_buttons(edge_id: str):
@@ -206,6 +208,7 @@ def preview_html(inventory: MigrationInventory) -> str:
     ))
     held=total-ready
     title="یک کاربر" if inventory.selection.mode=="SINGLE" else "گروه کاربران"
+    from edge_egress_k2_operator_ui import reason_text
     lines=[
         "🔎 <b>بررسی انتقال</b>","",
         f"انتخاب: <b>{title}</b>",
@@ -213,19 +216,20 @@ def preview_html(inventory: MigrationInventory) -> str:
         f"آماده بررسی: <b>{ready}</b>",
         f"نیازمند بررسی: <b>{held}</b>","",
     ]
-    for member in chosen[:20]:
+    for member in chosen[:10]:
         sign="✅" if member.selectable and can_stage else "⛔️"
         lines.append(f"{sign} <code>{_safe(member.username)}</code> — "+
-                     ("آماده بررسی" if sign=="✅" else "نیازمند بررسی"))
-    if len(chosen)>20:
-        lines.append(f"و {len(chosen)-20} حساب دیگر")
+                     ("آماده بررسی" if sign=="✅" else "نیازمند بررسی؛ "+reason_text(
+                         member.blockers[0] if member.blockers else
+                         plan.global_blockers[0] if plan.global_blockers else "")))
+    if len(chosen)>10:
+        lines.append(f"و {len(chosen)-10} حساب دیگر؛ جزئیات را از فهرست کاربران ببینید.")
     lines.append("")
     lines.append("برای ادامه، درخواست تأیید را بزنید." if _operator_runtime_released(plan) else
         ("⛔️ مسیر این حساب‌ها هنوز آماده انتقال نیست. "
          "ابتدا وضعیت سرور ورودی بررسی شود."
          if not can_stage else
-         "⛔️ اجرای انتقال در این نسخه غیرفعال است؛ "
-         "تا تأیید نهایی مسیر، هیچ حسابی تغییر نمی‌کند.")
+         "⛔️ انتقال فعلاً غیرفعال است؛ آماده‌سازی مسیر باید تأیید شود.")
     )
     # Do not expose internal 6G/PAM/F4 gate names to end users or Telegram.
     return "\n".join(lines)
@@ -246,11 +250,11 @@ def preview_buttons(edge_id: str, *,
         plan=build_wave_plan(inventory,wave_size=MAX_INPUT_UIDS)
         reviewed=_operator_runtime_released(plan)
     return _button_rows(
-        (("🔐 درخواست تأیید",f"hpeg_m4_prepare_{edge_id}"),)
+        (("ادامه و تأیید",f"hpeg_m4_prepare_{edge_id}"),)
         if reviewed else (),
         (("🔄 بررسی دوباره",f"hpeg_m4_refresh_{edge_id}"),
          ("📋 وضعیت",f"hpeg_m4_status_{edge_id}")),
-        (("🔎 بررسی بازیابی",f"hpeg_m4_recover_{edge_id}"),),
+        (("🔎 بررسی ادامهٔ عملیات",f"hpeg_m4_recover_{edge_id}"),),
         (("👥 انتخاب جدید",f"hpeg_m4_home_{edge_id}"),
          ("◀️ سرور",f"hpeg_edge_{edge_id}")),
     )

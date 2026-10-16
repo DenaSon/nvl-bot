@@ -151,6 +151,7 @@ class IntegratedWizardFunctionTests(unittest.TestCase):
             "_get_core_public_ip_cached":lambda:"209.200.246.198",
             "record_ingress_candidate":lambda *args:events.append(("candidate",)),
             "egress_staged_edge_result":staged_edge_result,
+            "_k2_ui_markup":lambda rows:rows,
             "db_conn":lambda:None,
             "assert_isolated_new_edge_candidate":lambda *args:events.append(('isolated_check',)),
             "normalize_k2_customer_port":normalize_k2_customer_port,
@@ -178,11 +179,11 @@ class IntegratedWizardFunctionTests(unittest.TestCase):
         self.assertIn(("stage","172.86.105.67","10.77.0.7"),events)
         self.assertFalse(any(event[0] in ("pool","setting_write","pool_active")
                              for event in events))
-        self.assertIn("HOLD",messages[-1].args[1])
+        self.assertIn("آماده",messages[-1].args[1])
         self.assertNotIn("DO_NOT_LOG",messages[-1].args[1])
         rows=messages[-1].kwargs["reply_markup"]
-        self.assertIn("hpeg_stage_e7",str(rows))
-        self.assertIn("hpeg_review_edge_e7",str(rows))
+        self.assertIn("hpeg_edge_e7",str(rows))
+        self.assertIn("hpeg_m4_home_e7",str(rows))
         self.assertNotIn("hpdef_",str(rows))
         self.assertFalse(any(event[0]=="setting_write" and
                              event[1][0]=="edge_egress_v1_onboard_enabled"
@@ -233,7 +234,7 @@ class IntegratedWizardFunctionTests(unittest.TestCase):
         self.assertEqual(result[1],"172.86.105.67")
         self.assertIn(("ingress","172.86.105.67"),events)
         self.assertFalse(any(x[0]=="pool" for x in events))
-        self.assertIn("HOLD",messages[-1].args[1])
+        self.assertIn("آماده",messages[-1].args[1])
         self.assertNotIn("hpdef_",str(messages[-1].kwargs.get("reply_markup")))
 
     def test_forged_stage_identity_does_not_register_edge(self):
@@ -244,7 +245,7 @@ class IntegratedWizardFunctionTests(unittest.TestCase):
         )
         self.assertFalse(result[0])
         self.assertFalse(any(x[0]=="pool" for x in events))
-        self.assertIn("HOLD",messages[-1].args[1])
+        self.assertIn("آماده",messages[-1].args[1])
 
     def test_protected_mode_can_stage_new_edge_without_moving_customers(self):
         result,events,messages=self.execute(opt_in=True,protected="1")
@@ -252,7 +253,7 @@ class IntegratedWizardFunctionTests(unittest.TestCase):
         self.assertIn(("stage","172.86.105.67","10.77.0.7"),events)
         self.assertFalse(any(event[0] in ("pool","setting_write","pool_active")
                              for event in events))
-        self.assertIn("HOLD",messages[-1].args[1])
+        self.assertIn("آماده",messages[-1].args[1])
 
     def test_invalid_opt_in_is_denied_before_installation(self):
         with self.assertRaisesRegex(ValueError,"INVALID_EGRESS_STAGE_WIZARD_OPT_IN"):

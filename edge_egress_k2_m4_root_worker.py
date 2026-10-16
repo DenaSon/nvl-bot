@@ -85,6 +85,8 @@ PINNED_SOURCE_FILES = frozenset((
     "edge_egress_k2_root_direct.py",
     "edge_egress_k2_m43_workflow.py",
     "edge_egress_k2_m4_telegram.py",
+    "edge_egress_k2_operator_ui.py",
+    "edge_egress_p3_telegram.py",
     "bot_final_v49-2.py",
     "edge_egress_k2_m42_evidence.py",
     "edge_egress_k2_m42_bindings.py",

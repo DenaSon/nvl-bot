@@ -27,13 +27,14 @@ class PendingTelegramApproval:
     selection: MigrationSelection
     request_id: str
     expires_at: int
+    activate_relay: bool = False
 
     @classmethod
     def create(cls, *, selection: MigrationSelection, actor_id: int,
                chat_id: int, message_id: int, result: dict,
-               now: int | None = None):
+               now: int | None = None, activate_relay: bool = False):
         stamp=int(time.time()) if now is None else now
-        if (not isinstance(selection,MigrationSelection)
+        if (type(activate_relay) is not bool or not isinstance(selection,MigrationSelection)
             or select_migration(selection.mode,selection.usernames,
                                 selection.target_edge_id)!=selection
             or type(actor_id) is not int or actor_id<=0
@@ -51,7 +52,7 @@ class PendingTelegramApproval:
             or not stamp < result["expires_at"] <= stamp+90):
             raise M43ClientHold("M43_APPROVAL_SCOPE_NOT_VERIFIED")
         return cls(actor_id,chat_id,message_id,selection,result["request_id"],
-                   result["expires_at"])
+                   result["expires_at"],activate_relay)
 
     def check(self, *, actor_id:int, chat_id:int, message_id:int,
               edge_id:str, now:int|None=None) -> None:
@@ -69,15 +70,19 @@ class PendingTelegramApproval:
 def confirmation_html(pending: PendingTelegramApproval) -> str:
     if not isinstance(pending,PendingTelegramApproval):
         raise M43ClientHold("M43_APPROVAL_MISSING")
-    lines=["🔐 <b>تأیید انتقال</b>","",
+    lines=[("⭐ <b>تأیید خروجی فعال</b>" if pending.activate_relay else "🔐 <b>تأیید انتقال</b>"),"",
            f"مقصد: <code>{escape(pending.selection.target_edge_id)}</code>",
            f"تعداد حساب: <b>{len(pending.selection.usernames)}</b>",""]
     lines.extend("• <code>"+escape(name)+"</code>"
                  for name in pending.selection.usernames[:10])
     if len(pending.selection.usernames)>10:
         lines.append(f"و {len(pending.selection.usernames)-10} حساب دیگر")
-    lines.extend(("","با تأیید، درخواست برای بررسی نهایی ارسال می‌شود.",
-                  "در صورت تغییر شرایط، انتقال متوقف خواهد شد."))
+    lines.extend(("", "با تأیید، انتقال و بررسی نهایی آغاز می‌شود.",
+                  "اگر شرایط تغییر کند، ادامهٔ عملیات متوقف می‌شود.",
+                  "💡 حساب روی سرور مرکزی می‌ماند؛ IP خروجی از مقصد انتخابی خواهد بود.",
+                  "این تأیید ۹۰ ثانیه اعتبار دارد."))
+    if pending.activate_relay:
+        lines.append("خروجی فعال فقط پس از تأیید همهٔ حساب‌های فعال ثبت می‌شود.")
     return "\n".join(lines)
 
 
@@ -98,18 +103,29 @@ def result_html(result: dict, *, selection: MigrationSelection) -> str:
     entries=result.get("accounts")
     if not isinstance(entries,list) or len(entries)!=len(selection.usernames):
         raise M43ClientHold("M43_RESULT_ACCOUNTS_INVALID")
+    if any(not isinstance(item,dict) for item in entries):
+        raise M43ClientHold("M43_RESULT_ACCOUNTS_INVALID")
     if tuple(item.get("username") for item in entries)!=selection.usernames:
         raise M43ClientHold("M43_RESULT_ACCOUNT_ORDER_DRIFT")
+    if (any(not isinstance(item,dict) or item.get('state') not in
+            ('VERIFIED','HOLD','DEFERRED') for item in entries)
+        or result['state']=='COMPLETED' and any(item['state']!='VERIFIED' for item in entries)
+        or result.get('relay_state') not in (None,'VERIFIED','HOLD')):
+        raise M43ClientHold('M43_RESULT_INCONSISTENT')
     state=result["state"]
-    lines=[("✅ <b>انتقال بررسی و تکمیل شد</b>" if state=="COMPLETED"
+    marker_only=result.get("relay_state")=="VERIFIED" and result.get("completed")==0
+    lines=[("✅ <b>خروجی فعال ثبت شد</b>" if marker_only else "✅ <b>انتقال تکمیل شد</b>" if state=="COMPLETED"
             else "⛔️ <b>انتقال متوقف شد</b>"),"",
            f"مقصد: <code>{escape(selection.target_edge_id)}</code>"]
-    for item in entries[:20]:
+    verified=sum(e.get("state")=="VERIFIED" for e in entries)
+    deferred=sum(e.get("state")=="DEFERRED" for e in entries)
+    lines.append(f"تأییدشده: {verified} · انجام‌نشده: {deferred} · نیازمند بررسی: {len(entries)-verified-deferred}")
+    for item in entries[:10]:
         status=item.get("state")
-        lines.append(("✅" if status=="VERIFIED" else "⛔️")
+        lines.append(("✅" if status=="VERIFIED" else "⚪️" if status=="DEFERRED" else "⛔️")
                      +f" <code>{escape(item['username'])}</code>"
-                     +(" — تأیید شد" if status=="VERIFIED" else " — نیازمند بررسی"))
-    if len(entries)>20:
+                     +(" — تأیید شد" if status=="VERIFIED" else " — انجام نشد" if status=="DEFERRED" else " — نیازمند بررسی"))
+    if len(entries)>10:
         count=sum(e.get('state')=='VERIFIED' for e in entries)
         lines.append(f"نتیجه کل: {count} تأییدشده از {len(entries)} حساب")
     if state=="HOLD":

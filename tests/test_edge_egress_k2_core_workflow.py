@@ -220,4 +220,48 @@ class NativeCohortWorkflowTests(CoreFixture):
         self.assertEqual(self.executed,[])
 
 
+    def test_stop_during_all_inventory_is_responsive_and_returns_no_partial_selection(self):
+        from edge_egress_k2_core_operations import CoreOperationalBindings
+        started=threading.Event();finish=threading.Event();reviewed=[]
+        def slow(root,selected):
+            reviewed.append(selected.usernames[0]);started.set()
+            if not finish.wait(3):
+                raise AssertionError('test barrier timed out')
+            return SimpleNamespace(global_issues=(),accounts=(SimpleNamespace(
+                username=selected.usernames[0],selected=True,issues=()),))
+        async def scenario():
+            task=asyncio.create_task(self.client.request('ALL',actor_id=11,chat_id=11,edge_id='e9'))
+            while not started.is_set():await asyncio.sleep(0.001)
+            response=await self.client.request('STOP',actor_id=11,chat_id=11)
+            self.assertEqual(response['state'],'STOP_REQUESTED')
+            self.assertEqual(self.client._review_progress,(0,3))
+            with self.assertRaisesRegex(ValueError,'BUSY'):
+                await self.client.request('ALL',actor_id=11,chat_id=11,edge_id='e9')
+            finish.set()
+            with self.assertRaisesRegex(ValueError,'REVIEW_STOPPED'):await task
+            self.assertFalse(self.client._preparing)
+        with patch.object(CoreOperationalBindings,'review',slow):
+            self.portal.review=self.root.review
+            asyncio.run(scenario())
+        self.assertEqual(len(reviewed),1)
+        self.assertEqual(self.executed,[])
+        with self.db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM failover_operations').fetchone(),(0,))
+
+    def test_cohort_progress_reports_skips_without_minting_any_approval(self):
+        from edge_egress_k2_core_operations import eligible_cohort
+        progress=[]
+        def review(selected):
+            name=selected.usernames[0]
+            return SimpleNamespace(global_issues=(),accounts=(SimpleNamespace(
+                username=name,selected=True,
+                issues=('ACTIVE_SESSIONS_PRESENT',) if name=='nvl0555' else ()),))
+        selected,skipped=eligible_cohort(self.db,'e9',review=review,
+            progress=lambda done,total:progress.append((done,total)))
+        self.assertEqual(progress,[(0,3),(1,3),(2,3),(3,3)])
+        self.assertEqual(skipped,(('nvl0555','ACTIVE_SESSIONS_PRESENT'),))
+        self.assertNotIn('nvl0555',selected.usernames)
+        self.assertEqual(self.client._pending,{})
+
+
 if __name__=='__main__':unittest.main()

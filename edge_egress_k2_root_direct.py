@@ -54,6 +54,7 @@ class RootDirectOperatorClient:
         self._executing = False
         self._preparing = False
         self._stop = False
+        self._review_progress = (0, 0)
 
     def _gate(self, actor_id: int, chat_id: int) -> None:
         if (not K2_ROOT_DIRECT_ENABLED or self.released is not True
@@ -110,9 +111,9 @@ class RootDirectOperatorClient:
         if type(activate_relay) is not bool:
             raise M43ClientHold('K2_RELAY_INTENT_INVALID')
         if action=='STOP':
-            if self._executing:
+            if self._executing or self._preparing:
                 self._stop=True
-            return {'state':'STOP_REQUESTED' if self._executing else 'IDLE'}
+            return {'state':'STOP_REQUESTED' if self._executing or self._preparing else 'IDLE'}
         if action=='ALL':
             from edge_egress_k2_core_operations import eligible_cohort,CoreOperationalBindings
             if (not K2_ROOT_DIRECT_BATCH_ENABLED or self._executing or self._preparing
@@ -121,6 +122,8 @@ class RootDirectOperatorClient:
             from edge_egress_v1_console import edge_id_checked
             edge_id_checked(edge_id)
             self._preparing=True
+            self._stop=False
+            self._review_progress=(0,0)
             try:
                 if activate_relay:
                     with self.portal.checkpoint.db_conn() as db:
@@ -134,7 +137,9 @@ class RootDirectOperatorClient:
                         return {'state':'INVENTORIED','selection':None,
                             'skipped':tuple((n,'TARGET_ALREADY_PROTECTED') for n in names)}
                 selected,skipped=await self._host_task(lambda:eligible_cohort(
-                    self.portal.checkpoint.db_conn,edge_id,review=self.portal.review))
+                    self.portal.checkpoint.db_conn,edge_id,review=self.portal.review,
+                    stop_requested=lambda:self._stop,
+                    progress=lambda done,total:setattr(self,"_review_progress",(done,total))))
                 return {'state':'INVENTORIED','selection':selected,'skipped':skipped}
             finally:
                 self._preparing=False
@@ -191,6 +196,7 @@ class RootDirectOperatorClient:
             if len(self._pending) >= 20:
                 raise M43ClientHold("K2_ROOT_DIRECT_QUEUE_FULL")
             self._preparing=True
+            self._stop=False
             try:
                 from edge_egress_k2_core_operations import CoreOperationalBindings
                 root=getattr(self.portal.execute_single,'__self__',None)
@@ -210,6 +216,8 @@ class RootDirectOperatorClient:
                                     actor_id=actor_id,chat_id=chat_id)
                         return self.portal.prepare(selection,actor_id=actor_id,chat_id=chat_id)
                     prepared=await self._host_task(prepare)
+                    if self._stop:
+                        raise M43ClientHold("CORE_REVIEW_STOPPED")
                 else:
                     prepared=self.portal.prepare(selection,actor_id=actor_id,chat_id=chat_id)
             finally:
@@ -355,8 +363,14 @@ async def native_review(application, selection, *, actor_id,chat_id):
     if client._executing or client._preparing:
         raise M43ClientHold('K2_REVIEW_BUSY')
     client._preparing=True
+    client._stop=False
+    client._review_progress=(0,len(selection.usernames))
     try:
-        return await client._host_task(lambda:client.portal.review(selection))
+        result=await client._host_task(lambda:client.portal.review(selection))
+        if client._stop:
+            raise M43ClientHold("CORE_REVIEW_STOPPED")
+        client._review_progress=(len(selection.usernames),len(selection.usernames))
+        return result
     finally:
         client._preparing=False
 

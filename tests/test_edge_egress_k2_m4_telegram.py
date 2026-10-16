@@ -284,9 +284,9 @@ class M4BotBindingTests(unittest.TestCase):
         handler=self.bot[start:end]
         self.assertIn("k2_m4_parse_callback(d)",handler)
         self.assertLess(handler.index("if role != 'admin':"),
-                        handler.index("k2_m4_readonly_preview"))
-        self.assertIn("k2_m4_preview_html",handler)
-        self.assertIn('inventory=(inventory if action=="refresh" else None)',handler)
+                        handler.index("_k2_m4_review_selected"))
+        self.assertIn("_k2_m4_review_selected",handler)
+        self.assertIn("k2_m4_preview_buttons(edge_id)",handler)
         self.assertNotIn("Existing6GGuardedExecutor(",handler)
         self.assertNotIn("run_migration_wave(",handler)
         self.assertNotIn("subprocess",handler)
@@ -296,9 +296,9 @@ class M4BotBindingTests(unittest.TestCase):
         end=self.bot.index("    # D1-C2B: a protected-mode legacy Edge",start)
         handler=self.bot[start:end]
         self.assertLess(handler.index("if role != 'admin':"),
-                        handler.index("k2_m4_readonly_preview"))
+                        handler.index("_k2_m4_review_selected"))
         self.assertIn("k2_m4_select_input(mode,text,target)",handler)
-        self.assertIn("k2_m4_preview_buttons(target, inventory=inventory)",handler)
+        self.assertIn("_k2_m4_review_selected(context,view,selection)",handler)
         self.assertNotIn("ExecutionTicket",handler)
         self.assertNotIn("passwd",handler)
 

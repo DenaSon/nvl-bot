@@ -163,7 +163,7 @@ class CoreOperationalHostFactory:
                                     host=self.host,observations=self.observations)
 
 
-def eligible_cohort(db_conn,edge_id,*,review):
+def eligible_cohort(db_conn,edge_id,*,review,stop_requested=lambda:False,progress=lambda done,total:None):
     """Freeze explicit usernames once; never discover more during execution.
 
     Invalid/busy/offline/unproven/already-target users are reported as skips.
@@ -177,7 +177,10 @@ def eligible_cohort(db_conn,edge_id,*,review):
     if not names or len(names)>10000:
         raise M42BindingHold('CORE_ALL_COHORT_EMPTY_OR_OVERSIZED')
     eligible=[];skipped=[]
-    for name in names:
+    progress(0,len(names))
+    for index,name in enumerate(names):
+        if stop_requested():
+            raise M42BindingHold("CORE_REVIEW_STOPPED")
         try:
             inv=review(select_migration('SINGLE',(name,),edge_id))
             a=next(a for a in inv.accounts if a.selected)
@@ -202,5 +205,8 @@ def eligible_cohort(db_conn,edge_id,*,review):
                 raise M42BindingHold('CORE_ALL_DESTINATION_OR_GLOBAL_HOLD') from exc
         except (ValueError,OSError,KeyError,StopIteration):
             skipped.append((name,'SOURCE_OR_SESSION_UNVERIFIED'))
+        progress(index+1,len(names))
+    if stop_requested():
+        raise M42BindingHold("CORE_REVIEW_STOPPED")
     selection=(select_migration('BATCH',tuple(eligible),edge_id) if eligible else None)
     return selection,tuple(skipped)

@@ -67,7 +67,7 @@ class M4WaveStatusTests(unittest.TestCase):
         response["unresolved"]=True
         response["users"][0]["state"]="UNKNOWN"
         display=root_checkpoint_status_html(response,self.selection)
-        self.assertIn("اجرای مجدد خودکار مجاز نیست",display)
+        self.assertIn("دوباره منتقل نکنید",display)
         response["users"][0]["username"]="nvl0557"
         with self.assertRaises(M4StatusHold):
             root_checkpoint_status_html(response,self.selection)

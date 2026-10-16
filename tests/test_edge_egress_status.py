@@ -107,6 +107,9 @@ class AdminStatusCallbackTests(unittest.TestCase):
         )
         callback=get_function("callback_handler",{
             "is_auth": lambda context: True,
+            "k2_ui_views": SimpleNamespace(navigate=lambda *a:None),
+            "k2_m43_approvals": SimpleNamespace(discard=lambda *a:None),
+            "_db_get_setting": lambda key,default:default,
             "_v2ray_management_target_from_callback": lambda d,ctx: None,
             "asyncio": asyncio,
             "classify_edge_callback":lambda _:None,
@@ -125,14 +128,15 @@ class AdminStatusCallbackTests(unittest.TestCase):
         })
         ctx=SimpleNamespace(user_data={"role":role,"agent_id":0})
         # Non-admin role here should not reach any actual API or database code.
-        asyncio.run(callback(SimpleNamespace(callback_query=q),ctx))
+        asyncio.run(callback(SimpleNamespace(callback_query=q,
+            effective_user=SimpleNamespace(id=11),effective_chat=SimpleNamespace(id=11)),ctx))
         return q
 
     def test_admin_can_open_read_only_status(self):
         q=self.run_handler("admin")
         q.answer.assert_awaited_once()
         q.edit_message_text.assert_awaited_once()
-        self.assertIn("مدیریت سرورها",q.edit_message_text.await_args.args[0])
+        self.assertIn("مدیریت خروجی",q.edit_message_text.await_args.args[0])
 
     def test_non_admin_gets_denied_without_status_read(self):
         q=self.run_handler("accountant")

@@ -50,7 +50,12 @@ integration/failure tests; no missing-function HOLD may masquerade as success.
 
 ## Phase 3 — Telegram UI/UX and release preparation
 
-**Next development phase.** Deploy/live tests remain deferred until this closes.
+Source implementation: [Phase 3 Telegram UI/UX](K2_PHASE3_TELEGRAM_UX_2026-10-16.md).
+Programs → Manage output, concise tips, complete account detail pages,
+responsive review/prepare/execute, progress/STOP and original-root status are
+connected. [Source packaging/manual release and rollback](K2_PHASE3_MANUAL_RELEASE_2026-10-16.md)
+is prepared. Exact-commit CI is recorded in the PR. No production/field
+acceptance is implied; manual SSH deploy and real tests are the next stage.
 
 Two-column minimal Persian flow: select Edge, Single/group/all, fresh review,
 confirm/cancel, progress/results, diagnostic guidance and scoped recovery.

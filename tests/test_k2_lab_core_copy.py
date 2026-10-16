@@ -6,12 +6,32 @@ import tarfile
 import tempfile
 import unittest
 import subprocess
+import sqlite3
+import sys
 from unittest.mock import patch
 
 from ops import k2_lab_core_copy as lab
 
 
 class IsolatedLabCopyTests(unittest.TestCase):
+    def test_fresh_lab_installs_canonical_egress_schemas_and_preserves_existing_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'lab.db'
+            with sqlite3.connect(path) as db:
+                db.executescript("CREATE TABLE settings(key TEXT,value TEXT);"
+                                 "INSERT INTO settings VALUES('brand','NVL-LAB');")
+            for _ in range(2):
+                lab.install_lab_egress_schema(path, python=sys.executable,
+                    source_root=Path(__file__).resolve().parents[1])
+            with sqlite3.connect(path) as db:
+                names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                for table in ('edge_egress_allocations', 'edge_egress_readiness',
+                              'edge_egress_f3_ingress_candidates',
+                              'edge_egress_uid_bindings', 'edge_egress_uid_runtime'):
+                    self.assertIn(table, names)
+                    self.assertEqual(db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0], 0)
+                self.assertEqual(db.execute('SELECT * FROM settings').fetchall(), [('brand', 'NVL-LAB')])
+
     def test_unknown_systemd_unit_exit_status_is_handled_without_mutation(self):
         for state in ('not-found','loaded',''):
             with self.subTest(state=state), \

@@ -60,6 +60,16 @@ class M4PresentationTests(unittest.TestCase):
     def test_untrusted_username_html_never_injected(self):
         self.assertNotIn("<script>",failure_html())
 
+    def test_unreleased_core_shows_setup_state_without_requesting_cli_work(self):
+        html=home_html('e12',available=False)
+        self.assertIn('هنوز تکمیل نشده',html)
+        self.assertNotIn('انتخاب کنید',html)
+        rows=home_buttons('e12',available=False)
+        self.assertEqual([cb for row in rows for _,cb in row],
+                         ['hpeg_m4_home_e12','hpeg_edge_e12'])
+        for word in ('SSH','PAM','UID','Core','JSON','دستور','ترمینال'):
+            self.assertNotIn(word,html)
+
 
 class M4OperatorReadOnlyTests(unittest.TestCase):
     def setUp(self):

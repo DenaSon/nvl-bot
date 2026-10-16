@@ -71,9 +71,14 @@ def _button_rows(*rows: tuple[tuple[str,str], ...]) -> list[list[tuple[str,str]]
     return [list(row) for row in rows if row]
 
 
-def home_html(edge_id: str) -> str:
+def home_html(edge_id: str, *, available: bool = True) -> str:
     if not _EDGE.fullmatch(edge_id):
         raise M4UIHold("EDGE_INVALID")
+    if not available:
+        return ("👥 <b>انتقال کاربران</b>\n\n"
+                f"سرور مقصد: <code>{_safe(edge_id)}</code>\n\n"
+                "⏳ راه‌اندازی انتقال کاربران روی سرور مرکزی هنوز تکمیل نشده است.\n"
+                "پس از تکمیل، انتقال‌ها از همین بخش انجام می‌شوند.")
     return ("👥 <b>انتقال کاربران</b>\n\n"
             f"سرور مقصد: <code>{_safe(edge_id)}</code>\n"
             "انتقال تکی، گروهی یا همه کاربران واجد شرایط را انتخاب کنید.\n\n"
@@ -83,9 +88,14 @@ def home_html(edge_id: str) -> str:
             "اتصال فعال کاربر باید پیش از انتقال بسته شود.")
 
 
-def home_buttons(edge_id: str):
+def home_buttons(edge_id: str, *, available: bool = True):
     if not _EDGE.fullmatch(edge_id):
         raise M4UIHold("EDGE_INVALID")
+    if not available:
+        return _button_rows(
+            (("🔄 بررسی دوباره",f"hpeg_m4_home_{edge_id}"),
+             ("◀️ سرور",f"hpeg_edge_{edge_id}")),
+        )
     return _button_rows(
         (("👤 انتقال تکی",f"hpeg_m4_single_{edge_id}"),
          ("👥 انتقال گروهی",f"hpeg_m4_batch_{edge_id}")),

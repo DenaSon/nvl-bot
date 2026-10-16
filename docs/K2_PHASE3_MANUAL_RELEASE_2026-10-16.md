@@ -1,3 +1,5 @@
+> **Owner-confirmed publication and Telegram/transport checkpoint:** df52 is deployed; UI and isolated e12 namespace IP were owner-verified. Customer transfer and native runtime activation remain pending. Read [the current live checkpoint](K2_LEGACY_INGRESS_AUTOMATION_2026-10-16.md) before the historical staging steps below. Do not rerun the df52 publisher.
+
 # K2 Phase 3 — manual release, rollback and real acceptance
 
 This is a source handoff, not a deployment record. The owner explicitly chose

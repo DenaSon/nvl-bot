@@ -22,6 +22,11 @@ def _git(repo, *args):
 
 def _included(name):
     path = PurePosixPath(name)
+    # Exact committed fixtures needed by the shipped regression suite.
+    # Arbitrary JSON and real environment files remain excluded.
+    if name in (".env.example", "ops/examples/edge_egress_fra1.json",
+                "ops/examples/edge_egress_stg1.json"):
+        return True
     return (not path.is_absolute() and ".." not in path.parts
             and not any(part.startswith(".") for part in path.parts)
             and (path.suffix in (".py", ".sh") or name == "requirements.txt"

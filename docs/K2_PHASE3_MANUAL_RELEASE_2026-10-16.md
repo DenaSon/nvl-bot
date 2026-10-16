@@ -7,6 +7,21 @@ The Phase 1/2/3 branches are stacked. Do not deploy an unrelated master SHA or
 assume an open PR is integrated. Pin the exact reviewed commit with green CI
 for the final integrated tree.
 
+### Core staging correction, 2026-10-16
+
+Owner-run staging of merged `34816de57160cb8456686e1fe6976310e62f742f`
+verified the immutable package but failed regression tests: the bundler omitted
+committed `.env.example` and the stg1 example JSON; two permission fixtures
+also assumed a permissive caller umask. The source bundler now includes only
+the exact three non-secret test-support files, and those fixtures explicitly
+set their intended safe/unsafe modes. CI additionally runs the complete suite
+as root from the extracted immutable bundle with `umask 077`. Real environment files
+and arbitrary JSON remain excluded; installed runtime code is unchanged.
+The supplied Core output still shows active PID `1672143`, zero restarts and
+unchanged live bot SHA256 `2d234c221fd28da21dbbfdb2a3f4073b063ae047099565b8afbb46abfaf2072e`.
+No code publication or runtime activation occurred. Retest a newly pinned
+corrected bundle before publishing; do not mark the failed stage accepted.
+
 ## 1. Build one immutable source package, away from the live bot
 
 From a trusted checkout containing the final reviewed SHA (Python 3.12+):
@@ -22,7 +37,8 @@ Record both printed `BUNDLE_SHA256` and `PACKAGE_MANIFEST_SHA256` with that
 SHA in the operator's release record. Build reads committed Git objects even
 if a working file differs. It excludes environment files, databases, keys and
 non-source assets. Rebuilding the same commit produces identical bytes;
-existing output is never silently replaced. The archive includes tests and
+existing output is never silently replaced. The archive includes tests, their
+exact committed example fixtures (including `.env.example`), and
 reviewed Python/shell source, `release.json` and `package.json`; neither is a
 field-acceptance report or an enabled runtime profile.
 

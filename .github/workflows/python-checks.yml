@@ -33,3 +33,15 @@ jobs:
 
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
+
+      - name: Test the extracted release as root with private deployment umask
+        run: |
+          NVL_COMMIT=$(git rev-parse HEAD)
+          NVL_STAGE=$(mktemp -d "$RUNNER_TEMP/nvl-release-XXXXXX")
+          python -B -m ops.k2_release_bundle build --repo . --commit "$NVL_COMMIT" --output "$NVL_STAGE/source.tar" | tee "$NVL_STAGE/build.log"
+          NVL_PACKAGE_SHA=$(sed -n 's/^PACKAGE_MANIFEST_SHA256=//p' "$NVL_STAGE/build.log")
+          mkdir "$NVL_STAGE/source"
+          tar -xf "$NVL_STAGE/source.tar" -C "$NVL_STAGE/source"
+          cd "$NVL_STAGE/source"
+          python -B -m ops.k2_release_bundle verify --directory . --commit "$NVL_COMMIT" --package-sha256 "$NVL_PACKAGE_SHA"
+          sudo "$(command -v python)" -B -c 'import os, unittest; os.umask(0o077); result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.discover("tests")); raise SystemExit(not result.wasSuccessful())'

@@ -20,7 +20,9 @@ This is the last committed operator selection, not a continuous packet test.
 A server's primary screen has two columns: **انتقال کاربران / انتخاب خروجی
 فعال**, connection/IP checks, then **جزئیات و نگهداری**. Existing diagnostics,
 transport preparation, account inspection and guarded metadata retirement
-remain reachable there. No second provisioning/migration implementation.
+remain reachable there. New isolated candidates use the existing P1 pinned,
+two-sided read-only IP test without joining the legacy host pool or relaxing
+its probe gate. No second provisioning/migration implementation.
 
 Transfer → Single / explicit group (up to 10 names) / all eligible → fresh
 review → final review → one-shot 90-second confirmation → progress/results.

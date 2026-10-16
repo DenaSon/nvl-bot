@@ -89,12 +89,19 @@ def edge_html(card, *, active_edge: str = "") -> str:
 
 def detail_buttons(card, current: str = "") -> list[list[tuple[str,str]]]:
     eid=edge_id_checked(card.edge_id)
+    connection=[("🔎 بررسی اتصال",f"hpeg_health_{eid}")]
+    if card.can_probe:
+        connection.append(("🌍 تست IP خروجی",f"hpeg_probe_{eid}"))
+    elif (not card.pool_active and card.ingress_verified
+          and card.allocation=="STAGED" and card.stage_pin):
+        # Isolated candidates deliberately never join the legacy host pool.
+        # Reuse P1's independent pinned/two-sided read-only probe; do not
+        # loosen the legacy console's pool-active safety gate.
+        connection=[("🌍 تست اتصال و IP",f"hpeg_p1_probe_{eid}")]
     return [
         [("👥 انتقال کاربران",f"hpeg_m4_home_{eid}"),
          ("⭐ انتخاب خروجی فعال",f"hpeg_relay_{eid}")],
-        [("🔎 بررسی اتصال",f"hpeg_health_{eid}"),
-         ("🌍 تست IP خروجی",f"hpeg_probe_{eid}")] if card.can_probe else
-        [("🔎 بررسی اتصال",f"hpeg_health_{eid}")],
+        connection,
         [("⚙️ جزئیات و نگهداری",f"hpeg_more_{eid}"),
          ("🔄 بروزرسانی",f"hpeg_edge_{eid}")],
         [("↩️ مدیریت خروجی","hpeg_status")],

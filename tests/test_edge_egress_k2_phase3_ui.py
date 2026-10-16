@@ -83,6 +83,16 @@ class Phase3PresentationTests(unittest.TestCase):
         self.assertIn('۹۰',html)
         self.assertNotIn(pending.request_id,html)
 
+    def test_new_isolated_edge_uses_existing_pinned_probe_without_joining_legacy_pool(self):
+        candidate=edge(pool_active=False)
+        self.assertFalse(candidate.can_probe)
+        callbacks=[cb for row in detail_buttons(candidate) for _,cb in row]
+        self.assertIn('hpeg_p1_probe_fra1',callbacks)
+        self.assertNotIn('hpeg_probe_fra1',callbacks)
+        self.assertNotIn('hpeg_health_fra1',callbacks)
+        unknown=replace(candidate,stage_pin=None)
+        self.assertNotIn('hpeg_p1_probe_fra1',[cb for row in detail_buttons(unknown) for _,cb in row])
+
     def test_primary_actions_are_short_and_maintenance_remains_reachable(self):
         buttons=detail_buttons(edge())
         self.assertEqual([cb for _,cb in buttons[0]],['hpeg_m4_home_fra1','hpeg_relay_fra1'])

@@ -148,13 +148,18 @@ class FreshCoreCliTests(unittest.TestCase):
 
 
     def test_temporary_connect_failure_during_restart_is_retried_safely(self):
-        import paramiko
+        class TemporarySSHError(Exception):
+            pass
+        sdk = SimpleNamespace(SSHException=TemporarySSHError,
+            BadHostKeyException=type('BadHostKeyException', (Exception,), {}),
+            AuthenticationException=type('AuthenticationException', (Exception,), {}))
         original, replacement = Mock(), Mock()
         original.get_transport.return_value.is_active.return_value = True
         replacement.get_transport.return_value.is_active.return_value = True
-        reconnect = Mock(side_effect=[paramiko.SSHException('reset'), replacement])
+        reconnect = Mock(side_effect=[TemporarySSHError('reset'), replacement])
         result = {'status':'LAB_CORE_INSTALLED'}
-        with patch.object(prepare, 'remote', side_effect=[EOFError(), json.dumps(result).encode()]), \
+        with patch.dict('sys.modules', {'paramiko':sdk}), \
+             patch.object(prepare, 'remote', side_effect=[EOFError(), json.dumps(result).encode()]), \
              patch.object(prepare.time, 'monotonic', return_value=100), \
              patch.object(prepare.time, 'sleep'):
             client, observed = prepare.wait_for_install(reconnect, original, '/root/nvl-lab-import-test')

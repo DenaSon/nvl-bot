@@ -115,6 +115,21 @@ class AutomaticObservationTests(fixture.CoreFixture):
                 runner.qualify_target('e9')
             pin.assert_not_called()
 
+    def test_all_users_qualification_failure_is_global_hold_never_all_skipped(self):
+        from edge_egress_k2_core_operations import eligible_cohort
+        runner=self.make()
+        self.root.observations=runner
+        self.root.ports=replace(self.root.ports,external_evidence=runner.current)
+        pin=SimpleNamespace(core_ipv4='209.200.246.198',edge_id='e9',edge_ipv4=fixture.TARGET,
+                            core_sha='c'*64,edge_sha='d'*64,ssh_host_key='fixture')
+        with patch('edge_egress_k2_p1_worker.load_stage_pin',return_value=pin),\
+             patch('edge_egress_k2_p1_worker.probe_phase1') as probe,\
+             patch.object(observer,'_root_bytes',return_value=b'invalid-field-report'),\
+             patch.object(runner,'_neighbours',return_value=()):
+            with self.assertRaisesRegex(ValueError,'GLOBAL_HOLD'):
+                eligible_cohort(self.db,'e9',review=self.root.review)
+            probe.assert_not_called()
+
     def post_fixture(self,phase,leak=False):
         self.protect(edge='e9',ip=fixture.TARGET)
         scope=ExecutionScope('UID_ATTACH','e9',fixture.SOURCE,fixture.TARGET,'nvl0555',1636)

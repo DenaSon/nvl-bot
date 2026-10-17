@@ -228,6 +228,10 @@ def ensure_terminal_policy(uid: int, priority: int, table: int, *,
             result.stdout, next_hop=edge_next_hop or "0.0.0.0",
             device=edge_veth or "_not_an_edge_",
             source=edge_src or "0.0.0.0",
+            # The generated protected guard preserves only this exact wg0
+            # return route for the user's SSH transport. It must remain
+            # acceptable while DNS starts under DENY and after UID attach.
+            allow_ingress_return=True,
         )
     except ProtectedRouteError as exc:
         raise DNSError("PROTECTED_ROUTE_TABLE_NOT_OWNED") from exc

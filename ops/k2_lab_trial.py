@@ -27,7 +27,8 @@ CONFIG=Path('/etc/nvl-egress/k2-m4')
 OLD_RELEASE='7376742013018b25171ed848464fe1947dc67527c91025d11efe161e512cfa14'
 OLD_BOT='502504367bdc01ef34efca70b6949ff3c03a74d3997e24ccf1478b1b945ce09b'
 DELTA=frozenset(('edge_egress_k2_runtime_release.py','edge_egress_k2_core_runtime.py',
-                 'edge_egress_k2_core_observer.py','edge_egress_uid_admission.py'))
+                 'edge_egress_k2_core_observer.py','edge_egress_uid_admission.py',
+                 'edge_egress_uid_dns.py'))
 
 
 def require(ok,message):
@@ -236,6 +237,7 @@ def controller(commit,bundle,package):
             '/root/venv/bin/python3 -B -m ops.k2_release_bundle verify --directory . --commit '+
             commit+' --package-sha256 '+package+'\n'+
             '/root/venv/bin/python3 -B -m unittest tests.test_k2_lab_trial '
+            'tests.test_edge_egress_core_pam_qualification tests.test_edge_egress_uid_dns '
             'tests.test_edge_egress_k2_core_runtime tests.test_edge_egress_k2_runtime_release -q\n'+
             'printf "%s\\n" '+commit+' > ../STAGING_OK\n'+
             'nohup flock -n ../publish.lock /root/venv/bin/python3 -B -m ops.k2_lab_trial '

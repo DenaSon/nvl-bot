@@ -10,6 +10,7 @@ import argparse
 from datetime import date, timedelta
 import getpass
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -21,6 +22,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import sysconfig
 import tarfile
 import tempfile
 import time
@@ -34,6 +36,53 @@ PACKAGE_SHA = '3af297eab2f087128cd7bc8b32d456dab91d0a5a61df534eb77ec3606722154d'
 RELEASE_SHA = 'e7e1324646d60bd7a9d533b4a28313bc03c319c9e2a64c6accfd0052ba80c297'
 ROOT = Path('/root')
 SOURCE = ROOT / 'nvl-k2-febcc45c505e/source.tar'
+FRESH_CONFIGURATION = False
+
+
+def configure_fresh_install(stage):
+    """Consume a source-Core-authenticated payload before fresh-host preflight."""
+    global APP, LAB_IP, EDGE_IP, SOURCE_SHA, PACKAGE_SHA, FRESH_CONFIGURATION
+    path = stage / 'metadata.json'
+    info = path.lstat()
+    require(path.is_file() and not path.is_symlink() and info.st_uid == 0
+            and info.st_mode & 0o077 == 0 and info.st_size <= 16384,
+            'LAB_METADATA_NOT_PRIVATE')
+    metadata = json.loads(path.read_bytes())
+    config = metadata.get('configuration', {})
+    require(set(config) == {'app', 'destination', 'source_sha256', 'package_sha256'}
+            and config['app'] == metadata.get('app')
+            and config['destination'] == metadata.get('destination'), 'LAB_CONFIGURATION_INVALID')
+    require(isinstance(config['app'], str) and re.fullmatch('[a-f0-9]{40}', config['app'])
+            and all(isinstance(config[k], str) and re.fullmatch('[a-f0-9]{64}', config[k])
+                    for k in ('source_sha256', 'package_sha256')), 'LAB_CONFIGURATION_PINS_INVALID')
+    address = ipaddress.ip_address(config['destination'])
+    require(address.version == 4 and address.is_global and not address.is_multicast
+            and str(address) == config['destination'] and str(address) != '209.200.246.198',
+            'LAB_DESTINATION_INVALID')
+    APP, LAB_IP = config['app'], str(address)
+    EDGE_IP = LAB_IP  # Fresh accounts stay Core-local until an actual Edge is added.
+    SOURCE_SHA, PACKAGE_SHA = config['source_sha256'], config['package_sha256']
+    FRESH_CONFIGURATION = True
+
+
+def prepare_lab_swap(*, meminfo=Path('/proc/meminfo'), swap=Path('/nvl-lab.swap'),
+                     fstab=Path('/etc/fstab')):
+    memory = dict((parts[0].rstrip(':'), int(parts[1]))
+                  for line in meminfo.read_text().splitlines() if len(parts := line.split()) >= 2)
+    if memory['MemTotal'] >= 1536 * 1024 or memory['SwapTotal'] >= 1024 * 1024:
+        return
+    require(not swap.exists() and not swap.is_symlink()
+            and str(swap) not in fstab.read_text(), 'LAB_SWAP_ALREADY_PRESENT')
+    require(shutil.disk_usage(ROOT).free >= 2 * 1024**3, 'LAB_SWAP_DISK_SPACE_REQUIRED')
+    # A bounded 1-GiB file avoids the memory pressure seen on the former Lab.
+    fd = os.open(swap, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(fd)
+    run(['dd', 'if=/dev/zero', 'of='+str(swap), 'bs=1M', 'count=1024', 'status=none'])
+    run(['mkswap', str(swap)])
+    run(['swapon', str(swap)])
+    with fstab.open('a') as stream:
+        stream.write('\n'+str(swap)+' none swap sw 0 0\n')
+    print('LAB_SWAP=1GiB', flush=True)
 
 
 def require(ok, message):
@@ -94,7 +143,9 @@ def preflight_lab():
             and release.get('VERSION_ID', '').strip('"') == '24.04'
             and read(['dpkg', '--print-architecture']) == 'amd64', 'LAB_OS_MISMATCH')
     for path in ('/root/master_bot.db', '/root/bot_final_v49-2.py',
-                 '/root/bot_persistence.pickle', '/etc/wireguard/wg0.conf',
+                 '/root/bot_persistence.pickle', '/root/nvl-lab-access.txt', '/etc/nvlbot',
+                 '/etc/wireguard/core_private.key', '/etc/wireguard/core_public.key',
+                 '/etc/sysctl.d/90-nvl-lab.conf', '/etc/wireguard/wg0.conf',
                  '/etc/nvl-egress', '/opt/nvl-egress',
                  '/etc/systemd/system/nvlbot.service',
                  '/etc/ssh/sshd_config.d/00-nvl-lab.conf',
@@ -224,13 +275,21 @@ def install_lab(stage):
     for name, expected in metadata['files'].items():
         require(digest(stage / name) == expected, 'LAB_PAYLOAD_HASH_FAILED: ' + name)
     require(digest(stage / 'source.tar') == SOURCE_SHA, 'LAB_SOURCE_HASH_FAILED')
-    require(list(sys.version_info[:3]) == metadata['python'], 'LAB_PYTHON_VERSION_MISMATCH')
+    if FRESH_CONFIGURATION:
+        require(list(sys.version_info[:2]) == metadata['python'][:2]
+                and sys.version_info[:2] == (3, 12)
+                and sysconfig.get_config_var('SOABI') == metadata.get('soabi'),
+                'LAB_PYTHON_ABI_MISMATCH')
+    else:
+        require(list(sys.version_info[:3]) == metadata['python'], 'LAB_PYTHON_VERSION_MISMATCH')
     env = dict(line.split('=', 1) for line in (stage / 'lab.env').read_text().splitlines())
     require(set(env) == {'BOT_TOKEN', 'MASTER_USER', 'MASTER_PASS', 'RB_CONFIRM_PASS',
                        'BOT_DB_PATH', 'BOT_PERSISTENCE_PATH', 'PYTHONDONTWRITEBYTECODE'},
             'LAB_ENV_SCOPE_CHANGED')
     test_bot = bot_api(env['BOT_TOKEN'], 'getMe')
     require(test_bot['id'] == metadata['test_bot_id'], 'LAB_TEST_BOT_ID_CHANGED')
+    if FRESH_CONFIGURATION:
+        prepare_lab_swap()
     print('LAB_INSTALL=PACKAGES', flush=True)
     run(['apt-get', 'update', '-qq'])
     run(['apt-get', 'install', '-y', '-qq', 'python3-venv', 'openssh-server',
@@ -438,13 +497,19 @@ def main():
     os.umask(0o077)
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port',type=int,default=22)
-    parser.add_argument('--install',type=Path)
+    modes=parser.add_mutually_exclusive_group()
+    modes.add_argument('--install',type=Path)
+    modes.add_argument('--fresh-install',type=Path)
     args=parser.parse_args()
-    if args.install:
-        stage=args.install.resolve()
+    if args.install or args.fresh_install:
+        requested=args.install or args.fresh_install
+        require(not requested.is_symlink(), 'LAB_STAGE_SYMLINK')
+        stage=requested.resolve()
         require(stage.parent==ROOT and stage.name.startswith('nvl-lab-import-'), 'LAB_STAGE_PATH_INVALID')
         # Never enter even failure cleanup on a wrong/nonfresh machine.
         try:
+            if args.fresh_install:
+                configure_fresh_install(stage)
             preflight_lab()
         except BaseException as error:
             (stage/'result.json').write_text(json.dumps(

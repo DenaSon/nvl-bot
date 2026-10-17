@@ -145,3 +145,19 @@ class FreshCoreCliTests(unittest.TestCase):
             handle.readline.return_value = '8.8.4.4\n'
             self.assertEqual(prepare.tty_line('IP: '), '8.8.4.4')
             opened.assert_called_once_with('/dev/tty', 'r+')
+
+
+    def test_temporary_connect_failure_during_restart_is_retried_safely(self):
+        import paramiko
+        original, replacement = Mock(), Mock()
+        original.get_transport.return_value.is_active.return_value = True
+        replacement.get_transport.return_value.is_active.return_value = True
+        reconnect = Mock(side_effect=[paramiko.SSHException('reset'), replacement])
+        result = {'status':'LAB_CORE_INSTALLED'}
+        with patch.object(prepare, 'remote', side_effect=[EOFError(), json.dumps(result).encode()]), \
+             patch.object(prepare.time, 'monotonic', return_value=100), \
+             patch.object(prepare.time, 'sleep'):
+            client, observed = prepare.wait_for_install(reconnect, original, '/root/nvl-lab-import-test')
+        self.assertIs(client, replacement)
+        self.assertEqual(observed, result)
+        self.assertEqual(reconnect.call_count, 2)

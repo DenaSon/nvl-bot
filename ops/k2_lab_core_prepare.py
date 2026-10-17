@@ -157,7 +157,8 @@ def wait_for_install(connect, client, remote_stage, *, timeout=1800):
             if not isinstance(error, paramiko.SSHException) or isinstance(
                     error, (paramiko.BadHostKeyException, paramiko.AuthenticationException)):
                 raise
-            client.close()
+            if client is not None:
+                client.close()
             client = None
             time.sleep(5)
             continue

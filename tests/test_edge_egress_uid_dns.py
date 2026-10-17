@@ -195,6 +195,46 @@ class DNSPolicyTests(unittest.TestCase):
             with self.assertRaises(DNSError):
                 ensure_terminal_policy(1644, 1780, 1780)
 
+    def test_real_protected_guard_output_can_start_and_restart_its_dns_service(self):
+        # Exercise the actual guard and DNS validators against the SAME
+        # modeled kernel state, instead of omitting wg0 from DNS fixtures.
+        from edge_egress_uid_boot import BootGuardApplier
+        from tests.test_edge_egress_v1_f2 import FakeIngressKernel,protected_fixture
+        kernel=FakeIngressKernel()
+        manifest=protected_fixture()
+        guard=BootGuardApplier(run=kernel,get_uid=lambda _:manifest.request.uid,
+            geteuid=lambda:0,read_nss=lambda:'hosts: files dns\n')
+        guard.apply(manifest)
+        for attached in (False,True):
+            kernel.edge_attached=attached
+            guard.verify(manifest,require_frozen=True)
+            with patch('edge_egress_uid_dns.subprocess.run',
+                       side_effect=lambda argv,**kw:kernel(*argv)):
+                ensure_terminal_policy(manifest.request.uid,manifest.request.priority,
+                    manifest.request.spec.route_table,
+                    edge_next_hop=manifest.request.spec.ns_veth_ip,
+                    edge_veth=manifest.request.spec.veth_root,
+                    edge_src=manifest.request.spec.root_veth_ip)
+        self.assertTrue(kernel.ingress_return)
+
+    def test_dns_accepts_only_exact_ssh_return_route_and_never_a_core_default(self):
+        request=req()
+        good='10.77.0.0/24 dev wg0 scope link src 10.77.0.1\n'
+        for route in (good+good,good.replace('wg0','eth0'),
+                      good.replace('10.77.0.1','209.200.246.198'),
+                      'default via 209.200.246.198 dev eth0\n'):
+            with self.subTest(route=route):
+                def run(argv,**kw):
+                    return SimpleNamespace(returncode=0,stdout=(
+                        '1780: from all uidrange 1644-1644 lookup 1780\n'
+                        if argv==['ip','-4','rule','show'] else
+                        'blackhole default metric 4096\n'+route))
+                with patch('edge_egress_uid_dns.subprocess.run',side_effect=run):
+                    with self.assertRaisesRegex(DNSError,'NOT_OWNED'):
+                        ensure_terminal_policy(1644,1780,1780,
+                            edge_next_hop=request.spec.ns_veth_ip,
+                            edge_veth=request.spec.veth_root,edge_src=request.spec.root_veth_ip)
+
     def test_dns_restart_rejects_foreign_edge_or_missing_blackhole(self):
         request = req()
         owned = ("default via " + request.spec.ns_veth_ip +

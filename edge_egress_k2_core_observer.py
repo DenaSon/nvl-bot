@@ -502,33 +502,18 @@ class CorePhysicalObservations:
 
     def _qualification(self,core_ip):
         if self.lab_trial:
-            from edge_egress_k2_runtime_release import validate_lab_trial
-            validate_lab_trial(self.db_conn,release_sha=self.release_sha,
-                               digest=self.qualification_sha256,core_ipv4=core_ip)
+            self._trial_scope('e2',(),core_ip=core_ip)
             return
-        from edge_egress_f4_release import parse_evidence_json,check_release_evidence
-        raw=_root_bytes(QUALIFICATION,16384,private=True)
-        if sha256(raw).hexdigest()!=self.qualification_sha256:
-            raise CoreObservationHold("RELEASE_FIELD_QUALIFICATION_DIGEST_CHANGED")
-        wrapper=json.loads(raw)
-        if (type(wrapper) is not dict or set(wrapper)!={'release_sha','evidence'}
-            or wrapper['release_sha']!=self.release_sha):
-            raise CoreObservationHold('FIELD_QUALIFICATION_RELEASE_MISMATCH')
-        payload=parse_evidence_json(json.dumps(wrapper['evidence']).encode())
-        # Acceptance remains a real, separately performed field stage. A
-        # successful namespace probe cannot mint rescue/reboot/WG-loss proof.
-        stamp=payload.get('observed_at')
-        if type(stamp) is not int or stamp>self.host.now():
-            raise CoreObservationHold('FIELD_QUALIFICATION_TIME_INVALID')
-        # A pinned qualification records release-time fault/reboot tests;
-        # it is not passed off as a new measurement on every transfer.
-        environment=payload.get('environment')
-        if environment not in ('disposable-vps','controlled-core'):
-            raise CoreObservationHold('FIELD_QUALIFICATION_ENVIRONMENT_INVALID')
-        result=check_release_evidence(payload,expected_core_ipv4=core_ip,now=stamp,
-                                      expected_environment=environment)
-        if not result.accepted:
-            raise CoreObservationHold("RELEASE_FIELD_QUALIFICATION_REQUIRED")
+        from edge_egress_k2_runtime_release import validate_core_field_qualification,CoreReleaseHold
+        try:
+            validate_core_field_qualification(
+                _root_bytes(QUALIFICATION,16384,private=True),
+                digest=self.qualification_sha256,release_sha=self.release_sha,
+                core_ipv4=core_ip,now=self.host.now())
+        except CoreReleaseHold as exc:
+            raise CoreObservationHold(str(exc)) from exc
+        except (ValueError,OSError,TypeError,KeyError) as exc:
+            raise CoreObservationHold('RELEASE_FIELD_QUALIFICATION_REQUIRED') from exc
 
     def qualify_target(self,edge_id):
         from edge_egress_k2_p1_worker import load_stage_pin,probe_phase1
@@ -609,10 +594,13 @@ class CorePhysicalObservations:
         self.target_digest=digest
         return self._current
 
-    def _trial_scope(self,edge_id,names):
+    def _trial_scope(self,edge_id,names,*,core_ip='144.172.84.127'):
         from edge_egress_k2_runtime_release import validate_lab_trial
-        validate_lab_trial(self.db_conn,release_sha=self.release_sha,
-            digest=self.qualification_sha256,edge_id=edge_id,usernames=names)
+        try:
+            validate_lab_trial(self.db_conn,release_sha=self.release_sha,
+                digest=self.qualification_sha256,edge_id=edge_id,usernames=names,core_ipv4=core_ip)
+        except (ValueError,OSError,TypeError,KeyError,subprocess.SubprocessError) as exc:
+            raise CoreObservationHold('LAB_TRIAL_AUTHORITY_CHANGED') from exc
 
     def current(self):
         if self._current is None:

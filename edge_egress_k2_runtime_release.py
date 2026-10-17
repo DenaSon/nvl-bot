@@ -15,6 +15,7 @@ import re
 import stat
 import pwd
 import subprocess
+import sqlite3
 
 CORE_PROFILE = Path("/etc/nvl-egress/k2-m4/core-runtime.json")
 INSTALLED_PAM = Path("/opt/nvl-egress/edge_egress_v1_admission.py")
@@ -180,54 +181,106 @@ def pam_cross_edge_released() -> bool:
         if not profile.enabled or os.geteuid() != 0:
             return False
         if profile.lab_trial is not None:
-            import sqlite3
             release=json.loads(_root_bytes(CORE_PROFILE.parent/'release.json',16384,private=True))
             validate_lab_trial(lambda:sqlite3.connect('file:/root/master_bot.db?mode=ro',uri=True),
                 release_sha=release['git_sha'],digest=profile.lab_trial_sha256)
         return sha256(_root_bytes(INSTALLED_PAM, 2_000_000)).hexdigest() == (
             profile.pam_module_sha256
         )
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error, subprocess.SubprocessError):
         return False
 
 
-def lab_trial_pam_target(conn, row) -> bool:
-    """Admit this trial's measured F2 UID, without promoting its Edge to READY.
+def validate_core_field_qualification(raw, *, digest, release_sha, core_ipv4, now):
+    """Shared static field qualification for the native collector and PAM.
+
+    UID_ROUTE/POST_ATTACH remain fresh per-account measurements. A namespace
+    probe, a new profile or a terminal SQL receipt cannot create this report.
+    """
+    from edge_egress_f4_release import parse_evidence_json,check_release_evidence
+    if sha256(raw).hexdigest()!=digest:
+        raise CoreReleaseHold('RELEASE_FIELD_QUALIFICATION_DIGEST_CHANGED')
+    wrapper=json.loads(raw)
+    if (type(wrapper) is not dict or set(wrapper)!={'release_sha','evidence'}
+        or wrapper['release_sha']!=release_sha):
+        raise CoreReleaseHold('FIELD_QUALIFICATION_RELEASE_MISMATCH')
+    payload=parse_evidence_json(json.dumps(wrapper['evidence']).encode())
+    stamp=payload.get('observed_at')
+    if type(stamp) is not int or stamp>now:
+        raise CoreReleaseHold('FIELD_QUALIFICATION_TIME_INVALID')
+    environment=payload.get('environment')
+    if environment not in ('disposable-vps','controlled-core'):
+        raise CoreReleaseHold('FIELD_QUALIFICATION_ENVIRONMENT_INVALID')
+    result=check_release_evidence(payload,expected_core_ipv4=core_ipv4,now=stamp,
+                                  expected_environment=environment)
+    if not result.accepted:
+        raise CoreReleaseHold('RELEASE_FIELD_QUALIFICATION_REQUIRED')
+
+
+def core_runtime_pam_target(conn, row) -> bool:
+    """Admit a native Single's proven UID without manufacturing F4 READY.
 
     The separate PAM interpreter cannot use the bot's in-memory collector.
-    It rechecks the same private, installation-bound grant plus the exact
-    original Single receipt. Kernel, DNS, UID denial and ingress checks still
-    run normally in probe_local_guards/check_account.
+    Recheck either the full release/Core-bound field qualification or the
+    separately bounded Lab grant, then this UID's original Single receipt.
+    Kernel, DNS, UID denial and ingress checks still run normally below.
     """
     try:
         from edge_egress_f3_readiness import read_readiness
         from edge_egress_p3_executor import ExecutionScope,_scope_digest,INTENT_PHASE
         profile=load_core_profile()
-        if (profile.lab_trial is None or LAB_USERS.get(row.username)!=row.uid
-            or row.edge_id!='e2' or row.edge_ipv4!=LAB_EDGE or row.state!='PROTECTED'
+        if (not profile.enabled or not profile.operations_enabled or row.state!='PROTECTED'
             or not pam_cross_edge_released()):
             return False
         ready=read_readiness(conn,row.edge_id)
-        if ready is None or ready.state!='STAGED' or ready.edge_ipv4!=LAB_EDGE:
+        if (ready is None or ready.state not in ('STAGED','VERIFIED_LAB','READY')
+            or ready.edge_ipv4!=row.edge_ipv4):
             return False
+        if profile.lab_trial is not None:
+            if (LAB_USERS.get(row.username)!=row.uid or row.edge_id!='e2'
+                or row.edge_ipv4!=LAB_EDGE or ready.state!='STAGED'):
+                return False
+        else:
+            allocation=conn.execute('SELECT core_public_ipv4 FROM edge_egress_allocations '
+                                    'WHERE edge_id=?',(row.edge_id,)).fetchall()
+            if len(allocation)!=1:
+                return False
+            manifest=json.loads(_root_bytes(CORE_PROFILE.parent/'release.json',16384,private=True))
+            import time
+            validate_core_field_qualification(
+                _root_bytes(CORE_PROFILE.parent/'field-acceptance.json',16384,private=True),
+                digest=profile.field_acceptance_sha256,release_sha=manifest['git_sha'],
+                core_ipv4=allocation[0][0],now=int(time.time()))
         receipt=conn.execute('SELECT status,source_host,target_host,detail_json '
                             'FROM failover_operations WHERE id=?',(row.last_operation_id,)).fetchone()
         if receipt is None:
             return False
         status,source,target,raw=receipt
         detail=json.loads(raw)
-        scope=ExecutionScope('UID_ENROLL_SOURCE','e2',LAB_EDGE,LAB_EDGE,row.username,row.uid)
-        if (source!=LAB_EDGE or target!=LAB_EDGE or detail.get('kind')!='K2_P3A'
+        if type(detail) is not dict or detail.get('action') not in ('UID_ATTACH','UID_ENROLL_SOURCE'):
+            return False
+        scope=ExecutionScope(detail['action'],row.edge_id,source,target,row.username,row.uid)
+        if (target!=row.edge_ipv4 or detail.get('kind')!='K2_P3A'
             or detail.get('single_uid') is not True or detail.get('username')!=row.username
-            or detail.get('uid')!=row.uid or detail.get('edge_id')!='e2'
+            or detail.get('uid')!=row.uid or detail.get('edge_id')!=row.edge_id
             or detail.get('action')!=scope.action or detail.get('scope_digest')!=_scope_digest(scope)
             or type(detail.get('nonce_hash')) is not str
             or not re.fullmatch('[a-f0-9]{64}',detail['nonce_hash'])):
             return False
+        if profile.lab_trial is not None and (scope.action!='UID_ENROLL_SOURCE' or source!=LAB_EDGE):
+            return False
         return bool(status=='SUCCEEDED' and detail.get('phase')=='EGRESS_P3_VERIFIED'
                     or status=='RUNNING' and detail.get('phase')==INTENT_PHASE
                     and detail.get('probe_only') is True and core_single_busy_admission(conn,row))
-    except (OSError,ValueError,KeyError,TypeError,AttributeError):
+    except (OSError,ValueError,KeyError,TypeError,AttributeError,sqlite3.Error,subprocess.SubprocessError):
+        return False
+
+
+def lab_trial_pam_target(conn, row) -> bool:
+    """Compatibility API; this entry remains exclusively Lab-scoped."""
+    try:
+        return load_core_profile().lab_trial is not None and core_runtime_pam_target(conn,row)
+    except (OSError,ValueError):
         return False
 
 

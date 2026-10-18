@@ -302,9 +302,10 @@ if [ -d /etc/systemd/system/nvlbot.service.d ]; then
     chmod 600 "${EXPORT_DIR}/nvlbot_dropins.tar.gz"
     echo "   ✅ تنظیمات تکمیلی سرویس systemd جمع‌آوری شد."
 fi
-# 🆕 اسنپ‌شاتِ سبک و هوشمندِ محیط: فقط فایل‌های اسکریپت (.sh، .py، .bak) منتقل می‌شوند
+# Archive the exact code-only stage already checked on the destination.
 echo "🔹 ۴.۵) ساختِ اسنپ‌شاتِ اسکریپت‌ها (root_full_snapshot.tar.gz)..."
-if ! tar -czf "${EXPORT_DIR}/root_full_snapshot.tar.gz" -C /root/nvlbot_standby .; then
+if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
+        'tar -czf - -C /root/nvlbot_standby .' > "${EXPORT_DIR}/root_full_snapshot.tar.gz"; then
     echo "❌ بسته‌بندی کد بررسی‌شده شکست خورد."
     rollback_start_nvlbot
     exit 1

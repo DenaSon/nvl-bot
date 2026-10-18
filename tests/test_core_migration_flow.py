@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 
@@ -219,6 +220,43 @@ TARGET_EDGE=192.0.2.2
                 self.assertTrue((stage / name).is_file(), name)
             for name in (".env", "master_bot.db", "ops/private.json", "ops/key.pem"):
                 self.assertFalse((stage / name).exists(), name)
+
+    def test_snapshot_streams_checked_target_code_and_recovers_failed_transfer(self):
+        start = self.core.index("# Archive the exact code-only stage")
+        finish = self.core.index('\necho "   ✅ تمام اسکریپت', start)
+        for failure in (False, True):
+            with self.subTest(ssh_failure=failure), tempfile.TemporaryDirectory() as tmp:
+                remote_stage = Path(tmp) / "remote-stage"
+                runtime_fixture(remote_stage)
+                export = Path(tmp) / "export"
+                export.mkdir()
+                trace = Path(tmp) / "trace"
+                body = self.core[start:finish].replace("/root/nvlbot_standby", str(remote_stage))
+                harness = r'''
+set -u
+SSH_OPTS=()
+TARGET_EDGE=fixture
+ssh() {
+    printf 'REMOTE_SNAPSHOT\n' >> "$TRACE"
+    if [ "$FAIL_SSH" = 1 ]; then printf partial; return 22; fi
+    bash -c "${!#}"
+}
+rollback_start_nvlbot() { printf 'SOURCE_RECOVERY\n' >> "$TRACE"; }
+'''
+                result = subprocess.run(
+                    ["bash", "-c", harness + body + '\necho SNAPSHOT_ACCEPTED\n'],
+                    env=dict(os.environ, EXPORT_DIR=str(export), TRACE=str(trace),
+                             FAIL_SSH=str(int(failure))), capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1 if failure else 0,
+                                 result.stdout + result.stderr)
+                self.assertIn("REMOTE_SNAPSHOT", trace.read_text())
+                self.assertEqual("SOURCE_RECOVERY" in trace.read_text(), failure)
+                self.assertEqual("SNAPSHOT_ACCEPTED" in result.stdout, not failure)
+                if not failure:
+                    with tarfile.open(export / "root_full_snapshot.tar.gz") as archive:
+                        for name in ("./ops/runtime_fixture.py", "./server_migration/runtime_fixture.py",
+                                     "./runtime_helper.py", "./bot_import_preflight.py"):
+                            self.assertIn(name, archive.getnames())
 
     def test_source_frozen_before_copy_and_wg_exclusive_before_promote(self):
         self.assertIn("if ! systemctl stop nvlbot || systemctl is-active --quiet nvlbot; then", self.core)

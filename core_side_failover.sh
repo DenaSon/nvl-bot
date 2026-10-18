@@ -121,9 +121,18 @@ if ! bash /root/demote_core_to_edge.sh --prepare "$TARGET_EDGE" "$CUSTOMER_SSH_P
     exit 1
 fi
 echo "🔹 ۲.۶) انتقال نسخه دقیق ربات و آماده‌سازی Python روی مقصد قبل از قطع سرویس..."
-if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" "mkdir -p /root/nvlbot_standby"; then exit 1; fi
-if ! rsync -az -e "ssh -i ${EDGE_SSH_KEY} -p ${EDGE_PORT} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
-        /root/bot_final_v49-2.py /root/requirements.txt /root/02_recreate_ssh_users.py /root/server_migration \
+if [ ! -s /root/bot_import_preflight.py ] || [ ! -d /root/ops ] || [ ! -d /root/server_migration ]; then
+    echo "❌ کد پیش‌بررسی یا پکیج‌های ops/server_migration روی Core ناقص است؛ Core متوقف نمی‌شود."
+    exit 1
+fi
+# Preserve the previous stage, but never let its stale modules mask missing code.
+if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
+    'set -e; [ ! -L /root/nvlbot_standby ]; if [ -e /root/nvlbot_standby ]; then [ -d /root/nvlbot_standby ]; previous=$(mktemp -d /root/nvlbot-stage-backup-XXXXXX); mv /root/nvlbot_standby "$previous/code"; fi; install -d -m 700 /root/nvlbot_standby'; then exit 1; fi
+if ! rsync -az --prune-empty-dirs \
+        --exclude='__pycache__/' --exclude='.git/' --include='*/' \
+        --include='*.py' --include='*.sh' --include='requirements.txt' --exclude='*' \
+        -e "ssh -i ${EDGE_SSH_KEY} -p ${EDGE_PORT} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
+        /root/*.py /root/*.sh /root/requirements.txt /root/server_migration /root/ops \
         "root@${TARGET_EDGE}:/root/nvlbot_standby/"; then
     echo "❌ انتقال فایل‌های ربات شکست خورد. Core متوقف نمی‌شود."
     exit 1
@@ -131,7 +140,7 @@ fi
 # --clear is intentional: standby virtualenv copies are not portable between VPSes.
 # Install compiler/headers here: pip may need source builds before Core downtime.
 if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
-    'set -e; apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv python3-pip python3-dev build-essential iptables-persistent >/dev/null; python3 -m venv --clear /root/venv; /root/venv/bin/python3 -m pip --version; /root/venv/bin/python3 -m pip install -q -r /root/nvlbot_standby/requirements.txt; /root/venv/bin/python3 -m py_compile /root/nvlbot_standby/bot_final_v49-2.py /root/nvlbot_standby/02_recreate_ssh_users.py; cd /root/nvlbot_standby; PYTHONPATH= /root/venv/bin/python3 -c "from server_migration.models import CHECK_FAIL, CHECK_PASS, CHECK_WARN, ServerCredentials"; echo bot_final_v49-2.py > /root/nvlbot_standby/.nvl_promotion_main'; then
+    'set -e; apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv python3-pip python3-dev build-essential iptables-persistent >/dev/null; python3 -m venv --clear /root/venv; /root/venv/bin/python3 -m pip --version; /root/venv/bin/python3 -m pip install -q -r /root/nvlbot_standby/requirements.txt; /root/venv/bin/python3 -m py_compile /root/nvlbot_standby/bot_final_v49-2.py /root/nvlbot_standby/02_recreate_ssh_users.py; cd /root/nvlbot_standby; PYTHONPATH= /root/venv/bin/python3 /root/nvlbot_standby/bot_import_preflight.py /root/nvlbot_standby/bot_final_v49-2.py; echo bot_final_v49-2.py > /root/nvlbot_standby/.nvl_promotion_main'; then
     echo "❌ Python/PIP/requirements روی مقصد آماده نشد. Core اصلی همچنان فعال است."
     exit 1
 fi
@@ -293,11 +302,14 @@ if [ -d /etc/systemd/system/nvlbot.service.d ]; then
     chmod 600 "${EXPORT_DIR}/nvlbot_dropins.tar.gz"
     echo "   ✅ تنظیمات تکمیلی سرویس systemd جمع‌آوری شد."
 fi
-# 🆕 اسنپ‌شاتِ سبک و هوشمندِ محیط: فقط فایل‌های اسکریپت (.sh، .py، .bak) منتقل می‌شوند
+# Archive the exact code-only stage already checked on the destination.
 echo "🔹 ۴.۵) ساختِ اسنپ‌شاتِ اسکریپت‌ها (root_full_snapshot.tar.gz)..."
-cd /root
-tar -czf "${EXPORT_DIR}/root_full_snapshot.tar.gz" *.sh *.py *.bak server_migration 2>/dev/null || true
-cd - >/dev/null
+if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
+        'tar -czf - -C /root/nvlbot_standby .' > "${EXPORT_DIR}/root_full_snapshot.tar.gz"; then
+    echo "❌ بسته‌بندی کد بررسی‌شده شکست خورد."
+    rollback_start_nvlbot
+    exit 1
+fi
 echo "   ✅ تمام اسکریپت‌های مدیریت و پایتون بسته‌بندی شدند (بدون فایل‌های حجیم)."
 
 # 🆕 همون اسنپ‌شاتِ سطح-سیستمِ collect_core_migration_files.sh (پکیج‌های دستی، کرون،

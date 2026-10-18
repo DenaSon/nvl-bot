@@ -5,10 +5,33 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def runtime_fixture(stage, missing=None):
+    """A bot import chain covering both lost packages; its body must never run."""
+    stage.mkdir(parents=True, exist_ok=True)
+    for package in ("ops", "server_migration"):
+        folder = stage / package
+        folder.mkdir()
+        (folder / "__init__.py").write_text("# package fixture\n")
+        (folder / "runtime_fixture.py").write_text("VALUE = 1\n")
+    (stage / "runtime_helper.py").write_text(
+        "from server_migration.runtime_fixture import VALUE\n"
+        "from ops.runtime_fixture import VALUE as OTHER\n")
+    (stage / "bot_final_v49-2.py").write_text(
+        "from runtime_helper import VALUE, OTHER\n"
+        "raise RuntimeError('BOT_BODY_MUST_NOT_RUN')\n")
+    shutil.copy2(ROOT / "bot_import_preflight.py", stage / "bot_import_preflight.py")
+    (stage / "02_recreate_ssh_users.py").write_text("# fixture\n")
+    (stage / "fixture.sh").write_text("#!/bin/bash\nexit 0\n")
+    (stage / "requirements.txt").write_text("# offline fixture\n")
+    if missing:
+        shutil.rmtree(stage / missing)
 
 
 class TelegramCoreMigrationTests(unittest.TestCase):
@@ -65,15 +88,14 @@ class TelegramCoreMigrationTests(unittest.TestCase):
             "/root/venv/bin/python3", "venv_python").replace(
             "/root/nvlbot_standby/.nvl_promotion_main", '"$TEST_MAIN"').replace(
             "/root/nvlbot_standby", '"$TEST_STATE"')
-        for failure in ("none", "apt", "pip", "compile", "import"):
+        for failure in ("none", "apt", "pip", "compile", "ops", "server_migration"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
                 trace = Path(tmp) / "trace"
                 marker = Path(tmp) / "main"
-                if failure != "import":
-                    shutil.copytree(ROOT / "server_migration", Path(tmp) / "server_migration")
+                runtime_fixture(Path(tmp), failure if failure in ("ops", "server_migration") else None)
                 env = dict(os.environ, TRACE=str(trace), TEST_STATE=tmp,
                            TEST_MAIN=str(marker), FAIL_STAGE=failure,
-                           TEST_PYTHON=sys.executable)
+                           TEST_PYTHON=sys.executable, PYTHONPATH="")
                 harness = r'''
 set -u
 apt-get() {
@@ -94,7 +116,7 @@ venv_python() {
         [ "$FAIL_STAGE" != pip ] || return 22
     elif [ "$1 $2" = '-m py_compile' ]; then
         [ "$FAIL_STAGE" != compile ] || return 23
-    elif [ "$1" = '-c' ]; then
+    elif [ "$1" = "$TEST_STATE/bot_import_preflight.py" ]; then
         "$TEST_PYTHON" "$@"
     fi
 }
@@ -136,24 +158,105 @@ TARGET_EDGE=192.0.2.2
     def test_destination_installs_importable_staged_package_and_rejects_missing_package(self):
         start = self.promote.index('STANDBY_DIR="/root/nvlbot_standby"')
         finish = self.promote.index("# Always prefer the service unit", start)
-        for present in (False, True):
-            with self.subTest(package_present=present), tempfile.TemporaryDirectory() as tmp:
+        for missing in ("ops", "server_migration", None):
+            with self.subTest(missing_package=missing), tempfile.TemporaryDirectory() as tmp:
                 stage, dest = Path(tmp) / "stage", Path(tmp) / "destination"
-                stage.mkdir()
+                runtime_fixture(stage, missing)
                 (dest / "venv/bin").mkdir(parents=True)
                 (dest / "venv/bin/python3").symlink_to(sys.executable)
                 (stage / ".nvl_promotion_main").write_text("bot_final_v49-2.py\n")
-                (stage / "bot_final_v49-2.py").write_text("# Offline fixture; never executed.\n")
-                (stage / "requirements.txt").write_text("# Offline fixture\n")
-                if present:
-                    shutil.copytree(ROOT / "server_migration", stage / "server_migration")
                 body = self.promote[start:finish].replace("/root/nvlbot_standby", str(stage))
                 result = subprocess.run(
                     ["bash", "-ec", 'systemctl() { :; }; BOT_DIR="$TEST_DEST";\n' + body],
-                    env=dict(os.environ, TEST_DEST=str(dest)), capture_output=True, text=True)
-                self.assertEqual(result.returncode, 0 if present else 1,
+                    env=dict(os.environ, TEST_DEST=str(dest), PYTHONPATH=""), capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0 if missing is None else 1,
                                  result.stdout + result.stderr)
-                self.assertEqual((dest / "server_migration/models.py").is_file(), present)
+                if missing is None:
+                    for name in ("runtime_helper.py", "ops/runtime_fixture.py", "server_migration/runtime_fixture.py", "fixture.sh"):
+                        self.assertTrue((dest / name).is_file(), name)
+                    self.assertIn("BOT_IMPORTS_OK=", result.stdout)
+
+    def test_bot_import_checker_never_runs_application_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = Path(tmp)
+            runtime_fixture(stage)
+            # Invoke the checker from outside the bundle to test import isolation.
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "bot_import_preflight.py"), str(stage / "bot_final_v49-2.py")],
+                env=dict(os.environ, PYTHONPATH=""), capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("BOT_IMPORTS_OK=1", result.stdout)
+
+    def test_old_stage_is_preserved_but_cannot_supply_missing_modules(self):
+        start = self.core.index("# Preserve the previous stage")
+        finish = self.core.index("if ! rsync", start)
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = Path(tmp) / "stage"
+            (stage / "ops").mkdir(parents=True)
+            (stage / "ops/stale.py").write_text("# must not mask an omitted package\n")
+            body = self.core[start:finish].replace("/root/nvlbot_standby", str(stage)).replace(
+                "/root/nvlbot-stage-backup-XXXXXX", str(Path(tmp) / "backup-XXXXXX"))
+            harness = 'SSH_OPTS=(); TARGET_EDGE=fixture; ssh() { bash -c "${!#}"; };\n'
+            subprocess.run(["bash", "-ec", harness + body], check=True)
+            self.assertEqual(list(stage.iterdir()), [])
+            self.assertEqual(len(list(Path(tmp).glob("backup-*/code/ops/stale.py"))), 1)
+
+    @unittest.skipUnless(shutil.which("rsync"), "rsync unavailable")
+    def test_transferred_bundle_contains_python_packages_but_no_runtime_secrets(self):
+        start = self.core.index("if ! rsync -az --prune-empty-dirs")
+        finish = self.core.index("# --clear is intentional", start)
+        with tempfile.TemporaryDirectory() as tmp:
+            source, stage = Path(tmp) / "source", Path(tmp) / "stage"
+            runtime_fixture(source)
+            stage.mkdir()
+            for name in (".env", "master_bot.db", "ops/private.json", "ops/key.pem"):
+                (source / name).write_text("private fixture\n")
+            body = self.core[start:finish].replace(
+                '"root@${TARGET_EDGE}:/root/nvlbot_standby/"', '"$TEST_STAGE/"').replace("/root/", str(source) + "/")
+            harness = 'EDGE_SSH_KEY=unused; EDGE_PORT=22; TARGET_EDGE=fixture;\n'
+            subprocess.run(["bash", "-ec", harness + body],
+                           env=dict(os.environ, TEST_STAGE=str(stage)), check=True)
+            for name in ("runtime_helper.py", "ops/runtime_fixture.py", "server_migration/runtime_fixture.py"):
+                self.assertTrue((stage / name).is_file(), name)
+            for name in (".env", "master_bot.db", "ops/private.json", "ops/key.pem"):
+                self.assertFalse((stage / name).exists(), name)
+
+    def test_snapshot_streams_checked_target_code_and_recovers_failed_transfer(self):
+        start = self.core.index("# Archive the exact code-only stage")
+        finish = self.core.index('\necho "   ✅ تمام اسکریپت', start)
+        for failure in (False, True):
+            with self.subTest(ssh_failure=failure), tempfile.TemporaryDirectory() as tmp:
+                remote_stage = Path(tmp) / "remote-stage"
+                runtime_fixture(remote_stage)
+                export = Path(tmp) / "export"
+                export.mkdir()
+                trace = Path(tmp) / "trace"
+                body = self.core[start:finish].replace("/root/nvlbot_standby", str(remote_stage))
+                harness = r'''
+set -u
+SSH_OPTS=()
+TARGET_EDGE=fixture
+ssh() {
+    printf 'REMOTE_SNAPSHOT\n' >> "$TRACE"
+    if [ "$FAIL_SSH" = 1 ]; then printf partial; return 22; fi
+    bash -c "${!#}"
+}
+rollback_start_nvlbot() { printf 'SOURCE_RECOVERY\n' >> "$TRACE"; }
+'''
+                result = subprocess.run(
+                    ["bash", "-c", harness + body + '\necho SNAPSHOT_ACCEPTED\n'],
+                    env=dict(os.environ, EXPORT_DIR=str(export), TRACE=str(trace),
+                             FAIL_SSH=str(int(failure))), capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1 if failure else 0,
+                                 result.stdout + result.stderr)
+                self.assertIn("REMOTE_SNAPSHOT", trace.read_text())
+                self.assertEqual("SOURCE_RECOVERY" in trace.read_text(), failure)
+                self.assertEqual("SNAPSHOT_ACCEPTED" in result.stdout, not failure)
+                if not failure:
+                    with tarfile.open(export / "root_full_snapshot.tar.gz") as archive:
+                        for name in ("./ops/runtime_fixture.py", "./server_migration/runtime_fixture.py",
+                                     "./runtime_helper.py", "./bot_import_preflight.py"):
+                            self.assertIn(name, archive.getnames())
 
     def test_source_frozen_before_copy_and_wg_exclusive_before_promote(self):
         self.assertIn("if ! systemctl stop nvlbot || systemctl is-active --quiet nvlbot; then", self.core)

@@ -32,6 +32,10 @@ fi
 
 TARGET_EDGE="$1"
 CUSTOMER_SSH_PORT="$2"
+# Serialize Telegram-triggered migrations, including their source DB freeze.
+command -v flock >/dev/null 2>&1 || { echo "❌ flock نصب نیست."; exit 1; }
+exec 9>/run/nvl-core-migration.lock
+flock -n 9 || { echo "❌ مهاجرت Core دیگری در حال اجراست."; exit 1; }
 
 BOT_DIR="${BOT_DIR_OVERRIDE:-/root}"
 DB_PATH="${BOT_DIR}/master_bot.db"
@@ -329,8 +333,7 @@ echo "🔹 ۷) تأییدِ نهایی..."
 echo "   ✅ nvlbot روی این سرور (Core قدیمی) قبلاً (مرحلهٔ ۳) متوقف شده و همچنان متوقف می‌ماند."
 echo ""
 echo "════════════════════════════════════════════════════════════"
-echo "✅ Failover کامل شد — ${TARGET_EDGE}:${CUSTOMER_SSH_PORT} حالا Core جدید است."
-echo "   کارِ باقی‌مانده (هنوز خودکار نیست):"
-echo "   - روی هر Edge دیگر، Endpoint در wg0.conf را به ${TARGET_EDGE} تغییر دهید."
-echo "   - DNS/host_pool ربات را به ${TARGET_EDGE} به‌عنوان پیش‌فرض تنظیم کنید."
+echo "✅ Promote موفق شد: ${TARGET_EDGE}:${CUSTOMER_SSH_PORT} Core جدید است."
+echo "   هنوز Demote Core قدیمی و هماهنگ‌سازی Endpointهای سایر Edgeها باقی است."
+echo "   DNS و host_pool جداگانه باید با وضعیت نهایی سرویس تطبیق داده شوند."
 echo "════════════════════════════════════════════════════════════"

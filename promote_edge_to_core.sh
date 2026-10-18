@@ -374,7 +374,8 @@ STAGED_MAIN_NAME="$(cat "$MAIN_MARKER")"
 "$BOT_DIR/venv/bin/python3" -m py_compile "$STANDBY_DIR/$STAGED_MAIN_NAME"
 systemctl stop nvlbot 2>/dev/null || true
 for package in ops server_migration; do
-    [ -s "$STANDBY_DIR/$package/__init__.py" ] ||
+    # A zero-byte __init__.py is a valid Python package initializer.
+    [ -f "$STANDBY_DIR/$package/__init__.py" ] ||
         { echo "Missing staged Python package: $package"; exit 1; }
 done
 [ -s "$STANDBY_DIR/bot_import_preflight.py" ] ||

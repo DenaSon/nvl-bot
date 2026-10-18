@@ -13260,68 +13260,30 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         spawn_bg_task(_provision_task_guarded())
 
-    # 🚀 ویزارد Promote (ارتقای Edge به Core)
+    # Promote: explicit confirmation, without unused password prompts.
     elif state == 'SRV_PROMOTE_PORT_INPUT':
-        if not text.strip().isdigit():
-            await update.message.reply_text("❌ فقط عدد بفرستید:"); return
-        context.user_data['srv_cust_port'] = text.strip()
-        context.user_data['state'] = 'SRV_PROMOTE_GOST_PORTS'
+        proposed = text.strip()
+        if not proposed.isdigit() or not (23 <= int(proposed) <= 65535):
+            await update.message.reply_text("❌ پورت معتبر بین ۲۳ تا ۶۵۵۳۵ وارد کنید.")
+            return
+        target_ip = context.user_data.get('srv_target_ip', '')
+        if not re.fullmatch(r'\d{1,3}(?:\.\d{1,3}){3}', target_ip):
+            safe_clear_context(context)
+            await update.message.reply_text("❌ مقصد معتبر نیست؛ دوباره از بخش سرورها شروع کنید.")
+            return
+        context.user_data['srv_cust_port'] = proposed
+        context.user_data['state'] = 'SRV_PROMOTE_AWAIT_CONFIRM'
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ تأیید انتقال Core", callback_data="srv_promote_confirm")],
+            [InlineKeyboardButton("🔙 انصراف", callback_data="srv_status")],
+        ])
         await update.message.reply_text(
-            "🌐 <b>پورت‌های Gost (TLS/WSS) سرور Core فعلی</b> را با فاصله وارد کنید (مثلاً 443 2087 2088 2089):\n"
-            "اگر ندارید خالی بگذارید یا یک پورت الکی بزنید.\n\n"
-            "💡 این مقدار فقط برای مرحلهٔ بعدی لازم است: بعد از موفقیتِ ارتقا، سرور Core فعلی خودش "
-            "خودکار به Edge تنزل داده می‌شود (بدون نیاز به کار دستی جداگانه).",
-            parse_mode="HTML")
-
-    elif state == 'SRV_PROMOTE_GOST_PORTS':
-        context.user_data['srv_promote_gost_ports'] = text.strip()
-        context.user_data['state'] = 'SRV_PROMOTE_PASS_INPUT'
-        await update.message.reply_text("🔑 <b>رمز روت (Root Password)</b> سرور مقصد را بفرستید (پیام حذف خواهد شد):")
-
-    elif state == 'SRV_PROMOTE_PASS_INPUT':
-        chat_id = update.effective_chat.id
-        root_pass = text.strip()
-        try: await update.message.delete()
-        except: pass
-        target_ip = context.user_data.get('srv_target_ip')
-        cust_port = context.user_data.get('srv_cust_port')
-        gost_ports = context.user_data.get('srv_promote_gost_ports', '')
-        # 🆕 IP فعلیِ Core را همین الان (قبل از هرگونه تغییر) ثبت می‌کنیم، چون بعد از تنزل
-        # خودکار در ادامه، همین مقدار به‌عنوان «سروری که باید Edge شود» استفاده می‌شود.
-        old_core_ip = _get_core_public_ip_cached()
-        safe_clear_context(context)
-        # 🚀 خودکار: خودِ ربات هر ۶ فایل مهاجرت لازم را از Core می‌سازد و آپلود می‌کند،
-        # سپس promote_edge_to_core.sh را روی مقصد اجرا می‌کند — نیازی به انتقال دستی نیست.
-        # 🆕 اگر ارتقا موفق شود، بلافاصله و خودکار Core قدیمی هم به Edge تنزل داده می‌شود — طبق
-        # درخواست صریح، «Promote» و «Demote» دیگر دو عملیات کاملاً مجزا نیستند.
-        async def _promote_task_guarded():
-            try:
-                await context.bot.send_message(
-                    chat_id,
-                    f"⏳ <b>در حال اجرای فیل‌اوور ایمن و انتقال به <code>{target_ip}</code>...</b>\n"
-                    f"⚠️ ربات تا لحظاتی دیگر روی این سرور متوقف شده و روی سرور جدید استارت می‌شود. سپس این سرور خودکار به Edge تبدیل خواهد شد.\n"
-                    f"✅ از این پس نیازی به کار دستی نیست؛ صبور باشید تا ربات روی سرور جدید پاسخگو شود.",
-                    parse_mode="HTML"
-                )
-                
-                # 💡 Root-cause fix: use systemd-run to detach the upgrade process from the bot
-                # This way, when the bot is stopped by the failover script, the process isn't killed and the demote script runs successfully.
-                cmd = (
-                    f"systemd-run --unit=failover-job-$(date +%s) bash -c '"
-                    f"{{ bash /root/core_side_failover.sh {target_ip} {cust_port} && "
-                    f"bash /root/demote_core_to_edge.sh {target_ip} {cust_port}; }} > /root/failover_migration.log 2>&1'"
-                )
-                
-                await run_cmd("sudo", "bash", "-c", cmd)
-                
-            except Exception:
-                log.exception("خطای مدیریت‌نشده در حین ارتقای %s به Core.", target_ip)
-                with contextlib.suppress(Exception):
-                    await context.bot.send_message(chat_id, f"❌ خطای غیرمنتظره در حین ارتقا رخ داد؛ لاگ سرور را بررسی کنید.")
-                    
-        spawn_bg_task(_promote_task_guarded())
-        
-
+            f"⚠️ <b>تأیید مهاجرت Core</b>\nمقصد: <code>{target_ip}</code>\n"
+            f"پورت مشتری: <code>{proposed}</code>\n\n"
+            "ابتدا پیش‌نیازها روی مقصد بررسی می‌شوند؛ سپس ربات فعلی متوقف می‌شود. "
+            "پس از راه‌اندازی Core جدید، Core قدیمی به Edge تبدیل خواهد شد. "
+            "اگر بررسی اولیه شکست بخورد، Core فعلی متوقف نمی‌شود.",
+            parse_mode="HTML", reply_markup=kb)
 
     # 📉 ویزارد Demote (تنزل Core به Edge)
     elif state == 'SRV_DEMOTE_NEW_CORE_IP':
@@ -21491,6 +21453,53 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     # 🎯 زیرمنوی جدید «تنظیمات مستقیم» — شامل تنظیمات هاست و تغییر پورت که قبلاً مستقیماً توی
     # منوی اصلی «تنظیمات سرور» بودند؛ حالا زیر یک دکمه‌ی جمع‌وجورتر دسته‌بندی شده‌اند.
+    elif d == "srv_promote_confirm" and role == 'admin':
+        target_ip = context.user_data.get('srv_target_ip', '')
+        cust_port = context.user_data.get('srv_cust_port', '')
+        if (context.user_data.get('state') != 'SRV_PROMOTE_AWAIT_CONFIRM'
+                or not re.fullmatch(r'\d{1,3}(?:\.\d{1,3}){3}', target_ip)
+                or not str(cust_port).isdigit()
+                or not (23 <= int(cust_port) <= 65535)):
+            safe_clear_context(context)
+            await query.edit_message_text("❌ تأییدیه مهاجرت معتبر نیست؛ دوباره شروع کنید.")
+            return
+        if not all(os.path.isfile(p) for p in (
+                '/root/core_side_failover.sh', '/root/promote_edge_to_core.sh',
+                '/root/demote_core_to_edge.sh')):
+            await query.edit_message_text(
+                "❌ فایل‌های مهاجرت روی Core کامل نیستند. ابتدا نسخه جدید را استقرار دهید.")
+            return
+        safe_clear_context(context)
+        chat_id = query.message.chat_id
+        await query.edit_message_text(
+            f"⏳ پیش‌بررسی و آغاز مهاجرت به <code>{target_ip}</code>... "
+            "موفقیت نهایی فقط پس از پایان عملیات مشخص می‌شود.", parse_mode="HTML")
+        async def _launch_core_migration():
+            try:
+                command = (
+                    f"set -o pipefail; {{ bash /root/core_side_failover.sh {target_ip} {cust_port} "
+                    f"&& bash /root/demote_core_to_edge.sh {target_ip} {cust_port}; }} "
+                    "> /root/failover_migration.log 2>&1"
+                )
+                ok, detail, kind = await run_cmd(
+                    'sudo', 'systemd-run', f'--unit=failover-job-{int(time.time() * 1000)}',
+                    '/bin/bash', '-c', command)
+                if not ok:
+                    await context.bot.send_message(
+                        chat_id, f"❌ اجرای مهاجرت آغاز نشد ({esc(kind or detail)}). "
+                        "ربات فعلی همچنان فعال است.", parse_mode="HTML")
+                else:
+                    await context.bot.send_message(
+                        chat_id, "✅ عملیات در سرویس مستقل ثبت شد. "
+                        "نتیجه نهایی را با گزارش مهاجرت بررسی کنید؛ "
+                        "این پیام به‌معنی موفقیت انتقال نیست.")
+            except Exception:
+                log.exception("Failed to launch legacy Core promotion")
+                with contextlib.suppress(Exception):
+                    await context.bot.send_message(chat_id, "❌ خطا هنگام آغاز مهاجرت؛ سرویس Core را بررسی کنید.")
+        spawn_bg_task(_launch_core_migration())
+        return
+
     elif d == "srv_direct_menu" and role == 'admin':
         kb = [[InlineKeyboardButton("🌐 تنظیمات هاست", callback_data="srv_hosts")],
               [InlineKeyboardButton("🔌 تغییر پورت", callback_data="srv_port")],

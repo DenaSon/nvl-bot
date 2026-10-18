@@ -3,6 +3,11 @@ on:
   pull_request:
     paths:
       - bot_final_v49-2.py
+      - bot_import_preflight.py
+      - setup_edge_relay.sh
+      - requirements.txt
+      - 'ops/**'
+      - 'server_migration/**'
       - core_side_failover.sh
       - promote_edge_to_core.sh
       - demote_core_to_edge.sh
@@ -26,3 +31,14 @@ jobs:
         run: python -m py_compile bot_final_v49-2.py
       - name: Migration regression tests
         run: python -m unittest discover -s tests -p test_core_migration_flow.py -v
+      - name: Import the real bot dependencies from a clean code-only stage
+        run: |
+          python -m venv "$RUNNER_TEMP/nvl-import-venv"
+          "$RUNNER_TEMP/nvl-import-venv/bin/python" -m pip install -r requirements.txt
+          stage=$(mktemp -d "$RUNNER_TEMP/nvl-bot-code-XXXXXX")
+          rsync -az --prune-empty-dirs \
+            --exclude='__pycache__/' --exclude='.git/' --include='*/' \
+            --include='*.py' --include='*.sh' --include='requirements.txt' --exclude='*' \
+            ./*.py ./*.sh requirements.txt ops server_migration "$stage/"
+          cd "$stage"
+          PYTHONPATH= "$RUNNER_TEMP/nvl-import-venv/bin/python" bot_import_preflight.py bot_final_v49-2.py

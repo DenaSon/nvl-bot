@@ -89,7 +89,8 @@ echo "🔹 ۶) تنظیم قوانین فوروارد پورت (DNAT) به سم�
 iptables -t nat -A PREROUTING -p tcp --dport "${CUSTOMER_SSH_PORT}" -j DNAT --to-destination "10.77.0.1:${CUSTOMER_SSH_PORT}"
 # خط جدید برای فوروارد پورت TLS:
 iptables -t nat -A PREROUTING -p tcp --dport "${TLS_PORT}" -j DNAT --to-destination "10.77.0.1:${TLS_PORT}"
-iptables -t nat -A POSTROUTING -j MASQUERADE
+# Local DNS replies must retain their loopback source address.
+iptables -t nat -A POSTROUTING ! -o lo -j MASQUERADE
 netfilter-persistent save >/dev/null 2>&1 || iptables-save > /etc/iptables/rules.v4
 echo "   ✅ ترافیک پورت ${CUSTOMER_SSH_PORT} به Core فوروارد می‌شود (و بعد از ریبوت هم باقی می‌ماند)."
 

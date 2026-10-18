@@ -28,7 +28,8 @@ class LegacyRelayContractTests(unittest.TestCase):
         src=LEGACY_EDGE.read_text(encoding="utf-8")
         self.assertIn('iptables -t nat -A PREROUTING -p tcp',src)
         self.assertIn('10.77.0.1:',src)
-        self.assertIn('iptables -t nat -A POSTROUTING -j MASQUERADE',src)
+        self.assertIn('iptables -t nat -A POSTROUTING ! -o lo -j MASQUERADE',src)
+        self.assertNotIn('iptables -t nat -A POSTROUTING -j MASQUERADE',src)
         for mutator in ('useradd ', 'adduser ', 'passwd ', 'CREATE TABLE ', 'ssh_accounts'):
             self.assertNotIn(mutator,src)
 

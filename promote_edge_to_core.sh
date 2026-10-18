@@ -373,13 +373,16 @@ STAGED_MAIN_NAME="$(cat "$MAIN_MARKER")"
     { echo "❌ Missing pip in destination venv; preflight failed."; exit 1; }
 "$BOT_DIR/venv/bin/python3" -m py_compile "$STANDBY_DIR/$STAGED_MAIN_NAME"
 systemctl stop nvlbot 2>/dev/null || true
-cp "$STANDBY_DIR/$STAGED_MAIN_NAME" "$BOT_DIR/$STAGED_MAIN_NAME"
-cp "$STANDBY_DIR/requirements.txt" "$BOT_DIR/requirements.txt"
-[ -s "$STANDBY_DIR/server_migration/models.py" ] ||
-    { echo "Missing staged server_migration package"; exit 1; }
-cp -a "$STANDBY_DIR/server_migration" "$BOT_DIR/"
-(cd "$BOT_DIR" && PYTHONPATH= "$BOT_DIR/venv/bin/python3" -c "from server_migration.models import CHECK_FAIL, CHECK_PASS, CHECK_WARN, ServerCredentials") ||
-    { echo "server_migration import failed on destination"; exit 1; }
+for package in ops server_migration; do
+    [ -s "$STANDBY_DIR/$package/__init__.py" ] ||
+        { echo "Missing staged Python package: $package"; exit 1; }
+done
+[ -s "$STANDBY_DIR/bot_import_preflight.py" ] ||
+    { echo "Missing staged bot import checker"; exit 1; }
+cp "$STANDBY_DIR/"*.py "$STANDBY_DIR/"*.sh "$STANDBY_DIR/requirements.txt" "$BOT_DIR/"
+cp -a "$STANDBY_DIR/ops" "$STANDBY_DIR/server_migration" "$BOT_DIR/"
+(cd "$BOT_DIR" && PYTHONPATH= "$BOT_DIR/venv/bin/python3" "$BOT_DIR/bot_import_preflight.py" "$BOT_DIR/$STAGED_MAIN_NAME") ||
+    { echo "Bot runtime imports failed on destination"; exit 1; }
 
 # Always prefer the service unit collected from the live Core during THIS run.
 if [ -s "${MIGRATION_DIR}/nvlbot.service" ]; then

@@ -122,14 +122,14 @@ fi
 echo "🔹 ۲.۶) انتقال نسخه دقیق ربات و آماده‌سازی Python روی مقصد قبل از قطع سرویس..."
 if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" "mkdir -p /root/nvlbot_standby"; then exit 1; fi
 if ! rsync -az -e "ssh -i ${EDGE_SSH_KEY} -p ${EDGE_PORT} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
-        /root/bot_final_v49-2.py /root/requirements.txt \
+        /root/bot_final_v49-2.py /root/requirements.txt /root/02_recreate_ssh_users.py \
         "root@${TARGET_EDGE}:/root/nvlbot_standby/"; then
     echo "❌ انتقال فایل‌های ربات شکست خورد. Core متوقف نمی‌شود."
     exit 1
 fi
 # --clear is intentional: standby virtualenv copies are not portable between VPSes.
 if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
-    'set -e; apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv python3-pip iptables-persistent >/dev/null; python3 -m venv --clear /root/venv; /root/venv/bin/python3 -m pip --version; /root/venv/bin/python3 -m pip install -q -r /root/nvlbot_standby/requirements.txt; /root/venv/bin/python3 -m py_compile /root/nvlbot_standby/bot_final_v49-2.py; echo bot_final_v49-2.py > /root/nvlbot_standby/.nvl_promotion_main'; then
+    'set -e; apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv python3-pip iptables-persistent >/dev/null; python3 -m venv --clear /root/venv; /root/venv/bin/python3 -m pip --version; /root/venv/bin/python3 -m pip install -q -r /root/nvlbot_standby/requirements.txt; /root/venv/bin/python3 -m py_compile /root/nvlbot_standby/bot_final_v49-2.py /root/nvlbot_standby/02_recreate_ssh_users.py; echo bot_final_v49-2.py > /root/nvlbot_standby/.nvl_promotion_main'; then
     echo "❌ Python/PIP/requirements روی مقصد آماده نشد. Core اصلی همچنان فعال است."
     exit 1
 fi

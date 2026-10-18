@@ -374,9 +374,13 @@ if wg show wg0 >/dev/null 2>&1; then
     exit 1
 fi
 echo "🔹 ۶) اجرای remote «promote_edge_to_core.sh» روی Edge — با OLD_CORE_IP خودکار=${SELF_IP}..."
-ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
-    "OLD_CORE_IP='${SELF_IP}' bash ${REMOTE_MIGRATION_DIR}/promote_edge_to_core.sh '${CUSTOMER_SSH_PORT}' '${REMOTE_MIGRATION_DIR}'"
-PROMOTE_EXIT=$?
+if ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
+        "OLD_CORE_IP='${SELF_IP}' bash ${REMOTE_MIGRATION_DIR}/promote_edge_to_core.sh '${CUSTOMER_SSH_PORT}' '${REMOTE_MIGRATION_DIR}'"; then
+    PROMOTE_EXIT=0
+else
+    # Also reach rollback if this wrapper was invoked with bash -e.
+    PROMOTE_EXIT=$?
+fi
 
 if [ "$PROMOTE_EXIT" -ne 0 ]; then
     echo "❌ promote_edge_to_core.sh روی Edge با کد خطای ${PROMOTE_EXIT} برگشت."

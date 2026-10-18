@@ -261,6 +261,24 @@ SOURCE_WG_STOPPED=0
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual("systemctl start nvlbot" in trace.read_text(), bool(stopped))
 
+    def test_remote_failure_reaches_source_recovery_even_with_errexit(self):
+        start = self.core.index('echo "🔹 ۶) اجرای remote')
+        finish = self.core.index('echo "🔹 ۷) تأیید', start)
+        harness = '''
+set -euo pipefail
+SSH_OPTS=()
+TARGET_EDGE=192.0.2.2
+SELF_IP=192.0.2.1
+REMOTE_MIGRATION_DIR=/unused
+CUSTOMER_SSH_PORT=8443
+ssh() { return 27; }
+rollback_start_nvlbot() { printf 'SOURCE_RECOVERY_CALLED\n'; }
+'''
+        result = subprocess.run(["bash", "-c", harness + self.core[start:finish]],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 27)
+        self.assertIn("SOURCE_RECOVERY_CALLED", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

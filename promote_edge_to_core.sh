@@ -344,12 +344,14 @@ systemctl stop nvlbot 2>/dev/null || true
 cp "$STANDBY_DIR/$STAGED_MAIN_NAME" "$BOT_DIR/$STAGED_MAIN_NAME"
 cp "$STANDBY_DIR/requirements.txt" "$BOT_DIR/requirements.txt"
 
-if [ -f "${STANDBY_DIR}/nvlbot.service.staged" ]; then
-    sed -E "s#(ExecStart=.*)bot_final_[^ ]+\.py#\1${STAGED_MAIN_NAME}#" "${STANDBY_DIR}/nvlbot.service.staged" > /etc/systemd/system/nvlbot.service
-elif [ -f "${MIGRATION_DIR}/nvlbot.service" ]; then
-    cp "${MIGRATION_DIR}/nvlbot.service" /etc/systemd/system/nvlbot.service
-elif [ -f "${MIGRATION_DIR}/custom_systemd_units/nvlbot.service" ]; then
-    cp "${MIGRATION_DIR}/custom_systemd_units/nvlbot.service" /etc/systemd/system/nvlbot.service
+# Always prefer the service unit collected from the live Core during THIS run.
+if [ -s "${MIGRATION_DIR}/nvlbot.service" ]; then
+    sed -E "s#bot_final_[^ ]+\\.py#${STAGED_MAIN_NAME}#g" "${MIGRATION_DIR}/nvlbot.service" > /etc/systemd/system/nvlbot.service
+elif [ -s "${STANDBY_DIR}/nvlbot.service.staged" ]; then
+    sed -E "s#bot_final_[^ ]+\\.py#${STAGED_MAIN_NAME}#g" "${STANDBY_DIR}/nvlbot.service.staged" > /etc/systemd/system/nvlbot.service
+else
+    echo "❌ nvlbot.service از Core قبلی منتقل نشده است."
+    exit 1
 fi
 
 systemctl daemon-reload

@@ -168,8 +168,15 @@ rollback_start_nvlbot() {
     systemctl start nvlbot 2>/dev/null && echo "   ✅ nvlbot روی Core قدیمی دوباره فعال شد." \
         || echo "   ❌ راه‌اندازی Core قبلی شکست خورد؛ systemctl status nvlbot را بررسی کنید."
 }
-systemctl stop nvlbot 2>/dev/null || true
-echo "   ✅ nvlbot روی این سرور متوقف شد — از این لحظه دیتابیس دیگر تغییر نمی‌کند."
+if ! systemctl is-active --quiet nvlbot; then
+    echo "❌ سرویس ربات روی Core فعلی فعال نیست؛ بدون تغییر متوقف می‌شویم."
+    exit 1
+fi
+if ! systemctl stop nvlbot || systemctl is-active --quiet nvlbot; then
+    echo "❌ توقف کامل nvlbot تأیید نشد؛ گرفتن بکاپ و ادامه Promote ممنوع است."
+    exit 1
+fi
+echo "   ✅ توقف nvlbot تأیید شد — اکنون بکاپ نهایی دیتابیس امن است."
 
 echo "🔹 ۴) جمع‌آوریِ فایل‌های مهاجرت از خودِ همین Core..."
 mkdir -p "$EXPORT_DIR"
@@ -357,6 +364,11 @@ if ! systemctl stop wg-quick@wg0; then
     exit 1
 fi
 SOURCE_WG_STOPPED=1
+if wg show wg0 >/dev/null 2>&1; then
+    echo "❌ WireGuard Core قبلی هنوز هویت فعال دارد؛ برای جلوگیری از دو Core ادامه نمی‌دهیم."
+    rollback_start_nvlbot
+    exit 1
+fi
 echo "🔹 ۶) اجرای remote «promote_edge_to_core.sh» روی Edge — با OLD_CORE_IP خودکار=${SELF_IP}..."
 ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
     "OLD_CORE_IP='${SELF_IP}' bash ${REMOTE_MIGRATION_DIR}/promote_edge_to_core.sh '${CUSTOMER_SSH_PORT}' '${REMOTE_MIGRATION_DIR}'"

@@ -13237,9 +13237,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ فرمت IP درست نیست (مثال: 104.194.134.158). دوباره بفرستید:")
             return
         pool = await asyncio.to_thread(_db_get_host_pool)
-        if any(row[0] == ip for row in pool):
+        existing_peer = False
+        with contextlib.suppress(OSError):
+            with open(WG_CONF_PATH, encoding="utf-8") as wg_file:
+                existing_peer = f"# edge-{ip.replace('.', '-')}" in wg_file.read()
+        if any(row[0] == ip for row in pool) or existing_peer:
             await update.message.reply_text(
-                "⛔️ این IP قبلاً ثبت شده؛ ابتدا رکورد و Peer قدیمی را بررسی کنید. نصب تکراری مجاز نیست."
+                "⛔️ این Edge در استخر یا WireGuard قبلاً ثبت شده است. "
+                "قبل از نصب مجدد، وضعیت و Peer قبلی را بررسی کنید."
             )
             safe_clear_context(context)
             return

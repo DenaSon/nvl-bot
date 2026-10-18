@@ -128,8 +128,21 @@ if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
 else
     iptables -C INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport 22 -j ACCEPT
 fi
-if ! grep -qE "^Port ${CUSTOMER_SSH_PORT}\$" /etc/ssh/sshd_config; then
-    echo "Port ${CUSTOMER_SSH_PORT}" >> /etc/ssh/sshd_config
+# Ubuntu often leaves '#Port 22' commented. Adding a customer Port then
+# suppresses the implicit SSH management port and breaks subsequent Demote.
+if ! grep -qE '^[[:space:]]*Port[[:space:]]+22([[:space:]]|$)' /etc/ssh/sshd_config; then
+    printf '\nPort 22\n' >> /etc/ssh/sshd_config
+fi
+if ! grep -qE "^[[:space:]]*Port[[:space:]]+${CUSTOMER_SSH_PORT}([[:space:]]|$)" /etc/ssh/sshd_config; then
+    printf '\nPort %s\n' "${CUSTOMER_SSH_PORT}" >> /etc/ssh/sshd_config
+fi
+if ! sshd -t; then
+    echo "❌ تنظیمات SSH جدید معتبر نیست؛ قبل از ری‌استارت متوقف شد."
+    exit 1
+fi
+if ! sshd -T | awk '$1 == "port" && $2 == "22" {found=1} END {exit !found}'; then
+    echo "❌ پورت مدیریتی ۲۲ در تنظیمات مؤثر SSH نیست؛ Promote متوقف شد."
+    exit 1
 fi
 mkdir -p /run/sshd
 chmod 0755 /run/sshd
@@ -644,6 +657,21 @@ sleep 5
 systemctl is-active --quiet nvlbot ||
     { echo "❌ nvlbot روی Core جدید پایدار نشد."; journalctl -u nvlbot -n 30 --no-pager; exit 1; }
 test -s "$BOT_DIR/master_bot.db" || { echo "❌ دیتابیس روی Core جدید پیدا نشد."; exit 1; }
+if [ "$(sqlite3 -readonly "$BOT_DIR/master_bot.db" 'PRAGMA quick_check;' 2>/dev/null)" != "ok" ]; then
+    echo "❌ دیتابیس انتقال‌یافته از نظر SQLite سالم نیست."
+    exit 1
+fi
+# Demote runs next on the original Core and needs this management listener.
+if ! ss -H -lnt | awk '$4 ~ /:22$/ {found=1} END {exit !found}'; then
+    echo "❌ پورت مدیریتی ۲۲ روی Core جدید LISTEN نیست؛ Demote امن نیست."
+    exit 1
+fi
+if [ "$(wg show wg0 public-key 2>/dev/null)" != "$(wg pubkey < "${MIGRATION_DIR}/core_private.key")" ]; then
+    echo "❌ هویت WireGuard Core جدید مطابق کلید مهاجرت نیست."
+    exit 1
+fi
+echo "PROMOTE_POSTCHECK_OK: bot, SQLite, Core WG identity and SSH management:22"
+
 PROMOTE_SUCCESS=1
 echo "✅ ترفیع این سرور به Core کامل شد. دیتابیس و سرویس ربات بررسی شدند."
 echo "════════════════════════════════════════════════════════════"

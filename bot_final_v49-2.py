@@ -14600,6 +14600,82 @@ async def _host_has_working_persistent_key(host, port=22, timeout=8):
     return await asyncio.to_thread(_sync)
 
 
+async def _legacy_edge_promotion_ready(host, expected_customer_port=None):
+    """Read-only readiness: Core WG evidence, remote Edge role, NAT and SSH."""
+    from ipaddress import IPv4Address
+    try:
+        addr = IPv4Address(str(host))
+        if not addr.is_global or str(addr) != host:
+            return False, "IP مقصد عمومی و معتبر نیست."
+    except ValueError:
+        return False, "IP مقصد معتبر نیست."
+    core_ip = await asyncio.to_thread(_get_core_public_ip_cached)
+    if not core_ip or host == core_ip:
+        return False, "سرور مقصد باید یک Edge و متفاوت از Core فعلی باشد."
+    pool = await asyncio.to_thread(_db_get_host_pool)
+    row = next((entry for entry in pool if entry[0] == host), None)
+    if not row or not row[1]:
+        return False, "Edge در استخر فعال ثبت نشده است."
+    mode = await asyncio.to_thread(
+        _db_get_setting, PROTECTED_SETTING_KEY, PROTECTED_SETTING_DEFAULT)
+    if not legacy_new_edge_gate(mode).allowed or await asyncio.to_thread(any_protected_bindings, db_conn):
+        return False, "این مسیر Legacy با Egress محافظت‌شده ترکیب نمی‌شود."
+    service_port = await asyncio.to_thread(_db_get_host_service_port, host)
+    if expected_customer_port is not None and int(expected_customer_port) != service_port:
+        return False, f"پورت مشتری باید با پورت ثبت‌شده Edge ({service_port}) برابر باشد."
+    wg = await asyncio.to_thread(_probe_wireguard_edge_sync, host)
+    if wg.get("wg_peer_ok") is not True or wg.get("core_path_ok") is not True:
+        return False, "WireGuard یا مسیر داخل تونل از Core به Edge تأیید نشد."
+    _, core_pub = await asyncio.to_thread(_get_core_wg_identity)
+    admin_port = await asyncio.to_thread(_db_get_host_admin_ssh_port, host, 22)
+    if not core_pub or not os.path.isfile(DO_SSH_KEY_PATH) or paramiko is None:
+        return False, "کلید WireGuard یا SSH مدیریتی موجود نیست."
+
+    def _remote_readonly():
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            pkey = paramiko.Ed25519Key.from_private_key_file(DO_SSH_KEY_PATH)
+            ssh.connect(host, port=admin_port, username="root", pkey=pkey,
+                        timeout=9, banner_timeout=9, look_for_keys=False, allow_agent=False)
+            cmd = (
+                "set -e; systemctl is-active --quiet wg-quick@wg0; "
+                "if systemctl is-active --quiet nvlbot; then exit 42; fi; "
+                "wg show wg0 public-key; wg show wg0 peers; "
+                "ip -4 -o addr show dev wg0; "
+                "iptables -t nat -S PREROUTING"
+            )
+            _, stdout, _ = ssh.exec_command(cmd, timeout=12)
+            output = stdout.read().decode(errors="replace")
+            code = stdout.channel.recv_exit_status()
+            return code, output
+        finally:
+            ssh.close()
+
+    try:
+        code, output = await asyncio.to_thread(_remote_readonly)
+    except Exception:
+        return False, "اتصال SSH مدیریتی Edge با کلید دائمی یا بررسی تنظیمات مقصد شکست خورد."
+    if code != 0:
+        return False, "WireGuard مقصد فعال نیست یا سرویس ربات از قبل روی مقصد اجرا می‌شود."
+    lines = output.splitlines()
+    if len(lines) < 3 or lines[0] == core_pub or core_pub not in lines[1].split():
+        return False, "هویت WireGuard مقصد با نقش Edge سازگار نیست."
+    if "10.77.0.1/24" in output or " wg0 " not in output:
+        return False, "آدرس داخلی WireGuard مقصد معتبر نیست."
+    if not any(
+        "--dport " + str(service_port) in line
+        and "--to-destination 10.77.0.1:" + str(service_port) in line
+        and "-j DNAT" in line
+        for line in lines
+    ):
+        return False, "قانون NAT پورت مشتری از Edge به Core وجود ندارد."
+    return True, (
+        f"Edge آماده است: WG و دسترسی مدیریتی سالم، "
+        f"رله پورت {service_port} ثبت و Core مقصد هنوز فعال نشده است."
+    )
+
+
 async def _render_server_status_panel(query, context):
     """رندر پنل وضعیت و نقش سرورها (Core/Edge)"""
     core_ip = await asyncio.to_thread(_get_core_public_ip_cached)
@@ -14656,6 +14732,7 @@ async def _render_server_status_panel(query, context):
                 btn_row1 = [InlineKeyboardButton("🎯 تنظیم به عنوان رله فعال", callback_data=f"srv_mkactive_{host}")]
 
             btn_row2 = [
+                InlineKeyboardButton("🔎 آمادگی ارتقا", callback_data=f"srv_ready_{host}"),
                 InlineKeyboardButton("🚀 ارتقا به Core", callback_data=f"srv_promote_{host}"),
                 InlineKeyboardButton("🔄 آپدیت Endpoint", callback_data=f"srv_update_ep_{host}"),
                 InlineKeyboardButton("⚡ بهینه‌سازی سرعت", callback_data=f"srv_optimize_{host}")
@@ -21344,8 +21421,32 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🚀 بهینه‌سازی <code>{target_ip}:{esc(default_port)}</code>\n\n🔑 لطفاً <b>رمز روت</b> سرور مقصد را بفرستید:",
             parse_mode="HTML")
 
+    elif d.startswith("srv_ready_") and role == 'admin':
+        target_ip = d[len("srv_ready_"):]
+        ready, detail = await _legacy_edge_promotion_ready(target_ip)
+        kb = [[InlineKeyboardButton(
+            "🚀 ادامه تبدیل به Core", callback_data=f"srv_promote_{target_ip}")]] if ready else []
+        kb.append([InlineKeyboardButton("🔙 وضعیت سرورها", callback_data="srv_status")])
+        await query.edit_message_text(
+            ("✅ <b>آماده ارتقا</b>\\n" if ready else "⛔️ <b>آماده نیست</b>\\n")
+            + f"<code>{esc(target_ip)}</code>\\n{esc(detail)}",
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+        return
+
     elif d.startswith("srv_promote_") and d != "srv_promote_confirm" and role == 'admin':
-        target_ip = d.replace("srv_promote_", "")
+        target_ip = d[len("srv_promote_"):]
+        ready, detail = await _legacy_edge_promotion_ready(target_ip)
+        if not ready:
+            await query.edit_message_text(
+                f"⛔️ <b>Promote مسدود شد.</b>\\n<code>{esc(target_ip)}</code>\\n{esc(detail)}",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 بررسی مجدد", callback_data=f"srv_ready_{target_ip}")],
+                    [InlineKeyboardButton("🔙 سرورها", callback_data="srv_status")],
+                ]))
+            return
+        # This candidate has passed read-only readiness; check again before the
+        # destructive handoff, as it can change while an operator reads screens.
         context.user_data['srv_target_ip'] = target_ip
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ بله، شروع ویزارد ارتقا", callback_data="srv_wiz_promote_start")],
@@ -21502,6 +21603,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 or not (23 <= int(cust_port) <= 65535)):
             safe_clear_context(context)
             await query.edit_message_text("❌ تأییدیه مهاجرت معتبر نیست؛ دوباره شروع کنید.")
+            return
+        ready, detail = await _legacy_edge_promotion_ready(target_ip, int(cust_port))
+        if not ready:
+            await query.edit_message_text(
+                f"⛔️ شرایط امن Promote تغییر کرده است: {esc(detail)}. "
+                "هیچ مهاجرتی شروع نشد.", parse_mode="HTML")
             return
         if not all(os.path.isfile(p) for p in (
                 '/root/core_side_failover.sh', '/root/promote_edge_to_core.sh',

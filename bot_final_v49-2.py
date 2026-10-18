@@ -21304,7 +21304,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🚀 بهینه‌سازی <code>{target_ip}:{esc(default_port)}</code>\n\n🔑 لطفاً <b>رمز روت</b> سرور مقصد را بفرستید:",
             parse_mode="HTML")
 
-    elif d.startswith("srv_promote_") and role == 'admin':
+    elif d.startswith("srv_promote_") and d != "srv_promote_confirm" and role == 'admin':
         target_ip = d.replace("srv_promote_", "")
         context.user_data['srv_target_ip'] = target_ip
         kb = InlineKeyboardMarkup([

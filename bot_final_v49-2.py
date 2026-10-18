@@ -21479,7 +21479,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 command = (
                     f"set -o pipefail; {{ bash /root/core_side_failover.sh {target_ip} {cust_port} "
                     f"&& bash /root/demote_core_to_edge.sh {target_ip} {cust_port}; }} "
-                    "> /root/failover_migration.log 2>&1"
+                    ">> /root/failover_migration.log 2>&1"
                 )
                 ok, detail, kind = await run_cmd(
                     'sudo', 'systemd-run', f'--unit=failover-job-{int(time.time() * 1000)}',

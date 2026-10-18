@@ -354,7 +354,24 @@ else
     exit 1
 fi
 
+# Restore source Core's private runtime BEFORE starting the destination bot.
+# Archives are prepared on the trusted source Core; never print env contents.
+if [ -f "${MIGRATION_DIR}/nvlbot_etc.tar.gz" ]; then
+    tar -xzf "${MIGRATION_DIR}/nvlbot_etc.tar.gz" -C /etc ||
+        { echo "❌ بازگردانی /etc/nvlbot شکست خورد."; exit 1; }
+    if [ -f /etc/nvlbot/nvlbot.env ]; then chmod 600 /etc/nvlbot/nvlbot.env; fi
+fi
+if [ -f "${MIGRATION_DIR}/nvlbot_dropins.tar.gz" ]; then
+    tar -xzf "${MIGRATION_DIR}/nvlbot_dropins.tar.gz" -C /etc/systemd/system ||
+        { echo "❌ بازگردانی drop-in سرویس ربات شکست خورد."; exit 1; }
+fi
 systemctl daemon-reload
+# Fail before account migration if a required systemd EnvironmentFile is absent.
+REQUIRED_ENV_FILE="$(systemctl show nvlbot -p EnvironmentFiles --value 2>/dev/null | awk '{print $1}')"
+if [ -n "$REQUIRED_ENV_FILE" ] && [ ! -f "$REQUIRED_ENV_FILE" ]; then
+    echo "❌ فایل EnvironmentFile الزامی روی Core جدید موجود نیست: ${REQUIRED_ENV_FILE}"
+    exit 1
+fi
 
 echo "🔹 ۱۲) بازسازیِ کاربرهای لینوکسی..."
 RECREATE_SCRIPT="${BOT_DIR}/02_recreate_ssh_users.py"

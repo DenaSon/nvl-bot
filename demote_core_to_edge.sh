@@ -20,7 +20,8 @@ if (( PREPARE )); then
   "${SSH[@]}" "systemctl is-active --quiet wg-quick@wg0" || fail "target Edge WG inactive"
   mkdir -p "$STATE"
   chmod 700 "$STATE"
-  "${SSH[@]}" "awk -F= '/^PrivateKey/{gsub(/[[:space:]]/,\"\",\$2);print \$2;exit}' /etc/wireguard/wg0.conf" > "$STATE/private"
+  # Strip only the assignment prefix: '=' padding belongs to the WG key.
+  "${SSH[@]}" "awk '/^[[:space:]]*PrivateKey[[:space:]]*=/{sub(/^[^=]*=/,\"\");gsub(/[[:space:]]/,\"\");print;exit}' /etc/wireguard/wg0.conf" > "$STATE/private"
   [[ -s "$STATE/private" ]] || fail "target Edge key missing"
   pub=$(wg pubkey < "$STATE/private") || fail "invalid target Edge key"
   remote_pub=$("${SSH[@]}" "wg show wg0 public-key") || fail "cannot read target WG key"

@@ -9,20 +9,36 @@ set -euo pipefail
 
 PROMOTE_SUCCESS=0
 OLD_CORE_STOPPED_BY_US=0
+TARGET_ROLE_CHANGED=0
 rollback_on_failure() {
-    if [ "$PROMOTE_SUCCESS" != "1" ] && [ "$OLD_CORE_STOPPED_BY_US" = "1" ] && [ -n "${OLD_CORE_IP:-}" ]; then
+    local failure_rc=$?
+    [ "$PROMOTE_SUCCESS" = "1" ] && return "$failure_rc"
+    if [ "$TARGET_ROLE_CHANGED" = "1" ]; then
+        # The source wrapper normally stopped the old Core. Even in that flow,
+        # a failed postcheck must stop our new bot/WG identity before it returns.
+        echo "⚠️ ارتقا کامل نشد؛ نقش ناقص Core روی مقصد متوقف می‌شود."
+        systemctl disable --now nvlbot >/dev/null 2>&1 || true
+        systemctl disable --now wg-quick@wg0 >/dev/null 2>&1 || true
+        if systemctl is-active --quiet nvlbot || systemctl is-active --quiet wg-quick@wg0 \
+                || wg show wg0 >/dev/null 2>&1; then
+            echo "❌ خاموش‌بودن کامل مقصد تأیید نشد؛ بازگشت Core قبلی نیازمند بررسی است."
+            return "$failure_rc"
+        fi
+    fi
+    if [ "$OLD_CORE_STOPPED_BY_US" = "1" ] && [ -n "${OLD_CORE_IP:-}" ]; then
         echo ""
         echo "⚠️⚠️⚠️ Promote ناتمام ماند — تلاش برای روشن‌کردنِ دوبارهٔ ربات روی Core قدیمی..."
         for p in 22 "${CUSTOMER_SSH_PORT:-22}"; do
             if ssh -i /root/.ssh/edge_provision_ed25519 -p "$p" -o ConnectTimeout=6 -o BatchMode=yes \
                     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "root@${OLD_CORE_IP}" \
-                    "systemctl start nvlbot" 2>/dev/null; then
+                    "systemctl start wg-quick@wg0 && systemctl start nvlbot" 2>/dev/null; then
                 echo "   ✅ ربات روی Core قدیمی (${OLD_CORE_IP}) دوباره روشن شد."
-                return
+                return "$failure_rc"
             fi
         done
         echo "   ❌ نتوانستیم خودکار دوباره روشنش کنیم — فوراً دستی بزنید: ssh root@${OLD_CORE_IP} systemctl start nvlbot"
     fi
+    return "$failure_rc"
 }
 trap rollback_on_failure EXIT
 
@@ -66,6 +82,7 @@ if [ -f "${MIGRATION_DIR}/root_full_snapshot.tar.gz" ]; then
 fi
 
 echo "🔹 ۱) توقف نقش قبلیِ Edge..."
+TARGET_ROLE_CHANGED=1
 systemctl stop wg-quick@wg0 >/dev/null 2>&1 || true
 systemctl stop gost >/dev/null 2>&1 || true
 iptables -t nat -F PREROUTING 2>/dev/null || true
@@ -142,7 +159,9 @@ if ! sshd -t; then
     echo "❌ تنظیمات SSH جدید معتبر نیست؛ قبل از ری‌استارت متوقف شد."
     exit 1
 fi
-if ! sshd -T | awk '$1 == "port" && $2 == "22" {found=1} END {exit !found}'; then
+# Existing Edge hardening uses Match LocalPort, which needs connection context.
+if ! sshd -T -C 'user=root,host=localhost,addr=127.0.0.1,laddr=127.0.0.1,lport=22' \
+        | awk '$1 == "port" && $2 == "22" {found=1} END {exit !found}'; then
     echo "❌ پورت مدیریتی ۲۲ در تنظیمات مؤثر SSH نیست؛ Promote متوقف شد."
     exit 1
 fi

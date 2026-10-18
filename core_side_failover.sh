@@ -159,7 +159,7 @@ rollback_start_nvlbot() {
         # The promoted target may already have the same WG private key even
         # though its bot is down. Disable it before restoring the source.
         if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
-                "systemctl disable --now nvlbot >/dev/null 2>&1 || true; systemctl disable --now wg-quick@wg0 >/dev/null 2>&1 || true; ! systemctl is-active --quiet nvlbot && ! systemctl is-active --quiet wg-quick@wg0"; then
+                "systemctl disable --now nvlbot >/dev/null 2>&1 || true; systemctl disable --now wg-quick@wg0 >/dev/null 2>&1 || true; ! systemctl is-active --quiet nvlbot && ! systemctl is-active --quiet wg-quick@wg0 && ! wg show wg0 >/dev/null 2>&1"; then
             echo "❌ نتوانستیم خاموش‌بودن WireGuard و ربات مقصد را تأیید کنیم؛ برای جلوگیری از دو Core، رول‌بک خودکار متوقف شد."
             return 1
         fi
@@ -174,6 +174,10 @@ if ! systemctl is-active --quiet nvlbot; then
 fi
 if ! systemctl stop nvlbot || systemctl is-active --quiet nvlbot; then
     echo "❌ توقف کامل nvlbot تأیید نشد؛ گرفتن بکاپ و ادامه Promote ممنوع است."
+    # A failed ExecStop/timeout may still have terminated the bot process.
+    if ! systemctl is-active --quiet nvlbot; then
+        rollback_start_nvlbot
+    fi
     exit 1
 fi
 echo "   ✅ توقف nvlbot تأیید شد — اکنون بکاپ نهایی دیتابیس امن است."

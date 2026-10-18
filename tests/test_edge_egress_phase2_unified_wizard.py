@@ -147,6 +147,8 @@ class IntegratedWizardFunctionTests(unittest.TestCase):
             "_db_add_host_pool":lambda host:events.append(("pool",host)),
             "_db_update_setting":lambda *args:events.append(("setting_write",args)),
             "_db_set_host_active":lambda *args:events.append(("pool_active",args)),
+            "_db_set_host_service_port":lambda host, port:events.append(("service_port",port)),
+            "_db_set_host_admin_ssh_port":lambda host, port:events.append(("admin_port",port)),
             "_db_set_host_provider_meta":lambda *args:None,
             "_get_core_public_ip_cached":lambda:"209.200.246.198",
             "record_ingress_candidate":lambda *args:events.append(("candidate",)),

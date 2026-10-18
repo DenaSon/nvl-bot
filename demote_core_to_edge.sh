@@ -8,7 +8,7 @@ fail() { echo "ERROR: $*" >&2; exit 1; }
 PREPARE=0
 if [[ "$1" == "--prepare" ]]; then PREPARE=1; shift; fi
 [[ $# -ge 2 && $# -le 3 ]] || fail "Usage: [--prepare] IP CUSTOMER_PORT [ADMIN_PORT]"
-NEW_IP="$1"; CUSTOMER_PORT="$2"; ADMIN_PORT="${3:-22}"
+NEW_IP="$1"; CUSTOMER_PORT="$2"; ADMIN_PORT="${3:-$(cat "$STATE/port" 2>/dev/null || echo 22)}"
 [[ "$NEW_IP" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || fail "invalid IP"
 [[ "$CUSTOMER_PORT" =~ ^[0-9]+$ ]] && (( CUSTOMER_PORT > 22 && CUSTOMER_PORT <= 65535 )) || fail "invalid customer port"
 [[ "$ADMIN_PORT" =~ ^[0-9]+$ ]] && (( ADMIN_PORT > 0 && ADMIN_PORT <= 65535 )) || fail "invalid admin port"
@@ -81,3 +81,9 @@ command -v netfilter-persistent >/dev/null || fail "NAT live but persistence pac
 netfilter-persistent save >/dev/null
 rm -rf "$STATE"
 echo "DEMOTE_OK: old Core became a WireGuard/DNAT relay; bot disabled"
+echo "ENDPOINT_SYNC: updating existing Edge endpoints from new Core"
+if ! "${SSH[@]}" "bash /root/update_all_edges_endpoint.sh '$NEW_IP'"; then
+  echo "PARTIAL: Core migrated and old Core demoted, but some Edge endpoints need repair" >&2
+  exit 2
+fi
+echo "MIGRATION_COMPLETE: new Core and all reachable Edge endpoints updated"

@@ -17,8 +17,10 @@ class TelegramCoreMigrationTests(unittest.TestCase):
         cls.edge = (ROOT / "setup_edge_relay.sh").read_text(encoding="utf-8")
 
     def test_legacy_edge_installer_never_uses_customer_port_as_management(self):
-        self.assertIn("candidate_ports = [22]", self.bot)
-        self.assertNotIn("candidate_ports = [22] +", self.bot)
+        installer = self.bot.split("def _provision_new_edge_sync(")[1].split(
+            "async def _provision_new_edge(")[0]
+        self.assertIn("candidate_ports = [22]", installer)
+        self.assertNotIn("candidate_ports = [22] +", installer)
         self.assertIn("await asyncio.to_thread(_db_set_host_admin_ssh_port, edge_ip, 22)", self.bot)
         self.assertIn("await asyncio.to_thread(_db_set_host_service_port, edge_ip, int(customer_port))", self.bot)
 

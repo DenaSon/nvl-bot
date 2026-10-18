@@ -129,8 +129,9 @@ if ! rsync -az -e "ssh -i ${EDGE_SSH_KEY} -p ${EDGE_PORT} -o BatchMode=yes -o St
     exit 1
 fi
 # --clear is intentional: standby virtualenv copies are not portable between VPSes.
+# Install compiler/headers here: pip may need source builds before Core downtime.
 if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
-    'set -e; apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv python3-pip iptables-persistent >/dev/null; python3 -m venv --clear /root/venv; /root/venv/bin/python3 -m pip --version; /root/venv/bin/python3 -m pip install -q -r /root/nvlbot_standby/requirements.txt; /root/venv/bin/python3 -m py_compile /root/nvlbot_standby/bot_final_v49-2.py /root/nvlbot_standby/02_recreate_ssh_users.py; echo bot_final_v49-2.py > /root/nvlbot_standby/.nvl_promotion_main'; then
+    'set -e; apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv python3-pip python3-dev build-essential iptables-persistent >/dev/null; python3 -m venv --clear /root/venv; /root/venv/bin/python3 -m pip --version; /root/venv/bin/python3 -m pip install -q -r /root/nvlbot_standby/requirements.txt; /root/venv/bin/python3 -m py_compile /root/nvlbot_standby/bot_final_v49-2.py /root/nvlbot_standby/02_recreate_ssh_users.py; echo bot_final_v49-2.py > /root/nvlbot_standby/.nvl_promotion_main'; then
     echo "❌ Python/PIP/requirements روی مقصد آماده نشد. Core اصلی همچنان فعال است."
     exit 1
 fi

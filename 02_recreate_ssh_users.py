@@ -113,6 +113,8 @@ def main():
     print(f"\n=== خلاصه: {created} ساخته شد، {synced} sync شد (از قبل بود)، {failed} خطا ===")
     if not args.dry_run:
         print("\nبرای تست یه اکانت رو با ssh وصل شو و مطمئن شو لاگین کار می‌کنه.")
+        if failed:
+            raise SystemExit(1)  # A partial account rebuild is not a successful Core migration.
 
 
 # 🐛🔧 رفع باگِ واقعی: قبلاً اینجا نوشته شده بود «if name == "main":» — چون نه «name» و

@@ -326,55 +326,42 @@ fi
 
 echo "🔹 ۱۱) استقرارِ کدِ ربات..."
 STANDBY_DIR="/root/nvlbot_standby"
-if [ ! -d "$STANDBY_DIR" ] || [ -z "$(ls -A "$STANDBY_DIR" 2>/dev/null)" ]; then
-    if [ -n "${OLD_CORE_IP:-}" ]; then
-        mkdir -p "$STANDBY_DIR"
-        for p in "${CUSTOMER_SSH_PORT}" 22; do
-            rsync -az -e "ssh -i /root/.ssh/edge_provision_ed25519 -p ${p} -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes" \
-                "root@${OLD_CORE_IP}:/root/bot_final_*.py" \
-                "root@${OLD_CORE_IP}:/root/requirements.txt" \
-                "root@${OLD_CORE_IP}:/root/venv" \
-                "root@${OLD_CORE_IP}:/root/nvlbot.service" "$STANDBY_DIR/" 2>/dev/null || true
-        done
-        [ -f "${STANDBY_DIR}/nvlbot.service" ] && mv -f "${STANDBY_DIR}/nvlbot.service" "${STANDBY_DIR}/nvlbot.service.staged"
-    fi
-fi
-STAGED_MAIN=$(find "$STANDBY_DIR" -maxdepth 1 -name 'bot_final_*.py' | head -n1)
-if [ -z "$STAGED_MAIN" ]; then exit 1; fi
-STAGED_MAIN_NAME=$(basename "$STAGED_MAIN")
-
+# The source Core preflight has already staged this exact file and installed pip.
+MAIN_MARKER="$STANDBY_DIR/.nvl_promotion_main"
+[ -f "$MAIN_MARKER" ] || { echo "❌ Preflight marker missing; refusing promotion."; exit 1; }
+STAGED_MAIN_NAME="$(cat "$MAIN_MARKER")"
+[ "$STAGED_MAIN_NAME" = "bot_final_v49-2.py" ] ||
+    { echo "❌ Unexpected staged bot script: $STAGED_MAIN_NAME"; exit 1; }
+[ -s "$STANDBY_DIR/$STAGED_MAIN_NAME" ] ||
+    { echo "❌ The selected bot script was not staged."; exit 1; }
+[ -s "$STANDBY_DIR/requirements.txt" ] ||
+    { echo "❌ requirements.txt was not staged."; exit 1; }
+[ -x "$BOT_DIR/venv/bin/python3" ] &&
+    "$BOT_DIR/venv/bin/python3" -m pip --version >/dev/null ||
+    { echo "❌ Missing pip in destination venv; preflight failed."; exit 1; }
+"$BOT_DIR/venv/bin/python3" -m py_compile "$STANDBY_DIR/$STAGED_MAIN_NAME"
 systemctl stop nvlbot 2>/dev/null || true
-cp "$STAGED_MAIN" "${BOT_DIR}/${STAGED_MAIN_NAME}"
-[ -f "${STANDBY_DIR}/requirements.txt" ] && cp "${STANDBY_DIR}/requirements.txt" "${BOT_DIR}/requirements.txt"
+cp "$STANDBY_DIR/$STAGED_MAIN_NAME" "$BOT_DIR/$STAGED_MAIN_NAME"
+cp "$STANDBY_DIR/requirements.txt" "$BOT_DIR/requirements.txt"
 
-if [ -d "${STANDBY_DIR}/venv" ]; then
-    cp -r "${STANDBY_DIR}/venv" "${BOT_DIR}/venv"
-elif [ ! -d "${BOT_DIR}/venv" ]; then
-    python3 -m venv "${BOT_DIR}/venv"
-fi
-
-if [ -f "${BOT_DIR}/requirements.txt" ]; then
-    "${BOT_DIR}/venv/bin/pip" install -q -r "${BOT_DIR}/requirements.txt"
-fi
-
-if [ -f "${STANDBY_DIR}/nvlbot.service.staged" ]; then
-    sed -E "s#(ExecStart=.*)bot_final_[^ ]+\.py#\1${STAGED_MAIN_NAME}#" "${STANDBY_DIR}/nvlbot.service.staged" > /etc/systemd/system/nvlbot.service
-elif [ -f "${MIGRATION_DIR}/nvlbot.service" ]; then
-    cp "${MIGRATION_DIR}/nvlbot.service" /etc/systemd/system/nvlbot.service
-elif [ -f "${MIGRATION_DIR}/custom_systemd_units/nvlbot.service" ]; then
-    cp "${MIGRATION_DIR}/custom_systemd_units/nvlbot.service" /etc/systemd/system/nvlbot.service
+# Always prefer the service unit collected from the live Core during THIS run.
+if [ -s "${MIGRATION_DIR}/nvlbot.service" ]; then
+    sed -E "s#bot_final_[^ ]+\\.py#${STAGED_MAIN_NAME}#g" "${MIGRATION_DIR}/nvlbot.service" > /etc/systemd/system/nvlbot.service
+elif [ -s "${STANDBY_DIR}/nvlbot.service.staged" ]; then
+    sed -E "s#bot_final_[^ ]+\\.py#${STAGED_MAIN_NAME}#g" "${STANDBY_DIR}/nvlbot.service.staged" > /etc/systemd/system/nvlbot.service
+else
+    echo "❌ nvlbot.service از Core قبلی منتقل نشده است."
+    exit 1
 fi
 
 systemctl daemon-reload
-systemctl enable --now nvlbot
-sleep 2
 
 echo "🔹 ۱۲) بازسازیِ کاربرهای لینوکسی..."
 RECREATE_SCRIPT="${BOT_DIR}/02_recreate_ssh_users.py"
 if [ -f "$RECREATE_SCRIPT" ]; then
     PYBIN="${BOT_DIR}/venv/bin/python3"
     [ -x "$PYBIN" ] || PYBIN="python3"
-    "$PYBIN" "$RECREATE_SCRIPT" >/dev/null 2>&1 || true
+    "$PYBIN" "$RECREATE_SCRIPT" || { echo "❌ بازسازی کاربران SSH شکست خورد."; exit 1; }
 fi
 
 echo "🔹 ۱۳) نصب تایمرِ nvl-edge-sync..."
@@ -633,6 +620,13 @@ echo "   ✅ لیمیتر پیشرفته با موفقیت روشن شد."
 
 echo ""
 echo "════════════════════════════════════════════════════════════"
+# Cutover completion is not merely successful dependency installation.
+echo "🔹 ۱۷) شروع ربات و تأیید اجرای واقعی روی Core جدید..."
+systemctl enable --now nvlbot
+sleep 5
+systemctl is-active --quiet nvlbot ||
+    { echo "❌ nvlbot روی Core جدید پایدار نشد."; journalctl -u nvlbot -n 30 --no-pager; exit 1; }
+test -s "$BOT_DIR/master_bot.db" || { echo "❌ دیتابیس روی Core جدید پیدا نشد."; exit 1; }
 PROMOTE_SUCCESS=1
-echo "✅ ترفیعِ این سرور به Core کامل شد (نسخه طلایی NVL)."
+echo "✅ ترفیع این سرور به Core کامل شد. دیتابیس و سرویس ربات بررسی شدند."
 echo "════════════════════════════════════════════════════════════"

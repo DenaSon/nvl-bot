@@ -32,6 +32,11 @@ fi
 
 TARGET_EDGE="$1"
 CUSTOMER_SSH_PORT="$2"
+SOURCE_WG_STOPPED=0
+# Serialize Telegram-triggered migrations, including their source DB freeze.
+command -v flock >/dev/null 2>&1 || { echo "❌ flock نصب نیست."; exit 1; }
+exec 9>/run/nvl-core-migration.lock
+flock -n 9 || { echo "❌ مهاجرت Core دیگری در حال اجراست."; exit 1; }
 
 BOT_DIR="${BOT_DIR_OVERRIDE:-/root}"
 DB_PATH="${BOT_DIR}/master_bot.db"
@@ -88,6 +93,50 @@ fi
 SSH_OPTS=(-i "$EDGE_SSH_KEY" -p "$EDGE_PORT" -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 echo "   ✅ اتصال مدیریتی روی پورت ${EDGE_PORT} برقرار شد."
 
+# All fallible Python preparation happens while the original Core remains live.
+# The chosen bot is pinned to the live service's script, never a random standby file.
+if [ ! -x /root/demote_core_to_edge.sh ] && [ ! -f /root/demote_core_to_edge.sh ]; then
+    echo "❌ اسکریپت demote_core_to_edge.sh نصب نیست؛ Core را متوقف نمی‌کنیم."
+    exit 1
+fi
+if ! command -v netfilter-persistent >/dev/null 2>&1; then
+    echo "❌ netfilter-persistent روی Core اصلی نیست؛ رله بعد از انتقال پایدار نمی‌ماند."
+    exit 1
+fi
+if [ ! -f /root/02_recreate_ssh_users.py ]; then
+    echo "❌ ابزار بازسازی کاربران روی Core موجود نیست؛ انتقال مسدود است."
+    exit 1
+fi
+if [ ! -f /root/requirements.txt ] || [ ! -f /root/bot_final_v49-2.py ]; then
+    echo "❌ کد اصلی یا requirements.txt روی Core فعلی پیدا نشد."
+    exit 1
+fi
+if [ ! -f /root/update_all_edges_endpoint.sh ] || [ ! -f /root/update_edge_endpoint.sh ]; then
+    echo "❌ اسکریپت‌های انتقال Endpoint به سایر Edgeها ناقص هستند."
+    exit 1
+fi
+echo "🔹 ۲.۵) بررسی نقش واقعی مقصد و نگه‌داری موقت هویت Edge قبلی..."
+if ! bash /root/demote_core_to_edge.sh --prepare "$TARGET_EDGE" "$CUSTOMER_SSH_PORT" "$EDGE_PORT"; then
+    echo "❌ مقصد Edge معتبر نیست. Core فعلی بدون تغییر فعال می‌ماند."
+    exit 1
+fi
+echo "🔹 ۲.۶) انتقال نسخه دقیق ربات و آماده‌سازی Python روی مقصد قبل از قطع سرویس..."
+if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" "mkdir -p /root/nvlbot_standby"; then exit 1; fi
+if ! rsync -az -e "ssh -i ${EDGE_SSH_KEY} -p ${EDGE_PORT} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
+        /root/bot_final_v49-2.py /root/requirements.txt /root/02_recreate_ssh_users.py \
+        "root@${TARGET_EDGE}:/root/nvlbot_standby/"; then
+    echo "❌ انتقال فایل‌های ربات شکست خورد. Core متوقف نمی‌شود."
+    exit 1
+fi
+# --clear is intentional: standby virtualenv copies are not portable between VPSes.
+if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
+    'set -e; apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv python3-pip iptables-persistent >/dev/null; python3 -m venv --clear /root/venv; /root/venv/bin/python3 -m pip --version; /root/venv/bin/python3 -m pip install -q -r /root/nvlbot_standby/requirements.txt; /root/venv/bin/python3 -m py_compile /root/nvlbot_standby/bot_final_v49-2.py /root/nvlbot_standby/02_recreate_ssh_users.py; echo bot_final_v49-2.py > /root/nvlbot_standby/.nvl_promotion_main'; then
+    echo "❌ Python/PIP/requirements روی مقصد آماده نشد. Core اصلی همچنان فعال است."
+    exit 1
+fi
+echo "   ✅ Python و وابستگی‌ها قبل از توقف Core روی مقصد آماده شدند."
+
+
 echo "🔹 ۳) توقفِ nvlbot روی همین Core (قبل از بکاپِ نهاییِ دیتابیس، تا نوشته‌ای گم نشود)..."
 # 🐛🔧 رفع باگِ ریشه‌ایِ واقعی (دو مشکل با هم): ۱) promote_edge_to_core.sh (مرحلهٔ ۱۰، محافظِ
 # Split-Brain) از طریقِ SSH به OLD_CORE_IP وصل می‌شود و اگر ببیند nvlbot آنجا هنوز active است،
@@ -99,9 +148,25 @@ echo "🔹 ۳) توقفِ nvlbot روی همین Core (قبل از بکاپِ ن
 # یعنی بکاپ همیشه دقیقاً آخرین وضعیتِ واقعی است. اگر ادامهٔ کار (Promote روی Edge) به هر دلیلی
 # شکست بخورد، خودکار همین‌جا nvlbot را دوباره روشن می‌کنیم تا مشتری‌های همین سرور بی‌سرویس نمانند.
 rollback_start_nvlbot() {
-    echo "🔹 رول‌بک: nvlbot را همین‌جا (Core قدیمی) دوباره روشن می‌کنیم تا مشتری‌ها بی‌سرویس نمانند..."
+    # Split-brain guard: never revive the old bot if the target bot started.
+    if ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" "systemctl is-active --quiet nvlbot" 2>/dev/null; then
+        echo "⚠️ Core جدید nvlbot فعال دارد؛ برای جلوگیری از Split-Brain، ربات قدیمی را روشن نمی‌کنیم."
+        echo "   وضعیت انتقال ناقص است؛ فوراً لاگ هر دو سرور بررسی شود."
+        return 1
+    fi
+    echo "🔹 رول‌بک: بازگرداندن WireGuard و ربات روی Core قبلی..."
+    if [ "$SOURCE_WG_STOPPED" = 1 ]; then
+        # The promoted target may already have the same WG private key even
+        # though its bot is down. Disable it before restoring the source.
+        if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
+                "systemctl disable --now nvlbot >/dev/null 2>&1 || true; systemctl disable --now wg-quick@wg0 >/dev/null 2>&1 || true; ! systemctl is-active --quiet nvlbot && ! systemctl is-active --quiet wg-quick@wg0"; then
+            echo "❌ نتوانستیم خاموش‌بودن WireGuard و ربات مقصد را تأیید کنیم؛ برای جلوگیری از دو Core، رول‌بک خودکار متوقف شد."
+            return 1
+        fi
+    fi
+    systemctl start wg-quick@wg0 2>/dev/null || { echo "❌ WireGuard قدیمی شروع نشد."; return 1; }
     systemctl start nvlbot 2>/dev/null && echo "   ✅ nvlbot روی Core قدیمی دوباره فعال شد." \
-        || echo "   ❌ روشن‌کردنِ خودکارِ nvlbot هم شکست خورد — دستی چک کنید: systemctl status nvlbot"
+        || echo "   ❌ راه‌اندازی Core قبلی شکست خورد؛ systemctl status nvlbot را بررسی کنید."
 }
 systemctl stop nvlbot 2>/dev/null || true
 echo "   ✅ nvlbot روی این سرور متوقف شد — از این لحظه دیتابیس دیگر تغییر نمی‌کند."
@@ -130,8 +195,9 @@ echo "   ✅ کلید WireGuard + peers استخراج شد."
 if sqlite3 "$DB_PATH" ".backup '${EXPORT_DIR}/master_bot.db'" 2>/dev/null; then
     echo "   ✅ دیتابیس با sqlite3 .backup (کپیِ امن، بعد از توقفِ ربات) گرفته شد."
 else
-    cp "$DB_PATH" "${EXPORT_DIR}/master_bot.db"
-    echo "   ⚠️ sqlite3 .backup شکست خورد — با cp خام کپی شد."
+    echo "❌ کپی امن دیتابیس شکست خورد؛ مهاجرت متوقف می‌شود."
+    rollback_start_nvlbot
+    exit 1
 fi
 
 if [ -f /etc/gost/config.yaml ]; then
@@ -190,6 +256,7 @@ if [ -f "$BOT_PERSISTENCE_SRC" ]; then
     cp "$BOT_PERSISTENCE_SRC" "${EXPORT_DIR}/bot_persistence.pickle"
     echo "   ✅ bot_persistence.pickle کپی شد."
 fi
+cp /root/update_all_edges_endpoint.sh /root/update_edge_endpoint.sh "${EXPORT_DIR}/"
 if [ -f /etc/systemd/system/nvlbot.service ]; then
     cp /etc/systemd/system/nvlbot.service "${EXPORT_DIR}/nvlbot.service"
     echo "   ✅ فایل nvlbot.service کپی شد."
@@ -262,6 +329,14 @@ echo "   ✅ همه‌چیز روی ${TARGET_EDGE}:${REMOTE_MIGRATION_DIR} قر�
 # داده‌های حساس (کلید خصوصی، دیتابیس) روی خودِ Core دیگر لازم نیست بمانند
 rm -rf "$EXPORT_DIR"
 
+# Never allow the migrated Core WG private key to run concurrently on two VPSes.
+echo "🔹 ۵.۵) خاموش‌کردن WireGuard قدیمی درست پیش از فعال‌سازی Core جدید..."
+if ! systemctl stop wg-quick@wg0; then
+    echo "❌ توقف WireGuard قدیمی شکست خورد؛ مهاجرت لغو شد."
+    rollback_start_nvlbot
+    exit 1
+fi
+SOURCE_WG_STOPPED=1
 echo "🔹 ۶) اجرای remote «promote_edge_to_core.sh» روی Edge — با OLD_CORE_IP خودکار=${SELF_IP}..."
 ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
     "OLD_CORE_IP='${SELF_IP}' bash ${REMOTE_MIGRATION_DIR}/promote_edge_to_core.sh '${CUSTOMER_SSH_PORT}' '${REMOTE_MIGRATION_DIR}'"
@@ -277,8 +352,7 @@ echo "🔹 ۷) تأییدِ نهایی..."
 echo "   ✅ nvlbot روی این سرور (Core قدیمی) قبلاً (مرحلهٔ ۳) متوقف شده و همچنان متوقف می‌ماند."
 echo ""
 echo "════════════════════════════════════════════════════════════"
-echo "✅ Failover کامل شد — ${TARGET_EDGE}:${CUSTOMER_SSH_PORT} حالا Core جدید است."
-echo "   کارِ باقی‌مانده (هنوز خودکار نیست):"
-echo "   - روی هر Edge دیگر، Endpoint در wg0.conf را به ${TARGET_EDGE} تغییر دهید."
-echo "   - DNS/host_pool ربات را به ${TARGET_EDGE} به‌عنوان پیش‌فرض تنظیم کنید."
+echo "✅ Promote موفق شد: ${TARGET_EDGE}:${CUSTOMER_SSH_PORT} Core جدید است."
+echo "   هنوز Demote Core قدیمی و هماهنگ‌سازی Endpointهای سایر Edgeها باقی است."
+echo "   DNS و host_pool جداگانه باید با وضعیت نهایی سرویس تطبیق داده شوند."
 echo "════════════════════════════════════════════════════════════"

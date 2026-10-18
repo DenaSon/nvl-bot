@@ -1,0 +1,28 @@
+name: Legacy Core Migration Safety
+on:
+  pull_request:
+    paths:
+      - bot_final_v49-2.py
+      - core_side_failover.sh
+      - promote_edge_to_core.sh
+      - demote_core_to_edge.sh
+      - update_all_edges_endpoint.sh
+      - update_edge_endpoint.sh
+      - tests/test_core_migration_flow.py
+      - .github/workflows/core-migration-safety.yml
+  workflow_dispatch:
+
+jobs:
+  migration-static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Bash syntax
+        run: bash -n core_side_failover.sh promote_edge_to_core.sh demote_core_to_edge.sh update_all_edges_endpoint.sh update_edge_endpoint.sh
+      - name: Python bot syntax
+        run: python -m py_compile bot_final_v49-2.py
+      - name: Migration regression tests
+        run: python -m unittest discover -s tests -p test_core_migration_flow.py -v

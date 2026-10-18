@@ -35,6 +35,14 @@ class TelegramCoreMigrationTests(unittest.TestCase):
         self.assertNotIn("root_pass", handler)
         self.assertNotIn("SRV_PROMOTE_GOST_PORTS", handler)
 
+    def test_final_confirm_callback_is_not_shadowed_by_generic_promote_route(self):
+        generic = 'elif d.startswith("srv_promote_") and d != "srv_promote_confirm" and role == \'admin\':'
+        confirmed = 'elif d == "srv_promote_confirm" and role == \'admin\':'
+        self.assertIn(generic, self.bot)
+        self.assertIn(confirmed, self.bot)
+        self.assertLess(self.bot.index(generic), self.bot.index(confirmed))
+        self.assertIn('context.user_data.get(\'state\') != \'SRV_PROMOTE_AWAIT_CONFIRM\'', self.bot)
+
     def test_preflight_is_before_stopping_source(self):
         marker = self.core.index("۲.۶) انتقال نسخه دقیق")
         stop = self.core.index("systemctl stop nvlbot 2>/dev/null || true")

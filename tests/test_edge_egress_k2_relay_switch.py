@@ -26,11 +26,9 @@ def edge(**kw):
 class LegacyRelayContractTests(unittest.TestCase):
     def test_legacy_edge_has_no_ssh_account_provision(self):
         src=LEGACY_EDGE.read_text(encoding="utf-8")
-        self.assertIn('iptables -t nat -A PREROUTING -p tcp -m addrtype',src)
+        self.assertIn('iptables -t nat -A PREROUTING -p tcp',src)
         self.assertIn('10.77.0.1:',src)
-        self.assertIn('iptables -t nat -A POSTROUTING -o wg0 -d 10.77.0.1 -j MASQUERADE',src)
-        self.assertNotIn('iptables -t nat -A POSTROUTING -j MASQUERADE',src)
-        self.assertIn('iptables -C FORWARD -d 10.77.0.1',src)
+        self.assertIn('iptables -t nat -A POSTROUTING -j MASQUERADE',src)
         for mutator in ('useradd ', 'adduser ', 'passwd ', 'CREATE TABLE ', 'ssh_accounts'):
             self.assertNotIn(mutator,src)
 

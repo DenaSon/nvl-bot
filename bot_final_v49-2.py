@@ -3791,7 +3791,8 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
     # قبلاً (مثلاً از طریق پنل «تغییر واقعی پورت SSH») پورتش عوض شده و الان دیگه واقعاً یک VPS
     # خام نیست، غلطه — sshd دیگه روی ۲۲ گوش نمی‌ده. الان اگه ۲۲ جواب نداد، پورتِ مشتری که خودِ
     # ادمین همین الان وارد کرده (customer_port) هم به‌عنوان تلاش دوم امتحان می‌شه.
-    candidate_ports = [22] + ([_normalize_ssh_port(customer_port, 22)] if _normalize_ssh_port(customer_port, 22) != 22 else [])
+    # Never try a customer DNAT port for administrative SSH.
+    candidate_ports = [22]
     for attempt in range(connect_retries):
         for cp in candidate_ports:
             try:
@@ -3867,10 +3868,9 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
     ok_key, err_key = _install_local_pubkey_on_open_ssh(ssh)
     if not ok_key:
         log.warning("نصب کلید SSH دائمی روی Edge %s شکست خورد: %s", edge_ip, err_key)
-        if protected_wizard:
-            with contextlib.suppress(Exception):
-                ssh.close()
-            return False, "⛔️ ثبت دسترسی مدیریتی امن روی Edge کامل نشد.", None
+        with contextlib.suppress(Exception):
+            ssh.close()
+        return False, "⛔️ کلید SSH مدیریتی روی Edge نصب نشد؛ برای Promote آماده نیست.", None
     
     with db_conn() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key='tls_port'").fetchone()
@@ -3891,6 +3891,9 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
         stdin, stdout, stderr = ssh.exec_command(cmd, timeout=240)
         out = stdout.read().decode(errors='replace')
         err = stderr.read().decode(errors='replace')
+        exit_status = stdout.channel.recv_exit_status()
+        if exit_status != 0:
+            return False, "⛔️ نصب Edge روی VPS شکست خورد؛ Peer و رکورد فعال ساخته نشدند. وضعیت VPS را بررسی کنید.", None
     except Exception as e:
         return False, f"❌ اجرای اسکریپت روی Edge شکست خورد: {e}", None
     finally:
@@ -3907,26 +3910,51 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
                         f"خطا:\n<code>{esc(err[-500:])}</code>"), None
     edge_pubkey = m.group(1)
 
-    # ثبت پیر روی خودِ Core (محلی، نه SSH)
+    # Reject stale/repeated registrations; never append the same Edge twice.
+    with open(WG_CONF_PATH, encoding="utf-8") as f:
+        original_wg_config = f.read()
+    if f"# {edge_name}" in original_wg_config or f"PublicKey = {edge_pubkey}" in original_wg_config:
+        return False, "⛔️ Peer این Edge از قبل ثبت شده؛ نصب را تکرار نکنید.", None
     try:
-        with open(WG_CONF_PATH, "a") as f:
+        with open(WG_CONF_PATH, "a", encoding="utf-8") as f:
             f.write(f"\n[Peer]\n# {edge_name}\nPublicKey = {edge_pubkey}\nAllowedIPs = {edge_wg_ip}/32\n")
-        subprocess.run(
-            "wg syncconf wg0 <(wg-quick strip wg0)",
-            shell=True, executable="/bin/bash", check=True, timeout=10
-        )
-    except Exception as e:
-        return False, f"⚠️ Edge راه‌اندازی شد ولی ثبتش روی Core شکست خورد: {e}\nکلید عمومی Edge (دستی ثبت کنید): <code>{esc(edge_pubkey)}</code>", None
-
-    # تست هندشیک/اتصال داخل تونل
-    time.sleep(2)
-    tunnel_ok = False
-    try:
-        ping_out = subprocess.run(["ping", "-c", "3", "-W", "2", edge_wg_ip],
-                                   capture_output=True, text=True, timeout=15)
-        tunnel_ok = "0% packet loss" in ping_out.stdout
+        subprocess.run("wg syncconf wg0 <(wg-quick strip wg0)",
+                       shell=True, executable="/bin/bash", check=True, timeout=10)
     except Exception:
-        pass
+        with open(WG_CONF_PATH, "w", encoding="utf-8") as f:
+            f.write(original_wg_config)
+        with contextlib.suppress(Exception):
+            subprocess.run("wg syncconf wg0 <(wg-quick strip wg0)",
+                           shell=True, executable="/bin/bash", timeout=10, check=True)
+        log.exception("WireGuard peer registration failed")
+        return False, "⛔️ ثبت Peer شکست خورد و کانفیگ قبلی Core بازیابی شد.", None
+
+    # A fresh WG handshake is mandatory before advertising a ready Edge.
+    tunnel_ok = False
+    for _attempt in range(5):
+        with contextlib.suppress(Exception):
+            subprocess.run(["ping", "-c", "1", "-W", "1", edge_wg_ip],
+                           capture_output=True, timeout=3)
+        try:
+            handshakes = subprocess.run(
+                ["wg", "show", "wg0", "latest-handshakes"],
+                capture_output=True, text=True, check=True, timeout=6).stdout
+            for line in handshakes.splitlines():
+                fields = line.split()
+                if len(fields) >= 2 and fields[0] == edge_pubkey:
+                    if int(fields[1]) > 0 and 0 <= time.time() - int(fields[1]) <= 120:
+                        tunnel_ok = True
+                        break
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+        if tunnel_ok:
+            break
+        time.sleep(2)
+    if not tunnel_ok:
+        return False, (
+            "⛔️ Edge نصب شد ولی هندشیک WireGuard برقرار نیست؛ "
+            "در استخر فعال ثبت نشد. ابتدا مسیر تونل را بررسی کنید."
+        ), None
 
     return True, "", {"edge_wg_ip": edge_wg_ip, "edge_pubkey": edge_pubkey,
                       "tunnel_ok": tunnel_ok,
@@ -4061,6 +4089,8 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
             return False, edge_ip, result
     else:
         await asyncio.to_thread(_db_add_host_pool, edge_ip)
+        await asyncio.to_thread(_db_set_host_service_port, edge_ip, int(customer_port))
+        await asyncio.to_thread(_db_set_host_admin_ssh_port, edge_ip, 22)
         if provider:
             await asyncio.to_thread(_db_set_host_provider_meta, edge_ip, provider, provider_instance_id)
         cur_hosts = [h.strip() for h in (await asyncio.to_thread(_db_get_setting, 'hosts', '')).split(',') if h.strip()]
@@ -4105,8 +4135,11 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
         )
     else:
         status = "✅ پینگ داخل تونل جواب داد." if result["tunnel_ok"] else "⚠️ تونل بالا آمد ولی پینگ داخلی جواب نداد — دستی با «wg show» چک کنید."
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⭐ این IP را پیش‌فرض کل سیستم کن", callback_data=f"hpdef_{edge_ip}")],
-                                   [InlineKeyboardButton("🛡 وضعیت و مسدودسازی IPها", callback_data="hp_menu")]])
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔎 بررسی آمادگی تبدیل به Core", callback_data=f"srv_ready_{edge_ip}")],
+            [InlineKeyboardButton("🖥 وضعیت و نقش سرورها", callback_data="srv_status")],
+            [InlineKeyboardButton("⭐ این IP را پیش‌فرض کل سیستم کن", callback_data=f"hpdef_{edge_ip}")],
+        ])
         await app.bot.send_message(
             chat_id,
             f"🎉 <b>Edge جدید با موفقیت راه‌اندازی شد</b>\n\n"
@@ -13203,6 +13236,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not ip_ok:
             await update.message.reply_text("❌ فرمت IP درست نیست (مثال: 104.194.134.158). دوباره بفرستید:")
             return
+        pool = await asyncio.to_thread(_db_get_host_pool)
+        if any(row[0] == ip for row in pool):
+            await update.message.reply_text(
+                "⛔️ این IP قبلاً ثبت شده؛ ابتدا رکورد و Peer قدیمی را بررسی کنید. نصب تکراری مجاز نیست."
+            )
+            safe_clear_context(context)
+            return
         context.user_data['edge_new_ip'] = ip
         context.user_data['state'] = 'EDGE_NEW_ROOTPASS'
         await update.message.reply_text(
@@ -13225,8 +13265,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "💡 این پورت برای اتصال کاربران است. برای انصراف «لغو» را بفرستید.",parse_mode="HTML")
 
     elif state == 'EDGE_NEW_PORT':
-        if not text.strip().isascii() or not text.strip().isdigit() or not 1 <= int(text.strip()) <= 65535:
-            await update.message.reply_text("❌ پورت باید عددی بین ۱ تا ۶۵۵۳۵ باشد. دوباره بفرستید:")
+        if not text.strip().isascii() or not text.strip().isdigit() or not 23 <= int(text.strip()) <= 65535:
+            await update.message.reply_text("❌ پورت مشتری باید بین ۲۳ تا ۶۵۵۳۵ باشد؛ ۲۲ مخصوص مدیریت است.")
             return
         customer_port = text.strip()
         chat_id = update.effective_chat.id

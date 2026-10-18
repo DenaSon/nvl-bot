@@ -261,6 +261,26 @@ if [ -f /etc/systemd/system/nvlbot.service ]; then
     cp /etc/systemd/system/nvlbot.service "${EXPORT_DIR}/nvlbot.service"
     echo "   ✅ فایل nvlbot.service کپی شد."
 fi
+# Runtime environment and systemd drop-ins are host-local and not in Git.
+# Keep these archives owner-only: they can contain live bot credentials.
+if [ -d /etc/nvlbot ]; then
+    if ! tar -czf "${EXPORT_DIR}/nvlbot_etc.tar.gz" -C /etc nvlbot; then
+        echo "❌ گرفتن بکاپ تنظیمات /etc/nvlbot شکست خورد."
+        rollback_start_nvlbot
+        exit 1
+    fi
+    chmod 600 "${EXPORT_DIR}/nvlbot_etc.tar.gz"
+    echo "   ✅ تنظیمات خصوصی سرویس ربات جمع‌آوری شد."
+fi
+if [ -d /etc/systemd/system/nvlbot.service.d ]; then
+    if ! tar -czf "${EXPORT_DIR}/nvlbot_dropins.tar.gz" -C /etc/systemd/system nvlbot.service.d; then
+        echo "❌ گرفتن بکاپ تنظیمات تکمیلی systemd شکست خورد."
+        rollback_start_nvlbot
+        exit 1
+    fi
+    chmod 600 "${EXPORT_DIR}/nvlbot_dropins.tar.gz"
+    echo "   ✅ تنظیمات تکمیلی سرویس systemd جمع‌آوری شد."
+fi
 # 🆕 اسنپ‌شاتِ سبک و هوشمندِ محیط: فقط فایل‌های اسکریپت (.sh، .py، .bak) منتقل می‌شوند
 echo "🔹 ۴.۵) ساختِ اسنپ‌شاتِ اسکریپت‌ها (root_full_snapshot.tar.gz)..."
 cd /root

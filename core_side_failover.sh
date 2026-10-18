@@ -88,6 +88,42 @@ fi
 SSH_OPTS=(-i "$EDGE_SSH_KEY" -p "$EDGE_PORT" -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 echo "   ✅ اتصال مدیریتی روی پورت ${EDGE_PORT} برقرار شد."
 
+# All fallible Python preparation happens while the original Core remains live.
+# The chosen bot is pinned to the live service's script, never a random standby file.
+if [ ! -x /root/demote_core_to_edge.sh ] && [ ! -f /root/demote_core_to_edge.sh ]; then
+    echo "❌ اسکریپت demote_core_to_edge.sh نصب نیست؛ Core را متوقف نمی‌کنیم."
+    exit 1
+fi
+if [ ! -f /root/requirements.txt ] || [ ! -f /root/bot_final_v49-2.py ]; then
+    echo "❌ کد اصلی یا requirements.txt روی Core فعلی پیدا نشد."
+    exit 1
+fi
+if [ ! -f /root/update_all_edges_endpoint.sh ] || [ ! -f /root/update_edge_endpoint.sh ]; then
+    echo "❌ اسکریپت‌های انتقال Endpoint به سایر Edgeها ناقص هستند."
+    exit 1
+fi
+echo "🔹 ۲.۵) بررسی نقش واقعی مقصد و نگه‌داری موقت هویت Edge قبلی..."
+if ! bash /root/demote_core_to_edge.sh --prepare "$TARGET_EDGE" "$CUSTOMER_SSH_PORT" "$EDGE_PORT"; then
+    echo "❌ مقصد Edge معتبر نیست. Core فعلی بدون تغییر فعال می‌ماند."
+    exit 1
+fi
+echo "🔹 ۲.۶) انتقال نسخه دقیق ربات و آماده‌سازی Python روی مقصد قبل از قطع سرویس..."
+if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" "mkdir -p /root/nvlbot_standby"; then exit 1; fi
+if ! rsync -az -e "ssh -i ${EDGE_SSH_KEY} -p ${EDGE_PORT} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
+        /root/bot_final_v49-2.py /root/requirements.txt \
+        "root@${TARGET_EDGE}:/root/nvlbot_standby/"; then
+    echo "❌ انتقال فایل‌های ربات شکست خورد. Core متوقف نمی‌شود."
+    exit 1
+fi
+# --clear is intentional: standby virtualenv copies are not portable between VPSes.
+if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
+    'set -e; apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv python3-pip iptables-persistent >/dev/null; python3 -m venv --clear /root/venv; /root/venv/bin/python3 -m pip --version; /root/venv/bin/python3 -m pip install -q -r /root/nvlbot_standby/requirements.txt; /root/venv/bin/python3 -m py_compile /root/nvlbot_standby/bot_final_v49-2.py; echo bot_final_v49-2.py > /root/nvlbot_standby/.nvl_promotion_main'; then
+    echo "❌ Python/PIP/requirements روی مقصد آماده نشد. Core اصلی همچنان فعال است."
+    exit 1
+fi
+echo "   ✅ Python و وابستگی‌ها قبل از توقف Core روی مقصد آماده شدند."
+
+
 echo "🔹 ۳) توقفِ nvlbot روی همین Core (قبل از بکاپِ نهاییِ دیتابیس، تا نوشته‌ای گم نشود)..."
 # 🐛🔧 رفع باگِ ریشه‌ایِ واقعی (دو مشکل با هم): ۱) promote_edge_to_core.sh (مرحلهٔ ۱۰، محافظِ
 # Split-Brain) از طریقِ SSH به OLD_CORE_IP وصل می‌شود و اگر ببیند nvlbot آنجا هنوز active است،
@@ -130,8 +166,9 @@ echo "   ✅ کلید WireGuard + peers استخراج شد."
 if sqlite3 "$DB_PATH" ".backup '${EXPORT_DIR}/master_bot.db'" 2>/dev/null; then
     echo "   ✅ دیتابیس با sqlite3 .backup (کپیِ امن، بعد از توقفِ ربات) گرفته شد."
 else
-    cp "$DB_PATH" "${EXPORT_DIR}/master_bot.db"
-    echo "   ⚠️ sqlite3 .backup شکست خورد — با cp خام کپی شد."
+    echo "❌ کپی امن دیتابیس شکست خورد؛ مهاجرت متوقف می‌شود."
+    rollback_start_nvlbot
+    exit 1
 fi
 
 if [ -f /etc/gost/config.yaml ]; then
@@ -190,6 +227,7 @@ if [ -f "$BOT_PERSISTENCE_SRC" ]; then
     cp "$BOT_PERSISTENCE_SRC" "${EXPORT_DIR}/bot_persistence.pickle"
     echo "   ✅ bot_persistence.pickle کپی شد."
 fi
+cp /root/update_all_edges_endpoint.sh /root/update_edge_endpoint.sh "${EXPORT_DIR}/"
 if [ -f /etc/systemd/system/nvlbot.service ]; then
     cp /etc/systemd/system/nvlbot.service "${EXPORT_DIR}/nvlbot.service"
     echo "   ✅ فایل nvlbot.service کپی شد."

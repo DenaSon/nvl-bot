@@ -94,6 +94,14 @@ if [ ! -x /root/demote_core_to_edge.sh ] && [ ! -f /root/demote_core_to_edge.sh 
     echo "❌ اسکریپت demote_core_to_edge.sh نصب نیست؛ Core را متوقف نمی‌کنیم."
     exit 1
 fi
+if ! command -v netfilter-persistent >/dev/null 2>&1; then
+    echo "❌ netfilter-persistent روی Core اصلی نیست؛ رله بعد از انتقال پایدار نمی‌ماند."
+    exit 1
+fi
+if [ ! -f /root/02_recreate_ssh_users.py ]; then
+    echo "❌ ابزار بازسازی کاربران روی Core موجود نیست؛ انتقال مسدود است."
+    exit 1
+fi
 if [ ! -f /root/requirements.txt ] || [ ! -f /root/bot_final_v49-2.py ]; then
     echo "❌ کد اصلی یا requirements.txt روی Core فعلی پیدا نشد."
     exit 1
@@ -135,9 +143,15 @@ echo "🔹 ۳) توقفِ nvlbot روی همین Core (قبل از بکاپِ ن
 # یعنی بکاپ همیشه دقیقاً آخرین وضعیتِ واقعی است. اگر ادامهٔ کار (Promote روی Edge) به هر دلیلی
 # شکست بخورد، خودکار همین‌جا nvlbot را دوباره روشن می‌کنیم تا مشتری‌های همین سرور بی‌سرویس نمانند.
 rollback_start_nvlbot() {
-    echo "🔹 رول‌بک: nvlbot را همین‌جا (Core قدیمی) دوباره روشن می‌کنیم تا مشتری‌ها بی‌سرویس نمانند..."
+    # Split-brain guard: never revive the old bot if the target bot started.
+    if ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" "systemctl is-active --quiet nvlbot" 2>/dev/null; then
+        echo "⚠️ Core جدید nvlbot فعال دارد؛ برای جلوگیری از Split-Brain، ربات قدیمی را روشن نمی‌کنیم."
+        echo "   وضعیت انتقال ناقص است؛ فوراً لاگ هر دو سرور بررسی شود."
+        return 1
+    fi
+    echo "🔹 رول‌بک: بازگرداندن ربات روی Core قبلی..."
     systemctl start nvlbot 2>/dev/null && echo "   ✅ nvlbot روی Core قدیمی دوباره فعال شد." \
-        || echo "   ❌ روشن‌کردنِ خودکارِ nvlbot هم شکست خورد — دستی چک کنید: systemctl status nvlbot"
+        || echo "   ❌ راه‌اندازی Core قبلی شکست خورد؛ systemctl status nvlbot را بررسی کنید."
 }
 systemctl stop nvlbot 2>/dev/null || true
 echo "   ✅ nvlbot روی این سرور متوقف شد — از این لحظه دیتابیس دیگر تغییر نمی‌کند."

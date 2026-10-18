@@ -375,6 +375,11 @@ STAGED_MAIN_NAME="$(cat "$MAIN_MARKER")"
 systemctl stop nvlbot 2>/dev/null || true
 cp "$STANDBY_DIR/$STAGED_MAIN_NAME" "$BOT_DIR/$STAGED_MAIN_NAME"
 cp "$STANDBY_DIR/requirements.txt" "$BOT_DIR/requirements.txt"
+[ -s "$STANDBY_DIR/server_migration/models.py" ] ||
+    { echo "Missing staged server_migration package"; exit 1; }
+cp -a "$STANDBY_DIR/server_migration" "$BOT_DIR/"
+(cd "$BOT_DIR" && PYTHONPATH= "$BOT_DIR/venv/bin/python3" -c "from server_migration.models import CHECK_FAIL, CHECK_PASS, CHECK_WARN, ServerCredentials") ||
+    { echo "server_migration import failed on destination"; exit 1; }
 
 # Always prefer the service unit collected from the live Core during THIS run.
 if [ -s "${MIGRATION_DIR}/nvlbot.service" ]; then

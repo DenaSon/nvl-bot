@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -62,13 +63,17 @@ class TelegramCoreMigrationTests(unittest.TestCase):
         finish = self.core.index('\necho "   ✅ Python', start)
         preflight = self.core[start:finish].replace(
             "/root/venv/bin/python3", "venv_python").replace(
-            "/root/nvlbot_standby/.nvl_promotion_main", '"$TEST_MAIN"')
-        for failure in ("none", "apt", "pip", "compile"):
+            "/root/nvlbot_standby/.nvl_promotion_main", '"$TEST_MAIN"').replace(
+            "/root/nvlbot_standby", '"$TEST_STATE"')
+        for failure in ("none", "apt", "pip", "compile", "import"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
                 trace = Path(tmp) / "trace"
                 marker = Path(tmp) / "main"
+                if failure != "import":
+                    shutil.copytree(ROOT / "server_migration", Path(tmp) / "server_migration")
                 env = dict(os.environ, TRACE=str(trace), TEST_STATE=tmp,
-                           TEST_MAIN=str(marker), FAIL_STAGE=failure)
+                           TEST_MAIN=str(marker), FAIL_STAGE=failure,
+                           TEST_PYTHON=sys.executable)
                 harness = r'''
 set -u
 apt-get() {
@@ -89,6 +94,8 @@ venv_python() {
         [ "$FAIL_STAGE" != pip ] || return 22
     elif [ "$1 $2" = '-m py_compile' ]; then
         [ "$FAIL_STAGE" != compile ] || return 23
+    elif [ "$1" = '-c' ]; then
+        "$TEST_PYTHON" "$@"
     fi
 }
 export -f apt-get python3 venv_python
@@ -125,6 +132,28 @@ TARGET_EDGE=192.0.2.2
             self.promote.index("mkdir -p /run/sshd"),
             self.promote.index("if ! sshd -t; then"),
         )
+
+    def test_destination_installs_importable_staged_package_and_rejects_missing_package(self):
+        start = self.promote.index('STANDBY_DIR="/root/nvlbot_standby"')
+        finish = self.promote.index("# Always prefer the service unit", start)
+        for present in (False, True):
+            with self.subTest(package_present=present), tempfile.TemporaryDirectory() as tmp:
+                stage, dest = Path(tmp) / "stage", Path(tmp) / "destination"
+                stage.mkdir()
+                (dest / "venv/bin").mkdir(parents=True)
+                (dest / "venv/bin/python3").symlink_to(sys.executable)
+                (stage / ".nvl_promotion_main").write_text("bot_final_v49-2.py\n")
+                (stage / "bot_final_v49-2.py").write_text("# Offline fixture; never executed.\n")
+                (stage / "requirements.txt").write_text("# Offline fixture\n")
+                if present:
+                    shutil.copytree(ROOT / "server_migration", stage / "server_migration")
+                body = self.promote[start:finish].replace("/root/nvlbot_standby", str(stage))
+                result = subprocess.run(
+                    ["bash", "-ec", 'systemctl() { :; }; BOT_DIR="$TEST_DEST";\n' + body],
+                    env=dict(os.environ, TEST_DEST=str(dest)), capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0 if present else 1,
+                                 result.stdout + result.stderr)
+                self.assertEqual((dest / "server_migration/models.py").is_file(), present)
 
     def test_source_frozen_before_copy_and_wg_exclusive_before_promote(self):
         self.assertIn("if ! systemctl stop nvlbot || systemctl is-active --quiet nvlbot; then", self.core)

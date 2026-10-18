@@ -18,7 +18,8 @@ def runtime_fixture(stage, missing=None):
     for package in ("ops", "server_migration"):
         folder = stage / package
         folder.mkdir()
-        (folder / "__init__.py").write_text("# package fixture\n")
+        # Empty package initializers are valid, as in the real ops package.
+        (folder / "__init__.py").write_text("")
         (folder / "runtime_fixture.py").write_text("VALUE = 1\n")
     (stage / "runtime_helper.py").write_text(
         "from server_migration.runtime_fixture import VALUE\n"

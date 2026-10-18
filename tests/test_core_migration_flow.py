@@ -57,6 +57,57 @@ class TelegramCoreMigrationTests(unittest.TestCase):
         self.assertIn("systemctl is-active --quiet nvlbot", self.core)
         self.assertNotIn("با cp خام کپی شد", self.core)
 
+    def test_python_preflight_prepares_source_builds_and_blocks_failed_preparation(self):
+        start = self.core.index("# --clear is intentional:")
+        finish = self.core.index('\necho "   ✅ Python', start)
+        preflight = self.core[start:finish].replace(
+            "/root/venv/bin/python3", "venv_python").replace(
+            "/root/nvlbot_standby/.nvl_promotion_main", '"$TEST_MAIN"')
+        for failure in ("none", "apt", "pip", "compile"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                trace = Path(tmp) / "trace"
+                marker = Path(tmp) / "main"
+                env = dict(os.environ, TRACE=str(trace), TEST_STATE=tmp,
+                           TEST_MAIN=str(marker), FAIL_STAGE=failure)
+                harness = r'''
+set -u
+apt-get() {
+    printf 'apt-get %s\n' "$*" >> "$TRACE"
+    [ "$FAIL_STAGE" != apt ] || return 13
+    for package in "$@"; do
+        case "$package" in
+            build-essential) touch "$TEST_STATE/compiler" ;;
+            python3-dev) touch "$TEST_STATE/headers" ;;
+        esac
+    done
+}
+python3() { printf 'python3 %s\n' "$*" >> "$TRACE"; }
+venv_python() {
+    printf 'venv_python %s\n' "$*" >> "$TRACE"
+    if [ "$1 $2 $3" = '-m pip install' ]; then
+        [ -f "$TEST_STATE/compiler" ] && [ -f "$TEST_STATE/headers" ] || return 21
+        [ "$FAIL_STAGE" != pip ] || return 22
+    elif [ "$1 $2" = '-m py_compile' ]; then
+        [ "$FAIL_STAGE" != compile ] || return 23
+    fi
+}
+export -f apt-get python3 venv_python
+ssh() { bash -c "${!#}"; }
+SSH_OPTS=()
+TARGET_EDGE=192.0.2.2
+'''
+                result = subprocess.run(
+                    ["bash", "-c", harness + preflight + '\necho PREFLIGHT_ACCEPTED\n'],
+                    env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0 if failure == "none" else 1,
+                                 result.stdout + result.stderr)
+                self.assertEqual(marker.exists(), failure == "none")
+                self.assertEqual("PREFLIGHT_ACCEPTED" in result.stdout, failure == "none")
+                if failure == "none":
+                    calls = trace.read_text()
+                    self.assertLess(calls.index("apt-get install"),
+                                    calls.index("venv_python -m pip install"))
+
     def test_promote_preserves_ssh_admin_port_and_validates_config(self):
         # Port 22 must be explicit, not left to sshd's implicit default:
         # adding a single non-22 Port otherwise removes that default.

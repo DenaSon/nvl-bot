@@ -61,6 +61,18 @@ class TelegramCoreMigrationTests(unittest.TestCase):
         self.assertIn("MIGRATION_COMPLETE", self.demote)
         self.assertIn('systemctl disable --now nvlbot', self.demote)
 
+    def test_private_runtime_and_systemd_dropins_restored_before_bot_start(self):
+        self.assertIn('nvlbot_etc.tar.gz', self.core)
+        self.assertIn('nvlbot_dropins.tar.gz', self.core)
+        self.assertIn('nvlbot_etc.tar.gz', self.promote)
+        self.assertIn('nvlbot_dropins.tar.gz', self.promote)
+        self.assertIn('chmod 600 /etc/nvlbot/nvlbot.env', self.promote)
+        self.assertLess(
+            self.promote.index('tar -xzf "${MIGRATION_DIR}/nvlbot_etc.tar.gz"'),
+            self.promote.index('systemctl enable --now nvlbot'),
+        )
+        self.assertIn('REQUIRED_ENV_FILE=', self.promote)
+
     def test_endpoint_propagation_fails_on_unreachable_edges(self):
         self.assertIn('[ "$FAIL" -eq 0 ]', self.sync)
 

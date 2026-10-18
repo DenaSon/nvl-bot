@@ -643,6 +643,14 @@ systemctl enable --now nvlbot
 sleep 5
 systemctl is-active --quiet nvlbot ||
     { echo "❌ nvlbot روی Core جدید پایدار نشد."; journalctl -u nvlbot -n 30 --no-pager; exit 1; }
+# The new Core must be represented in host_pool and authoritative settings.
+DB_CORE_IP="$(sqlite3 "${BOT_DIR}/master_bot.db" "SELECT value FROM settings WHERE key='core_wg_public_ip';")"
+DB_CORE_POOL="$(sqlite3 "${BOT_DIR}/master_bot.db" "SELECT COUNT(*) FROM host_pool WHERE host='${SELF_PUBLIC_IP}' AND active=1;")"
+if [ "$DB_CORE_IP" != "$SELF_PUBLIC_IP" ] || [ "$DB_CORE_POOL" != 1 ]; then
+    echo "❌ هویت Core جدید در دیتابیس یا host_pool تأیید نشد؛ مهاجرت کامل نیست."
+    exit 1
+fi
+echo "CORE_DB_OK: ${SELF_PUBLIC_IP} registered as authoritative Core"
 test -s "$BOT_DIR/master_bot.db" || { echo "❌ دیتابیس روی Core جدید پیدا نشد."; exit 1; }
 PROMOTE_SUCCESS=1
 echo "✅ ترفیع این سرور به Core کامل شد. دیتابیس و سرویس ربات بررسی شدند."

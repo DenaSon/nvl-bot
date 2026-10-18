@@ -14643,7 +14643,10 @@ async def _legacy_edge_promotion_ready(host, expected_customer_port=None):
                 "if systemctl is-active --quiet nvlbot; then exit 42; fi; "
                 "wg show wg0 public-key; wg show wg0 peers; "
                 "ip -4 -o addr show dev wg0; "
-                "iptables -t nat -S PREROUTING"
+                "iptables -t nat -S PREROUTING; "
+                "iptables -t nat -S POSTROUTING; "
+                "iptables -S FORWARD; "
+                "sysctl -n net.ipv4.ip_forward"
             )
             _, stdout, _ = ssh.exec_command(cmd, timeout=12)
             output = stdout.read().decode(errors="replace")
@@ -14670,6 +14673,14 @@ async def _legacy_edge_promotion_ready(host, expected_customer_port=None):
         for line in lines
     ):
         return False, "قانون NAT پورت مشتری از Edge به Core وجود ندارد."
+    if not any("-j MASQUERADE" in line and "-o wg0" in line and "10.77.0.1" in line
+               for line in lines):
+        return False, "قانون NAT برگشت از WireGuard روی Edge ناقص است."
+    if not any("-A FORWARD" in line and "-d 10.77.0.1" in line and "-j ACCEPT" in line
+               for line in lines):
+        return False, "اجازه FORWARD به Core وجود ندارد."
+    if not lines or lines[-1].strip() != "1":
+        return False, "IP forwarding روی Edge فعال نیست."
     return True, (
         f"Edge آماده است: WG و دسترسی مدیریتی سالم، "
         f"رله پورت {service_port} ثبت و Core مقصد هنوز فعال نشده است."

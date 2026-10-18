@@ -98,4 +98,11 @@ if ! "${SSH[@]}" "bash /root/update_all_edges_endpoint.sh '$NEW_IP'"; then
   echo "PARTIAL: Core migrated and old Core demoted, but some Edge endpoints need repair" >&2
   exit 2
 fi
+# Preserve existing DNS/default routing: the former Core is now a working
+# DNAT relay. Changing a customer DNS record without an external probe is unsafe.
+if ! "${SSH[@]}" "test \"\$(sqlite3 -readonly /root/master_bot.db \"SELECT value FROM settings WHERE key='core_wg_public_ip';\")\" = '$NEW_IP'"; then
+  echo "PARTIAL: the new Core is not reflected in the authoritative database" >&2
+  exit 2
+fi
+echo "DNS_UNCHANGED: the previous Core IP remains a relay; verify customer DNS and host_pool before declaring field acceptance"
 echo "MIGRATION_COMPLETE: new Core and all reachable Edge endpoints updated"

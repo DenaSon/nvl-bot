@@ -45,13 +45,43 @@ class TelegramCoreMigrationTests(unittest.TestCase):
 
     def test_preflight_is_before_stopping_source(self):
         marker = self.core.index("۲.۶) انتقال نسخه دقیق")
-        stop = self.core.index("systemctl stop nvlbot 2>/dev/null || true")
+        stop = self.core.index("if ! systemctl stop nvlbot || systemctl is-active --quiet nvlbot; then")
         self.assertLess(marker, stop)
         self.assertIn("python3 -m venv --clear /root/venv", self.core)
         self.assertIn("python3 -m pip --version", self.core)
         self.assertIn("demote_core_to_edge.sh --prepare", self.core)
         self.assertIn("systemctl is-active --quiet nvlbot", self.core)
         self.assertNotIn("با cp خام کپی شد", self.core)
+
+    def test_promote_preserves_ssh_admin_port_and_validates_config(self):
+        # Port 22 must be explicit, not left to sshd's implicit default:
+        # adding a single non-22 Port otherwise removes that default.
+        self.assertIn("Port 22", self.promote)
+        self.assertIn('sshd -t', self.promote)
+        self.assertIn('sshd -T', self.promote)
+        self.assertIn('PROMOTE_POSTCHECK_OK', self.promote)
+        self.assertIn('PRAGMA quick_check;', self.promote)
+        self.assertIn('wg show wg0 public-key', self.promote)
+        self.assertLess(
+            self.promote.index("if ! sshd -t; then"),
+            self.promote.index("if ! systemctl restart ssh"),
+        )
+        self.assertLess(
+            self.promote.index("mkdir -p /run/sshd"),
+            self.promote.index("if ! sshd -t; then"),
+        )
+
+    def test_source_frozen_before_copy_and_wg_exclusive_before_promote(self):
+        self.assertIn("if ! systemctl stop nvlbot || systemctl is-active --quiet nvlbot; then", self.core)
+        self.assertIn("if wg show wg0 >/dev/null 2>&1; then", self.core)
+        self.assertLess(
+            self.core.index("if ! systemctl stop nvlbot || systemctl is-active --quiet nvlbot; then"),
+            self.core.index('sqlite3 "$DB_PATH" ".backup'),
+        )
+        self.assertLess(
+            self.core.index("if wg show wg0 >/dev/null 2>&1; then"),
+            self.core.index('PROMOTE_EXIT=$?'),
+        )
 
     def test_promote_uses_pinned_main_and_existing_venv(self):
         self.assertIn(".nvl_promotion_main", self.promote)

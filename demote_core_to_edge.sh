@@ -37,6 +37,11 @@ if (( PREPARE )); then
 fi
 [[ -r "$STATE/private" && -r "$STATE/addr" && -r "$STATE/core_pub" ]] || fail "no prepared Edge identity"
 [[ "$(cat "$STATE/ip")" == "$NEW_IP" && "$(cat "$STATE/port")" == "$ADMIN_PORT" ]] || fail "destination mismatch"
+# The promotion script may normalize sshd to port 22 after the initial probe.
+if ! "${SSH[@]}" "true" 2>/dev/null; then
+  SSH=(ssh -i "$KEY" -p 22 -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "root@$NEW_IP")
+  "${SSH[@]}" "true" || fail "new Core administrative SSH unreachable"
+fi
 systemctl is-active --quiet nvlbot && fail "old Core bot is still running"
 "${SSH[@]}" "systemctl is-active --quiet nvlbot" || fail "new Core bot is not active"
 [[ "$("${SSH[@]}" "wg show wg0 public-key")" == "$(cat "$STATE/core_pub")" ]] || fail "new Core WireGuard identity mismatch"
@@ -66,6 +71,13 @@ PORTS=("$CUSTOMER_PORT")
 if [[ -r /root/master_bot.db ]]; then
   TLS_PORT=$(sqlite3 /root/master_bot.db "SELECT value FROM settings WHERE key='tls_port';" 2>/dev/null || true)
   if [[ "$TLS_PORT" =~ ^[0-9]+$ ]] && (( TLS_PORT > 22 && TLS_PORT <= 65535 )); then PORTS+=("$TLS_PORT"); fi
+fi
+# Include listening Gost endpoints; internal localhost backend ports are ignored.
+if [[ -r /etc/gost/config.yaml ]]; then
+  while IFS= read -r port; do
+    if [[ "$port" =~ ^[0-9]+$ ]] && (( port > 22 && port <= 65535 )); then PORTS+=("$port"); fi
+  done < <(grep -E 'addr:[[:space:]]*' /etc/gost/config.yaml |
+            grep -oE ':[0-9]{2,5}' | tr -d ':' | sort -nu || true)
 fi
 for port in "${PORTS[@]}"; do
   iptables -t nat -C PREROUTING -p tcp -m addrtype --dst-type LOCAL --dport "$port" -j DNAT --to-destination "10.77.0.1:$port" 2>/dev/null ||

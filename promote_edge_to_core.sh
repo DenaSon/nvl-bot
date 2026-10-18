@@ -136,6 +136,8 @@ fi
 if ! grep -qE "^[[:space:]]*Port[[:space:]]+${CUSTOMER_SSH_PORT}([[:space:]]|$)" /etc/ssh/sshd_config; then
     printf '\nPort %s\n' "${CUSTOMER_SSH_PORT}" >> /etc/ssh/sshd_config
 fi
+mkdir -p /run/sshd
+chmod 0755 /run/sshd
 if ! sshd -t; then
     echo "❌ تنظیمات SSH جدید معتبر نیست؛ قبل از ری‌استارت متوقف شد."
     exit 1
@@ -144,8 +146,6 @@ if ! sshd -T | awk '$1 == "port" && $2 == "22" {found=1} END {exit !found}'; the
     echo "❌ پورت مدیریتی ۲۲ در تنظیمات مؤثر SSH نیست؛ Promote متوقف شد."
     exit 1
 fi
-mkdir -p /run/sshd
-chmod 0755 /run/sshd
 
 if systemctl is-enabled --quiet ssh.socket 2>/dev/null || systemctl is-active --quiet ssh.socket 2>/dev/null; then
     mkdir -p /etc/systemd/system/ssh.socket.d

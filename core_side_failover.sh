@@ -32,6 +32,7 @@ fi
 
 TARGET_EDGE="$1"
 CUSTOMER_SSH_PORT="$2"
+SOURCE_WG_STOPPED=0
 # Serialize Telegram-triggered migrations, including their source DB freeze.
 command -v flock >/dev/null 2>&1 || { echo "❌ flock نصب نیست."; exit 1; }
 exec 9>/run/nvl-core-migration.lock
@@ -154,7 +155,16 @@ rollback_start_nvlbot() {
         return 1
     fi
     echo "🔹 رول‌بک: بازگرداندن WireGuard و ربات روی Core قبلی..."
-    systemctl start wg-quick@wg0 2>/dev/null || echo "❌ WireGuard قدیمی شروع نشد."
+    if [ "$SOURCE_WG_STOPPED" = 1 ]; then
+        # The promoted target may already have the same WG private key even
+        # though its bot is down. Disable it before restoring the source.
+        if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
+                "systemctl disable --now nvlbot >/dev/null 2>&1 || true; systemctl disable --now wg-quick@wg0 >/dev/null 2>&1 || true; ! systemctl is-active --quiet nvlbot && ! systemctl is-active --quiet wg-quick@wg0"; then
+            echo "❌ نتوانستیم خاموش‌بودن WireGuard و ربات مقصد را تأیید کنیم؛ برای جلوگیری از دو Core، رول‌بک خودکار متوقف شد."
+            return 1
+        fi
+    fi
+    systemctl start wg-quick@wg0 2>/dev/null || { echo "❌ WireGuard قدیمی شروع نشد."; return 1; }
     systemctl start nvlbot 2>/dev/null && echo "   ✅ nvlbot روی Core قدیمی دوباره فعال شد." \
         || echo "   ❌ راه‌اندازی Core قبلی شکست خورد؛ systemctl status nvlbot را بررسی کنید."
 }
@@ -326,6 +336,7 @@ if ! systemctl stop wg-quick@wg0; then
     rollback_start_nvlbot
     exit 1
 fi
+SOURCE_WG_STOPPED=1
 echo "🔹 ۶) اجرای remote «promote_edge_to_core.sh» روی Edge — با OLD_CORE_IP خودکار=${SELF_IP}..."
 ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
     "OLD_CORE_IP='${SELF_IP}' bash ${REMOTE_MIGRATION_DIR}/promote_edge_to_core.sh '${CUSTOMER_SSH_PORT}' '${REMOTE_MIGRATION_DIR}'"

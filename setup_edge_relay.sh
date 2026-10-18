@@ -42,6 +42,14 @@ CORE_PUBLIC_KEY="$3"
 EDGE_WG_IP="$4"
 CUSTOMER_SSH_PORT="$5"
 TLS_PORT="${6:-2088}" # پورت پیش‌فرض TLS اگر داده نشد
+# Management SSH remains on port 22; never DNAT it into the Core.
+for p in "$CORE_WG_PORT" "$CUSTOMER_SSH_PORT" "$TLS_PORT"; do
+    [[ "$p" =~ ^[0-9]+$ ]] && (( 10#$p >= 1 && 10#$p <= 65535 )) ||
+        { echo "❌ Invalid port: $p" >&2; exit 1; }
+done
+[[ "$CUSTOMER_SSH_PORT" != 22 && "$TLS_PORT" != 22 ]] ||
+    { echo "❌ Port 22 is reserved for Edge management SSH" >&2; exit 1; }
+
 
 echo "🔹 ۱) نصب WireGuard و iptables-persistent..."
 apt-get update -qq
@@ -85,13 +93,22 @@ sed -i '/^net.ipv4.ip_forward/d' /etc/sysctl.conf
 echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
-echo "🔹 ۶) تنظیم قوانین فوروارد پورت (DNAT) به سمت Core..."
-iptables -t nat -A PREROUTING -p tcp --dport "${CUSTOMER_SSH_PORT}" -j DNAT --to-destination "10.77.0.1:${CUSTOMER_SSH_PORT}"
-# خط جدید برای فوروارد پورت TLS:
-iptables -t nat -A PREROUTING -p tcp --dport "${TLS_PORT}" -j DNAT --to-destination "10.77.0.1:${TLS_PORT}"
-iptables -t nat -A POSTROUTING -j MASQUERADE
-netfilter-persistent save >/dev/null 2>&1 || iptables-save > /etc/iptables/rules.v4
-echo "   ✅ ترافیک پورت ${CUSTOMER_SSH_PORT} به Core فوروارد می‌شود (و بعد از ریبوت هم باقی می‌ماند)."
+echo "🔹 ۶) تنظیم قوانین محدود و پایدارِ رله به Core..."
+for port in "$CUSTOMER_SSH_PORT" "$TLS_PORT"; do
+    iptables -t nat -C PREROUTING -p tcp -m addrtype --dst-type LOCAL --dport "$port" \
+        -j DNAT --to-destination "10.77.0.1:$port" 2>/dev/null ||
+        iptables -t nat -A PREROUTING -p tcp -m addrtype --dst-type LOCAL --dport "$port" \
+            -j DNAT --to-destination "10.77.0.1:$port"
+    iptables -C FORWARD -d 10.77.0.1 -p tcp --dport "$port" -j ACCEPT 2>/dev/null ||
+        iptables -I FORWARD 1 -d 10.77.0.1 -p tcp --dport "$port" -j ACCEPT
+done
+iptables -C FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null ||
+    iptables -I FORWARD 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -t nat -C POSTROUTING -o wg0 -d 10.77.0.1 -j MASQUERADE 2>/dev/null ||
+    iptables -t nat -A POSTROUTING -o wg0 -d 10.77.0.1 -j MASQUERADE
+netfilter-persistent save >/dev/null ||
+    { echo "❌ NAT live, but persistence failed: do not mark Edge ready" >&2; exit 1; }
+echo "   ✅ DNAT/FORWARD/MASQUERADE فقط برای مسیر Core تنظیم شد."
 
 # 🆕 محدودیتِ «فقط root روی پورت ۲۲»: چون این سرور فعلاً Edge است، اکانتِ مشتری‌ای رویش
 # وجود ندارد (احرازِ هویتِ واقعی همیشه روی Core انجام می‌شود)، ولی این محدودیت را همین الان
@@ -126,7 +143,7 @@ fi
 
 echo ""
 echo "════════════════════════════════════════════════════════════"
-echo "✅ نصب این Edge کامل شد."
+echo "✅ نصب اولیه Edge انجام شد؛ ثبت Peer و تأیید تونل باید از بات بررسی شود."
 echo "   کلید عمومی این Edge: ${EDGE_PUB}"
 echo "   IP داخلی این Edge:   ${EDGE_WG_IP}"
 echo ""

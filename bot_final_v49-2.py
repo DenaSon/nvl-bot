@@ -14560,99 +14560,74 @@ async def _host_has_working_persistent_key(host, port=22, timeout=8):
     return await asyncio.to_thread(_sync)
 
 
-async def _render_server_status_panel(query, context):
-    """رندر پنل وضعیت و نقش سرورها (Core/Edge)"""
+async def _render_server_status_panel(query, context, page=0):
+    """Compact Core/Edge inventory: read-only presentation, no host mutations."""
+    import server_role_panel as server_panel
+
     core_ip = await asyncio.to_thread(_get_core_public_ip_cached)
+    if not core_ip:
+        await _safe_edit_or_send(
+            query,
+            "⚠️ IP عمومی Core مشخص نیست. تا تأیید هویت Core، عملیات مدیریتی نمایش داده نمی‌شود.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")]
+            ]),
+            parse_mode="HTML",
+        )
+        return
     await asyncio.to_thread(_db_sync_host_pool)
     pool = await asyncio.to_thread(_db_get_host_pool)
-    service_port_map = await asyncio.to_thread(_db_get_host_service_port_map)
-    admin_port_map = await asyncio.to_thread(_db_get_host_admin_ssh_port_map)
-
-    # 🆕 اضافه شدن متغیرهای مربوط به تشخیص Edge فعال (دامنه)
-    active_edge_ip = await asyncio.to_thread(_db_get_setting, 'dns_current_ip', '')
-    default_edge = await asyncio.to_thread(_db_get_default_host)
-
-    # 🔧 گارد ایمنی: اگر IP خودِ Core قابل‌تشخیص نباشد...
-    if not core_ip:
-        kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")]]
-        await query.edit_message_text(
-            "⚠️ <b>نمی‌توانم IP عمومی سرور Core را تشخیص بدهم.</b>\n\n"
-            "چون این پنل دکمه‌های حساس «ارتقا/تنزل» دارد، برای جلوگیری از نمایش اشتباهِ نقش هر "
-            "سرور، فعلاً باز نمی‌شود. لطفاً اول یک‌بار از «🚀 افزودن Edge جدید» استفاده کنید (که "
-            "IP عمومی Core را خودکار تشخیص و ذخیره می‌کند)، سپس دوباره امتحان کنید.",
-            reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
-        return
-
-    lines = [f"🖥 <b>وضعیت و نقش سرورها</b>\n"]
-    lines.append(f"🏠 <b>سرور Core فعلی:</b> <code>{esc(core_ip)}</code>\n")
-
-    # چکِ موازیِ وضعیتِ کلیدِ دائمی برای همهٔ Edgeها هم‌زمان
-    edge_hosts = [(host, admin_port_map.get(host, 22)) for host, *_ in pool if host != core_ip]
-    if edge_hosts:
-        key_check_results = await asyncio.gather(
-            *[_host_has_working_persistent_key(h, p) for h, p in edge_hosts]
-        )
-        key_status = {h: ok for (h, p), ok in zip(edge_hosts, key_check_results)}
-    else:
-        key_status = {}
-
-    kb = []
-    for host, active, fails, last_check, last_status, disabled_reason, disabled_at, is_default, avg_latency_ms, added_at, _is_standby in pool:
-        if host == core_ip:
-            role_icon = "👑 <b>[Core]</b>"
-            btn_row = [
-                InlineKeyboardButton("📉 تنزل به Edge", callback_data=f"srv_demote_{host}"),
-                InlineKeyboardButton("⚡ بهینه‌سازی سرعت", callback_data=f"srv_optimize_{host}")
-            ]
-            kb.append(btn_row)
-        else:
-            # 🆕 تشخیص اینکه آیا این Edge در حال حاضر رله فعال (متصل به دامنه) است یا خیر
-            btn_row1 = []
-            if host == active_edge_ip or host == default_edge:
-                role_icon = "🎯 <b>[رله فعال - متصل به دامنه]</b>"
-            else:
-                role_icon = "⚪️ [آماده به کار - Standby]"
-                # 🆕 دکمه شیفت ترافیک فقط برای سرورهای آماده به کار (Standby) نشان داده می‌شود
-                btn_row1 = [InlineKeyboardButton("🎯 تنظیم به عنوان رله فعال", callback_data=f"srv_mkactive_{host}")]
-
-            btn_row2 = [
-                InlineKeyboardButton("🚀 ارتقا به Core", callback_data=f"srv_promote_{host}"),
-                InlineKeyboardButton("🔄 آپدیت Endpoint", callback_data=f"srv_update_ep_{host}"),
-                InlineKeyboardButton("⚡ بهینه‌سازی سرعت", callback_data=f"srv_optimize_{host}")
-            ]
-            
-            # ✅ یعنی همین الان بدونِ رمز با کلیدِ دائمی وصل می‌شه
-            key_ok = key_status.get(host, False)
-            key_label = ("✅" if key_ok else "❌") + " نصب دسترسی دائمی SSH"
-            key_row = [InlineKeyboardButton(key_label, callback_data=f"srv_installkey_{host}")]
-
-            # اضافه کردن دکمه‌ها به کیبورد
-            if btn_row1:
-                kb.append(btn_row1)
-            kb.append(btn_row2)
-            kb.append(key_row)
-        
-        status_icon = "🟢" if active else "🔴"
-        lines.append(
-            f"{status_icon} <code>{esc(host)}</code> {role_icon} — "
-            f"Service <code>{service_port_map.get(host, 22)}</code> | "
-            f"Admin <code>{admin_port_map.get(host, 22)}</code>"
-        )
-        
-    kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")])
-    
+    dns_ip = await asyncio.to_thread(_db_get_setting, "dns_current_ip", "")
+    content, buttons = server_panel.overview(core_ip, pool, dns_ip, page)
+    keyboard = [[InlineKeyboardButton(label, callback_data=callback)
+                 for label, callback in row] for row in buttons]
     await _safe_edit_or_send(
-        query,
-        "\n".join(lines) + "\n\n"
-        "💡 <b>راهنما:</b>\n"
-        "- <b>Core:</b> سرور اصلی که دیتابیس و ربات روی آن اجرا می‌شوند.\n"
-        "- <b>Edge:</b> سرورهای رله که ترافیک را به Core منتقل می‌کنند.\n"
-        "- <b>رله فعال:</b> سرور Edge ای که در حال حاضر ترافیک دامنه روی آن تنظیم شده است.\n"
-        "- <b>ارتقا:</b> تبدیل یک Edge به Core جدید.\n"
-        "- <b>تنزل:</b> تبدیل Core قدیمی به Edge بعد از جابه‌جایی.",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="HTML"
+        query, content, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML"
     )
+
+
+async def _render_server_detail_panel(query, context, host):
+    """One selected IP at a time; preserve existing operation callback handlers."""
+    import server_role_panel as server_panel
+
+    core_ip = await asyncio.to_thread(_get_core_public_ip_cached)
+    try:
+        server_panel.checked_ip(host)
+        server_panel.checked_ip(core_ip)
+    except ValueError:
+        await _safe_edit_or_send(
+            query, "⛔ IP سرور نامعتبر است.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 فهرست سرورها", callback_data="srv_status")]
+            ]), parse_mode="HTML",
+        )
+        return
+    pool = await asyncio.to_thread(_db_get_host_pool)
+    if host != core_ip and not any(item[0] == host for item in pool):
+        await _safe_edit_or_send(
+            query, "⛔ این سرور در فهرست مدیریت وجود ندارد.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 فهرست سرورها", callback_data="srv_status")]
+            ]), parse_mode="HTML",
+        )
+        return
+    service_map = await asyncio.to_thread(_db_get_host_service_port_map)
+    admin_map = await asyncio.to_thread(_db_get_host_admin_ssh_port_map)
+    dns_ip = await asyncio.to_thread(_db_get_setting, "dns_current_ip", "")
+    row = next((item for item in pool if item[0] == host), None)
+    key_ok = None
+    if host != core_ip and row and row[1]:
+        key_ok = await _host_has_working_persistent_key(host, admin_map.get(host, 22))
+    content, buttons = server_panel.detail(
+        core_ip, host, pool, dns_ip,
+        service_map.get(host, 22), admin_map.get(host, 22), key_ok,
+    )
+    keyboard = [[InlineKeyboardButton(label, callback_data=callback)
+                 for label, callback in row] for row in buttons]
+    await _safe_edit_or_send(
+        query, content, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML"
+    )
+
 
 # ============================================================================
 # 🚀 خودکارسازی «ارتقا (Promote)»: قبلاً ادمین باید دستی ۶ فایل را از Core به Edge
@@ -21275,6 +21250,63 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🖥 پنل وضعیت و نقش سرورها (Core/Edge)
     elif d == "srv_status" and role == 'admin':
         await _render_server_status_panel(query, context)
+
+    # Core/Edge UI-only drill-down and page selection.
+    elif d.startswith("srv_page_") and role == 'admin':
+        import server_role_panel as server_panel
+        try:
+            page = int(d[len("srv_page_"):])
+        except ValueError:
+            page = 0
+        await _render_server_status_panel(query, context, page=page)
+
+    elif d.startswith("srv_view_") and role == 'admin':
+        await _render_server_detail_panel(query, context, d[len("srv_view_"):])
+
+    # Safe metadata-only deletion of inactive hosts. Always recheck at commit.
+    elif d.startswith("srv_del_confirm_") and role == 'admin':
+        import server_role_panel as server_panel
+        target_ip = d[len("srv_del_confirm_"):]
+        core_ip = await asyncio.to_thread(_get_core_public_ip_cached)
+        ok, message = await asyncio.to_thread(
+            server_panel.delete_inactive, db_conn, target_ip, core_ip,
+            _db_assert_legacy_host_mutation_allowed,
+        )
+        await _safe_edit_or_send(
+            query,
+            ("✅ " if ok else "⛔ ") + esc(message) + "\n\n"
+            + "🌐 <code>" + esc(target_ip) + "</code>",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 فهرست سرورها", callback_data="srv_status")]
+            ]), parse_mode="HTML",
+        )
+
+    elif d.startswith("srv_del_") and role == 'admin':
+        import server_role_panel as server_panel
+        target_ip = d[len("srv_del_"):]
+        core_ip = await asyncio.to_thread(_get_core_public_ip_cached)
+        ok, reason = await asyncio.to_thread(
+            server_panel.deletion_preview, db_conn, target_ip, core_ip,
+            _db_assert_legacy_host_mutation_allowed,
+        )
+        buttons = []
+        if ok:
+            buttons.append([InlineKeyboardButton(
+                "🗑 تأیید حذف از فهرست",
+                callback_data="srv_del_confirm_" + target_ip,
+            )])
+        buttons.append([InlineKeyboardButton(
+            "🔙 جزئیات سرور", callback_data="srv_view_" + target_ip,
+        )])
+        await _safe_edit_or_send(
+            query,
+            "🗑 <b>حذف رکورد سرور</b>\n\n"
+            + "🌐 IP: <code>" + esc(target_ip) + "</code>\n"
+            + esc(reason) + "\n\n"
+            + ("⚠️ فقط رکورد مدیریتی حذف می‌شود؛ VPS، SSH، DNS، WireGuard و کاربران تغییر نمی‌کنند."
+               if ok else "⛔ حذف تا رفع وابستگی‌های موجود مجاز نیست."),
+            reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML",
+        )
 
     elif d.startswith("srv_optimize_") and role == 'admin':
         target_ip = d.replace("srv_optimize_", "")

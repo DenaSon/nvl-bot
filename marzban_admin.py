@@ -1304,8 +1304,10 @@ class MarzbanAdminService:
     ) -> ApiResult:
         """Create a Marzban user and verify it with an authoritative GET.
 
-        If the POST succeeds but verification fails, the structured failure
-        includes created=True so callers must not blindly retry the POST.
+        Every failure after the create POST is treated as potentially
+        side-effecting. created=True therefore means the remote User may exist
+        and callers must reconcile/cleanup instead of blindly retrying.
+        Pre-POST failures explicitly return created=False.
         """
         try:
             username = normalize_user_create_username(username)
@@ -1338,11 +1340,19 @@ class MarzbanAdminService:
 
         ok_inbounds, inbound_payload = await self.get_inbounds()
         if not ok_inbounds:
-            return False, inbound_payload
+            return False, {
+                "stage": "inbounds",
+                "created": False,
+                "error": inbound_payload,
+            }
         try:
             inbounds = build_user_inbounds(inbound_payload, selected_inbound_tags)
         except ValueError as exc:
-            return False, str(exc)
+            return False, {
+                "stage": "inbounds_validation",
+                "created": False,
+                "error": str(exc),
+            }
 
         proxies = {protocol: {} for protocol in inbounds}
         payload: Dict[str, Any] = {
@@ -1360,7 +1370,16 @@ class MarzbanAdminService:
 
         ok_create, created = await self.request("POST", "/api/user", json_data=payload)
         if not ok_create:
-            return False, created
+            error_text = str(created or "").lower()
+            collision = "already exists" in error_text or "already_exist" in error_text
+            return False, {
+                "stage": "create",
+                # A non-collision POST failure is ambiguous: the request may have
+                # reached Marzban even when its response was lost or failed.
+                "created": False if collision else True,
+                "collision": collision,
+                "error": created,
+            }
 
         ok_verify, verified = await self.get_user(username)
         if not ok_verify or not isinstance(verified, dict):

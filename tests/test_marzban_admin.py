@@ -905,6 +905,51 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["stage"], "verify")
         self.service.request.assert_awaited_once()
 
+    async def test_create_user_marks_post_failure_as_uncertain(self):
+        self.service.get_inbounds = AsyncMock(return_value=(
+            True,
+            {"vless": [{"tag": "VLESS Reality", "protocol": "vless"}]},
+        ))
+        self.service.get_user = AsyncMock()
+        self.service.request = AsyncMock(
+            return_value=(False, "Network Error: connection reset")
+        )
+
+        ok, result = await self.service.create_user(
+            "nvl_uncertain01",
+            data_limit_bytes=1024**3,
+            expire=0,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(result["stage"], "create")
+        self.assertTrue(result["created"])
+        self.assertFalse(result["collision"])
+        self.assertIn("connection reset", str(result["error"]))
+        self.service.get_user.assert_not_awaited()
+
+    async def test_create_user_marks_already_exists_as_safe_collision(self):
+        self.service.get_inbounds = AsyncMock(return_value=(
+            True,
+            {"vless": [{"tag": "VLESS Reality", "protocol": "vless"}]},
+        ))
+        self.service.get_user = AsyncMock()
+        self.service.request = AsyncMock(
+            return_value=(False, {"detail": "User already exists"})
+        )
+
+        ok, result = await self.service.create_user(
+            "nvl_collision01",
+            data_limit_bytes=1024**3,
+            expire=0,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(result["stage"], "create")
+        self.assertFalse(result["created"])
+        self.assertTrue(result["collision"])
+        self.service.get_user.assert_not_awaited()
+
     async def test_create_user_rejects_removed_selected_inbound_before_post(self):
         self.service.get_inbounds = AsyncMock(return_value=(
             True,

@@ -94,6 +94,7 @@ import qrcode
 import v2ray_engine
 import marzban_admin
 import cloudflare_dns
+from dns_route_guard import DNSDecision, RelayCandidate, plan_host_retirement_dns
 import radar_runtime
 import radar_notifications
 import radar_ui
@@ -4253,6 +4254,44 @@ def _cf_get_config():
 def _cf_configured(cfg=None):
     cfg = cfg or _cf_get_config()
     return all([cfg["public_domain"], cfg["token"], cfg["zone"]])
+
+def _cf_read_public_domain_ip_sync():
+    """Read the exact public A record from Cloudflare. Never trust cached state.
+
+    GET-only; ambiguous, invalid, missing or unreadable records fail closed.
+    """
+    import ipaddress
+    from urllib.parse import quote
+
+    cfg = _cf_get_config()
+    if not _cf_configured(cfg):
+        return None, "CLOUDFLARE_UNCONFIGURED"
+    uri = (f"https://api.cloudflare.com/client/v4/zones/{cfg['zone']}/dns_records"
+           f"?name={quote(cfg['public_domain'], safe='')}&type=A")
+    auth = [{"Authorization": f"Bearer {cfg['token']}"}]
+    if cfg.get("email"):
+        auth.append({"X-Auth-Email": cfg["email"], "X-Auth-Key": cfg["token"]})
+    for headers in auth:
+        try:
+            req = urllib.request.Request(uri, headers=headers, method="GET")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                result = json.loads(resp.read())
+        except Exception:
+            continue
+        if not result.get("success"):
+            continue
+        exact = [r for r in (result.get("result") or [])
+                 if r.get("type") == "A" and r.get("name", "").lower() == cfg["public_domain"].lower()]
+        if len(exact) != 1:
+            return None, "PUBLIC_A_RECORD_AMBIGUOUS"
+        ip = str(exact[0].get("content") or "").strip()
+        try:
+            ipaddress.IPv4Address(ip)
+        except ValueError:
+            return None, "PUBLIC_A_RECORD_INVALID"
+        return ip, None
+    return None, "CLOUDFLARE_READ_FAILED"
+
 
 def _cf_update_dns_record_sync(new_ip: str):
     # All known legacy Cloudflare callers ultimately reach this function.
@@ -25199,11 +25238,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         active_now = await asyncio.to_thread(_db_get_active_hosts_from_pool)
         if len(active_now) <= 1:
             await query.message.reply_text("⛔️ این تنها IP فعال شماست؛ اول یک IP دیگر اضافه کنید تا فاکتورسازی متوقف نشود."); return
+        # Manual and automatic retirement share the same fail-closed preflight.
+        decision = await _hf01_plan_host_deactivation(host)
+        if decision.action == "BLOCKED":
+            log.warning("HF01 manual host retirement held host=%s reason=%s", host, decision.reason)
+            await query.message.reply_text("⛔️ عملیات متوقف شد؛ مسیر امن جایگزین تأیید نشده است.")
+            return
+        if decision.action == "SWITCH":
+            changed, detail = await _cf_switch_public_domain(decision.target, app=context.application)
+            if not changed:
+                log.error("HF01 manual DNS change failed host=%s reason=%s", host, detail)
+                await query.message.reply_text("⛔️ تغییر مسیر دامنه تأیید نشد؛ هیچ Hostی غیرفعال نشد.")
+                return
         await asyncio.to_thread(_db_set_host_active, host, False, "مسدودسازی دستی توسط ادمین")
         await asyncio.to_thread(_db_rebuild_hosts_from_pool)
-        remaining_active = await asyncio.to_thread(_db_get_active_hosts_from_pool)
-        if remaining_active:
-            await _cf_switch_public_domain(remaining_active[0], app=context.application)
         await query.message.reply_text(f"🚫 {host} غیرفعال شد.")
         await _render_host_pool_panel(query)
 
@@ -27790,6 +27838,41 @@ def _probe_wireguard_edge_sync(host):
     }
 
 
+async def _hf01_plan_host_deactivation(host):
+    """Verify actual Cloudflare route before mutating a host or switching DNS."""
+    live_ip, error = await asyncio.to_thread(_cf_read_public_domain_ip_sync)
+    if error:
+        return DNSDecision("BLOCKED", None, error)
+
+    stored = await asyncio.to_thread(_db_get_setting, "dns_current_ip", "")
+    if stored != live_ip:
+        await asyncio.to_thread(_db_update_setting, "dns_current_ip", live_ip)
+        log.warning("HF01 DNS state reconciled: stored=%s live=%s", stored, live_ip)
+
+    core_ip = await asyncio.to_thread(_db_get_setting, "core_wg_public_ip", "")
+    if not core_ip:
+        core_ip = await asyncio.to_thread(_get_core_public_ip_cached)
+    core_ip = str(core_ip or "").strip()
+    if live_ip != host:
+        return plan_host_retirement_dns(host, live_ip, core_ip, ())
+
+    pool = await asyncio.to_thread(_db_get_host_pool)
+    ports = await asyncio.to_thread(_db_get_host_service_port_map)
+    checked = []
+    for row in pool:
+        candidate, active, *_ = row
+        is_default, is_standby = bool(row[7]), bool(row[10])
+        if not active or candidate in (host, core_ip) or is_standby:
+            continue
+        service_ok, _ = await _tcp_health_check(candidate, ports.get(candidate, 22))
+        if not service_ok:
+            continue
+        route = await asyncio.to_thread(_probe_wireguard_edge_sync, candidate)
+        verified = route.get("wg_peer_ok") is True and route.get("core_path_ok") is True
+        checked.append(RelayCandidate(candidate, is_default, verified, is_standby))
+    return plan_host_retirement_dns(host, live_ip, core_ip, checked)
+
+
 async def _host_health_tick(app):
     await asyncio.to_thread(_db_sync_host_pool)
     pool = await asyncio.to_thread(_db_get_host_pool)
@@ -27869,6 +27952,17 @@ async def _host_health_tick(app):
             )
             continue
 
+        # Only the affected DNS endpoint may trigger a route decision.
+        decision = await _hf01_plan_host_deactivation(host)
+        if decision.action == "BLOCKED":
+            log.error("HF01 automatic host retirement held host=%s reason=%s", host, decision.reason)
+            continue
+        if decision.action == "SWITCH":
+            # Switch to a verified relay before disabling the routed host.
+            changed, detail = await _cf_switch_public_domain(decision.target, app=app)
+            if not changed:
+                log.error("HF01 automatic DNS change failed host=%s reason=%s", host, detail)
+                continue
         await asyncio.to_thread(
             _db_set_host_active,
             host,
@@ -27876,9 +27970,6 @@ async def _host_health_tick(app):
             f"Service port failed after {new_fails} consecutive checks: {service_err}",
         )
         await asyncio.to_thread(_db_rebuild_hosts_from_pool)
-        remaining_active = await asyncio.to_thread(_db_get_active_hosts_from_pool)
-        if remaining_active:
-            await _cf_switch_public_domain(remaining_active[0], app=app)
 
         await _notify_admins(
             app,

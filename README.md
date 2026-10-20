@@ -1,3 +1,5 @@
+> **Health Center plan / 2026-10-20 (documentation only):** [HD-01/HD-02 MVP roadmap](docs/HEALTH_CENTER_HD01_HD02_ROADMAP_2026-10-20.md) and [MCI-specific SSH incident record](docs/HEALTH_INCIDENT_2026-10-20_MCI_EDGE.md). Existing Check-Host `CLEAR` is TCP-only and is **not** proof of MCI/Rightel SSH authentication readiness. Health must not write DNS, host/Edge state, accounts or trigger 6H; these phases are PLANNED, not implemented/deployed.
+
 > **Core deploy update — 2026-10-14:** The operator reported a successful **code-only VPS publish** of SHA `d5ca38b6e7069d969d8aa33bcb42ef71c8c63b2a` on `CloudVPS121849`: 8 root Python files replaced, 13 added, 70 code hashes passed, nvlbot restarted and held a stable PID for 10 seconds. **Independent post-deploy host checks / Telegram UI smoke remain pending.** This is not an approved protected UID egress deployment or customer migration. See [exact Core recovery paths and next tests](docs/NVL_K2_CORE_CODE_RELEASE_RECORD_2026-10-14.md). Historical “not deployed” text below only describes pre-2026-10-14 state; do **not** run the one-shot deploy again.
 
 # NVL Bot

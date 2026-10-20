@@ -95,6 +95,7 @@ import v2ray_engine
 import marzban_admin
 import cloudflare_dns
 from dns_route_guard import DNSDecision, RelayCandidate, plan_host_retirement_dns
+from critical_operation_notice import send_critical_notice
 import radar_runtime
 import radar_notifications
 import radar_ui
@@ -25242,14 +25243,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         decision = await _hf01_plan_host_deactivation(host)
         if decision.action == "BLOCKED":
             log.warning("HF01 manual host retirement held host=%s reason=%s", host, decision.reason)
+            await _hf02_notify_route_event(context.application, "ROUTE_CHANGE_BLOCKED", host, reason=decision.reason)
             await query.message.reply_text("⛔️ عملیات متوقف شد؛ مسیر امن جایگزین تأیید نشده است.")
             return
         if decision.action == "SWITCH":
-            changed, detail = await _cf_switch_public_domain(decision.target, app=context.application)
+            changed, detail = await _cf_switch_public_domain(decision.target, app=None)
             if not changed:
                 log.error("HF01 manual DNS change failed host=%s reason=%s", host, detail)
+                await _hf02_notify_route_event(context.application, "ROUTE_CHANGE_FAILED", host, target=decision.target, reason="DNS_UPDATE_NOT_CONFIRMED")
                 await query.message.reply_text("⛔️ تغییر مسیر دامنه تأیید نشد؛ هیچ Hostی غیرفعال نشد.")
                 return
+            await _hf02_notify_route_event(context.application, "ROUTE_CHANGED", host, target=decision.target)
         await asyncio.to_thread(_db_set_host_active, host, False, "مسدودسازی دستی توسط ادمین")
         await asyncio.to_thread(_db_rebuild_hosts_from_pool)
         await query.message.reply_text(f"🚫 {host} غیرفعال شد.")
@@ -27838,6 +27842,18 @@ def _probe_wireguard_edge_sync(host):
     }
 
 
+async def _hf02_notify_route_event(app, event, host, target=None, reason=None):
+    """Only critical route decisions reach explicitly authorized super-admins."""
+    ref = await send_critical_notice(
+        app, event=event, primary_super_admin_id=SUPER_ADMIN_ID,
+        dedupe_key=str(host), logger=log,
+    )
+    if ref:
+        log.warning("NVL_CRITICAL_OPERATION ref=%s event=%s host=%s target=%s reason=%s",
+                    ref, event, host, target or "-", reason or "-")
+    return ref
+
+
 async def _hf01_plan_host_deactivation(host):
     """Verify actual Cloudflare route before mutating a host or switching DNS."""
     live_ip, error = await asyncio.to_thread(_cf_read_public_domain_ip_sync)
@@ -27956,13 +27972,16 @@ async def _host_health_tick(app):
         decision = await _hf01_plan_host_deactivation(host)
         if decision.action == "BLOCKED":
             log.error("HF01 automatic host retirement held host=%s reason=%s", host, decision.reason)
+            await _hf02_notify_route_event(app, "ROUTE_CHANGE_BLOCKED", host, reason=decision.reason)
             continue
         if decision.action == "SWITCH":
             # Switch to a verified relay before disabling the routed host.
-            changed, detail = await _cf_switch_public_domain(decision.target, app=app)
+            changed, detail = await _cf_switch_public_domain(decision.target, app=None)
             if not changed:
                 log.error("HF01 automatic DNS change failed host=%s reason=%s", host, detail)
+                await _hf02_notify_route_event(app, "ROUTE_CHANGE_FAILED", host, target=decision.target, reason="DNS_UPDATE_NOT_CONFIRMED")
                 continue
+            await _hf02_notify_route_event(app, "ROUTE_CHANGED", host, target=decision.target)
         await asyncio.to_thread(
             _db_set_host_active,
             host,
@@ -27971,15 +27990,6 @@ async def _host_health_tick(app):
         )
         await asyncio.to_thread(_db_rebuild_hosts_from_pool)
 
-        await _notify_admins(
-            app,
-            f"🔴 <b>یک Service endpoint از سرویس خارج شد</b>\n\n"
-            f"Service <code>{esc(host)}:{service_port}</code> در {new_fails} بررسی متوالی "
-            f"پاسخ نداد و از لیست فعال حذف شد.\n"
-            f"آخرین خطا: <code>{esc(service_err)}</code>\n"
-            f"Admin SSH <code>{admin_port}</code>: {'✅ سالم' if admin_ok else '❌ ناموفق'}\n\n"
-            f"توجه: وضعیت Admin SSH مستقل ثبت می‌شود و به‌تنهایی باعث خروج Edge از سرویس نمی‌شود.",
-        )
         log.warning(
             "Service endpoint %s:%s disabled after %s failures: %s",
             host, service_port, new_fails, service_err,

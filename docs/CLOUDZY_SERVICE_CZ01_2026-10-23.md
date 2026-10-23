@@ -1,3 +1,5 @@
+> **Updated UI routing decision — 2026-10-23:** The new Cloudzy/Legacy management panel will REPLACE the existing K2 'مدیریت خروجی' button **inside 🧩 Programs** only, not add a new root admin shortcut. K2 modules/handlers and all Legacy manual UI remain untouched. Planned three phases: 9 read-only actions, 3 purchase/key/wait actions, 8 server-management actions + guarded Legacy Relay controls. See [current plan](CLOUDZY_MANAGEMENT_CZ02_CZ04_3_PHASE_PLAN_2026-10-23.md). No integration has been implemented by this documentation change.
+
 > **Integration decision — 2026-10-23 (documentation only):** The proposed next Cloudzy UI will be a **separate first-page admin shortcut** reusing the existing Legacy Edge installer while preserving the original manual UI and callback behavior. Ubuntu 24.04 is fixed and hidden in the new flow. K2 protected customer Egress is **not operationally released/accepted** and is out of scope. No Telegram integration is implemented by this note. See [Cloudzy Legacy quick-Edge design and safety plan](CLOUDZY_LEGACY_QUICK_EDGE_PLAN_2026-10-23.md).
 
 # NVL CloudzyService — CZ-01 (service only)

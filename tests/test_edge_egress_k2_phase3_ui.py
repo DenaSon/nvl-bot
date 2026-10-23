@@ -102,7 +102,10 @@ class Phase3PresentationTests(unittest.TestCase):
             self.assertNotIn(word,steps_html())
         source=BOT.read_text()
         hub=source[source.index('def _build_admin_programs_kb'):source.index('_MIGRATION_INPUT_STATES')]
-        self.assertIn('callback_data="hpeg_status"',hub)
+        # CZ-02 deliberately moves the Programs shortcut away from unreleased K2.
+        self.assertIn('callback_data="apps_cz_home"', hub)
+        self.assertNotIn('callback_data="hpeg_status"', hub)
+        self.assertIn('elif d == "hpeg_status"', source)
         pool=source[source.index('async def _show_host_pool'):source.index('async def _show_host_pool')+18000] if 'async def _show_host_pool' in source else ''
         self.assertNotIn('مدیریت Egress',pool)
 

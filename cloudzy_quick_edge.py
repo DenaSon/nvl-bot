@@ -165,7 +165,7 @@ class ReceiptStore:
                 hold_reason TEXT
             )""")
             db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS cloudzy_edge_one_unfinished
-                ON cloudzy_edge_operations((1)) WHERE status != 'EDGE_READY'""")
+                ON cloudzy_edge_operations((1)) WHERE status NOT IN ('EDGE_READY','REJECTED')""")
 
     def reserve(self, *, actor, chat, region, plan, cycle, price, port, pubkey):
         region, plan = _safe_id(region), _safe_id(plan)
@@ -182,7 +182,7 @@ class ReceiptStore:
             with self.db() as db:
                 db.execute("BEGIN IMMEDIATE")
                 prior = db.execute(
-                    "SELECT id FROM cloudzy_edge_operations WHERE status!='EDGE_READY' LIMIT 1"
+                    "SELECT id FROM cloudzy_edge_operations WHERE status NOT IN ('EDGE_READY','REJECTED') LIMIT 1"
                 ).fetchone()
                 if prior:
                     raise QuickEdgeHold("PREVIOUS_CLOUDZY_OPERATION_UNSETTLED")
@@ -294,7 +294,7 @@ class QuickEdgeWizard:
             if data == "apps_cz_wizard":
                 self.store.initialize()
                 old = await asyncio.to_thread(self.store.latest)
-                if old and old["status"] != "EDGE_READY":
+                if old and old["status"] not in ("EDGE_READY", "REJECTED"):
                     await self._operation_screen(query, old, markup, actor, chat)
                     return
                 port, pub = await self._preflight()
@@ -414,6 +414,7 @@ class QuickEdgeWizard:
                 await self._display(query,
                     "🔐 <b>آخرین بررسی هویت SSH</b>\n\n"
                     f"IP: <code>{_text(op['public_ipv4'])}</code>\n"
+                    f"نوع کلید: <code>{_text(op['host_key_type'])}</code>\n"
                     f"اثر انگشت: <code>{_text(op['host_key_fingerprint'])}</code>\n\n"
                     "⚠️ فقط اگر این اثر انگشت را با یک منبع مستقل و مورداعتماد "
                     "(مثل کنسول سرور در Cloudzy) تطبیق داده‌اید، تأیید کنید. "
@@ -555,6 +556,7 @@ class QuickEdgeWizard:
             text += "\n⏳ پس از ری‌استارت بات، این مرحله ممکن است نامعلوم باشد؛ درخواست تکراری نفرستید."
         if status == "HOSTKEY_PENDING":
             text += (f"\n🔐 <b>SSH host-key fingerprint</b>\n"
+                     f"نوع: <code>{_text(op.get('host_key_type') or 'نامشخص')}</code>\n"
                      f"<code>{_text(op.get('host_key_fingerprint') or 'نامشخص')}</code>\n\n"
                      "این اثرانگشت را با یک منبع مستقل و مورداعتماد، "
                      "مثلاً کنسول Cloudzy، مقایسه کنید. مشاهده آن از همین IP کافی نیست.")
@@ -578,6 +580,17 @@ class QuickEdgeWizard:
             server_id = _server_id(data)
             await asyncio.to_thread(
                 self.store.change, opid, "CREATING", "CREATED", provider_server_id=server_id)
+        except CloudzyAPIError as exc:
+            # API definitively rejected POST (4xx); no uncertain provider charge.
+            try:
+                await asyncio.to_thread(self.store.change, opid, "CREATING", "REJECTED",
+                                        hold_reason="CLOUDZY_HTTP_REJECTED_" + str(exc.status))
+            except QuickEdgeHold:
+                pass
+            await app.bot.send_message(
+                chat, f"⛔️ خرید توسط Cloudzy رد شد (HTTP {exc.status}). "
+                "هیچ نصب Edge انجام نشد؛ پس از اصلاح شرایط می‌توانید درخواست جدید ثبت کنید.")
+            return
         except (CloudzyUncertainError, QuickEdgeHold, CloudzyError, Exception) as exc:
             # No second create. Even HTTP 4xx is left for manual review rather
             # than allowing another chargeable attempt on an ambiguous deployment.
@@ -624,6 +637,7 @@ class QuickEdgeWizard:
             "🔐 VPS Cloudzy ساخته شد. قبل از نصب، اثرانگشت SSH را "
             "از طریق کنسول معتبر Cloudzy مستقل بررسی کنید:\n\n"
             f"<code>{_text(fingerprint)}</code>\n"
+            f"نوع کلید: <code>{_text(key_type)}</code>\n"
             f"IP: <code>{_text(op['public_ipv4'])}</code>\n"
             "سپس از «وضعیت عملیات» وارد بررسی و تأیید شوید.",
             parse_mode="HTML")

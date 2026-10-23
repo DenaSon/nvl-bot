@@ -188,6 +188,45 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         await self.app.drain()
         return self.wizard.store.latest()
 
+    async def test_crash_during_create_recovers_from_exact_provider_name_without_post(self):
+        opid = self.wizard.store.reserve(
+            actor=112, chat=334, region="fra", plan="plan-1",
+            cycle="monthly", price=250, port=2252, pubkey=self.pub)
+        self.api.server["hostname"] = self.wizard.store.get(opid)["hostname"]
+        await self.cb("apps_cz_operations")
+        self.assertIn("apps_cz_qcheck_" + opid, self.query.callbacks)
+        await self.cb("apps_cz_qcheck_" + opid)
+        await self.app.drain()
+        self.assertEqual(self.wizard.store.get(opid)["status"], "HOSTKEY_PENDING")
+        self.assertNotIn("wait", self.api.calls)
+        self.assertFalse(any(isinstance(c, tuple) and c[0] == "create" for c in self.api.calls))
+
+    async def test_crash_during_wait_recovers_without_new_order(self):
+        opid = self.wizard.store.reserve(
+            actor=112, chat=334, region="fra", plan="plan-1",
+            cycle="monthly", price=250, port=2252, pubkey=self.pub)
+        self.wizard.store.change(opid, "CREATING", "CREATED",
+                                 provider_server_id="server-1")
+        self.wizard.store.change(opid, "CREATED", "WAITING")
+        await self.cb("apps_cz_operations")
+        await self.cb("apps_cz_qcheck_" + opid)
+        await self.app.drain()
+        self.assertEqual(self.wizard.store.get(opid)["status"], "HOSTKEY_PENDING")
+        self.assertEqual(self.api.calls, ["get"])
+
+    async def test_postcheck_rejection_never_reports_edge_ready(self):
+        async def rejected(*args):
+            self.verifications.append(args)
+            return False
+        self.wizard.verify = rejected
+        await self.purchase()
+        await self.cb("apps_cz_operations")
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_")))
+        await self.app.drain()
+        self.assertEqual(self.wizard.store.latest()["status"], "HOLD_PROVISION")
+        self.assertEqual(len(self.provisions), 1)
+
     async def test_unauthorized_or_initial_navigation_never_purchases(self):
         await self.cb("apps_cz_wizard", role="agent")
         self.assertEqual(self.api.calls, [])

@@ -46,7 +46,7 @@ there is no additional OS-listing endpoint inside this service.
 
 - Token comes from `CLOUDZY_TOKEN` or an explicit constructor argument; it
   must never be committed or printed. Create a scoped, expiring developer token.
-- No SDK/package installation is needed: existing `requests` dependency.
+- No SDK/package installation is needed: HTTPS requests use Python's standard-library `urllib`.
 - Creation is chargeable; `confirm=True` must follow an actual operator
   decision elsewhere. Rebuild destroys the disk, password reset invalidates
   old credentials, and delete destroys the VPS. The library checks the explicit

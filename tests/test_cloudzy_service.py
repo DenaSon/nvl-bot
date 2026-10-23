@@ -193,6 +193,12 @@ class CloudzyServiceTests(unittest.TestCase):
         self.assertEqual(out["ipAddress"], "203.0.113.4")
         self.assertEqual(len(self.session.calls), 2)
 
+    def test_wait_supports_nested_service_envelope_without_false_ready(self):
+        payload = {"data": {"service": {"status": "active", "primaryIpv4": "8.8.8.8"}}}
+        self.session.responses = [FakeResponse(payload)]
+        self.assertEqual(self.client.wait_for_ready("id", timeout=3), payload)
+        self.assertEqual(len(self.session.calls), 1)
+
     def test_wait_terminal_state_and_timeout(self):
         self.session.responses = [FakeResponse({"state": "failed"})]
         with self.assertRaises(CloudzyError):

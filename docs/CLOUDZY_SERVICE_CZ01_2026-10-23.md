@@ -1,3 +1,5 @@
+> **Integration decision — 2026-10-23 (documentation only):** The proposed next Cloudzy UI will be a **separate first-page admin shortcut** reusing the existing Legacy Edge installer while preserving the original manual UI and callback behavior. Ubuntu 24.04 is fixed and hidden in the new flow. K2 protected customer Egress is **not operationally released/accepted** and is out of scope. No Telegram integration is implemented by this note. See [Cloudzy Legacy quick-Edge design and safety plan](CLOUDZY_LEGACY_QUICK_EDGE_PLAN_2026-10-23.md).
+
 # NVL CloudzyService — CZ-01 (service only)
 
 ## Scope and source

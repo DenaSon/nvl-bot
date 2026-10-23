@@ -124,6 +124,7 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         self.app = FakeApp()
         self.api = FakeCloudzy()
         self.provisions = []
+        self.verifications = []
         self.preflight_calls = []
         self.pub = "ssh-ed25519 AAAAxpublickey nvledge"
         self.fingerprint = ["ssh-ed25519", "AAAAPINNEDPUBLIC", "SHA256:trustedtest"]
@@ -132,6 +133,7 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
             conn_factory=self.db,
             preflight=self._preflight,
             provision=self._provision,
+            verify=self._verify,
             cloudzy_factory=lambda: self.api,
             fingerprint=self._fingerprint,
             now=lambda: self.now[0],
@@ -162,6 +164,10 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
     async def _provision(self, *args):
         self.provisions.append(args)
         return True, "8.8.8.8", {"tunnel_ok": True}
+
+    async def _verify(self, *args):
+        self.verifications.append(args)
+        return True
 
     async def cb(self, data, *, role="admin", actor=112, chat=334):
         await self.wizard.handle_callback(
@@ -229,6 +235,7 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         ip, port, hostname, chat, app, server_id, pinned = self.provisions[0]
         self.assertEqual((ip, port, chat, server_id), ("8.8.8.8", 2252, 334, "server-1"))
         self.assertEqual(pinned, tuple(self.fingerprint[:2]))
+        self.assertEqual(self.verifications, [("8.8.8.8", 2252, "server-1")])
         self.assertTrue(hostname.startswith("nvl-edge-"))
         await self.cb(accept)
         self.assertEqual(len(self.provisions), 1)

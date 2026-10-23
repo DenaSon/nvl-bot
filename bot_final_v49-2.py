@@ -3971,8 +3971,10 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
     # 🐛🔧 سقفِ زمانیِ بیرونی: حتی اگه thread (به هر دلیلِ پیش‌بینی‌نشده‌ای) گیر کنه، ربات بعد از
     # این مهلت خودش کنترل رو پس می‌گیره به‌جای اینکه برای همیشه بی‌پاسخ بمونه.
     # connect_retries می‌تونه چند بار با فاصلهٔ ۱۰ ثانیه تلاش کنه، پس سقف باید فضای کافی بده.
-    if type(egress_stage_requested) is not bool or type(pool_active) is not bool:
-        raise ValueError("INVALID_EDGE_PROVISION_OPTIONS")
+    if type(egress_stage_requested) is not bool:
+        raise ValueError("INVALID_EGRESS_STAGE_WIZARD_OPT_IN")
+    if type(pool_active) is not bool:
+        raise ValueError("INVALID_EDGE_POOL_MODE")
     if not pool_active and (egress_stage_requested or trusted_host_key is None):
         raise ValueError("INACTIVE_CLOUDZY_EDGE_REQUIRES_PINNED_LEGACY_INSTALL")
     # K2 opt-in is a non-customer, unlisted Ingress+Stage candidate. Do not
@@ -4085,7 +4087,10 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
             )
             return False, edge_ip, result
     else:
-        await asyncio.to_thread(_db_add_host_pool, edge_ip, active=pool_active)
+        if pool_active:
+            await asyncio.to_thread(_db_add_host_pool, edge_ip)
+        else:
+            await asyncio.to_thread(_db_add_host_pool, edge_ip, active=False)
         if provider:
             await asyncio.to_thread(_db_set_host_provider_meta, edge_ip, provider, provider_instance_id)
         if pool_active:

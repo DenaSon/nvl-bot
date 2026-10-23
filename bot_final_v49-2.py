@@ -7056,10 +7056,39 @@ async def _cloudzy_quick_provision(ip, port, hostname, chat, app, server_id, tru
     )
 
 
+async def _cloudzy_quick_verify(ip, port, server_id):
+    """CZ-03 acceptance: installed, SSH service responds, no customer assignment."""
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT active,is_default,service_port,provider,provider_instance_id "
+            "FROM host_pool WHERE host=?", (ip,)
+        ).fetchone()
+        if not row or row[0] or row[1] or int(row[2]) != port:
+            raise RuntimeError("CLOUDZY_LEGACY_EDGE_NOT_INACTIVE")
+        if row[3] != "cloudzy" or row[4] != server_id:
+            raise RuntimeError("CLOUDZY_PROVIDER_OWNERSHIP_MISMATCH")
+        users = conn.execute(
+            "SELECT COUNT(*) FROM ssh_accounts WHERE host=?", (ip,)
+        ).fetchone()[0]
+        hosts_row = conn.execute(
+            "SELECT value FROM settings WHERE key='hosts'"
+        ).fetchone()
+        dns_row = conn.execute(
+            "SELECT value FROM settings WHERE key='dns_current_ip'"
+        ).fetchone()
+        if users or ip in (hosts_row[0] if hosts_row else "").split(","):
+            raise RuntimeError("CLOUDZY_EDGE_ALREADY_SELECTABLE")
+        if dns_row and dns_row[0] == ip:
+            raise RuntimeError("CLOUDZY_EDGE_SELECTED_PUBLIC_DNS")
+    reachable, _reason = await _check_ssh_reachable(ip, port, timeout=7)
+    return bool(reachable)
+
+
 _cloudzy_quick_edge = QuickEdgeWizard(
     conn_factory=db_conn,
     preflight=_cloudzy_quick_preflight,
     provision=_cloudzy_quick_provision,
+    verify=_cloudzy_quick_verify,
 )
 
 

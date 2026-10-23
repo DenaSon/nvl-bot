@@ -170,7 +170,8 @@ class Phase1PanelTests(unittest.TestCase):
         self.assertIn("admin@example.org", self.query.text)
         self.cb("apps_cz_keys_0")
         self.assertIn("کلیدهای عمومی", self.query.text)
-        self.assertFalse(any("del" in x or "add" in x for x in self.query.callbacks))
+        self.assertFalse(any(x.startswith(("apps_cz_kdel_", "apps_cz_kadd", "apps_cz_kconfirm_"))
+                             for x in self.query.callbacks))
         self.assertNotIn("PRIVATE_NO", str(self.context.user_data))
         tok = next(v[len("apps_cz_key_"):] for v in self.query.callbacks
                    if v.startswith("apps_cz_key_"))

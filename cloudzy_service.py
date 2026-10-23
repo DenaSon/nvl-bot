@@ -99,7 +99,7 @@ class CloudzyService:
         sleep=None,
         monotonic=None,
     ):
-        self._token = _required(token or os.environ.get("CLOUDZY_TOKEN", ""), "CLOUDZY_TOKEN")
+        self._token = _required(token if token is not None else os.environ.get("CLOUDZY_TOKEN", ""), "CLOUDZY_TOKEN")
         if not isinstance(base_url, str) or not base_url.startswith("https://"):
             raise ValueError("Cloudzy base URL must use HTTPS")
         if "?" in base_url or "#" in base_url or "@" in base_url.split("/")[2]:
@@ -133,12 +133,13 @@ class CloudzyService:
                 headers=request_headers,
                 json=body,
                 timeout=self._write_timeout if mutation else self._read_timeout,
+                allow_redirects=False,
             )
         except requests.RequestException as exc:
             if mutation:
                 raise CloudzyUncertainError(operation, idempotency_key=key) from None
             raise CloudzyError(f"Cloudzy read request failed: {type(exc).__name__}") from None
-        if response.status_code >= 400:
+        if not 200 <= response.status_code < 300:
             try:
                 payload = response.json()
             except (ValueError, TypeError):

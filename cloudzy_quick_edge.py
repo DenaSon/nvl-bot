@@ -243,6 +243,24 @@ class QuickEdgeWizard:
         self.cloudzy_factory = cloudzy_factory
         self.fingerprint = fingerprint
         self.now = now
+        self._running = set()  # same-process single-flight, DB journal survives restarts
+
+    def _launch(self, app, opid, task):
+        if opid in self._running:
+            raise QuickEdgeHold("OPERATION_ALREADY_RUNNING")
+        self._running.add(opid)
+
+        async def wrapped():
+            try:
+                await task
+            finally:
+                self._running.discard(opid)
+        try:
+            app.create_task(wrapped())
+        except Exception:
+            self._running.discard(opid)
+            task.close()
+            raise
 
     async def _cloudzy(self, method, *args, **kwargs):
         return await asyncio.to_thread(
@@ -360,7 +378,7 @@ class QuickEdgeWizard:
                     f"شناسه عملیات: <code>{opid[:16]}</code>\n"
                     "نتیجه را از «وضعیت عملیات» بررسی کنید؛ تأیید مجدد خرید نزنید.",
                     [[("📋 وضعیت عملیات", "apps_cz_operations")]], markup)
-                app.create_task(self._buy(opid, chat, pub, app))
+                self._launch(app, opid, self._buy(opid, chat, pub, app))
             elif data == "apps_cz_operations":
                 op = await asyncio.to_thread(self.store.latest)
                 if not op:
@@ -376,12 +394,13 @@ class QuickEdgeWizard:
                 op = await asyncio.to_thread(self.store.get, opid)
                 if op["actor_id"] != actor or op["chat_id"] != chat:
                     raise QuickEdgeHold("OPERATION_OWNER_MISMATCH")
-                if op["status"] not in ("CREATE_UNCERTAIN", "CREATED", "HOLD_WAIT", "HOLD_IP", "HOLD_SSH"):
+                if op["status"] not in ("CREATING", "CREATE_UNCERTAIN", "CREATED",
+                                      "WAITING", "HOLD_WAIT", "HOLD_IP", "HOLD_SSH"):
                     raise QuickEdgeHold("RECONCILIATION_UNAVAILABLE")
                 # Only ONE read-only reconciliation task; no create/provision retry.
                 await self._display(query, "🔎 در حال بررسی مجدد وضعیت VPS بدون خرید تازه...",
                     [[("📋 وضعیت", "apps_cz_operations")]], markup)
-                app.create_task(self._reconcile(opid, chat, app))
+                self._launch(app, opid, self._reconcile(opid, chat, app))
             elif data.startswith("apps_cz_qreview_"):
                 opid = data[len("apps_cz_qreview_"):]
                 op = await asyncio.to_thread(self.store.get, opid)
@@ -421,7 +440,7 @@ class QuickEdgeWizard:
                     "این مرحله ممکن است بخشی از سرور و WireGuard را تغییر دهد؛ "
                     "اگر عملیات نامعلوم ماند، نصب را دوباره شروع نکنید.",
                     [[("📋 وضعیت", "apps_cz_operations")]], markup)
-                app.create_task(self._install(opid, chat, app))
+                self._launch(app, opid, self._install(opid, chat, app))
             elif data == "apps_cz_qsavekey":
                 port, pub = await self._preflight()
                 digest = hashlib.sha256(pub.encode()).hexdigest()
@@ -520,7 +539,9 @@ class QuickEdgeWizard:
         status = op["status"]
         rows = []
         if op["actor_id"] == actor and op["chat_id"] == chat:
-            if status in ("CREATE_UNCERTAIN", "CREATED", "HOLD_WAIT", "HOLD_IP", "HOLD_SSH"):
+            if (status in ("CREATING", "CREATE_UNCERTAIN", "CREATED", "WAITING",
+                           "HOLD_WAIT", "HOLD_IP", "HOLD_SSH")
+                    and op["id"] not in self._running):
                 rows.append([("🔎 بررسی بدون خرید مجدد", "apps_cz_qcheck_" + op["id"])])
         rows.append([("🔄 تازه‌سازی", "apps_cz_qview_" + op["id"])])
         rows.append([("↩️ Cloudzy", "apps_cz_home")])
@@ -612,6 +633,18 @@ class QuickEdgeWizard:
             op = await asyncio.to_thread(self.store.get, opid)
             current = op["status"]
             server_id = op.get("provider_server_id")
+            # Crash-recovered CREATING is UNKNOWN, not proof no server was bought.
+            # Never replay POST; only search exact unique op hostname.
+            if current == "CREATING":
+                await asyncio.to_thread(
+                    self.store.change, opid, "CREATING", "CREATE_UNCERTAIN",
+                    hold_reason="INTERRUPTED_CREATE_UNKNOWN")
+                current = "CREATE_UNCERTAIN"
+            if current == "WAITING":
+                await asyncio.to_thread(
+                    self.store.change, opid, "WAITING", "HOLD_WAIT",
+                    hold_reason="INTERRUPTED_WAIT_RECHECK")
+                current = "HOLD_WAIT"
             if current == "CREATE_UNCERTAIN":
                 matches = [
                     _obj(entry) for entry in _items(await self._cloudzy("list_servers"))

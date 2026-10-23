@@ -233,12 +233,13 @@ class ReceiptStore:
 
 
 class QuickEdgeWizard:
-    def __init__(self, *, conn_factory, preflight, provision,
+    def __init__(self, *, conn_factory, preflight, provision, verify,
                  cloudzy_factory=CloudzyService, fingerprint=capture_ssh_host_key,
                  now=time.time):
         self.store = ReceiptStore(conn_factory, now=now)
         self.preflight = preflight
         self.provision = provision
+        self.verify = verify
         self.cloudzy_factory = cloudzy_factory
         self.fingerprint = fingerprint
         self.now = now
@@ -321,15 +322,16 @@ class QuickEdgeWizard:
                 selected = s.get("plans", {}).get(data[len("apps_cz_qp_"):])
                 if not selected:
                     raise QuickEdgeHold("INVALID_PLAN")
-                plan_id, name, price, scope = selected
-                s.update(plan=plan_id, name=name, price=price, scope=scope)
+                plan_id, name, price, scope, price_basis = selected
+                s.update(plan=plan_id, name=name, price=price,
+                         scope=scope, price_basis=price_basis)
                 s["nonce"] = secrets.token_hex(8)
                 await self._display(query,
                     "⚠️ <b>تأیید خرید VPS جدید</b>\n\n"
                     f"منطقه: {_text(s['region_name'])}\n"
                     f"پلن: {_text(name)}\n"
                     f"دوره: {CYCLES[s['cycle']]}\n"
-                    f"هزینه کاتالوگ: {_text(price)} سنت ({_text(scope)})\n"
+                    f"قیمت پایه کاتالوگ: {_text(price)} سنت ({_text(s['price_basis'])}، {_text(scope)})\n"
                     f"پورت سرویس SSH: {_text(s['port'])}\n\n"
                     "⚠️ هزینه IPv4 و سایر افزونه‌ها ممکن است جدا محاسبه شود. "
                     "این عدد قیمت نهایی تضمین‌شده نیست.\n"
@@ -484,14 +486,17 @@ class QuickEdgeWizard:
                 continue
             scope = str(item.get("priceScope", "catalog_base"))
             label = str(_val(item, "name", "slug", "id") or "plan")[:34]
-            all_rows.append((pid, label, cents, scope))
+            basis = ("معادل ماهانه" if _val(price, "monthlyEquivCents") is not None
+                     and _val(price, "amountCents", "priceCents") is None
+                     else CYCLES[session["cycle"]])
+            all_rows.append((pid, label, cents, scope, basis))
         all_rows = all_rows[:120]
         max_page = max(1, (len(all_rows) + PAGE_SIZE - 1) // PAGE_SIZE)
         page = min(page, max_page - 1)
         tokens = self._token(all_rows[page*PAGE_SIZE:(page+1)*PAGE_SIZE])
         session["plans"] = tokens
-        rows = [[(f"📦 {name[:25]} · {price} سنت پایه", "apps_cz_qp_" + token)]
-                for token, (_, name, price, _) in tokens.items()]
+        rows = [[(f"📦 {name[:22]} · {price} سنت ({basis})", "apps_cz_qp_" + token)]
+                for token, (_, name, price, _, basis) in tokens.items()]
         rows.extend([[("◀️ قبلی", f"apps_cz_qpg_{page-1}")] if page else []])
         if page + 1 < max_page:
             rows.append([("بعدی ▶️", f"apps_cz_qpg_{page+1}")])
@@ -653,6 +658,10 @@ class QuickEdgeWizard:
             )
             if not ok or not isinstance(details, dict) or not details.get("tunnel_ok"):
                 raise QuickEdgeHold("LEGACY_PROVISION_OR_WG_TUNNEL_NOT_VERIFIED")
+            verified = await self.verify(
+                op["public_ipv4"], port, op["provider_server_id"])
+            if verified is not True:
+                raise QuickEdgeHold("LEGACY_EDGE_POSTCHECK_FAILED")
             await asyncio.to_thread(self.store.change, opid, "PROVISIONING", "EDGE_READY")
             await app.bot.send_message(
                 chat, f"✅ Edge <code>{_text(op['public_ipv4'])}</code> با منطق Legacy آماده شد.\n"

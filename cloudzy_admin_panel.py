@@ -29,7 +29,12 @@ def _obj(value):
     if not isinstance(value, dict):
         return {}
     data = value.get("data")
-    return data if isinstance(data, dict) else value
+    root = data if isinstance(data, dict) else value
+    for name in ("server", "service", "account", "summary", "user"):
+        inner = root.get(name)
+        if isinstance(inner, dict):
+            return inner
+    return root
 
 
 def _items(value):
@@ -127,7 +132,12 @@ class CloudzyAdminPanel:
         tokens = []
         for row in rows:
             token = secrets.token_hex(4)
-            refs[token] = (kind, str(_get(row, "id", "uuid", "keyId") or ""), row)
+            safe = {k: v for k, v in row.items()
+                    if k in ("id", "uuid", "serviceId", "keyId",
+                             "hostname", "name", "label", "state", "status",
+                             "region", "regionId", "code", "planName", "planId")
+                    and isinstance(v, (str, int, float, bool))}
+            refs[token] = (kind, str(_get(row, "id", "uuid", "serviceId", "keyId") or ""), safe)
             tokens.append(token)
         context.user_data["cz_refs"] = {
             "actor": actor, "chat": chat, "expires": self.now() + REF_TTL,
@@ -192,8 +202,8 @@ class CloudzyAdminPanel:
                     [[("↩️ Cloudzy", "apps_cz_home")]], markup)
             elif data.startswith("apps_cz_servers_"):
                 page = _page(data[len("apps_cz_servers_"):])
-                values = _items(await self._api("list_servers"))
-                values, page, count = _paged(values, page)
+                all_rows = _items(await self._api("list_servers"))
+                values, page, count = _paged(all_rows, page)
                 tokens = self._refs(context, "server", values, actor, chat)
                 rows = []
                 for entry, token in zip(values, tokens):
@@ -203,7 +213,7 @@ class CloudzyAdminPanel:
                 rows.append([("↩️ Cloudzy", "apps_cz_home")])
                 await self._display(query,
                     f"🖥 <b>سرورهای Cloudzy</b>\n"
-                    f"تعداد دریافت‌شده: {len(_items(await self._cached_no_repeat(values, count, page)))}\n"
+                    f"تعداد دریافت‌شده: {len(all_rows)}\n"
                     f"صفحه {page + 1} از {count}\n\n"
                     "این فهرست از حساب Cloudzy دریافت می‌شود؛ هر VPS الزاماً Edge فعال NVL نیست.",
                     rows, markup)
@@ -351,10 +361,6 @@ class CloudzyAdminPanel:
         except Exception:
             # Avoid spilling raw HTTP response bodies, tokens or key material.
             await query.message.reply_text("⛔️ خطای غیرمنتظره در پنل Cloudzy؛ تغییری را تکرار نکنید.")
-
-    async def _cached_no_repeat(self, selected, count, page):
-        """Never re-query the provider to render a count (avoids duplicate requests)."""
-        return selected
 
     async def handle_text(self, message, context, text, *, role, actor, chat, markup):
         state = context.user_data.get("state")

@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from cloudzy_quick_edge import QuickEdgeHold, QuickEdgeWizard, ReceiptStore, _public_ipv4
-from cloudzy_service import CloudzyUncertainError
+from cloudzy_service import CloudzyUncertainError, CloudzyAPIError
 
 
 class FakeQuery:
@@ -278,6 +278,17 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(hostname.startswith("nvl-edge-"))
         await self.cb(accept)
         self.assertEqual(len(self.provisions), 1)
+
+    async def test_definite_4xx_rejects_without_permanent_purchase_lock(self):
+        self.api.fail_create = CloudzyAPIError(402, "private provider rejection")
+        record = await self.purchase()
+        self.assertEqual(record["status"], "REJECTED")
+        self.assertNotIn("private provider rejection", str(self.app.bot.messages))
+        self.api.fail_create = None
+        await self.cb("apps_cz_wizard")
+        self.assertTrue(any(x.startswith("apps_cz_qr_") for x in self.query.callbacks))
+        self.assertEqual(len([x for x in self.api.calls
+                              if isinstance(x, tuple) and x[0] == "create"]), 1)
 
     async def test_unknown_create_is_held_and_reconciled_only_by_read(self):
         self.api.fail_create = CloudzyUncertainError("POST /services", idempotency_key="same")

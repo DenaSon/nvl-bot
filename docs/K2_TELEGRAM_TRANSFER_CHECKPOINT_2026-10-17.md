@@ -1,3 +1,5 @@
+> **Operational status clarification — 2026-10-23:** K2 protected, per-UID customer Egress is **NOT RELEASED / NOT ACCEPTED for Production** on available source and owner-verified evidence. As checked on current `master`, `K2_ROOT_DIRECT_ENABLED=False`, `K2_ROOT_DIRECT_BATCH_ENABLED=False`, and `CORE_OPERATIONS_ENABLED=False` by default. This document contains **historical 2026-10-17 lab observations**, not a claim that those deleted/replaced lab instances are still live; nor does a STAGED tunnel or namespace test certify customer migration. No new live Production host inspection was performed for this clarification. The approved Cloudzy quick Edge plan intentionally uses the **existing Legacy ingress/relay workflow** with old UI unchanged; see [Cloudzy Legacy quick-Edge plan](CLOUDZY_LEGACY_QUICK_EDGE_PLAN_2026-10-23.md). Do not enable K2 on the strength of this note.
+
 # Telegram egress transfer — current release checkpoint
 
 ## Last owner-confirmed live state

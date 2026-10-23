@@ -3,8 +3,6 @@
 import json
 import unittest
 
-import requests
-
 from cloudzy_service import (
     CloudzyAPIError,
     CloudzyError,
@@ -217,7 +215,7 @@ class CloudzyServiceTests(unittest.TestCase):
         self.assertNotIn("hpt_TEST_DO_NOT_EXPOSE", str(ctx.exception))
 
     def test_uncertain_mutation_does_not_retry(self):
-        self.session.responses = [requests.exceptions.Timeout("timed out")]
+        self.session.responses = [TimeoutError("timed out")]
         with self.assertRaises(CloudzyUncertainError) as ctx:
             self.client.create_server(
                 hostname="e", plan_id="p", region="fra",
@@ -230,7 +228,7 @@ class CloudzyServiceTests(unittest.TestCase):
             self.client.delete_server("s", confirm=True)
 
     def test_read_network_and_bad_json_are_distinct(self):
-        self.session.responses = [requests.exceptions.ConnectionError("failed")]
+        self.session.responses = [OSError("failed")]
         with self.assertRaises(CloudzyError):
             self.client.list_servers()
         self.session.responses = [FakeResponse({"ignored": True}, invalid_json=True)]

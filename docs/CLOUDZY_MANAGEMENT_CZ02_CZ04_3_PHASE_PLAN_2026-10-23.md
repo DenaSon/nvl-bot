@@ -1,3 +1,5 @@
+> **Delivery update — 2026-10-23:** CZ-02 Phase 1 read-only Cloudzy UI merged to master (PR #182). CZ-03 Phase 2 purchase/wait/Core-public-key/Legacy-inactive-Edge workflow is implemented **in source in PR #183**; do not claim any live Cloudzy order, production deployment, or customer acceptance. The Legacy manual UI and K2 source remain. CZ-04 Phase 3 is still planned, not implemented. Detailed Phase 2 acceptance and HOLD states: [CZ-03 delivery record](CLOUDZY_CZ03_PHASE2_DELIVERY_2026-10-23.md). The original plan below describes the design baseline, not the latest delivery state.
+
 # NVL — Cloudzy / Legacy Edge management: three-phase plan
 
 Date: 2026-10-23

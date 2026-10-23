@@ -10,7 +10,7 @@ legacy api.cloudzy.com/developers API-Token interface.
 
 from __future__ import annotations
 
-import json
+import json as jsonlib
 import os
 import time
 import uuid
@@ -30,7 +30,7 @@ class _Response:
         self.content = content
 
     def json(self):
-        return json.loads(self.content)
+        return jsonlib.loads(self.content)
 
 
 class _StdlibSession:
@@ -39,10 +39,10 @@ class _StdlibSession:
     def __init__(self):
         self._opener = urllib.request.build_opener(_NoRedirect())
 
-    def request(self, method, url, *, headers, json: payload, timeout, allow_redirects):
+    def request(self, method, url, *, headers, json, timeout, allow_redirects):
         if allow_redirects:
             raise ValueError("Cloudzy redirects must be disabled")
-        data = json.dumps(payload).encode("utf-8") if payload is not None else None
+        data = jsonlib.dumps(json).encode("utf-8") if json is not None else None
         request = urllib.request.Request(url, headers=headers, data=data, method=method)
         try:
             with self._opener.open(request, timeout=timeout) as response:

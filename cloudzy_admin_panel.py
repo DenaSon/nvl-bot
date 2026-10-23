@@ -8,7 +8,6 @@ The bot supplies a Telegram InlineKeyboardMarkup adapter.
 from __future__ import annotations
 
 import asyncio
-import base64
 from html import escape
 import re
 import secrets
@@ -19,10 +18,6 @@ from cloudzy_service import CloudzyAPIError, CloudzyError, CloudzyService, Cloud
 MAX_PAGE = 999
 PAGE_SIZE = 6
 REF_TTL = 600
-ACTION_TTL = 180
-KEY_TYPES = ("ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256",
-             "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
-             "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com")
 
 
 def _obj(value):
@@ -91,22 +86,6 @@ def _paging(prefix, page, count):
     return [buttons] if buttons else []
 
 
-def _public_key(raw):
-    if not isinstance(raw, str) or len(raw) > 8192 or "\n" in raw or "\r" in raw:
-        raise ValueError("INVALID_PUBLIC_KEY")
-    parts = raw.strip().split()
-    if len(parts) < 2 or parts[0] not in KEY_TYPES:
-        raise ValueError("INVALID_PUBLIC_KEY")
-    try:
-        decoded = base64.b64decode(parts[1], validate=True)
-    except (ValueError, base64.binascii.Error):
-        raise ValueError("INVALID_PUBLIC_KEY") from None
-    if not (20 <= len(decoded) <= 8192) or any(ord(c) < 32 for c in " ".join(parts[2:])):
-        raise ValueError("INVALID_PUBLIC_KEY")
-    if parts[0].encode() not in decoded[:128]:
-        # ssh-rsa encodes "ssh-rsa", Ed25519 encodes "ssh-ed25519", etc.
-        raise ValueError("INVALID_PUBLIC_KEY")
-    return raw.strip()
 
 
 class CloudzyAdminPanel:
@@ -119,13 +98,6 @@ class CloudzyAdminPanel:
 
     async def _display(self, target, text, rows, markup):
         await target.edit_message_text(text, parse_mode="HTML", reply_markup=markup(rows))
-
-    @staticmethod
-    def _end_key_flow(context):
-        context.user_data.pop("cz_key_input", None)
-        context.user_data.pop("cz_key_action", None)
-        if str(context.user_data.get("state", "")).startswith("CZ_KEY_"):
-            context.user_data.pop("state", None)
 
     def _refs(self, context, kind, rows, actor, chat):
         refs = {}
@@ -155,30 +127,10 @@ class CloudzyAdminPanel:
             raise ValueError("EXPIRED_SELECTION")
         return chosen[1], chosen[2]
 
-    def _pending(self, context, kind, actor, chat, **fields):
-        nonce = secrets.token_hex(8)
-        context.user_data["cz_key_action"] = {
-            "kind": kind, "nonce": nonce, "actor": actor, "chat": chat,
-            "expires": self.now() + ACTION_TTL, **fields,
-        }
-        return nonce
-
-    def _consume(self, context, kind, nonce, actor, chat):
-        pending = context.user_data.pop("cz_key_action", None)
-        if (not isinstance(pending, dict) or pending.get("kind") != kind
-                or pending.get("nonce") != nonce or pending.get("actor") != actor
-                or pending.get("chat") != chat or self.now() >= pending.get("expires", 0)):
-            raise ValueError("EXPIRED_ACTION")
-        return pending
-
     async def handle_callback(self, query, context, data, *, role, actor, chat, markup):
         if role != "admin":
             await query.message.reply_text("⛔️ فقط مدیر مجاز است.")
             return
-        # Fresh navigation cancels pending key input or destructive confirmations.
-        if data in ("apps_cz_home", "apps_cz_account", "apps_cz_balance") or data.startswith(
-                ("apps_cz_servers_", "apps_cz_regions_", "apps_cz_keys_")):
-            self._end_key_flow(context)
         try:
             if data == "apps_cz_home":
                 await self._display(query,
@@ -187,18 +139,25 @@ class CloudzyAdminPanel:
                     "🛡 مسیر قدیمی Edge/Relay از تنظیمات سرور بدون تغییر باقی است.\n"
                     "ℹ️ مدیریت خروجی محافظت‌شده K2 در این بخش اجرا نمی‌شود.",
                     [
-                        [("⚡ ساخت سریع Edge · فاز بعد", "apps_cz_wizard")],
+                        [("⚡ ساخت سریع Edge · فاز ۲", "apps_cz_wizard")],
+                        [("🌐 Edge و Relay · فاز ۳", "apps_cz_edge")],
                         [("🖥 سرورهای Cloudzy", "apps_cz_servers_0")],
                         [("🌍 مناطق و پلن‌ها", "apps_cz_regions_0"),
                          ("💰 موجودی", "apps_cz_balance")],
                         [("👤 اطلاعات حساب", "apps_cz_account"),
                          ("🔑 کلیدهای SSH", "apps_cz_keys_0")],
+                        [("📋 عملیات · فازهای بعد", "apps_cz_operations")],
                         [("↩️ برنامه‌ها", "apps_home")],
                     ], markup)
-            elif data == "apps_cz_wizard":
+            elif data in ("apps_cz_wizard", "apps_cz_edge", "apps_cz_operations"):
+                label = ("ساخت سریع Edge" if data == "apps_cz_wizard"
+                         else "Edge و Relay" if data == "apps_cz_edge"
+                         else "عملیات نیمه‌تمام")
+                phase = "۲" if data == "apps_cz_wizard" else "۳"
                 await self._display(query,
-                    "⚡ <b>ساخت سریع Edge</b>\n\n"
-                    "این ویزارد در فاز ۲ تکمیل می‌شود؛ هنوز خرید یا نصب VPS مجاز نیست.",
+                    f"⚙️ <b>{label}</b>\n\n"
+                    f"این قابلیت در فاز {phase} پیاده‌سازی می‌شود؛ "
+                    "فاز ۱ فقط اطلاعات Cloudzy را نمایش می‌دهد و هیچ سروری را تغییر نمی‌دهد.",
                     [[("↩️ Cloudzy", "apps_cz_home")]], markup)
             elif data.startswith("apps_cz_servers_"):
                 page = _page(data[len("apps_cz_servers_"):])
@@ -304,48 +263,22 @@ class CloudzyAdminPanel:
                 all_rows = _items(await self._api("list_ssh_keys"))
                 rows_page, page, count = _paged(all_rows, page)
                 tokens = self._refs(context, "key", rows_page, actor, chat)
-                rows = [[("🗑 " + str(_get(v, "name", "id") or "کلید")[:27],
-                          "apps_cz_kdel_" + t)] for v, t in zip(rows_page, tokens)]
+                rows = [[("🔑 " + str(_get(v, "name", "id") or "کلید")[:27],
+                          "apps_cz_key_" + t)] for v, t in zip(rows_page, tokens)]
                 rows += _paging("apps_cz_keys", page, count)
-                rows += [[("➕ افزودن کلید عمومی SSH", "apps_cz_kadd")],
-                         [("↩️ Cloudzy", "apps_cz_home")]]
+                rows += [[("↩️ Cloudzy", "apps_cz_home")]]
                 await self._display(query,
-                    f"🔑 <b>کلیدهای ذخیره‌شده Cloudzy</b>\n"
+                    f"🔑 <b>کلیدهای عمومی SSH</b>\n"
                     f"تعداد: {len(all_rows)} · صفحه {page + 1} از {count}\n\n"
-                    "برای مشاهده تأیید حذف، روی نام کلید بزنید.\n"
-                    "حذف کلید ذخیره‌شده الزاماً دسترسی SSH سرورهای قبلی را قطع نمی‌کند.",
+                    "فاز ۱ فقط نمایش اطلاعات است. افزودن/حذف کلید در فازهای بعد انجام می‌شود.",
                     rows, markup)
-            elif data == "apps_cz_kadd":
-                self._end_key_flow(context)
-                context.user_data["cz_key_input"] = {
-                    "actor": actor, "chat": chat, "expires": self.now() + ACTION_TTL
-                }
-                context.user_data["state"] = "CZ_KEY_NAME"
+            elif data.startswith("apps_cz_key_"):
+                key_id, item = self._resolve(context, data[len("apps_cz_key_"):], "key", actor, chat)
                 await self._display(query,
-                    "🔑 <b>افزودن SSH Public Key</b>\n\n"
-                    "نام کلید را ارسال کنید. فقط کلید عمومی وارد می‌شود، نه رمز یا کلید خصوصی.",
-                    [[("❌ انصراف", "apps_cz_keys_0")]], markup)
-            elif data.startswith("apps_cz_kdel_"):
-                key_id, item = self._resolve(context, data[len("apps_cz_kdel_"):], "key", actor, chat)
-                nonce = self._pending(context, "delete", actor, chat, key_id=key_id)
-                await self._display(query,
-                    "⚠️ <b>حذف کلید ذخیره‌شده Cloudzy</b>\n\n"
-                    f"نام: {_value(_get(item, 'name', 'id'))}\n"
+                    "🔑 <b>مشخصات SSH Public Key</b>\n\n"
+                    f"نام: {_value(_get(item, 'name'))}\n"
                     f"شناسه: <code>{_value(key_id)}</code>\n\n"
-                    "این عملیات برگشت‌ناپذیر است و نباید برای کلید مدیریت Edge فعال بدون بررسی انجام شود.",
-                    [[("✅ تأیید حذف کلید", "apps_cz_kconfirm_" + nonce)],
-                     [("❌ انصراف", "apps_cz_keys_0")]], markup)
-            elif data.startswith("apps_cz_kconfirm_"):
-                pending = self._consume(context, "delete", data[len("apps_cz_kconfirm_"):], actor, chat)
-                await self._api("delete_ssh_key", pending["key_id"], confirm=True)
-                await self._display(query,
-                    "✅ کلید ذخیره‌شده از حساب Cloudzy حذف شد.\n"
-                    "وضعیت دسترسی به سرورهای موجود جداگانه بررسی شود.",
-                    [[("↩️ کلیدها", "apps_cz_keys_0")]], markup)
-            elif data.startswith("apps_cz_kaddyes_"):
-                pending = self._consume(context, "add", data[len("apps_cz_kaddyes_"):], actor, chat)
-                await self._api("add_ssh_key", pending["name"], pending["public_key"])
-                await self._display(query, "✅ کلید عمومی در Cloudzy ثبت شد.",
+                    "این صفحه فقط خواندنی است. کلیدهای ذخیره‌شده Cloudzy را در فازهای بعد مدیریت خواهیم کرد.",
                     [[("↩️ کلیدها", "apps_cz_keys_0")]], markup)
             else:
                 await query.message.reply_text("⛔️ گزینه نامعتبر یا منقضی است.")
@@ -362,50 +295,3 @@ class CloudzyAdminPanel:
             # Avoid spilling raw HTTP response bodies, tokens or key material.
             await query.message.reply_text("⛔️ خطای غیرمنتظره در پنل Cloudzy؛ تغییری را تکرار نکنید.")
 
-    async def handle_text(self, message, context, text, *, role, actor, chat, markup):
-        state = context.user_data.get("state")
-        if state not in ("CZ_KEY_NAME", "CZ_KEY_PUBLIC"):
-            return False
-        if role != "admin":
-            self._end_key_flow(context)
-            await message.reply_text("⛔️ فقط مدیر مجاز است.")
-            return True
-        flow = context.user_data.get("cz_key_input")
-        if (not isinstance(flow, dict) or flow.get("actor") != actor
-                or flow.get("chat") != chat or self.now() >= flow.get("expires", 0)):
-            self._end_key_flow(context)
-            await message.reply_text("⏳ مهلت ثبت کلید تمام شد؛ دوباره از پنل شروع کنید.")
-            return True
-        if text.strip() in ("لغو", "انصراف", "/cancel", "🏠 منوی اصلی", "🧩 برنامه‌ها"):
-            self._end_key_flow(context)
-            await message.reply_text("✅ ثبت کلید لغو شد.")
-            return True
-        if state == "CZ_KEY_NAME":
-            name = text.strip()
-            if len(name) > 80 or len(name) < 2 or any(ord(x) < 32 for x in name):
-                await message.reply_text("نام کلید باید بین ۲ تا ۸۰ نویسه و بدون کاراکتر کنترلی باشد.")
-                return True
-            flow["name"] = name
-            context.user_data["state"] = "CZ_KEY_PUBLIC"
-            await message.reply_text("کلید عمومی OpenSSH را ارسال کنید (مثلاً ssh-ed25519 …). کلید خصوصی ارسال نکنید.")
-            return True
-        try:
-            public_key = _public_key(text)
-        except ValueError:
-            await message.reply_text("⛔️ فرمت کلید عمومی معتبر نیست؛ فقط یک خط Public Key استاندارد بفرستید.")
-            return True
-        name = flow["name"]
-        self._end_key_flow(context)
-        nonce = self._pending(context, "add", actor, chat, name=name, public_key=public_key)
-        await message.reply_text(
-            "🔑 <b>تأیید ثبت کلید</b>\n\n"
-            f"نام: {_value(name)}\n"
-            f"نوع: {_value(public_key.split()[0])}\n\n"
-            "فقط کلید عمومی ذخیره خواهد شد.",
-            parse_mode="HTML",
-            reply_markup=markup([
-                [("✅ ثبت در Cloudzy", "apps_cz_kaddyes_" + nonce)],
-                [("❌ انصراف", "apps_cz_keys_0")]
-            ]),
-        )
-        return True

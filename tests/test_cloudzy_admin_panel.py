@@ -4,6 +4,7 @@ from pathlib import Path
 import unittest
 
 from cloudzy_admin_panel import CloudzyAdminPanel
+from cloudzy_service import CloudzyAPIError, CloudzyError
 
 
 class FakeMessage:
@@ -156,6 +157,13 @@ class Phase1PanelTests(unittest.TestCase):
         self.assertIn("&lt;small&gt;", self.query.text)
         self.assertIn("1700", self.query.text)
         self.assertIn("هزینه IPv4", self.query.text)
+        self.assertIn("apps_cz_pl_hourly_" + tok, self.query.callbacks)
+        self.cb("apps_cz_pl_hourly_" + tok)
+        self.assertIn("ساعتی", self.query.text)
+        self.cb("apps_cz_pl_quarterly_" + tok)
+        self.assertIn("سه‌ماهه", self.query.text)
+        self.cb("apps_cz_pl_annually_" + tok)
+        self.assertIn("سالانه", self.query.text)
         self.cb("apps_cz_balance")
         self.assertIn("2134", self.query.text)
         self.cb("apps_cz_account")
@@ -184,6 +192,25 @@ class Phase1PanelTests(unittest.TestCase):
         self.now[0] += 601
         self.cb("apps_cz_sv_" + tok)
         self.assertEqual(len(self.query.edits), size)
+
+    def test_api_errors_do_not_show_secrets_and_empty_inventory_is_safe(self):
+        class Denied(FakeCloudzy):
+            def list_servers(self):
+                raise CloudzyAPIError(403, "topsecret_value")
+        self.panel = CloudzyAdminPanel(factory=Denied, now=lambda: self.now[0])
+        self.cb("apps_cz_servers_0")
+        self.assertIn("403", self.query.message.sent[-1][0])
+        self.assertNotIn("topsecret_value", self.query.message.sent[-1][0])
+        class Empty(FakeCloudzy):
+            def list_servers(self):
+                return {"data": []}
+            def list_regions(self):
+                return {"data": []}
+        self.panel = CloudzyAdminPanel(factory=Empty, now=lambda: self.now[0])
+        self.cb("apps_cz_servers_0")
+        self.assertIn("تعداد دریافت‌شده: 0", self.query.text)
+        self.cb("apps_cz_regions_0")
+        self.assertIn("تعداد: 0", self.query.text)
 
     def test_zero_provider_mutation_and_old_manual_paths_present(self):
         source = (Path(__file__).resolve().parents[1] / "bot_final_v49-2.py").read_text("utf-8")

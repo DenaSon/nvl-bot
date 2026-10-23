@@ -394,6 +394,7 @@ class JournalTests(unittest.TestCase):
         self.assertIn("pool_active=False", source)
         self.assertIn('trusted_host_key=trusted_host_key', source)
         self.assertIn('paramiko.RejectPolicy()', source)
+        self.assertIn('legacy_peer_name = "edge-" + ip.replace(".", "-")', source)
 
 
 if __name__ == "__main__":

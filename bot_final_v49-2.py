@@ -400,6 +400,7 @@ from edge_egress_k2_m4_status import (
     root_checkpoint_status_html as k2_m44_root_status_html,
 )
 import edge_egress_k2_root_direct as k2_root_direct_flags
+from cloudzy_admin_panel import CloudzyAdminPanel
 from edge_egress_k2_root_direct import (
     bound_root_client as k2_root_direct_client,
     native_review as k2_native_review,
@@ -6988,10 +6989,20 @@ async def require_login(update):
 
 PORTAL_DISPLAY_NAME = "NeVeL"  # 🔒 نام ثابت پورتال و مدیریت — با تغییر «نام برند» در تنظیمات عوض نمی‌شود
 
+_cloudzy_admin_panel = CloudzyAdminPanel()
+
+
+def _cloudzy_markup(rows):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(label, callback_data=callback) for label, callback in row]
+        for row in rows
+    ])
+
+
 def _build_admin_programs_kb():
     """Infrastructure and operational tools available only to NVL administrators."""
     return [
-        [InlineKeyboardButton("🌐 مدیریت خروجی", callback_data="hpeg_status")],
+        [InlineKeyboardButton("☁️ مدیریت Cloudzy و Edge", callback_data="apps_cz_home")],
         [
             InlineKeyboardButton("🖥 نودها", callback_data="apps_marzban_nodes"),
             InlineKeyboardButton("🌐 هاست‌ها", callback_data="apps_marzban_hosts"),
@@ -7013,6 +7024,7 @@ async def _show_admin_programs_hub(target, context):
             await target.reply_text(text)
         return
 
+    _cloudzy_admin_panel._end_key_flow(context)
     context.user_data.pop('state', None)
     actor=getattr(getattr(target,'from_user',None),'id',None)
     message=getattr(target,'message',target)
@@ -7024,7 +7036,7 @@ async def _show_admin_programs_hub(target, context):
         "🧩 <b>برنامه‌ها</b>\n"
         "━━━━━━━━━━━━━━\n"
         "یک ابزار را انتخاب کنید.\n\n"
-        "🌐 <b>مدیریت خروجی</b> — راه‌اندازی Edge و تغییر IP خروجی کاربران SSH\n"
+        "☁️ <b>مدیریت Cloudzy و Edge</b> — سرورهای ابری، کلید SSH و آماده‌سازی Edge\n"
         "🖥 <b>نودها</b> — وضعیت، تنظیمات، راه‌اندازی و اتصال Node\n"
         "🌐 <b>هاست‌ها</b> — Inboundها و Public Hostها\n"
         "🚚 <b>انتقال</b> — مهاجرت کنترل‌شده سرور اصلی Marzban\n"
@@ -10945,6 +10957,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = context.user_data.get('state')
     role = context.user_data.get('role')
     chat_id = update.effective_chat.id
+
+    if state in ('CZ_KEY_NAME', 'CZ_KEY_PUBLIC'):
+        await _cloudzy_admin_panel.handle_text(
+            update.message, context, text, role=role,
+            actor=update.effective_user.id, chat=chat_id,
+            markup=_cloudzy_markup,
+        )
+        return
 
     if role == 'admin' and state in ('K2_M4_SINGLE','K2_M4_BATCH','EDGE_NEW_IP','EDGE_NEW_ROOTPASS','EDGE_NEW_PORT') and text in (
         '🧩 برنامه‌ها','🧩 برنامه ها','🏠 منوی اصلی'):
@@ -16075,6 +16095,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d == 'apps_home':
         context.user_data.pop("mza_nodes_origin", None)
         await _show_admin_programs_hub(query, context)
+        return
+    elif d.startswith("apps_cz_"):
+        await _cloudzy_admin_panel.handle_callback(
+            query, context, d, role=role,
+            actor=update.effective_user.id, chat=update.effective_chat.id,
+            markup=_cloudzy_markup,
+        )
         return
     elif d == 'apps_marzban_nodes':
         context.user_data["mza_nodes_origin"] = "apps"

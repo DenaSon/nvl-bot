@@ -29,7 +29,9 @@ class MarzbanProgramsUITests(unittest.TestCase):
             self.assertIn(label, region)
             self.assertIn(callback, region)
         self.assertIn("🧩 <b>برنامه‌ها</b>", region)
-        self.assertIn("مدیریت خروجی", region)
+        self.assertIn("Cloudzy | Edge و Relay", region)
+        self.assertIn('callback_data="apps_cz_home"', region)
+        self.assertNotIn('callback_data="hpeg_status"', region)
 
     def test_v2ray_dashboard_no_longer_owns_nodes_or_hosts(self):
         region = self._region(

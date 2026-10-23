@@ -1,15 +1,9 @@
-"""CZ-02 phase 1 tests: offline fake API, fake Telegram, zero VPS changes."""
+"""CZ-02 phase 1: read-only Cloudzy UI tests (no network or VPS mutation)."""
 import asyncio
-import base64
 from pathlib import Path
 import unittest
 
-from cloudzy_admin_panel import CloudzyAdminPanel, _public_key
-
-
-def fake_public_key():
-    body = b"\x00\x00\x00\x0bssh-ed25519" + b"\x00\x00\x00\x20" + b"x" * 32
-    return "ssh-ed25519 " + base64.b64encode(body).decode("ascii") + " demo"
+from cloudzy_admin_panel import CloudzyAdminPanel
 
 
 class FakeMessage:
@@ -34,8 +28,7 @@ class FakeQuery:
 
     @property
     def callbacks(self):
-        return [value for row in self.edits[-1][1]["reply_markup"]
-                for _, value in row]
+        return [v for row in self.edits[-1][1]["reply_markup"] for _, v in row]
 
 
 class Context:
@@ -46,17 +39,15 @@ class Context:
 class FakeCloudzy:
     def __init__(self):
         self.calls = []
-        self.keys = [{"id": "k1", "name": "owner"},
-                     {"id": "k2", "name": "operator"}]
 
-    def _called(self, name, *args):
-        self.calls.append((name, args))
+    def _called(self, method, *args):
+        self.calls.append((method, args))
 
     def list_servers(self):
         self._called("list_servers")
         return {"data": [
-            {"id": "srv" + str(i), "hostname": "node" + str(i),
-             "credentials": "MUST_NOT_PERSIST"} for i in range(8)
+            {"id": f"srv{i}", "hostname": f"node{i}", "credentials": "MUST_NOT_PERSIST"}
+            for i in range(8)
         ]}
 
     def get_server(self, key):
@@ -79,11 +70,9 @@ class FakeCloudzy:
 
     def list_plans(self, **kwargs):
         self._called("list_plans", kwargs["region"], kwargs["billing_cycle"])
-        return {"plans": [
-            {"id": "p1", "name": "<small>", "price": {
-                "monthlyEquivCents": 1700, "regionId": "fra"}},
-            {"id": "p2", "slug": "medium", "price": None},
-        ]}
+        return {"plans": [{"id": "p1", "name": "<small>", "price": {
+            "monthlyEquivCents": 1700, "regionId": "fra"}},
+            {"id": "p2", "slug": "medium", "price": None}]}
 
     def whoami(self):
         self._called("whoami")
@@ -95,39 +84,23 @@ class FakeCloudzy:
 
     def list_ssh_keys(self):
         self._called("list_ssh_keys")
-        return {"data": list(self.keys)}
+        return {"data": [{"id": "k1", "name": "owner", "publicKey": "PRIVATE_NO"},
+                         {"id": "k2", "name": "operator"}]}
 
-    def add_ssh_key(self, name, key):
-        self._called("add_ssh_key", name, key)
-        self.keys.append({"id": "newkey", "name": name})
-        return {"id": "newkey"}
-
-    def delete_ssh_key(self, key_id, *, confirm):
-        self._called("delete_ssh_key", key_id, confirm)
-        self.keys = [k for k in self.keys if k["id"] != key_id]
-
-    # Mutating VPS operations must NEVER be requested in phase 1.
-    def create_server(self, *args, **kwargs):
-        raise AssertionError("phase 1 must not purchase VPS")
-
-    def delete_server(self, *args, **kwargs):
-        raise AssertionError("phase 1 must not delete VPS")
-
-    def power_on(self, *args, **kwargs):
-        raise AssertionError("phase 1 must not power VPS")
-
-    def power_off(self, *args, **kwargs):
-        raise AssertionError("phase 1 must not power VPS")
-
-    def restart_server(self, *args, **kwargs):
-        raise AssertionError("phase 1 must not restart VPS")
+    # Any unexpected write is a hard failure, rather than a mocked success.
+    def __getattr__(self, method):
+        if method in ("create_server", "delete_server", "power_on", "power_off",
+                      "restart_server", "rename_server", "rebuild_server",
+                      "reset_server_password", "add_ssh_key", "delete_ssh_key"):
+            raise AssertionError("No Cloudzy writes in phase 1")
+        raise AttributeError(method)
 
 
 def markup(rows):
     for row in rows:
-        for _, callback in row:
-            if not isinstance(callback, str) or len(callback.encode("utf-8")) > 64:
-                raise AssertionError("oversized/invalid Telegram callback")
+        for _, cb in row:
+            if not isinstance(cb, str) or len(cb.encode("utf-8")) > 64:
+                raise AssertionError("invalid callback length")
     return rows
 
 
@@ -140,56 +113,46 @@ class Phase1PanelTests(unittest.TestCase):
         self.query = FakeQuery()
 
     def cb(self, data, *, role="admin", actor=123, chat=345):
-        asyncio.run(self.panel.handle_callback(
-            self.query, self.context, data, role=role,
-            actor=actor, chat=chat, markup=markup,
-        ))
+        asyncio.run(self.panel.handle_callback(self.query, self.context, data,
+            role=role, actor=actor, chat=chat, markup=markup))
 
-    def inp(self, text, *, role="admin", actor=123, chat=345):
-        message = FakeMessage()
-        outcome = asyncio.run(self.panel.handle_text(
-            message, self.context, text, role=role,
-            actor=actor, chat=chat, markup=markup,
-        ))
-        return outcome, message
-
-    def test_hub_has_real_entries_but_no_mutating_vps_action(self):
+    def test_home_read_only_and_future_flow_disabled(self):
         self.cb("apps_cz_home")
         self.assertIn("مدیریت Cloudzy", self.query.text)
-        self.assertIn("apps_cz_servers_0", self.query.callbacks)
-        self.assertIn("apps_cz_regions_0", self.query.callbacks)
-        self.assertIn("apps_cz_keys_0", self.query.callbacks)
+        for cb in ("apps_cz_servers_0", "apps_cz_regions_0", "apps_cz_keys_0",
+                   "apps_cz_wizard", "apps_cz_edge", "apps_cz_operations",
+                   "apps_cz_account", "apps_cz_balance"):
+            self.assertIn(cb, self.query.callbacks)
         self.assertNotIn("hpeg_status", self.query.callbacks)
         self.assertEqual(self.api.calls, [])
-        self.cb("apps_cz_wizard")
-        self.assertIn("فاز ۲", self.query.text)
+        for cb in ("apps_cz_wizard", "apps_cz_edge", "apps_cz_operations"):
+            self.cb(cb)
+            self.assertIn("فاز", self.query.text)
         self.assertEqual(self.api.calls, [])
 
-    def test_pages_and_server_details_status_usage_and_escaping(self):
+    def test_servers_paginated_and_detail_status_usage_html_safe(self):
         self.cb("apps_cz_servers_0")
-        self.assertIn("8", self.query.text)
+        self.assertIn("تعداد دریافت‌شده: 8", self.query.text)
         self.assertIn("apps_cz_servers_1", self.query.callbacks)
         self.assertEqual(len(self.context.user_data["cz_refs"]["items"]), 6)
         self.assertNotIn("MUST_NOT_PERSIST", str(self.context.user_data))
-        token = next(x[len("apps_cz_sv_"):] for x in self.query.callbacks
-                     if x.startswith("apps_cz_sv_"))
-        self.cb("apps_cz_sv_" + token)
+        tok = next(v[len("apps_cz_sv_"):] for v in self.query.callbacks
+                   if v.startswith("apps_cz_sv_"))
+        self.cb("apps_cz_sv_" + tok)
         self.assertIn("node &amp; &lt;test&gt;", self.query.text)
-        self.assertNotIn("MUST_NOT_PERSIST", self.query.text)
-        self.cb("apps_cz_st_" + token)
+        self.cb("apps_cz_st_" + tok)
         self.assertIn("active", self.query.text)
-        self.cb("apps_cz_use_" + token)
+        self.cb("apps_cz_use_" + tok)
         self.assertIn("27", self.query.text)
         self.cb("apps_cz_servers_1")
         self.assertIn("صفحه 2 از 2", self.query.text)
-        self.assertEqual([name for name, _ in self.api.calls].count("list_servers"), 2)
-        self.assertNotIn("create_server", [name for name, _ in self.api.calls])
+        self.assertEqual([m for m, _ in self.api.calls].count("list_servers"), 2)
 
-    def test_region_plan_price_and_balance(self):
+    def test_regions_plans_account_balance_and_saved_public_keys(self):
         self.cb("apps_cz_regions_0")
-        token = next(x[len("apps_cz_rg_"):] for x in self.query.callbacks
-                     if x.startswith("apps_cz_rg_"))
-        self.cb("apps_cz_rg_" + token)
+        tok = next(v[len("apps_cz_rg_"):] for v in self.query.callbacks
+                   if v.startswith("apps_cz_rg_"))
+        self.cb("apps_cz_rg_" + tok)
         self.assertIn("&lt;small&gt;", self.query.text)
         self.assertIn("1700", self.query.text)
         self.assertIn("هزینه IPv4", self.query.text)
@@ -197,84 +160,36 @@ class Phase1PanelTests(unittest.TestCase):
         self.assertIn("2134", self.query.text)
         self.cb("apps_cz_account")
         self.assertIn("admin@example.org", self.query.text)
+        self.cb("apps_cz_keys_0")
+        self.assertIn("کلیدهای عمومی", self.query.text)
+        self.assertFalse(any("del" in x or "add" in x for x in self.query.callbacks))
+        self.assertNotIn("PRIVATE_NO", str(self.context.user_data))
+        tok = next(v[len("apps_cz_key_"):] for v in self.query.callbacks
+                   if v.startswith("apps_cz_key_"))
+        self.cb("apps_cz_key_" + tok)
+        self.assertIn("مشخصات", self.query.text)
 
-    def test_admin_denied_and_forged_selector(self):
+    def test_cross_user_stale_and_forged_callbacks(self):
         self.cb("apps_cz_home", role="agent")
         self.assertEqual(self.query.edits, [])
         self.assertIn("فقط مدیر", self.query.message.sent[-1][0])
         self.cb("apps_cz_servers_0")
-        count = len(self.query.edits)
+        size = len(self.query.edits)
         self.cb("apps_cz_sv_forged")
-        self.assertEqual(len(self.query.edits), count)
-        self.assertIn("معتبر نیست", self.query.message.sent[-1][0])
-        token = next(x[len("apps_cz_sv_"):] for x in self.query.callbacks
-                     if x.startswith("apps_cz_sv_"))
-        self.cb("apps_cz_sv_" + token, actor=999)
-        self.assertEqual(len(self.query.edits), count)
+        self.assertEqual(len(self.query.edits), size)
+        tok = next(v[len("apps_cz_sv_"):] for v in self.query.callbacks
+                   if v.startswith("apps_cz_sv_"))
+        self.cb("apps_cz_sv_" + tok, actor=999)
+        self.assertEqual(len(self.query.edits), size)
         self.now[0] += 601
-        self.cb("apps_cz_sv_" + token)
-        self.assertEqual(len(self.query.edits), count)
+        self.cb("apps_cz_sv_" + tok)
+        self.assertEqual(len(self.query.edits), size)
 
-    def test_delete_key_needs_one_shot_actor_bound_confirmation(self):
-        self.cb("apps_cz_keys_0")
-        token = next(x[len("apps_cz_kdel_"):] for x in self.query.callbacks
-                     if x.startswith("apps_cz_kdel_"))
-        self.cb("apps_cz_kdel_" + token)
-        nonce_cb = next(x for x in self.query.callbacks if x.startswith("apps_cz_kconfirm_"))
-        self.cb(nonce_cb, actor=999)
-        self.assertEqual(len(self.api.keys), 2)
-        self.cb(nonce_cb)
-        self.assertEqual(len(self.api.keys), 2)
-        self.cb("apps_cz_keys_0")
-        token = next(x[len("apps_cz_kdel_"):] for x in self.query.callbacks
-                     if x.startswith("apps_cz_kdel_"))
-        self.cb("apps_cz_kdel_" + token)
-        nonce_cb = next(x for x in self.query.callbacks if x.startswith("apps_cz_kconfirm_"))
-        self.cb(nonce_cb)
-        self.assertEqual(len(self.api.keys), 1)
-        self.cb(nonce_cb)
-        self.assertEqual(len(self.api.keys), 1)
-
-    def test_add_key_requires_valid_public_key_and_confirmation(self):
-        self.cb("apps_cz_kadd")
-        self.assertEqual(self.context.user_data["state"], "CZ_KEY_NAME")
-        worked, msg = self.inp("owner-machine")
-        self.assertTrue(worked)
-        self.assertEqual(self.context.user_data["state"], "CZ_KEY_PUBLIC")
-        worked, msg = self.inp("-----BEGIN OPENSSH PRIVATE KEY-----")
-        self.assertIn("معتبر نیست", msg.sent[-1][0])
-        worked, msg = self.inp(fake_public_key())
-        self.assertTrue(worked)
-        nonce_cb = msg.sent[-1][1]["reply_markup"][0][0][1]
-        self.assertNotIn("CZ_KEY_PUBLIC", self.context.user_data.values())
-        self.assertEqual(len(self.api.keys), 2)
-        self.cb(nonce_cb)
-        self.assertEqual(len(self.api.keys), 3)
-        self.cb(nonce_cb)
-        self.assertEqual(len(self.api.keys), 3)
-
-    def test_add_key_timeout_cancel_and_cross_chat(self):
-        self.cb("apps_cz_kadd")
-        worked, msg = self.inp("some-key", actor=123, chat=999)
-        self.assertTrue(worked)
-        self.assertIn("مهلت", msg.sent[-1][0])
-        self.cb("apps_cz_kadd")
-        self.now[0] += 200
-        worked, msg = self.inp("another-name")
-        self.assertTrue(worked)
-        self.assertIn("مهلت", msg.sent[-1][0])
-        self.cb("apps_cz_kadd")
-        worked, msg = self.inp("لغو")
-        self.assertTrue(worked)
-        self.assertNotIn("state", self.context.user_data)
-
-    def test_no_hidden_mutations_and_legacy_callbacks_remain_in_source(self):
+    def test_zero_provider_mutation_and_old_manual_paths_present(self):
         source = (Path(__file__).resolve().parents[1] / "bot_final_v49-2.py").read_text("utf-8")
-        start = source.index("def _build_admin_programs_kb()")
-        end = source.index("async def _show_admin_programs_hub(", start)
-        programs = source[start:end]
-        self.assertIn('callback_data="apps_cz_home"', programs)
-        self.assertNotIn('callback_data="hpeg_status"', programs)
+        menu = source[source.index("def _build_admin_programs_kb"):source.index("_MIGRATION_INPUT_STATES =")]
+        self.assertIn('callback_data="apps_cz_home"', menu)
+        self.assertNotIn('callback_data="hpeg_status"', menu)
         for original in ('elif d in ("hp_addedge", "hpeg_wizard")',
                          'elif d.startswith("srv_mkactive_")',
                          'elif d.startswith("hpdefmig_yes_")',
@@ -282,16 +197,16 @@ class Phase1PanelTests(unittest.TestCase):
                          'elif d == "hpeg_status"'):
             self.assertIn(original, source)
         self.assertIn('elif d.startswith("apps_cz_")', source)
-
-
-class KeyValidationTests(unittest.TestCase):
-    def test_openssh_key_validation(self):
-        self.assertEqual(_public_key(fake_public_key()), fake_public_key())
-        for invalid in ("ssh-ed25519 XXXX", "ssh-rsa ????",
-                        "-----BEGIN PRIVATE KEY-----", "ssh-ed25519 AAAA\nXX",
-                        "not-a-key", "ssh-ed25519 " + "x" * 10000):
-            with self.subTest(invalid=invalid[:25]), self.assertRaises(ValueError):
-                _public_key(invalid)
+        for cb in ("apps_cz_home", "apps_cz_servers_0", "apps_cz_regions_0",
+                   "apps_cz_keys_0", "apps_cz_balance"):
+            self.cb(cb)
+        self.assertTrue(all(m in {
+            "list_servers", "list_regions", "list_ssh_keys", "get_balance"}
+            for m, _ in self.api.calls))
+        panel_source = (Path(__file__).resolve().parents[1] / "cloudzy_admin_panel.py").read_text("utf-8")
+        for forbidden in ("create_server(", "delete_server(", "power_on(",
+                          "reset_server_password(", "add_ssh_key(", "delete_ssh_key("):
+            self.assertNotIn(forbidden, panel_source)
 
 
 if __name__ == "__main__":

@@ -220,23 +220,40 @@ class CloudzyAdminPanel:
                 await self._display(query,
                     f"🌍 <b>مناطق Cloudzy</b>\nتعداد: {len(all_rows)} · صفحه {page + 1} از {count}\n"
                     "برای نمایش پلن‌های منطقه انتخاب کنید.", rows, markup)
-            elif data.startswith("apps_cz_rg_"):
-                region_id, region = self._resolve(context, data[len("apps_cz_rg_"):], "region", actor, chat)
-                res = await self._api("list_plans", region=region_id, billing_cycle="monthly")
+            elif data.startswith(("apps_cz_rg_", "apps_cz_pl_")):
+                if data.startswith("apps_cz_rg_"):
+                    token = data[len("apps_cz_rg_"):]
+                    cycle = "monthly"
+                else:
+                    selector = data[len("apps_cz_pl_"):]
+                    cycle, separator, token = selector.partition("_")
+                    if not separator or cycle not in ("monthly", "hourly", "quarterly", "annually"):
+                        raise ValueError("INVALID_BILLING_CYCLE")
+                region_id, region = self._resolve(context, token, "region", actor, chat)
+                res = await self._api("list_plans", region=region_id, billing_cycle=cycle)
                 plans = _items(res.get("plans", []) if isinstance(res, dict) else res)
-                lines = [f"📦 <b>پلن‌های ماهانه</b>\nمنطقه: {_value(_get(region, 'name', 'id'))}\n"]
+                cycle_title = {"monthly": "ماهانه", "hourly": "ساعتی",
+                               "quarterly": "سه‌ماهه", "annually": "سالانه"}[cycle]
+                lines = [f"📦 <b>پلن‌ها — {cycle_title}</b>\nمنطقه: {_value(_get(region, 'name', 'id'))}\n"]
                 for p in plans[:15]:
                     price = p.get("price") or {}
                     cents = _get(price, "amountCents", "priceCents", "monthlyEquivCents")
+                    price_kind = ("معادل ماهانه" if _get(price, "monthlyEquivCents") is not None
+                                  and _get(price, "amountCents", "priceCents") is None
+                                  else cycle_title)
                     line = (f"• {_value(_get(p, 'name', 'slug', 'id'))} — "
-                            f"{_value(cents)} سنت (پایه)" if cents is not None
+                            f"{_value(cents)} سنت ({price_kind}، پایه)" if cents is not None
                             else f"• {_value(_get(p, 'name', 'slug', 'id'))} — قیمت نامشخص")
                     lines.append(line)
                 if len(plans) > 15:
                     lines.append(f"… و {len(plans) - 15} پلن دیگر")
                 lines.append("\n⚠️ قیمت پایه است؛ هزینه IPv4 و افزونه‌ها ممکن است جدا باشد.")
                 await self._display(query, "\n".join(lines),
-                    [[("↩️ مناطق", "apps_cz_regions_0")]], markup)
+                    [[("ساعتی", "apps_cz_pl_hourly_" + token),
+                      ("ماهانه", "apps_cz_pl_monthly_" + token)],
+                     [("سه‌ماهه", "apps_cz_pl_quarterly_" + token),
+                      ("سالانه", "apps_cz_pl_annually_" + token)],
+                     [("↩️ مناطق", "apps_cz_regions_0")]], markup)
             elif data == "apps_cz_account":
                 info = _obj(await self._api("whoami"))
                 await self._display(query,

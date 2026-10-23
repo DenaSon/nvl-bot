@@ -380,6 +380,25 @@ class QuickEdgeWizard:
                 await self._display(query, "🔎 در حال بررسی مجدد وضعیت VPS بدون خرید تازه...",
                     [[("📋 وضعیت", "apps_cz_operations")]], markup)
                 app.create_task(self._reconcile(opid, chat, app))
+            elif data.startswith("apps_cz_qreview_"):
+                opid = data[len("apps_cz_qreview_"):]
+                op = await asyncio.to_thread(self.store.get, opid)
+                if op["actor_id"] != actor or op["chat_id"] != chat or op["status"] != "HOSTKEY_PENDING":
+                    raise QuickEdgeHold("NOT_READY_FOR_HOST_KEY_APPROVAL")
+                context.user_data["cz3_host_review"] = {
+                    "id": opid, "actor": actor, "chat": chat,
+                    "expires": self.now() + 180,
+                    "fingerprint": op["host_key_fingerprint"]
+                }
+                await self._display(query,
+                    "🔐 <b>آخرین بررسی هویت SSH</b>\n\n"
+                    f"IP: <code>{_text(op['public_ipv4'])}</code>\n"
+                    f"اثر انگشت: <code>{_text(op['host_key_fingerprint'])}</code>\n\n"
+                    "⚠️ فقط اگر این اثر انگشت را با یک منبع مستقل و مورداعتماد "
+                    "(مثل کنسول سرور در Cloudzy) تطبیق داده‌اید، تأیید کنید. "
+                    "مقایسه با همان اتصال SSH کافی نیست.",
+                    [[("✅ اثر انگشت را مستقل بررسی کردم", "apps_cz_qaccept_" + opid)],
+                     [("❌ بازگشت بدون نصب", "apps_cz_operations")]], markup)
             elif data.startswith("apps_cz_qaccept_"):
                 opid = data[len("apps_cz_qaccept_"):]
                 op = await asyncio.to_thread(self.store.get, opid)
@@ -497,8 +516,6 @@ class QuickEdgeWizard:
         if op["actor_id"] == actor and op["chat_id"] == chat:
             if status in ("CREATE_UNCERTAIN", "CREATED", "HOLD_WAIT", "HOLD_IP", "HOLD_SSH"):
                 rows.append([("🔎 بررسی بدون خرید مجدد", "apps_cz_qcheck_" + op["id"])])
-            if status == "HOSTKEY_PENDING":
-                context_not_available = False  # approval nonce stored by caller on review; see below
         rows.append([("🔄 تازه‌سازی", "apps_cz_qview_" + op["id"])])
         rows.append([("↩️ Cloudzy", "apps_cz_home")])
         text = ("📋 <b>عملیات ساخت Edge</b>\n\n"
@@ -515,10 +532,6 @@ class QuickEdgeWizard:
                      "این اثرانگشت را با یک منبع مستقل و مورداعتماد، "
                      "مثلاً کنسول Cloudzy، مقایسه کنید. مشاهده آن از همین IP کافی نیست.")
             if op["actor_id"] == actor and op["chat_id"] == chat:
-                nonce = secrets.token_hex(8)
-                # Persisted provider fingerprint is not secret; nonce is bound to the
-                # live per-chat review step (not a durable authorization).
-                # Filled directly in the UI handler using an explicit callback below.
                 rows.insert(0, [("🔐 بررسی و تأیید اثرانگشت", "apps_cz_qreview_" + op["id"])])
         if status.startswith("HOLD") or status == "CREATE_UNCERTAIN":
             text += f"\n⚠️ نیازمند بررسی: {_text(op.get('hold_reason') or 'UNKNOWN')}"

@@ -7052,8 +7052,11 @@ def _cloudzy_quick_preflight():
 async def _cloudzy_quick_provision(ip, port, hostname, chat, app, server_id, trusted_host_key):
     if await asyncio.to_thread(_db_host_exists, ip):
         raise RuntimeError("CLOUDZY_IP_ALREADY_REGISTERED")
+    # Legacy wg0 peer removal identifies entries by edge-<IPv4>, not the
+    # Cloudzy provider hostname used to reconcile a potentially charged order.
+    legacy_peer_name = "edge-" + ip.replace(".", "-")
     return await _provision_new_edge(
-        ip, None, port, hostname, chat, app,
+        ip, None, port, legacy_peer_name, chat, app,
         private_key_path=DO_SSH_KEY_PATH, connect_retries=3,
         provider="cloudzy", provider_instance_id=server_id,
         egress_stage_requested=False, trusted_host_key=trusted_host_key,

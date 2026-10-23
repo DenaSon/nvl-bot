@@ -4142,7 +4142,7 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
                   [[InlineKeyboardButton("📋 وضعیت خرید Cloudzy", callback_data="apps_cz_operations")]]))
         await app.bot.send_message(
             chat_id,
-            f"🎉 <b>Edge جدید با موفقیت راه‌اندازی شد</b>\n\n"
+            f"{'🎉 <b>Edge جدید با موفقیت راه‌اندازی شد</b>' if pool_active else '🛠 <b>ثبت اولیه Edge — در انتظار تأیید نهایی</b>'}\n\n"
             f"🌐 IP عمومی: <code>{esc(edge_ip)}</code>\n"
             f"🔒 IP داخلی تونل: <code>{result['edge_wg_ip']}</code>\n"
             f"🔑 کلید عمومی Edge: <code>{esc(result['edge_pubkey'])}</code>\n"

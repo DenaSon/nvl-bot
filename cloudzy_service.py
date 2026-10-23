@@ -308,7 +308,12 @@ class CloudzyService:
             server = self.get_server(server_id)
             if not isinstance(server, Mapping):
                 raise CloudzyError("invalid Cloudzy server details")
-            status = str(server.get("state") or "").lower()
+            detail = server
+            for envelope in ("data", "service", "server"):
+                nested = detail.get(envelope)
+                if isinstance(nested, Mapping):
+                    detail = nested
+            status = str(detail.get("state") or detail.get("status") or "").lower()
             if status == "active":
                 return server  # Provider readiness, NOT SSH/WireGuard acceptance.
             if status in _FAILED_STATES:

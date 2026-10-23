@@ -400,6 +400,7 @@ from edge_egress_k2_m4_status import (
     root_checkpoint_status_html as k2_m44_root_status_html,
 )
 import edge_egress_k2_root_direct as k2_root_direct_flags
+from cloudzy_quick_edge import QuickEdgeWizard
 from cloudzy_admin_panel import CloudzyAdminPanel
 from edge_egress_k2_root_direct import (
     bound_root_client as k2_root_direct_client,
@@ -2983,7 +2984,7 @@ def _db_set_host_active(host, active: bool, reason=None):
             conn.execute("UPDATE host_pool SET active=1, consecutive_fails=0, disabled_reason=NULL, disabled_at=NULL, last_status='🟢 سالم', last_check=? WHERE host=?", (now, host))
         else:
             conn.execute("UPDATE host_pool SET active=0, disabled_reason=?, disabled_at=? WHERE host=?", (reason, now, host))
-def _db_add_host_pool(host):
+def _db_add_host_pool(host, *, active=True):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with db_conn() as conn:
         _db_assert_legacy_host_mutation_allowed(conn)
@@ -2992,8 +2993,8 @@ def _db_add_host_pool(host):
         conn.execute(
             "INSERT OR IGNORE INTO host_pool "
             "(host, active, added_at, ssh_port, service_port, admin_ssh_port) "
-            "VALUES (?, 1, ?, ?, ?, 22)",
-            (host, now, service_port, service_port),
+            "VALUES (?, ?, ?, ?, ?, 22)",
+            (host, 1 if active else 0, now, service_port, service_port),
         )
         conn.execute(
             "UPDATE host_pool SET "
@@ -3761,7 +3762,7 @@ def _next_edge_wg_ip():
     return f"10.77.0.{n}"
 
 
-def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, private_key_path=None, connect_retries=1, *, protected_wizard=False):
+def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, private_key_path=None, connect_retries=1, *, protected_wizard=False, trusted_host_key=None):
     """
     تابع مسدودکننده (blocking، به‌خاطر paramiko و subprocess). باید حتماً با
     asyncio.to_thread صدا زده شود، نه مستقیم داخل event loop.
@@ -3786,7 +3787,24 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
     edge_wg_ip = _next_edge_wg_ip()
 
     ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    if trusted_host_key is None:
+        # Legacy manual UX and its existing default behavior are unchanged.
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    else:
+        # Cloudzy CZ-03: require explicit operator-reviewed host-key identity.
+        # Never authenticate to an unpinned newly purchased VPS.
+        try:
+            _key_type, _key_b64 = trusted_host_key
+            _verified_key = paramiko.PKey.from_type_string(
+                _key_type, base64.b64decode(_key_b64, validate=True))
+            if _verified_key.get_name() != _key_type:
+                raise ValueError("SSH_HOST_KEY_TYPE_MISMATCH")
+            ssh.get_host_keys().add(edge_ip, _key_type, _verified_key)
+            ssh.get_host_keys().add(f"[{edge_ip}]:{_normalize_ssh_port(customer_port, 22)}",
+                                    _key_type, _verified_key)
+            ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
+        except Exception:
+            return False, "⛔️ کلید هویت SSH تأییدشده معتبر نیست؛ نصب متوقف شد.", None
     last_err = None
     connected_port = None
     # 🐛🔧 رفع باگ «اتصال SSH روی Edge شکست خورد: timed out»: قبلاً این‌جا همیشه فقط پورت
@@ -3939,7 +3957,8 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
 
 async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, chat_id, app,
                                private_key_path=None, connect_retries=1, provider=None, provider_instance_id=None,
-                               *, egress_stage_requested=False):
+                               *, egress_stage_requested=False, trusted_host_key=None,
+                               pool_active=True):
     """رَپِر async: کار سنگین را در thread جدا اجرا می‌کند تا event loop ربات بلاک نشود.
     🆕 private_key_path/connect_retries برای VPSهایی که از «ساخت VPS ابری خودکار» می‌آیند (بدون
     رمز روت، فقط کلید، و تازه بوت شده پس ممکن است SSHـش چند ثانیه دیرتر آماده شود).
@@ -3954,6 +3973,10 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
     # connect_retries می‌تونه چند بار با فاصلهٔ ۱۰ ثانیه تلاش کنه، پس سقف باید فضای کافی بده.
     if type(egress_stage_requested) is not bool:
         raise ValueError("INVALID_EGRESS_STAGE_WIZARD_OPT_IN")
+    if type(pool_active) is not bool:
+        raise ValueError("INVALID_EDGE_POOL_MODE")
+    if not pool_active and (egress_stage_requested or trusted_host_key is None):
+        raise ValueError("INACTIVE_CLOUDZY_EDGE_REQUIRES_PINNED_LEGACY_INSTALL")
     # K2 opt-in is a non-customer, unlisted Ingress+Stage candidate. Do not
     # unlock Legacy host selection or mutate any protected UID while staging.
     if egress_stage_requested:
@@ -3997,6 +4020,7 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
                 _provision_new_edge_sync, edge_ip, root_password, customer_port, edge_name,
                 private_key_path, connect_retries,
                 protected_wizard=egress_stage_requested,
+                trusted_host_key=trusted_host_key,
             ),
             timeout=_provision_timeout,
         )
@@ -4063,14 +4087,18 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
             )
             return False, edge_ip, result
     else:
-        await asyncio.to_thread(_db_add_host_pool, edge_ip)
+        if pool_active:
+            await asyncio.to_thread(_db_add_host_pool, edge_ip)
+        else:
+            await asyncio.to_thread(_db_add_host_pool, edge_ip, active=False)
         if provider:
             await asyncio.to_thread(_db_set_host_provider_meta, edge_ip, provider, provider_instance_id)
-        cur_hosts = [h.strip() for h in (await asyncio.to_thread(_db_get_setting, 'hosts', '')).split(',') if h.strip()]
-        if edge_ip not in cur_hosts:
-            cur_hosts.append(edge_ip)
-            await asyncio.to_thread(_db_update_setting, 'hosts', ",".join(cur_hosts))
-        await asyncio.to_thread(_db_set_host_active, edge_ip, True)
+        if pool_active:
+            cur_hosts = [h.strip() for h in (await asyncio.to_thread(_db_get_setting, 'hosts', '')).split(',') if h.strip()]
+            if edge_ip not in cur_hosts:
+                cur_hosts.append(edge_ip)
+                await asyncio.to_thread(_db_update_setting, 'hosts', ",".join(cur_hosts))
+            await asyncio.to_thread(_db_set_host_active, edge_ip, True)
         # F3: legacy ingress onboarding records only an INGRESS_ONLY candidate.
         # Egress staging requires a separately pinned, explicitly authorized
         # 6G operation; never reuse this installer password for Egress SSH.
@@ -4108,16 +4136,18 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
         )
     else:
         status = "✅ پینگ داخل تونل جواب داد." if result["tunnel_ok"] else "⚠️ تونل بالا آمد ولی پینگ داخلی جواب نداد — دستی با «wg show» چک کنید."
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⭐ این IP را پیش‌فرض کل سیستم کن", callback_data=f"hpdef_{edge_ip}")],
-                                   [InlineKeyboardButton("🛡 وضعیت و مسدودسازی IPها", callback_data="hp_menu")]])
+        kb = (InlineKeyboardMarkup([[InlineKeyboardButton("⭐ این IP را پیش‌فرض کل سیستم کن", callback_data=f"hpdef_{edge_ip}")],
+                                    [InlineKeyboardButton("🛡 وضعیت و مسدودسازی IPها", callback_data="hp_menu")]])
+              if pool_active else InlineKeyboardMarkup(
+                  [[InlineKeyboardButton("📋 وضعیت خرید Cloudzy", callback_data="apps_cz_operations")]]))
         await app.bot.send_message(
             chat_id,
-            f"🎉 <b>Edge جدید با موفقیت راه‌اندازی شد</b>\n\n"
+            f"{'🎉 <b>Edge جدید با موفقیت راه‌اندازی شد</b>' if pool_active else '🛠 <b>ثبت اولیه Edge — در انتظار تأیید نهایی</b>'}\n\n"
             f"🌐 IP عمومی: <code>{esc(edge_ip)}</code>\n"
             f"🔒 IP داخلی تونل: <code>{result['edge_wg_ip']}</code>\n"
             f"🔑 کلید عمومی Edge: <code>{esc(result['edge_pubkey'])}</code>\n"
             f"{status}\n\n"
-            f"این IP هم‌اکنون به «🌐 سرویس IP» اضافه و فعال شد.\n"
+            f"{'این IP هم‌اکنون به «🌐 سرویس IP» اضافه و فعال شد.' if pool_active else 'Edge در host_pool به‌صورت غیرفعال ثبت شد؛ مشتریان به آن تخصیص نمی‌یابند.'}\n"
             f"🛡 Egress خروجی: "
             f"{'Stage ثبت شد، هنوز READY نیست.' if result.get('egress_v1') else 'هنوز تأیید نشده؛ ثبت ورودی به‌معنای خروج کاربران از Edge نیست.'}",
             parse_mode="HTML", reply_markup=kb
@@ -6990,6 +7020,84 @@ async def require_login(update):
 PORTAL_DISPLAY_NAME = "NeVeL"  # 🔒 نام ثابت پورتال و مدیریت — با تغییر «نام برند» در تنظیمات عوض نمی‌شود
 
 _cloudzy_admin_panel = CloudzyAdminPanel()
+
+
+def _cloudzy_quick_preflight():
+    """Fail closed before paid create AND before mutating Core/Legacy WG."""
+    if paramiko is None or os.geteuid() != 0:
+        raise RuntimeError("CORE_ROOT_PARAMIKO_REQUIRED")
+    if not os.path.isfile(EDGE_SETUP_SCRIPT_LOCAL_PATH) or not os.path.isfile(WG_CONF_PATH):
+        raise RuntimeError("LEGACY_WG_INSTALLER_NOT_AVAILABLE")
+    if not all(_get_core_wg_identity()) or not _get_core_public_ip_cached():
+        raise RuntimeError("CORE_WG_IDENTITY_NOT_READY")
+    with db_conn() as conn:
+        _db_assert_legacy_host_mutation_allowed(conn)
+        if _db_running_failover_id(conn) is not None:
+            raise RuntimeError("ORIGINAL_6G_FAILOVER_BUSY")
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key='edge_egress_v1_onboard_enabled'"
+        ).fetchone()
+        if row is not None and row[0] == '1':
+            raise RuntimeError("EXPLICIT_K2_ONBOARDING_MUST_BE_DISABLED")
+    if any_protected_bindings(db_conn):
+        raise RuntimeError("PROTECTED_K2_BINDINGS_PRESENT")
+    ok, error, pubkey = _ensure_local_ssh_keypair_sync()
+    if not ok or not pubkey or not os.path.isfile(DO_SSH_KEY_PATH):
+        raise RuntimeError("LEGACY_ED25519_KEY_MISSING")
+    if os.stat(DO_SSH_KEY_PATH).st_mode & 0o077:
+        raise RuntimeError("LEGACY_ED25519_KEY_INSECURE_PERMISSIONS")
+    return _normalize_ssh_port(_db_get_setting('port', '22'), 22), pubkey
+
+
+async def _cloudzy_quick_provision(ip, port, hostname, chat, app, server_id, trusted_host_key):
+    if await asyncio.to_thread(_db_host_exists, ip):
+        raise RuntimeError("CLOUDZY_IP_ALREADY_REGISTERED")
+    # Legacy wg0 peer removal identifies entries by edge-<IPv4>, not the
+    # Cloudzy provider hostname used to reconcile a potentially charged order.
+    legacy_peer_name = "edge-" + ip.replace(".", "-")
+    return await _provision_new_edge(
+        ip, None, port, legacy_peer_name, chat, app,
+        private_key_path=DO_SSH_KEY_PATH, connect_retries=3,
+        provider="cloudzy", provider_instance_id=server_id,
+        egress_stage_requested=False, trusted_host_key=trusted_host_key,
+        pool_active=False,
+    )
+
+
+async def _cloudzy_quick_verify(ip, port, server_id):
+    """CZ-03 acceptance: installed, SSH service responds, no customer assignment."""
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT active,is_default,service_port,provider,provider_instance_id "
+            "FROM host_pool WHERE host=?", (ip,)
+        ).fetchone()
+        if not row or row[0] or row[1] or int(row[2]) != port:
+            raise RuntimeError("CLOUDZY_LEGACY_EDGE_NOT_INACTIVE")
+        if row[3] != "cloudzy" or row[4] != server_id:
+            raise RuntimeError("CLOUDZY_PROVIDER_OWNERSHIP_MISMATCH")
+        users = conn.execute(
+            "SELECT COUNT(*) FROM ssh_accounts WHERE host=?", (ip,)
+        ).fetchone()[0]
+        hosts_row = conn.execute(
+            "SELECT value FROM settings WHERE key='hosts'"
+        ).fetchone()
+        dns_row = conn.execute(
+            "SELECT value FROM settings WHERE key='dns_current_ip'"
+        ).fetchone()
+        if users or ip in (hosts_row[0] if hosts_row else "").split(","):
+            raise RuntimeError("CLOUDZY_EDGE_ALREADY_SELECTABLE")
+        if dns_row and dns_row[0] == ip:
+            raise RuntimeError("CLOUDZY_EDGE_SELECTED_PUBLIC_DNS")
+    reachable, _reason = await _check_ssh_reachable(ip, port, timeout=7)
+    return bool(reachable)
+
+
+_cloudzy_quick_edge = QuickEdgeWizard(
+    conn_factory=db_conn,
+    preflight=_cloudzy_quick_preflight,
+    provision=_cloudzy_quick_provision,
+    verify=_cloudzy_quick_verify,
+)
 
 
 def _cloudzy_markup(rows):
@@ -16086,6 +16194,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d == 'apps_home':
         context.user_data.pop("mza_nodes_origin", None)
         await _show_admin_programs_hub(query, context)
+        return
+    elif (d in ("apps_cz_wizard", "apps_cz_operations")
+          or d.startswith("apps_cz_q")):
+        await _cloudzy_quick_edge.handle_callback(
+            query, context, d, role=role,
+            actor=update.effective_user.id, chat=update.effective_chat.id,
+            markup=_cloudzy_markup, app=context.application,
+        )
         return
     elif d.startswith("apps_cz_"):
         await _cloudzy_admin_panel.handle_callback(

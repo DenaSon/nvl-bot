@@ -283,7 +283,8 @@ class CloudzyAdminPanel:
                 rows = [[("🔑 " + str(_get(v, "name", "id") or "کلید")[:27],
                           "apps_cz_key_" + t)] for v, t in zip(rows_page, tokens)]
                 rows += _paging("apps_cz_keys", page, count)
-                rows += [[("↩️ Cloudzy", "apps_cz_home")]]
+                rows += [[("🔑 ثبت کلید عمومی Core", "apps_cz_qsavekey")],
+                         [("↩️ Cloudzy", "apps_cz_home")]]
                 await self._display(query,
                     f"🔑 <b>کلیدهای عمومی SSH</b>\n"
                     f"تعداد: {len(all_rows)} · صفحه {page + 1} از {count}\n\n"

@@ -435,12 +435,13 @@ class QuickEdgeWizard:
                     [[("✅ ثبت کلید عمومی Core", "apps_cz_qkeyyes_" + nonce)],
                      [("❌ انصراف", "apps_cz_keys_0")]], markup)
             elif data.startswith("apps_cz_qkeyyes_"):
-                pending = context.user_data.pop("cz3_addkey", None)
+                pending = context.user_data.get("cz3_addkey")
                 if (not isinstance(pending, dict) or pending.get("actor") != actor
                         or pending.get("chat") != chat
                         or self.now() >= pending.get("expires", 0)
                         or pending.get("nonce") != data[len("apps_cz_qkeyyes_"):]):
                     raise QuickEdgeHold("SSH_KEY_CONFIRMATION_EXPIRED")
+                context.user_data.pop("cz3_addkey", None)  # consumed once by correct operator
                 _, pub = await self._preflight()
                 if hashlib.sha256(pub.encode()).hexdigest() != pending["digest"]:
                     raise QuickEdgeHold("SSH_KEY_CHANGED")

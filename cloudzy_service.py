@@ -10,13 +10,45 @@ legacy api.cloudzy.com/developers API-Token interface.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 import uuid
+import urllib.error
+import urllib.request
 from collections.abc import Mapping, Sequence
 from urllib.parse import quote
 
-import requests
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
+class _Response:
+    def __init__(self, status_code, content):
+        self.status_code = status_code
+        self.content = content
+
+    def json(self):
+        return json.loads(self.content)
+
+
+class _StdlibSession:
+    """Minimal verified-HTTPS transport; never follows provider redirects."""
+
+    def __init__(self):
+        self._opener = urllib.request.build_opener(_NoRedirect())
+
+    def request(self, method, url, *, headers, json: payload, timeout, allow_redirects):
+        if allow_redirects:
+            raise ValueError("Cloudzy redirects must be disabled")
+        data = json.dumps(payload).encode("utf-8") if payload is not None else None
+        request = urllib.request.Request(url, headers=headers, data=data, method=method)
+        try:
+            with self._opener.open(request, timeout=timeout) as response:
+                return _Response(response.status, response.read())
+        except urllib.error.HTTPError as exc:
+            return _Response(exc.code, exc.read())
 
 
 DEFAULT_BASE_URL = "https://dash.cloudzy.com/api/v1"
@@ -109,7 +141,7 @@ class CloudzyService:
             raise ValueError("Cloudzy base URL must end with /api/v1")
         if read_timeout <= 0 or write_timeout <= 0:
             raise ValueError("timeouts must be positive")
-        self._session = session if session is not None else requests.Session()
+        self._session = session if session is not None else _StdlibSession()
         self._read_timeout = read_timeout
         self._write_timeout = write_timeout
         self._sleep = sleep if sleep is not None else time.sleep
@@ -135,7 +167,7 @@ class CloudzyService:
                 timeout=self._write_timeout if mutation else self._read_timeout,
                 allow_redirects=False,
             )
-        except requests.RequestException as exc:
+        except (OSError, urllib.error.URLError, TimeoutError) as exc:
             if mutation:
                 raise CloudzyUncertainError(operation, idempotency_key=key) from None
             raise CloudzyError(f"Cloudzy read request failed: {type(exc).__name__}") from None

@@ -3522,21 +3522,52 @@ def _db_assert_account_write_allowed(conn):
 
 
 def _pick_target_host_for_new_account():
-    try:
-        pool = _db_get_host_pool()
-        # استفاده از len برای اطمینان از اینکه اگر ستون is_standby در دیتابیس ساخته نشده بود، کرش نکند
-        candidates = [r[0] for r in pool if r[1] and (len(r) < 11 or not r[10])]
+    """Select a customer-facing Legacy Relay, never the Core or a standby.
+
+    The host_pool also contains the Core as an active fallback. Balancing over
+    all active host_pool rows previously assigned newly sold SSH accounts to the
+    Core whenever its customer count was lower than the active Relay's.
+    A customer endpoint must be explicitly listed in settings.hosts *and*
+    active/non-standby in the pool. Do not silently fall back to Core.
+    """
+    with db_conn() as conn:
+        settings = dict(conn.execute(
+            "SELECT key, value FROM settings "
+            "WHERE key IN ('hosts', 'core_wg_public_ip')"
+        ).fetchall())
+        core = str(settings.get("core_wg_public_ip") or "").strip()
+        if not core:
+            log.error("SSH customer host selection HOLD: CORE_PUBLIC_IP_UNVERIFIED")
+            raise RuntimeError("CORE_PUBLIC_IP_UNVERIFIED")
+
+        configured = list(dict.fromkeys(
+            host.strip() for host in str(settings.get("hosts") or "").split(",")
+            if host.strip()
+        ))
+        pool = {
+            host: (active, standby)
+            for host, active, standby in conn.execute(
+                "SELECT host, active, is_standby FROM host_pool"
+            ).fetchall()
+        }
+        candidates = [
+            host for host in configured
+            if host != core and host in pool
+            and int(pool[host][0] or 0) == 1
+            and int(pool[host][1] or 0) == 0
+        ]
         if not candidates:
-            return _hosts_fallback_with_warning("pick_target_host_for_new_account")
-        with db_conn() as conn:
-            rows = conn.execute(
-                "SELECT host, COUNT(*) FROM ssh_accounts WHERE host IS NOT NULL AND host != '' GROUP BY host").fetchall()
-        counts = dict(rows)
-        candidates.sort(key=lambda h: counts.get(h, 0))
-        return candidates[0]
-    except Exception as e:
-        log.error(f"Error in picking target host: {e}")
-        return _hosts_fallback_with_warning("error_in_picking_host")
+            log.error("SSH customer host selection HOLD: NO_ELIGIBLE_CUSTOMER_RELAY")
+            raise RuntimeError("NO_ELIGIBLE_CUSTOMER_RELAY")
+
+        counts = dict(conn.execute(
+            "SELECT host, COUNT(*) FROM ssh_accounts "
+            "WHERE service_type='ssh' AND status='🟢 فعال' "
+            "AND host IS NOT NULL AND host<>'' GROUP BY host"
+        ).fetchall())
+    # Preserve legacy least-loaded allocation among *eligible* customer Relays.
+    # Python min is stable, so ties follow the explicit settings.hosts order.
+    return min(candidates, key=lambda host: counts.get(host, 0))
 
 async def _acct_host_port(owner_row):
     """
@@ -11017,7 +11048,15 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
 
         # Edge فقط endpoint عمومی این دسته است؛ Linux userها در توپولوژی Relay روی Core ساخته می‌شوند.
         # همهٔ اکانت‌های همین دسته یک endpoint مشترک می‌گیرند تا خروجی/مدیریت آن‌ها یکدست بماند.
-        target_host = await asyncio.to_thread(_pick_target_host_for_new_account)
+        try:
+            target_host = await asyncio.to_thread(_pick_target_host_for_new_account)
+        except RuntimeError as exc:
+            log.warning("SSH bulk purchase HOLD: %s", exc)
+            await query.message.reply_text(
+                "⛔️ هیچ Relay فعال و مجازی برای ساخت حساب جدید وجود ندارد. "
+                "تنظیمات هاست‌ها را بررسی کنید؛ هیچ حسابی ساخته نشد."
+            )
+            return
         target_port = await asyncio.to_thread(_db_get_host_service_port, target_host, 22)
 
         for i in range(count):
@@ -23707,7 +23746,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os_retries = 0
             # endpoint عمومی این اکانت یک‌بار انتخاب می‌شود؛ عملیات Linux در توپولوژی Relay
             # روی Core انجام می‌شود و target_host فقط برای routing/invoice metadata باقی می‌ماند.
-            target_host = await asyncio.to_thread(_pick_target_host_for_new_account)
+            try:
+                target_host = await asyncio.to_thread(_pick_target_host_for_new_account)
+            except RuntimeError as exc:
+                log.warning("SSH single purchase HOLD: %s", exc)
+                await asyncio.to_thread(_db_cancel_reservation, un)
+                await query.message.reply_text(
+                    "⛔️ هیچ Relay فعال و مجازی برای ساخت حساب جدید وجود ندارد. "
+                    "تنظیمات هاست‌ها را بررسی کنید؛ رزرو حساب لغو شد."
+                )
+                return
             target_port = await asyncio.to_thread(_db_get_host_service_port, target_host, 22)
             while await _os_user_exists(un, target_host, target_port) and os_retries < MAX_OS_RETRIES:
                 await asyncio.to_thread(_db_cancel_reservation, un)

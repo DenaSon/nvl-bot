@@ -401,6 +401,7 @@ from edge_egress_k2_m4_status import (
 )
 import edge_egress_k2_root_direct as k2_root_direct_flags
 from cloudzy_quick_edge import QuickEdgeWizard
+from cloudzy_cz04a import Cloudzy04A
 from cloudzy_admin_panel import CloudzyAdminPanel
 from edge_egress_k2_root_direct import (
     bound_root_client as k2_root_direct_client,
@@ -7097,6 +7098,37 @@ _cloudzy_quick_edge = QuickEdgeWizard(
     preflight=_cloudzy_quick_preflight,
     provision=_cloudzy_quick_provision,
     verify=_cloudzy_quick_verify,
+)
+
+
+def _cloudzy_04a_guard(conn):
+    """Reuse current protected Legacy and original failover fences."""
+    _db_assert_legacy_host_mutation_allowed(conn)
+    if _db_running_failover_id(conn) is not None:
+        raise RuntimeError("ORIGINAL_FAILOVER_RUNNING")
+    row = conn.execute(
+        "SELECT value FROM settings WHERE key='edge_egress_v1_onboard_enabled'"
+    ).fetchone()
+    if row and row[0] == "1":
+        raise RuntimeError("K2_ONBOARDING_ENABLED")
+
+
+async def _cloudzy_04a_probe(ip, service_port, admin_port):
+    """Fresh Core-side checks, NOT independent Iran/ISP acceptance."""
+    if await asyncio.to_thread(_is_current_core_host, ip):
+        return False
+    service_ok, _ = await _check_ssh_reachable(ip, service_port, timeout=7)
+    admin_ok, _ = await _check_ssh_reachable(ip, admin_port, timeout=7)
+    wg = await asyncio.to_thread(_probe_wireguard_edge_sync, ip)
+    return (bool(service_ok) and bool(admin_ok)
+            and wg.get("wg_peer_ok") is True
+            and wg.get("core_path_ok") is True)
+
+
+_cloudzy_04a = Cloudzy04A(
+    conn_factory=db_conn,
+    guard=_cloudzy_04a_guard,
+    probe=_cloudzy_04a_probe,
 )
 
 
@@ -16194,6 +16226,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d == 'apps_home':
         context.user_data.pop("mza_nodes_origin", None)
         await _show_admin_programs_hub(query, context)
+        return
+    elif d == "apps_cz_edge" or d.startswith("apps_cz4_"):
+        await _cloudzy_04a.handle_callback(
+            query, context, d, role=role,
+            actor=update.effective_user.id, chat=update.effective_chat.id,
+            markup=_cloudzy_markup,
+        )
         return
     elif (d in ("apps_cz_wizard", "apps_cz_operations")
           or d.startswith("apps_cz_q")):

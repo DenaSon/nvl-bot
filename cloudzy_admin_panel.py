@@ -1,8 +1,8 @@
-"""CZ-02: small, admin-only Cloudzy Telegram UI controller (Phase 1).
+"""Cloudzy admin's read-only API views, used alongside the CZ-03 Quick Edge wizard.
 
-Provider access only via CloudzyService; no VPS purchase/power/rebuild/delete,
-no legacy host_pool, DNS, WireGuard, SSH user or K2 mutations.  No telegram
-imports here, so the UI can be unit-tested using lightweight fake messages.
+The main bot dispatches purchase, operation-journal and SSH public-key add
+callbacks to QuickEdgeWizard before this panel. This panel itself does not
+create VPSs or mutate Legacy Edge/Relay state.
 The bot supplies a Telegram InlineKeyboardMarkup adapter.
 """
 from __future__ import annotations
@@ -135,29 +135,26 @@ class CloudzyAdminPanel:
             if data == "apps_cz_home":
                 await self._display(query,
                     "☁️ <b>مدیریت Cloudzy و Edge</b>\n\n"
-                    "⚡ ساخت سریع Edge در فاز بعد فعال می‌شود.\n"
-                    "🛡 مسیر قدیمی Edge/Relay از تنظیمات سرور بدون تغییر باقی است.\n"
-                    "ℹ️ مدیریت خروجی محافظت‌شده K2 در این بخش اجرا نمی‌شود.",
+                    "⚡ ساخت سریع Edge: خرید VPS و نصب Legacy با تأیید مدیر.\n"
+                    "🛡 Edge جدید ابتدا غیرفعال ثبت می‌شود؛ DNS، Relay و کاربران تغییر نمی‌کنند.\n"
+                    "ℹ️ انتقال Relay و کاربران در فاز بعدی انجام می‌شود.",
                     [
-                        [("⚡ ساخت سریع Edge · فاز ۲", "apps_cz_wizard")],
-                        [("🌐 Edge و Relay · فاز ۳", "apps_cz_edge")],
+                        [("⚡ ساخت سریع Edge", "apps_cz_wizard")],
+                        [("🌐 Edge و Relay · فاز بعد", "apps_cz_edge")],
                         [("🖥 سرورهای Cloudzy", "apps_cz_servers_0")],
                         [("🌍 مناطق و پلن‌ها", "apps_cz_regions_0"),
                          ("💰 موجودی", "apps_cz_balance")],
                         [("👤 اطلاعات حساب", "apps_cz_account"),
                          ("🔑 کلیدهای SSH", "apps_cz_keys_0")],
-                        [("📋 عملیات · فازهای بعد", "apps_cz_operations")],
+                        [("📋 وضعیت عملیات", "apps_cz_operations")],
                         [("↩️ برنامه‌ها", "apps_home")],
                     ], markup)
-            elif data in ("apps_cz_wizard", "apps_cz_edge", "apps_cz_operations"):
-                label = ("ساخت سریع Edge" if data == "apps_cz_wizard"
-                         else "Edge و Relay" if data == "apps_cz_edge"
-                         else "عملیات نیمه‌تمام")
-                phase = "۲" if data == "apps_cz_wizard" else "۳"
+            elif data == "apps_cz_edge":
                 await self._display(query,
-                    f"⚙️ <b>{label}</b>\n\n"
-                    f"این قابلیت در فاز {phase} پیاده‌سازی می‌شود؛ "
-                    "فاز ۱ فقط اطلاعات Cloudzy را نمایش می‌دهد و هیچ سروری را تغییر نمی‌دهد.",
+                    "🌐 <b>Edge و Relay</b>\n\n"
+                    "انتخاب Relay پیش‌فرض و انتقال کاربران هنوز ارائه نشده است.\n"
+                    "برای ساخت Edge غیرفعال از «ساخت سریع Edge» استفاده کنید.\n"
+                    "مسیر Legacy در تنظیمات سرور همچنان در دسترس است.",
                     [[("↩️ Cloudzy", "apps_cz_home")]], markup)
             elif data.startswith("apps_cz_servers_"):
                 page = _page(data[len("apps_cz_servers_"):])
@@ -288,7 +285,7 @@ class CloudzyAdminPanel:
                 await self._display(query,
                     f"🔑 <b>کلیدهای عمومی SSH</b>\n"
                     f"تعداد: {len(all_rows)} · صفحه {page + 1} از {count}\n\n"
-                    "فاز ۱ فقط نمایش اطلاعات است. افزودن/حذف کلید در فازهای بعد انجام می‌شود.",
+                    "🔑 ثبت کلید عمومی Core با تأیید مدیر فعال است؛ حذف کلید هنوز ارائه نشده است.",
                     rows, markup)
             elif data.startswith("apps_cz_key_"):
                 key_id, item = self._resolve(context, data[len("apps_cz_key_"):], "key", actor, chat)
@@ -296,7 +293,7 @@ class CloudzyAdminPanel:
                     "🔑 <b>مشخصات SSH Public Key</b>\n\n"
                     f"نام: {_value(_get(item, 'name'))}\n"
                     f"شناسه: <code>{_value(key_id)}</code>\n\n"
-                    "این صفحه فقط خواندنی است. کلیدهای ذخیره‌شده Cloudzy را در فازهای بعد مدیریت خواهیم کرد.",
+                    "جزئیات کلید خواندنی است؛ حذف کلید در نسخه فعلی فعال نیست.",
                     [[("↩️ کلیدها", "apps_cz_keys_0")]], markup)
             else:
                 await query.message.reply_text("⛔️ گزینه نامعتبر یا منقضی است.")

@@ -390,6 +390,7 @@ class Cloudzy04A:
                     [
                         [("🖥 فهرست همه Edgeهای NVL", "apps_cz4_hosts_0")],
                         [("☁️ مدیریت VPSهای Cloudzy", "apps_cz4_vps")],
+                        [("🔁 انتقال Relay و کاربران · CZ-04B", "apps_cz5_home")],
                         [("↩️ Cloudzy", "apps_cz_home")],
                     ], markup,
                 )

@@ -402,6 +402,8 @@ from edge_egress_k2_m4_status import (
 import edge_egress_k2_root_direct as k2_root_direct_flags
 from cloudzy_quick_edge import QuickEdgeWizard
 from cloudzy_cz04a import Cloudzy04A
+from cloudzy_cz04b import Cloudzy04B
+from cloudzy_cz04b_dns import CloudflareExactDNS
 from cloudzy_admin_panel import CloudzyAdminPanel
 from edge_egress_k2_root_direct import (
     bound_root_client as k2_root_direct_client,
@@ -7129,6 +7131,83 @@ _cloudzy_04a = Cloudzy04A(
     conn_factory=db_conn,
     guard=_cloudzy_04a_guard,
     probe=_cloudzy_04a_probe,
+)
+
+
+def _cloudzy_04b_guard(conn):
+    """Shared legacy/K2 write fence; CZ04B itself holds the original 6G lease."""
+    _db_assert_legacy_host_mutation_allowed(conn)
+    row = conn.execute(
+        "SELECT value FROM settings WHERE key='edge_egress_v1_onboard_enabled'"
+    ).fetchone()
+    if row and row[0] == "1":
+        raise RuntimeError("K2_ONBOARDING_ENABLED")
+
+
+async def _cloudzy_04b_provider_verified(host, server_id):
+    state = await _cloudzy_04a._provider(server_id, host)
+    return state in ("active", "running")
+
+
+def _cloudzy_04b_nat_pinned_sync(host, admin_port, service_port, tls_port, trusted_key):
+    """Read-only DNAT/forwarding inspection through the CZ03 verified SSH pin.
+
+    No AutoAddPolicy, no SSH password, no command side effects.
+    """
+    import base64
+    if paramiko is None:
+        return False
+    try:
+        key_type, key_encoded = trusted_key
+        host_key = paramiko.PKey.from_type_string(
+            key_type, base64.b64decode(key_encoded, validate=True)
+        )
+        management_key = paramiko.Ed25519Key.from_private_key_file(DO_SSH_KEY_PATH)
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
+        known_name = host if admin_port == 22 else f"[{host}]:{admin_port}"
+        ssh.get_host_keys().add(known_name, key_type, host_key)
+        try:
+            ssh.connect(
+                host, port=int(admin_port), username="root", pkey=management_key,
+                look_for_keys=False, allow_agent=False,
+                timeout=10, banner_timeout=10, auth_timeout=10,
+            )
+            ports = sorted({int(service_port), int(tls_port)})
+            checks = ["test \"$(sysctl -n net.ipv4.ip_forward)\" = 1"]
+            for port in ports:
+                if not 1 <= port <= 65535:
+                    return False
+                checks.append(
+                    "iptables -t nat -C PREROUTING -p tcp --dport "
+                    f"{port} -j DNAT --to-destination 10.77.0.1:{port}"
+                )
+            checks.append("iptables -t nat -C POSTROUTING ! -o lo -j MASQUERADE")
+            cmd = " && ".join(checks)
+            _stdin, stdout, stderr = ssh.exec_command(cmd, timeout=15)
+            return stdout.channel.recv_exit_status() == 0
+        finally:
+            ssh.close()
+    except Exception:
+        log.exception("CZ04B pinned NAT preflight failed (no mutation)")
+        return False
+
+
+async def _cloudzy_04b_nat(host, admin_port, service_port, tls_port, trusted_key):
+    return await asyncio.to_thread(
+        _cloudzy_04b_nat_pinned_sync,
+        host, admin_port, service_port, tls_port, trusted_key,
+    )
+
+
+_cloudzy_04b = Cloudzy04B(
+    db_conn=db_conn,
+    guard=_cloudzy_04b_guard,
+    provider=_cloudzy_04b_provider_verified,
+    probe=_cloudzy_04a_probe,
+    nat=_cloudzy_04b_nat,
+    dns=CloudflareExactDNS(_cf_get_config),
+    enabled=lambda: os.environ.get("NVL_CZ04B_ENABLE", "0") == "1",
 )
 
 
@@ -16226,6 +16305,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d == 'apps_home':
         context.user_data.pop("mza_nodes_origin", None)
         await _show_admin_programs_hub(query, context)
+        return
+    elif d.startswith("apps_cz5_"):
+        await _cloudzy_04b.handle_callback(
+            query, context, d, role=role,
+            actor=update.effective_user.id, chat=update.effective_chat.id,
+            markup=_cloudzy_markup,
+        )
         return
     elif d == "apps_cz_edge" or d.startswith("apps_cz4_"):
         await _cloudzy_04a.handle_callback(

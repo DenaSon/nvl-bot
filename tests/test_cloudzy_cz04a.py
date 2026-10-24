@@ -138,7 +138,7 @@ class CZ04ATests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def select(self, action):
-        await self.cb("apps_cz_edge")
+        await self.cb("apps_cz4_vps")
         self.assertIn("هیچ", "هیچ")
         detail = next(x for x in self.query.callbacks if x.startswith("apps_cz4_detail_"))
         await self.cb(detail)
@@ -251,7 +251,7 @@ class CZ04ATests(unittest.IsolatedAsyncioTestCase):
     async def test_admin_and_callback_owner_ttl(self):
         await self.cb("apps_cz_edge", role="agent")
         self.assertIn("فقط مدیر", self.query.sent[-1])
-        await self.cb("apps_cz_edge")
+        await self.cb("apps_cz4_vps")
         detail = next(x for x in self.query.callbacks if x.startswith("apps_cz4_detail_"))
         count = len(self.query.edits)
         await self.cb(detail, actor=999)
@@ -332,7 +332,7 @@ class CZ04ATests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(db.execute(
                 "SELECT status FROM cloudzy_cz04a_actions"
             ).fetchone()[0], "HOLD")
-        await self.cb("apps_cz_edge")
+        await self.cb("apps_cz4_vps")
         detail = next(x for x in self.query.callbacks if x.startswith("apps_cz4_detail_"))
         await self.cb(detail)
         picked = next(x for x in self.query.callbacks if x.startswith("apps_cz4_pick_stop_"))

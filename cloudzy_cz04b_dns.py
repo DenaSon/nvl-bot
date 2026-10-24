@@ -114,6 +114,9 @@ class CloudflareExactDNS:
             url = ("https://api.cloudflare.com/client/v4/zones/"
                    + quote(zone, safe="") + "/dns_records?type=A&name="
                    + quote(name, safe=""))
+            # A preceding GET may have verified a legacy Global Key. Rebuild the
+            # headers for each record instead of reusing an earlier Bearer header.
+            headers = self._headers(cfg, self._auth_mode or "bearer")
             payload = self._read(url, cfg, headers)
             if payload.get("success") is not True:
                 raise DNSHold("DNS_READ_ERROR")

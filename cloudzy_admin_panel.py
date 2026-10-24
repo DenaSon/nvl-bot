@@ -137,11 +137,12 @@ class CloudzyAdminPanel:
                     "☁️ <b>مدیریت Cloudzy و Edge</b>\n\n"
                     "⚡ ساخت سریع Edge: خرید VPS و نصب Legacy با تأیید مدیر.\n"
                     "🛡 Edge جدید ابتدا غیرفعال ثبت می‌شود؛ DNS، Relay و کاربران تغییر نمی‌کنند.\n"
-                    "ℹ️ انتقال Relay و کاربران در فاز بعدی انجام می‌شود.",
+                    "ℹ️ آماده‌سازی Relay به‌صورت Standby فعال است؛ تغییر مسیر و انتقال کاربران در CZ-04B است.",
                     [
                         [("⚡ ساخت سریع Edge", "apps_cz_wizard")],
-                        [("🌐 Edge و Relay · فاز بعد", "apps_cz_edge")],
-                        [("🖥 سرورهای Cloudzy", "apps_cz_servers_0")],
+                        [("🌐 Edge و Relay · آماده‌به‌کار", "apps_cz_edge")],
+                        [("🖥 سرورهای Cloudzy", "apps_cz_servers_0"),
+                         ("🛠 مدیریت VPS", "apps_cz4_vps")],
                         [("🌍 مناطق و پلن‌ها", "apps_cz_regions_0"),
                          ("💰 موجودی", "apps_cz_balance")],
                         [("👤 اطلاعات حساب", "apps_cz_account"),
@@ -149,13 +150,6 @@ class CloudzyAdminPanel:
                         [("📋 وضعیت عملیات", "apps_cz_operations")],
                         [("↩️ برنامه‌ها", "apps_home")],
                     ], markup)
-            elif data == "apps_cz_edge":
-                await self._display(query,
-                    "🌐 <b>Edge و Relay</b>\n\n"
-                    "انتخاب Relay پیش‌فرض و انتقال کاربران هنوز ارائه نشده است.\n"
-                    "برای ساخت Edge غیرفعال از «ساخت سریع Edge» استفاده کنید.\n"
-                    "مسیر Legacy در تنظیمات سرور همچنان در دسترس است.",
-                    [[("↩️ Cloudzy", "apps_cz_home")]], markup)
             elif data.startswith("apps_cz_servers_"):
                 page = _page(data[len("apps_cz_servers_"):])
                 all_rows = _items(await self._api("list_servers"))

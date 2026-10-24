@@ -275,6 +275,48 @@ class CZ04BTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("EGRESS_RECOVERY_REQUIRED", r[1])
         self.assertEqual(self.manager._targets(), [("203.0.113.12", "sv1")])
 
+
+    async def test_post_commit_dns_uncertainty_holds_without_false_rollback(self):
+        def broken_postcheck(target):
+            raise RuntimeError("postcheck unavailable")
+        self.manager._route_db_postcheck = broken_postcheck
+        await self.confirmed_route()
+        with self.db() as db:
+            self.assertEqual(db.execute(
+                "SELECT host FROM host_pool WHERE is_default=1"
+            ).fetchone()[0], "203.0.113.12")
+            self.assertEqual(db.execute(
+                "SELECT status FROM cloudzy_cz04b_operations"
+            ).fetchone()[0], "HOLD")
+            status, detail = db.execute(
+                "SELECT status,detail_json FROM failover_operations"
+            ).fetchone()
+            self.assertEqual(status, "RUNNING")
+            self.assertIn("EGRESS_RECOVERY_REQUIRED", detail)
+        self.assertTrue(all(r["ip"] == "203.0.113.12" for r in self.dns.records))
+
+    async def test_user_postcommit_uncertainty_preserves_hold_for_review(self):
+        await self.confirmed_route()
+        await self.cb("apps_cz5_users_0")
+        await self.cb("apps_cz5_all")
+        go = next(x for x in self.q.callbacks if x.startswith("apps_cz5_go_"))
+        def broken_shared(*args, **kwargs):
+            raise RuntimeError("shared journal uncertain")
+        self.manager._shared_finish = broken_shared
+        await self.cb(go)
+        with self.db() as db:
+            op = db.execute(
+                "SELECT status FROM cloudzy_cz04b_operations "
+                "WHERE kind='users'"
+            ).fetchone()
+            self.assertEqual(op[0], "HOLD")
+            self.assertEqual(db.execute(
+                "SELECT host FROM ssh_accounts WHERE username='alice'"
+            ).fetchone()[0], "203.0.113.12")
+            self.assertEqual(db.execute(
+                "SELECT status FROM failover_operations ORDER BY id DESC LIMIT 1"
+            ).fetchone()[0], "RUNNING")
+
     async def test_wrong_provider_nat_and_protected_veto_without_dns_write(self):
         for name in ("provider_good", "nat_good", "probe_good", "safe"):
             setattr(self, name, False)

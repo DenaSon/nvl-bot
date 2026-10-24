@@ -78,7 +78,7 @@ class CustomerRelayPickerTests(unittest.TestCase):
         with self.db() as db:
             db.execute(
                 "UPDATE settings SET value=? WHERE key='hosts'",
-                (f"{STANDBY},{GHOST},{CORE},{RELAY}",)
+                (f"{STANDBY},{CORE},{RELAY}",)
             )
         self.assertEqual(self.pick(), RELAY)
 

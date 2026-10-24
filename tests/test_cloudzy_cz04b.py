@@ -546,6 +546,24 @@ class DNSPortTests(unittest.TestCase):
         self.assertEqual(port._auth_mode, "bearer")
         self.assertEqual(observed[-1].get("Authorization"), "Bearer rotated-token")
 
+    def test_credential_change_after_get_before_put_blocks_write(self):
+        """Never PUT with an unverified token if settings change mid-operation."""
+        self.state["tls_passthrough"] = "0"
+        observed = []
+
+        def rotate(url, headers, payload=None, method="GET"):
+            observed.append(method)
+            result = self.transport(url, headers, payload, method)
+            if method == "GET" and self.state["token"] == "testtoken":
+                self.state["token"] = "rotated-token"
+            return result
+
+        port = CloudflareExactDNS(lambda: self.state, transport=rotate)
+        baseline = port.snapshot()
+        with self.assertRaisesRegex(DNSHold, "DNS_AUTH_NOT_VERIFIED"):
+            port.set_all(baseline, "2.3.4.5")
+        self.assertNotIn("PUT", observed)
+
     def test_proxied_records_are_rejected(self):
         def proxy(url, headers, payload=None, method="GET"):
             return {"success": True, "result": [

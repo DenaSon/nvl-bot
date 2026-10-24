@@ -131,17 +131,17 @@ class Phase1PanelTests(unittest.TestCase):
             self.assertIn(cb, labels)
         self.assertEqual(labels["apps_cz_wizard"], "⚡ ساخت سریع Edge")
         self.assertEqual(labels["apps_cz_operations"], "📋 وضعیت عملیات")
-        self.assertIn("فاز بعد", labels["apps_cz_edge"])
+        self.assertIn("آماده‌به‌کار", labels["apps_cz_edge"])
+        self.assertIn("apps_cz4_vps", labels)
         self.assertNotIn("hpeg_status", self.query.callbacks)
         self.assertEqual(self.api.calls, [])
-        self.cb("apps_cz_edge")
-        self.assertIn("هنوز ارائه نشده", self.query.text)
         self.assertEqual(self.api.calls, [])
 
     def test_cz03_wizard_operations_and_key_add_dispatched_first(self):
         # The read-only presentation module should never intercept CZ-03 actions.
         source = (Path(__file__).resolve().parents[1] / "bot_final_v49-2.py").read_text("utf-8")
         self.assertIn('d in ("apps_cz_wizard", "apps_cz_operations")', source)
+        self.assertIn('d == "apps_cz_edge" or d.startswith("apps_cz4_")', source)
         self.assertIn('d.startswith("apps_cz_q")', source)
         self.assertLess(source.index("_cloudzy_quick_edge.handle_callback("),
                         source.index("_cloudzy_admin_panel.handle_callback("))

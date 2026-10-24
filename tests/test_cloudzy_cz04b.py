@@ -278,8 +278,12 @@ class CZ04BTests(unittest.IsolatedAsyncioTestCase):
     async def test_wrong_provider_nat_and_protected_veto_without_dns_write(self):
         for name in ("provider_good", "nat_good", "probe_good", "safe"):
             setattr(self, name, False)
-            await self.confirmed_route()
+            await self.cb("apps_cz5_home")
+            chosen = next(x for x in self.q.callbacks if x.startswith("apps_cz5_target_"))
+            await self.cb(chosen)
             self.assertEqual(self.dns.calls, [])
+            self.assertFalse(any(x.startswith("apps_cz5_go_")
+                                 for x in self.q.callbacks))
             setattr(self, name, True)
         with self.db() as db:
             self.assertEqual(db.execute(

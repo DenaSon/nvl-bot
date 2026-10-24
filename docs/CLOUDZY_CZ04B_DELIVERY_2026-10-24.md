@@ -1,0 +1,39 @@
+# CZ-04B — Guarded Legacy Relay route and separate SSH ownership transfer
+Date: 2026-10-24
+Status: Source implementation / live E2E acceptance pending
+
+## Scope and terms
+This operates **only on a verified CZ03 Cloudzy-managed active Standby**, with pinned SSH host key, externally verified Cloudzy VPS id/IP and state and fresh Core probes. A manual old Edge may be the source; it is never silently adopted as a Cloudzy-owned VPS. Existing legacy manual commands remain available and are NOT called by CZ04B. Protected/K2 UID Egress is explicitly excluded.
+
+In the current Legacy architecture the Edge performs DNAT toward Core over WireGuard; the SSH identity remains on Core. A successful Core SSH/WG/NAT test **does not** establish Iranian ISP or real-client IP acceptance. Production handoff requires independent live-client evidence.
+
+**NVL_CZ04B_ENABLE defaults OFF.** Set to 1 in the nvlbot systemd environment only during an approved maintenance/testing window after independent end-to-end checks. Reading previews and Journal is always permitted.
+
+## Two separate admin approvals
+From Programs > Cloudzy > Edge & Relay > CZ-04B:
+1. Select a CZ03 verified Cloudzy standby. Preview rejects K2/protected mode, auto failover, concurrent original 6G lease, unresolved CZ04A/CZ04B journal, missing/changed default, target in legacy settings.hosts, target already assigned users, multi-Edge active SSH conflicts and misaligned service ports.
+2. Read current public and TLS Cloudflare A records (exact ID, DNS-only, unambiguous), confirm both point to current default; fresh provider ID/IP/ACTIVE, admin/customer SSH, Core-WG, pinned root-management SSH and installed DNAT/SNAT rules. The installer created NAT during CZ03; CZ04B only verifies, does not blindly append rules.
+3. Independent explicit route-change confirmation (one-use, 180 sec, actor/chat/session bound), after having independently tested a real customer path to the target.
+4. Acquire the original shared Phase-6G lock with **no stale recovery**. Journal PREPARING then DNS_WRITE_INTENT **before first public DNS mutation**; update only the configured exact A records. Verify target DNS. In one local SQLite transaction, compare current source/default/hosts and active SSH snapshot and commit new default + host list order + dns_current_ip + timestamp; leave source active and leave **all customer Host assignments unchanged**. Verify live DNS again and local DB; mark route READY and shared 6G SUCCEEDED.
+5. If DNS partially changes or DB CAS fails before commit, attempt verified restore of original public/TLS A records and mark ABORTED/6G FAILED only after read-back. If rollback is unknown/incomplete, HOLD + original 6G RUNNING with EGRESS_RECOVERY_REQUIRED marker; do NOT replay automatically. If post-DB-commit reconciliation is uncertain, HOLD the journal and shared lease instead of a blind rollback.
+6. **Separate customer step**: after READY, select one active SSH account or up to 200 active accounts remaining on the previous default (including NULL/empty effective ownership). Independent one-use approval. Fresh provider, SSH, WG, pinned NAT, DNS and atomic SQLite compare-and-swap of every exact username/source assignment. No Linux credential rebuild, V2Ray assignment or K2 mapping change. Journal DONE or ABORTED/HOLD; zero-users path is read-only.
+
+Only one CZ04B unresolved operation can be active at a time. A HOLD/IN_FLIGHT remains locked pending operator reconciliation; the bot does not offer an unsafe reset button.
+
+## Cloudflare adapter
+cloudzy_cz04b_dns.py separately enumerates exact public_domain A record and tls_domain A record (if tls_passthrough=1), refuses proxied, ambiguous or invalid records; preserves DNS-only and original TTL using exact record IDs. Credentials remain in existing NVL Cloudflare settings and are never persisted to the CZ04B operation journal or Telegram. The new adapter DOES NOT modify dns_current_ip: the orchestrator updates that only after verified provider writes.
+
+## Explicit safety boundaries
+- No Core-IP fallback in DNS.
+- No automatic old server power-off/delete; old source stays active.
+- No bulk account migrations on first Relay approval.
+- No per-user SSH password writes or remote user rebuild.
+- No original srv_mkactive_ or hpdef_migrate_ chained callbacks.
+- No assertion that NAT/WG handshake alone proves customer's public egress IP.
+- No irreversible Cloudzy VPS operations (rename/delete/rebuild/reset password/key deletion deferred).
+
+## Deployment
+Merge only after CI. Deploy pinned SHA with detached staging. Run targeted tests plus production-shape Core read-only diagnostics. Back up /root/master_bot.db using SQLite backup and runtime files. Deploy cloudzy_cz04b.py, cloudzy_cz04b_dns.py, cloudzy_cz04a.py and bot_final_v49-2.py together. Restart nvlbot and check journalctl. Keep NVL_CZ04B_ENABLE=0 initially. Read-only Telegram smoke test may show zero standby candidates until CZ03 VPS purchase and CZ04A promotion. Do NOT enable paid DNS/user mutation before isolated live trial and external user/IP acceptance.
+
+## Verification
+tests/test_cloudzy_cz04b.py mocks Cloudflare public+TLS records, two-record partial failure and rollback, unresolved HOLD shared 6G lock, stale source-account snapshot, concurrent/cross-user approval, protected-mode/provider/NAT failures, zero/one/N users, and no implicit user migration. Other CZ03/CZ04A/Legacy and K2 test suites remain mandatory.

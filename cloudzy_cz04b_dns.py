@@ -149,6 +149,10 @@ class CloudflareExactDNS:
             ):
                 raise DNSHold("DNS_CHANGED_CONCURRENTLY")
             cfg, zone, headers = self._access()
+            # Credentials may rotate between read-back and PUT. Require that
+            # this exact credential successfully completed a GET first.
+            if self._auth_mode is None:
+                raise DNSHold("DNS_AUTH_NOT_VERIFIED")
             url = ("https://api.cloudflare.com/client/v4/zones/"
                    + quote(zone, safe="") + "/dns_records/"
                    + quote(expected_record["id"], safe=""))

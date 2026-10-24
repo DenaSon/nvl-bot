@@ -277,6 +277,12 @@ class Cloudzy04B:
             rows = self._source_accounts(db, source)
             return rows, _digest(rows)
 
+    def _migration_rows_locked(self, source):
+        with self.db() as db:
+            self.guard(db)
+            rows = self._source_accounts(db, source)
+            return rows, _digest(rows)
+
     def _reserve(self, kind, actor, chat, state, *, shared, fingerprint="", names=None):
         with self.db() as db:
             self._init(db)
@@ -482,11 +488,22 @@ class Cloudzy04B:
             )
 
     async def _acquire(self, source, target):
-        return await asyncio.to_thread(
+        lock, busy = await asyncio.to_thread(
             acquire_original_6g, self.db, source, target,
             stale_seconds=0, parse_datetime=lambda s: None,
             allow_legacy_stale_recovery=False,
         )
+        if lock:
+            # Persist a recovery-protected 6G phase immediately after acquiring
+            # the lease; legacy stale recovery must never steal this lease
+            # after a crash between DNS write intent and journal update.
+            await asyncio.to_thread(
+                update_original_6g, self.db, lock,
+                detail={"phase": "EGRESS_RECOVERY_REQUIRED",
+                        "controller": "CLOUDZY_CZ04B_LEASE"},
+                require_running=True,
+            )
+        return lock, busy
 
     async def _run_route(self, actor, chat, target):
         if not self.enabled():
@@ -591,6 +608,16 @@ class Cloudzy04B:
         op_id = None
         committed = False
         try:
+            # Confirm the route and account fingerprint under our shared lease
+            # before reserving the account transaction.
+            again = await asyncio.to_thread(self._route_ready)
+            if again != (source, target, pid):
+                raise CutoverHold("ROUTE_CHANGED_AFTER_LOCK")
+            now_rows, now_fp = await asyncio.to_thread(
+                self._migration_rows_locked, source,
+            )
+            if now_fp != fp:
+                raise CutoverHold("ACCOUNT_SNAPSHOT_CHANGED_UNDER_LOCK")
             op_id = await asyncio.to_thread(
                 self._reserve, "users", actor, chat, state, shared=lock,
                 fingerprint=fp, names=names,

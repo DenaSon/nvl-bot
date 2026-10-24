@@ -154,6 +154,8 @@ class CloudzyService:
         request_headers = {
             "Authorization": f"Bearer {self._token}",
             "Accept": "application/json",
+            # Default urllib user agent triggers Cloudflare 1010 on Cloudzy.
+            "User-Agent": "NVLBot-Cloudzy/1.0",
         }
         if body is not None:
             request_headers["Content-Type"] = "application/json"

@@ -23,6 +23,14 @@ Only one CZ04B unresolved operation can be active at a time. A HOLD/IN_FLIGHT re
 ## Cloudflare adapter
 cloudzy_cz04b_dns.py separately enumerates exact public_domain A record and tls_domain A record (if tls_passthrough=1), refuses proxied, ambiguous or invalid records; preserves DNS-only and original TTL using exact record IDs. Credentials remain in existing NVL Cloudflare settings and are never persisted to the CZ04B operation journal or Telegram. The new adapter DOES NOT modify dns_current_ip: the orchestrator updates that only after verified provider writes.
 
+## Field acceptance and Cloudflare auth correction (2026-10-24)
+- The first Cloudzy Legacy Edge 153.75.90.152 passed paid provisioning, CZ03 EDGE_READY, CZ04A Standby promotion and external NVP Tunnel validation. Core egress IP was expected and confirmed; no customer cutover has occurred.
+- During route preflight, Cloudflare returned HTTP 400 / code 9106 when the existing `cf_key` (an API Token) was sent with old-style `X-Auth-Email` / `X-Auth-Key` headers because `cf_email` was also populated. A read-only live test proved that `Authorization: Bearer` succeeds for the same credential, and n1.nvlsup.com is DNS-only and still points at 5.75.197.158.
+- `CloudflareExactDNS` now tries Bearer first for reads, regardless of leftover `cf_email`. If a Cloudflare authentication error (9106 or 10000) is returned on a **GET** and email is configured, it tries legacy Global Key headers; a successful GET pins that mode for subsequent record checks and writes. A credential change invalidates the pinned mode. Failed non-authenticated reads are fail-closed. **No alternate authentication or automatic retry is attempted for PUT.**
+- A single active SSH account `nevel1253` was found explicitly assigned to Core (91.107.170.239), whereas 470 SSH accounts were assigned to the old Relay. The operator reassigned this account using the existing bot IP-service workflow; the root cause of assigning newly created accounts to Core still needs separate investigation. Do not delete or silently rewrite active customer accounts to work around preflight.
+- This patch makes no database schema, host-routing, auto-failover, provider or NAT changes. Reconfirm live account distribution and Cloudflare DNS-only before any approved CZ04B cutover. Keep `NVL_CZ04B_ENABLE=0` until the operator-approved maintenance window.
+- Regression tests cover leftover-email Bearer, legacy Global Key fallback, unrelated API failures, failed authentication without writes, and credential rotation.
+
 ## Explicit safety boundaries
 - No Core-IP fallback in DNS.
 - No automatic old server power-off/delete; old source stays active.

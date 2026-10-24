@@ -17,6 +17,7 @@ from cloudzy_service import CloudzyService, CloudzyAPIError, CloudzyUncertainErr
 
 TTL = 600
 CONFIRM_TTL = 180
+INVENTORY_PAGE_SIZE = 8
 ACTIONS = {"start", "stop", "reboot", "relay"}
 FINAL = ("DONE", "REJECTED")
 RELAY_BLOCKED_FLAGS = ("phase6h_auto_failover_enabled", "auto_failover_mode")
@@ -108,6 +109,102 @@ class Cloudzy04A:
                     "admin_port": int(admin_port or 22),
                 })
             return ret
+
+    def _inventory(self):
+        """Read all NVL host_pool records, including unmanaged/manual entries.
+
+        Membership and last recorded health are different dimensions. Counts
+        include only SSH service_type accounts, not V2Ray or K2 users. NULL/empty
+        host accounts inherit the current default for display purposes only.
+        No Cloudzy API call and no host/account/route mutation occurs here.
+        """
+        with self.db() as db:
+            rows = db.execute("""
+                SELECT host, active, is_default, is_standby, provider,
+                       provider_instance_id, health_state, health_updated_at,
+                       service_ok, admin_ok, wg_peer_ok, core_path_ok
+                FROM host_pool
+                ORDER BY is_default DESC, active DESC, host
+            """).fetchall()
+            assignments = db.execute("""
+                SELECT COALESCE(host, ''), COUNT(*),
+                       SUM(CASE WHEN status LIKE '%فعال%'
+                                AND status NOT LIKE '%غیر%' THEN 1 ELSE 0 END)
+                FROM ssh_accounts
+                WHERE service_type='ssh'
+                GROUP BY COALESCE(host, '')
+            """).fetchall()
+            assignment_map = {
+                str(host): (int(total), int(active or 0))
+                for host, total, active in assignments
+            }
+            core_row = db.execute(
+                "SELECT value FROM settings WHERE key='core_wg_public_ip'"
+            ).fetchone()
+            core_ip = str(core_row[0] or "") if core_row else ""
+            try:
+                receipts = db.execute("""
+                    SELECT provider_server_id, public_ipv4, COUNT(*)
+                    FROM cloudzy_edge_operations
+                    WHERE status='EDGE_READY'
+                    GROUP BY provider_server_id, public_ipv4
+                """).fetchall()
+            except sqlite3.OperationalError:
+                receipts = []
+            verified = {
+                (str(pid), str(ip)) for pid, ip, total in receipts
+                if total == 1 and pid and ip
+            }
+        unassigned_all, unassigned_active = assignment_map.get("", (0, 0))
+        inventory = []
+        for (host, active, default, standby, provider, instance,
+             health, health_at, service_ok, admin_ok, wg_ok, path_ok) in rows:
+            host = str(host)
+            explicit_all, explicit_active = assignment_map.get(host, (0, 0))
+            default = bool(default)
+            provider_name = str(provider or "")
+            provider_id = str(instance or "")
+            inventory.append({
+                "host": host, "active": bool(active),
+                "default": default, "standby": bool(standby),
+                "core": bool(core_ip and host == core_ip),
+                "provider": provider_name,
+                "provider_id": provider_id,
+                "verified_cloudzy": provider_name == "cloudzy"
+                    and (provider_id, host) in verified,
+                "health": str(health or "UNKNOWN"),
+                "health_at": str(health_at or ""),
+                "service_ok": service_ok,
+                "admin_ok": admin_ok,
+                "wg_ok": wg_ok,
+                "path_ok": path_ok,
+                "explicit_all": explicit_all,
+                "explicit_active": explicit_active,
+                "inherited_all": unassigned_all if default else 0,
+                "inherited_active": unassigned_active if default else 0,
+            })
+        return inventory
+
+    @staticmethod
+    def _inventory_role(item):
+        if item["default"]:
+            return "⭐ پیش‌فرض"
+        if item["core"]:
+            return "🛟 Core"
+        if item["standby"]:
+            return "🟡 Standby"
+        return "🟢 فعال" if item["active"] else "⚪️ غیرفعال"
+
+    def _inventory_ref(self, context, actor, chat, token):
+        state = context.user_data.get("cz4_nvl_refs")
+        if (not isinstance(state, dict) or state.get("actor") != actor
+                or state.get("chat") != chat
+                or self.now() >= state.get("expires", 0)):
+            raise Cloudzy04AHold("EXPIRED_INVENTORY_SELECTION")
+        host = state.get("items", {}).get(token)
+        if not isinstance(host, str) or not host:
+            raise Cloudzy04AHold("UNKNOWN_INVENTORY_SELECTION")
+        return host
 
     def _state(self, host, provider_id, *, mutation):
         with self.db() as db:
@@ -275,7 +372,111 @@ class Cloudzy04A:
             await query.message.reply_text("⛔️ فقط مدیر مجاز است.")
             return
         try:
-            if data in ("apps_cz_edge", "apps_cz4_vps"):
+            if data == "apps_cz_edge":
+                hosts = await asyncio.to_thread(self._inventory)
+                count_active = sum(item["active"] for item in hosts)
+                count_standby = sum(item["standby"] for item in hosts)
+                count_managed = sum(item["verified_cloudzy"] for item in hosts)
+                await self._display(
+                    query,
+                    "🌐 <b>مرکز مدیریت Edge و Relay</b>\n\n"
+                    f"🖥 کل IPهای ثبت‌شده در NVL: <b>{len(hosts)}</b>\n"
+                    f"🟢 فعال: {count_active} · ⚪️ غیرفعال: {len(hosts) - count_active}\n"
+                    f"⭐ پیش‌فرض: {sum(item['default'] for item in hosts)}"
+                    f" · 🟡 Standby: {count_standby}\n"
+                    f"☁️ VPSهای Cloudzy قابل مدیریت: {count_managed}\n\n"
+                    "وضعیت‌ها از دیتابیس NVL هستند؛ سلامت آنلاین تضمین نشده است.\n"
+                    "انتقال مسیر پیش‌فرض، DNS و کاربران در CZ-04B خواهد بود.",
+                    [
+                        [("🖥 فهرست همه Edgeهای NVL", "apps_cz4_hosts_0")],
+                        [("☁️ مدیریت VPSهای Cloudzy", "apps_cz4_vps")],
+                        [("↩️ Cloudzy", "apps_cz_home")],
+                    ], markup,
+                )
+                return
+            if data.startswith("apps_cz4_hosts_"):
+                raw_page = data[len("apps_cz4_hosts_"):]
+                if not raw_page.isascii() or not raw_page.isdecimal() or len(raw_page) > 3:
+                    raise Cloudzy04AHold("INVALID_PAGE")
+                inventory = await asyncio.to_thread(self._inventory)
+                pages = max(1, (len(inventory) + INVENTORY_PAGE_SIZE - 1)
+                            // INVENTORY_PAGE_SIZE)
+                page = min(int(raw_page), pages - 1)
+                start = page * INVENTORY_PAGE_SIZE
+                current = inventory[start:start + INVENTORY_PAGE_SIZE]
+                refs, rows = {}, []
+                for item in current:
+                    token = secrets.token_hex(4)
+                    refs[token] = item["host"]
+                    rows.append([(
+                        f"{self._inventory_role(item)} · {item['host']}",
+                        "apps_cz4_host_" + token
+                    )])
+                context.user_data["cz4_nvl_refs"] = {
+                    "actor": actor, "chat": chat,
+                    "expires": self.now() + TTL, "items": refs,
+                }
+                paging = []
+                if page:
+                    paging.append(("◀️ قبلی", f"apps_cz4_hosts_{page - 1}"))
+                if page < pages - 1:
+                    paging.append(("بعدی ▶️", f"apps_cz4_hosts_{page + 1}"))
+                if paging:
+                    rows.append(paging)
+                rows.append([("↩️ Edge و Relay", "apps_cz_edge")])
+                await self._display(
+                    query,
+                    "🖥 <b>همه Edgeهای NVL</b>\n"
+                    f"تعداد: {len(inventory)} · صفحه {page + 1} از {pages}\n\n"
+                    "تمام ردیف‌های host_pool، شامل دستی و Cloudzy.\n"
+                    "🛡 فهرست فقط خواندنی است؛ سلامت ثبت‌شده ممکن است قدیمی باشد.",
+                    rows, markup,
+                )
+                return
+            if data.startswith("apps_cz4_host_"):
+                host = self._inventory_ref(
+                    context, actor, chat, data[len("apps_cz4_host_"):]
+                )
+                inventory = await asyncio.to_thread(self._inventory)
+                item = next((x for x in inventory if x["host"] == host), None)
+                if not item:
+                    raise Cloudzy04AHold("HOST_REMOVED")
+                def flag(v):
+                    return "✅" if v == 1 else ("❌" if v == 0 else "—")
+                provider_label = (
+                    "ثبت‌نشده / دستی" if not item["provider"]
+                    else item["provider"]
+                )
+                rows = []
+                if item["verified_cloudzy"]:
+                    rows.append([("☁️ مدیریت VPS Cloudzy", "apps_cz4_vps")])
+                rows.append([("↩️ فهرست Edgeها", "apps_cz4_hosts_0")])
+                await self._display(
+                    query,
+                    f"🖥 <b>جزئیات NVL Edge</b>\n\n"
+                    f"IP: <code>{_safe(host)}</code>\n"
+                    f"نقش: {self._inventory_role(item)}\n"
+                    f"عضویت فعال: {'بله' if item['active'] else 'خیر'}\n"
+                    f"پیش‌فرض: {'بله' if item['default'] else 'خیر'}"
+                    f" · Standby: {'بله' if item['standby'] else 'خیر'}\n"
+                    f"Provider: {_safe(provider_label)}\n"
+                    f"مالکیت Cloudzy تأییدشده: {'بله' if item['verified_cloudzy'] else 'خیر'}\n\n"
+                    f"👥 کاربران SSH با Host صریح: {item['explicit_all']}"
+                    f" (فعال: {item['explicit_active']})\n"
+                    f"👥 کاربران SSH بدون Host، منتسب به پیش‌فرض: {item['inherited_all']}"
+                    f" (فعال: {item['inherited_active']})\n\n"
+                    f"🩺 سلامت ثبت‌شده: {_safe(item['health'])}\n"
+                    f"آخرین ثبت سلامت: {_safe(item['health_at'])}\n"
+                    f"SSH سرویس: {flag(item['service_ok'])}"
+                    f" · SSH مدیر: {flag(item['admin_ok'])}\n"
+                    f"WireGuard: {flag(item['wg_ok'])}"
+                    f" · مسیر Core: {flag(item['path_ok'])}\n\n"
+                    "⚠️ این داده‌ها Snapshot دیتابیس‌اند؛ تست زنده انجام نشده است.\n"
+                    "این صفحه هیچ عملیات Cloudzy یا تغییر Relay انجام نمی‌دهد.",
+                    rows, markup,
+                )
+                return
+            if data == "apps_cz4_vps":
                 hosts = await asyncio.to_thread(self._read)
                 refs = {}
                 buttons = []

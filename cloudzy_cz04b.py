@@ -297,6 +297,30 @@ class Cloudzy04B:
             ).fetchone()
             if not locked:
                 raise CutoverHold("SHARED_6G_LEASE_LOST")
+            # Repeat all critical route identity checks inside the same
+            # BEGIN IMMEDIATE reservation that precedes the DNS write intent.
+            if kind == "route":
+                current = db.execute(
+                    "SELECT host FROM host_pool WHERE is_default=1 AND active=1"
+                ).fetchall()
+                tr = db.execute(
+                    "SELECT active,is_default,is_standby,provider,provider_instance_id "
+                    "FROM host_pool WHERE host=?", (state["target"],)
+                ).fetchone()
+                st = self._settings(db)
+                receipt = db.execute(
+                    "SELECT COUNT(*) FROM cloudzy_edge_operations "
+                    "WHERE status='EDGE_READY' AND provider_server_id=? AND public_ipv4=?",
+                    (state["provider_id"], state["target"])
+                ).fetchone()[0]
+                if (len(current) != 1 or current[0][0] != state["source"]
+                    or tr != (1, 0, 1, "cloudzy", state["provider_id"])
+                    or st.get("dns_current_ip") != state.get("dns")
+                    or st.get("hosts") != state.get("hosts")
+                    or receipt != 1
+                    or _digest(self._source_accounts(db, state["source"]))
+                    != state.get("fingerprint")):
+                    raise CutoverHold("ROUTE_RESERVATION_SNAPSHOT_CHANGED")
             op_id = secrets.token_hex(16)
             ts = int(self.now())
             db.execute("""

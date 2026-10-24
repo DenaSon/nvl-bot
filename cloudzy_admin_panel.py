@@ -140,7 +140,7 @@ class CloudzyAdminPanel:
                     "ℹ️ آماده‌سازی Relay به‌صورت Standby فعال است؛ تغییر مسیر و انتقال کاربران در CZ-04B است.",
                     [
                         [("⚡ ساخت سریع Edge", "apps_cz_wizard")],
-                        [("🌐 Edge و Relay · آماده‌به‌کار", "apps_cz_edge")],
+                        [("🌐 Edge و Relay · همه NVL", "apps_cz_edge")],
                         [("🖥 سرورهای Cloudzy", "apps_cz_servers_0"),
                          ("🛠 مدیریت VPS", "apps_cz4_vps")],
                         [("🌍 مناطق و پلن‌ها", "apps_cz_regions_0"),

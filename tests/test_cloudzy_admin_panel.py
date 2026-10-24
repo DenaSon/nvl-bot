@@ -131,7 +131,7 @@ class Phase1PanelTests(unittest.TestCase):
             self.assertIn(cb, labels)
         self.assertEqual(labels["apps_cz_wizard"], "⚡ ساخت سریع Edge")
         self.assertEqual(labels["apps_cz_operations"], "📋 وضعیت عملیات")
-        self.assertIn("آماده‌به‌کار", labels["apps_cz_edge"])
+        self.assertIn("همه NVL", labels["apps_cz_edge"])
         self.assertIn("apps_cz4_vps", labels)
         self.assertNotIn("hpeg_status", self.query.callbacks)
         self.assertEqual(self.api.calls, [])

@@ -7,6 +7,7 @@ the CZ-04B coordinator commits those after verifying live DNS.
 from __future__ import annotations
 import ipaddress
 import json
+from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
@@ -26,6 +27,9 @@ class CloudflareExactDNS:
     def __init__(self, config, *, transport=None):
         self.config = config
         self.transport = transport or self._transport
+        # Only use an auth mode after a successful DNS GET. Never retry DNS writes.
+        self._auth_identity = None
+        self._auth_mode = None
 
     @staticmethod
     def _transport(url, headers, payload=None, method="GET"):
@@ -35,18 +39,66 @@ class CloudflareExactDNS:
         with urlopen(request, timeout=15) as response:
             return json.loads(response.read().decode("utf-8"))
 
+    @staticmethod
+    def _headers(cfg, mode):
+        if mode == "global":
+            headers = {
+                "X-Auth-Email": cfg["email"],
+                "X-Auth-Key": str(cfg["token"]).strip(),
+            }
+        else:
+            headers = {"Authorization": "Bearer " + str(cfg["token"]).strip()}
+        headers["Content-Type"] = "application/json"
+        return headers
+
+    @staticmethod
+    def _auth_rejected(payload):
+        # Cloudflare: 9106=authentication failed, 10000=authentication error.
+        # Never switch credentials for ordinary DNS/permission failures.
+        return isinstance(payload, dict) and any(
+            isinstance(err, dict) and str(err.get("code")) in ("9106", "10000")
+            for err in (payload.get("errors") or [])
+        )
+
     def _access(self):
         cfg = self.config()
         zone = str(cfg.get("zone") or "").strip()
         token = str(cfg.get("token") or "").strip()
         if not zone or not token or not cfg.get("public_domain"):
             raise DNSHold("CLOUDFLARE_CONFIG_MISSING")
-        if cfg.get("email"):
-            headers = {"X-Auth-Email": cfg["email"], "X-Auth-Key": token}
-        else:
-            headers = {"Authorization": "Bearer " + token}
-        headers["Content-Type"] = "application/json"
-        return cfg, zone, headers
+        identity = (zone, token, str(cfg.get("email") or ""))
+        if identity != self._auth_identity:
+            self._auth_identity = identity
+            self._auth_mode = None
+        # Email may be left over from an older Global API Key configuration.
+        # It does not prove that the configured credential is a Global Key.
+        return cfg, zone, self._headers(cfg, self._auth_mode or "bearer")
+
+    def _read(self, url, cfg, headers):
+        """Discover Global-Key auth using GET only, and pin it for subsequent PUTs."""
+        try:
+            payload = self.transport(url, headers)
+        except HTTPError as exc:
+            if not cfg.get("email") or self._auth_mode is not None:
+                raise
+            try:
+                error = json.loads(exc.read().decode("utf-8"))
+            except (ValueError, UnicodeError) as parse_error:
+                raise DNSHold("DNS_AUTH_RESPONSE_INVALID") from parse_error
+            if not self._auth_rejected(error):
+                raise DNSHold("DNS_READ_ERROR") from exc
+            payload = self.transport(url, self._headers(cfg, "global"))
+            if payload.get("success") is True:
+                self._auth_mode = "global"
+            return payload
+        if (self._auth_mode is None and cfg.get("email")
+                and self._auth_rejected(payload)):
+            payload = self.transport(url, self._headers(cfg, "global"))
+            if payload.get("success") is True:
+                self._auth_mode = "global"
+        elif self._auth_mode is None and payload.get("success") is True:
+            self._auth_mode = "bearer"
+        return payload
 
     def snapshot(self):
         cfg, zone, headers = self._access()
@@ -62,7 +114,7 @@ class CloudflareExactDNS:
             url = ("https://api.cloudflare.com/client/v4/zones/"
                    + quote(zone, safe="") + "/dns_records?type=A&name="
                    + quote(name, safe=""))
-            payload = self.transport(url, headers)
+            payload = self._read(url, cfg, headers)
             if payload.get("success") is not True:
                 raise DNSHold("DNS_READ_ERROR")
             rows = [row for row in (payload.get("result") or [])

@@ -19,6 +19,7 @@ from edge_egress_k2_a_6g_shared import acquire_original_6g, update_original_6g
 REF_TTL = 600
 CONFIRM_TTL = 180
 PAGE_SIZE = 8
+MAX_BATCH = 200
 CLOSED = ("READY", "DONE", "ABORTED")
 RUNNING_6G = "RUNNING"
 ACTIVE_STATUS = "status LIKE '%فعال%' AND status NOT LIKE '%غیر%'"
@@ -102,8 +103,7 @@ class Cloudzy04B:
         """Recheck authoritative roles/provider/account scope in one DB transaction."""
         with self.db() as db:
             self._init(db)
-            if locked:
-                self.guard(db)
+            self.guard(db)
             st = self._settings(db)
             self._guard_settings(st)
             if not locked and db.execute(
@@ -184,15 +184,18 @@ class Cloudzy04B:
     def _targets(self):
         with self.db() as db:
             self._init(db)
-            return [
-                (str(ip), str(pid)) for ip, pid in db.execute(
+            try:
+                rows = db.execute(
                     "SELECT h.host,h.provider_instance_id FROM host_pool h "
                     "JOIN cloudzy_edge_operations c "
                     "ON c.provider_server_id=h.provider_instance_id AND c.public_ipv4=h.host "
                     "WHERE h.provider='cloudzy' AND h.active=1 AND h.is_default=0 "
                     "AND h.is_standby=1 AND c.status='EDGE_READY' ORDER BY h.host"
                 ).fetchall()
-            ]
+            except sqlite3.OperationalError:
+                # No CZ03 order placed yet. Never create fake provider ownership.
+                rows = []
+            return [(str(ip), str(pid)) for ip, pid in rows]
 
     def _latest(self):
         with self.db() as db:
@@ -231,6 +234,36 @@ class Cloudzy04B:
             if not tr or tr != ("cloudzy", pid, 1, 1, 0):
                 raise CutoverHold("TARGET_ROLE_CHANGED")
             return source, target, pid
+
+    def _ready_probe_state(self, source, target, provider_id):
+        with self.db() as db:
+            self.guard(db)
+            st = self._settings(db)
+            self._guard_settings(st)
+            row = db.execute(
+                "SELECT active,is_default,is_standby,service_port,admin_ssh_port,"
+                "provider,provider_instance_id FROM host_pool WHERE host=?",
+                (target,)
+            ).fetchone()
+            if (not row or row[0:3] != (1, 1, 0)
+                or row[5:] != ("cloudzy", provider_id)):
+                raise CutoverHold("ROUTE_TARGET_CHANGED")
+            pinned = db.execute(
+                "SELECT host_key_type,host_key_base64 FROM cloudzy_edge_operations "
+                "WHERE status='EDGE_READY' AND provider_server_id=? AND public_ipv4=?",
+                (provider_id, target)
+            ).fetchall()
+            if len(pinned) != 1 or not all(pinned[0]):
+                raise CutoverHold("CZ03_PIN_CHANGED")
+            tls = int(st.get("tls_port") or "2088")
+            if not (1 <= int(row[3] or 0) <= 65535 and
+                    1 <= int(row[4] or 0) <= 65535 and 1 <= tls <= 65535):
+                raise CutoverHold("INVALID_PORT")
+            return {
+                "source": source, "target": target, "provider_id": provider_id,
+                "customer_port": int(row[3]), "admin_port": int(row[4]),
+                "tls_port": tls, "pinned_key": tuple(pinned[0]),
+            }
 
     def _migration_snapshot(self, source, target):
         with self.db() as db:
@@ -369,9 +402,29 @@ class Cloudzy04B:
                     (key, value),
                 )
             db.execute(
-                "UPDATE cloudzy_cz04b_operations SET status='READY',updated_at=?,"
-                "note='DNS_AND_DEFAULT_READY_NO_USER_MOVE' WHERE id=?",
+                "UPDATE cloudzy_cz04b_operations "
+                "SET status='DB_TARGET_COMMITTED',updated_at=?,"
+                "note='POST_COMMIT_DNS_VERIFICATION_REQUIRED' WHERE id=?",
                 (int(self.now()), op_id)
+            )
+
+    def _route_db_postcheck(self, target):
+        with self.db() as db:
+            defaults = db.execute(
+                "SELECT host FROM host_pool WHERE is_default=1 AND active=1"
+            ).fetchall()
+            st = self._settings(db)
+            if (len(defaults) != 1 or defaults[0][0] != target
+                or st.get("dns_current_ip") != target
+                or st.get("hosts", "").split(",")[0] != target):
+                raise CutoverHold("POST_COMMIT_DATABASE_ROUTE_MISMATCH")
+
+    def _hold_after_commit(self, op_id):
+        with self.db() as db:
+            db.execute(
+                "UPDATE cloudzy_cz04b_operations "
+                "SET status='HOLD',updated_at=?,note=? WHERE id=?",
+                (int(self.now()), "POST_COMMIT_RECONCILIATION_REQUIRED", op_id)
             )
 
     def _commit_users(self, op_id, state, fingerprint, names):
@@ -464,14 +517,29 @@ class Cloudzy04B:
             self._expect_dns(actual, target)
             await asyncio.to_thread(self._commit_route, op_id, state)
             committed = True
+            final_dns = await asyncio.to_thread(self.dns.snapshot)
+            self._expect_dns(final_dns, target)
+            await asyncio.to_thread(self._route_db_postcheck, target)
+            await asyncio.to_thread(self._transition, op_id, "READY",
+                                    "DNS_DEFAULT_READY_NO_USER_MOVE")
             await asyncio.to_thread(self._shared_finish, lock, completed=True)
             return "READY"
         except Exception:
             # Never revert a committed DB/default while DNS points to target.
             if committed:
                 if op_id:
-                    await asyncio.to_thread(self._transition, op_id, "HOLD",
-                                            "POST_COMMIT_SHARED_LEASE_UNCERTAIN")
+                    try:
+                        await asyncio.to_thread(self._hold_after_commit, op_id)
+                    except Exception:
+                        pass
+                try:
+                    await asyncio.to_thread(
+                        update_original_6g, self.db, lock,
+                        detail={"phase": "EGRESS_RECOVERY_REQUIRED"},
+                        require_running=True,
+                    )
+                except Exception:
+                    pass
                 raise CutoverHold("ROUTE_POSTCOMMIT_RECONCILE") from None
             try:
                 observed = await asyncio.to_thread(self.dns.snapshot)
@@ -513,7 +581,10 @@ class Cloudzy04B:
         available = {r[0] for r in rows}
         if not names or not set(names).issubset(available):
             raise CutoverHold("ACCOUNT_SELECTION_INVALID")
-        state = {"source": source, "target": target, "provider_id": pid}
+        state = await asyncio.to_thread(self._ready_probe_state, source, target, pid)
+        await self._fresh(state)
+        live_dns = await asyncio.to_thread(self.dns.snapshot)
+        self._expect_dns(live_dns, target)
         lock, busy = await self._acquire(source, target)
         if not lock:
             raise CutoverHold("SHARED_6G_BUSY")
@@ -639,7 +710,7 @@ class Cloudzy04B:
                 session = {
                     "actor": actor, "chat": chat, "expires": self.now() + REF_TTL,
                     "users": refs, "source": source, "target": target,
-                    "fingerprint": fingerprint, "all": [r[0] for r in users],
+                    "fingerprint": fingerprint, "all": [r[0] for r in users[:MAX_BATCH]],
                 }
                 context.user_data["cz5"] = session
                 paging = []
@@ -650,7 +721,7 @@ class Cloudzy04B:
                 if paging:
                     buttons.append(paging)
                 if users:
-                    buttons.append([("👥 انتخاب تمام کاربران باقیمانده", "apps_cz5_all")])
+                    buttons.append([("👥 انتقال حداکثر ۲۰۰ کاربر باقیمانده", "apps_cz5_all")])
                 buttons.append([("↩️ CZ-04B", "apps_cz5_home")])
                 await self._display(query,
                     f"👥 <b>انتقال Host کاربران SSH</b>\n\n"

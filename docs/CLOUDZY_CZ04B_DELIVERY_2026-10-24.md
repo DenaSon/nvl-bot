@@ -31,6 +31,13 @@ cloudzy_cz04b_dns.py separately enumerates exact public_domain A record and tls_
 - This patch makes no database schema, host-routing, auto-failover, provider or NAT changes. Reconfirm live account distribution and Cloudflare DNS-only before any approved CZ04B cutover. Keep `NVL_CZ04B_ENABLE=0` until the operator-approved maintenance window.
 - Regression tests cover leftover-email Bearer, legacy Global Key fallback, unrelated API failures, failed authentication without writes, and credential rotation.
 
+## Follow-up: SSH enrollment selected Core as least-loaded host (2026-10-24)
+- After moving account `nevel1253` onto the old Relay, the read-only live SSH distribution first showed 471 active accounts on 5.75.197.158 and zero on 91.107.170.239, but the next check again showed one active account on Core. Identify that *new* account and transfer only after operator review; no automatic deletion or bulk reassignment.
+- Root cause in `bot_final_v49-2.py`: `_pick_target_host_for_new_account` selected the least-loaded row among **all** `host_pool.active=1` rows excluding only Standby. The Core is included in that pool as an active fallback, so a near-empty Core won against the busy Relay on the next purchase.
+- New SSH purchases (single and bulk) select only an active, non-Standby candidate explicitly listed in `settings.hosts`, excluding the authoritative `settings.core_wg_public_ip`. Load balancing among eligible Relays is preserved. With no verified Core public IP or eligible Relay, enrollment fails closed with an explicit admin/operator message; single-account temporary username reservation is cancelled before any OS account is created.
+- Account identity and service are still provisioned on Core as before; this fix changes only the **customer-facing host assignment**. Existing active customers, Cloudflare, NAT, WireGuard, 6H, CZ04B Journal and egress protection are not mutated.
+- Perform a post-deploy new-account smoke test and verify `SELECT host,COUNT(*) FROM ssh_accounts WHERE service_type='ssh' AND status='🟢 فعال' GROUP BY host` before attempting CZ04B again.
+
 ## Explicit safety boundaries
 - No Core-IP fallback in DNS.
 - No automatic old server power-off/delete; old source stays active.

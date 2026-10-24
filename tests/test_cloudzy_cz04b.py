@@ -550,12 +550,16 @@ class DNSPortTests(unittest.TestCase):
         """Never PUT with an unverified token if settings change mid-operation."""
         self.state["tls_passthrough"] = "0"
         observed = []
+        get_count = [0]
 
         def rotate(url, headers, payload=None, method="GET"):
             observed.append(method)
             result = self.transport(url, headers, payload, method)
-            if method == "GET" and self.state["token"] == "testtoken":
-                self.state["token"] = "rotated-token"
+            if method == "GET":
+                get_count[0] += 1
+                if get_count[0] == 2:
+                    # First GET sets up baseline; second is the write preflight.
+                    self.state["token"] = "rotated-token"
             return result
 
         port = CloudflareExactDNS(lambda: self.state, transport=rotate)

@@ -3,6 +3,8 @@ import asyncio
 from contextlib import contextmanager
 import copy
 import json
+from io import BytesIO
+from urllib.error import HTTPError
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
@@ -445,6 +447,104 @@ class DNSPortTests(unittest.TestCase):
         b = p.set_all(a, "2.3.4.5")
         self.assertTrue(all(r["ip"] == "2.3.4.5" for r in b))
         self.assertEqual([t for t, _ in self.calls].count("PUT"), 2)
+
+    def test_email_with_api_token_still_uses_bearer(self):
+        """A leftover cf_email must not turn a valid API Token into a Global Key."""
+        self.state["email"] = "legacy@example.test"
+        observed = []
+
+        def observe(url, headers, payload=None, method="GET"):
+            observed.append((method, dict(headers)))
+            assert headers.get("Authorization") == "Bearer testtoken"
+            assert "X-Auth-Email" not in headers
+            return self.transport(url, headers, payload, method)
+
+        port = CloudflareExactDNS(lambda: self.state, transport=observe)
+        before = port.snapshot()
+        port.set_all(before, "2.3.4.5")
+        self.assertTrue(any(method == "PUT" for method, _ in observed))
+        self.assertTrue(all("Authorization" in headers for _, headers in observed))
+
+    def test_legacy_global_key_fallback_only_on_auth_error_from_read(self):
+        """A genuine legacy Global API Key can still perform verified reads/writes."""
+        self.state["email"] = "legacy@example.test"
+        observed = []
+
+        def mixed(url, headers, payload=None, method="GET"):
+            observed.append((method, dict(headers)))
+            if "Authorization" in headers:
+                assert method == "GET"
+                error = json.dumps({
+                    "success": False,
+                    "errors": [{"code": 9106, "message": "Authentication failed"}],
+                }).encode()
+                raise HTTPError(url, 400, "Bad Request", {}, BytesIO(error))
+            assert headers.get("X-Auth-Email") == "legacy@example.test"
+            assert headers.get("X-Auth-Key") == "testtoken"
+            return self.transport(url, headers, payload, method)
+
+        port = CloudflareExactDNS(lambda: self.state, transport=mixed)
+        before = port.snapshot()
+        port.set_all(before, "2.3.4.5")
+        self.assertEqual(sum("Authorization" in headers
+                             for _, headers in observed), 1)
+        self.assertTrue(all("X-Auth-Key" in headers
+                            for method, headers in observed if method == "PUT"))
+
+    def test_non_auth_cloudflare_failure_does_not_fallback(self):
+        """An unrelated Cloudflare 400 must never switch to Global-Key auth."""
+        self.state["email"] = "legacy@example.test"
+        observed = []
+
+        def failure(url, headers, payload=None, method="GET"):
+            observed.append((method, dict(headers)))
+            error = json.dumps({
+                "success": False,
+                "errors": [{"code": 1004, "message": "Invalid zone"}],
+            }).encode()
+            raise HTTPError(url, 400, "Bad Request", {}, BytesIO(error))
+
+        port = CloudflareExactDNS(lambda: self.state, transport=failure)
+        with self.assertRaises(DNSHold):
+            port.snapshot()
+        self.assertEqual(len(observed), 1)
+        self.assertNotIn("X-Auth-Key", observed[0][1])
+
+    def test_failed_both_auth_modes_never_attempts_put(self):
+        self.state["email"] = "legacy@example.test"
+        observed = []
+
+        def failure(url, headers, payload=None, method="GET"):
+            observed.append((method, dict(headers)))
+            if method != "GET":
+                raise AssertionError("DNS mutation after auth failure")
+            return {
+                "success": False,
+                "errors": [{"code": 9106, "message": "Authentication failed"}],
+            }
+
+        port = CloudflareExactDNS(lambda: self.state, transport=failure)
+        with self.assertRaises(DNSHold):
+            port.snapshot()
+        self.assertEqual([method for method, _ in observed], ["GET", "GET"])
+
+    def test_rotating_credentials_discards_prior_auth_mode(self):
+        self.state["email"] = "legacy@example.test"
+        observed = []
+
+        def mixed(url, headers, payload=None, method="GET"):
+            observed.append(dict(headers))
+            if headers.get("Authorization") == "Bearer testtoken":
+                return {"success": False, "errors": [{"code": 9106}]}
+            return self.transport(url, headers, payload, method)
+
+        port = CloudflareExactDNS(lambda: self.state, transport=mixed)
+        port.snapshot()
+        self.assertEqual(port._auth_mode, "global")
+        self.state["token"] = "rotated-token"
+        port.snapshot()
+        self.assertEqual(port._auth_mode, "bearer")
+        self.assertEqual(observed[-1].get("Authorization"), "Bearer rotated-token")
 
     def test_proxied_records_are_rejected(self):
         def proxy(url, headers, payload=None, method="GET"):

@@ -629,6 +629,19 @@ class Cloudzy04B:
             return len(names)
         except Exception:
             if committed:
+                if op_id:
+                    try:
+                        await asyncio.to_thread(self._hold_after_commit, op_id)
+                    except Exception:
+                        pass
+                try:
+                    await asyncio.to_thread(
+                        update_original_6g, self.db, lock,
+                        detail={"phase": "EGRESS_RECOVERY_REQUIRED"},
+                        require_running=True,
+                    )
+                except Exception:
+                    pass
                 raise CutoverHold("USERS_POSTCOMMIT_SHARED_LEASE_UNCERTAIN") from None
             try:
                 if op_id:

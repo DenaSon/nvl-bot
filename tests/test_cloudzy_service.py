@@ -51,6 +51,7 @@ class CloudzyServiceTests(unittest.TestCase):
         self.assertEqual(got_method, method)
         self.assertEqual(url, "https://dash.cloudzy.com/api/v1" + path)
         self.assertEqual(kw["headers"]["Authorization"], "Bearer hpt_TEST_DO_NOT_EXPOSE")
+        self.assertEqual(kw["headers"]["User-Agent"], "NVLBot-Cloudzy/1.0")
         return kw
 
     def test_catalog_and_account_routes(self):

@@ -119,3 +119,62 @@ Operator-provided follow-up confirmed that previously used experimental priority
 Old, **separate** policy remains: `7700: from all fwmark 0x77 lookup 77`, table `77` has `default dev wg0`; the Core `iptables -t mangle -S OUTPUT` lists **two identical** `--uid-owner 1658 -j MARK --set-xmark 0x77/0xffffffff` entries; and `iptables -t nat -S POSTROUTING` lists **two identical** `-o wg0 -m mark --mark 0x77 -j MASQUERADE` entries. UID `1658` is the historical test UID, distinct from Canary `nvl0557` UID `1644`. No current evidence shows that these old explicit UID rules redirect UID `1644`. Their present ownership, persistence, active sessions, rule counters and impact of any removal remain **unverified**. **Do not delete/reorder** those rules or touch `wg0` as part of R1. Duplicate lines are evidence of redundant installed entries, not authorization for live firewall mutation.
 
 Next: focus on the missing dedicated transport lifecycle/reconcile, PAM/boot acceptance and shared 6G bridge; legacy-rule cleanup is a separately owned, deliberately scoped maintenance decision and not a prerequisite to re-running prior staging tests.
+
+## 9. R1 development checkpoint — 2026-10-12 (Draft PR #92)
+
+**Code-only work in progress**, not an accepted R1 release. [Draft PR #92](https://github.com/DenaSon/nvl-bot/pull/92) adds `edge_egress_r1_transport.py`, focused tests and [R1 technical contract](EDGE_EGRESS_R1_PERSISTENT_TRANSPORT.md). The new logic is deliberately **opt-in/disposable-only** and never starts on import, runs an installer or changes the existing Core/Edge. It refuses to adopt the running `stg1` shadow implicitly, refuses unreviewed broad-then-tagged Edge NAT, requires root-owned SHA-256-pinned stage/unit files and checks dedicated WG peer/addresses/routes/forwarding without printing private keys.
+
+The `GuardedR1ShadowPort` is an optional injected F2 bridge collaborator and requires externally verified same **existing 6G** lease and independently attested UID guard before and between Edge/Core starts. Any uncertain partial start results in an error for the F2 coordinator to HOLD/freeze; it never cleans up live legacy resources blindly. `MANAGED_RUNNING` describes transport observation only and always keeps `customer_ready=false`.
+
+**R1 is NOT complete:** approved durable systemd installation, actual Core/Edge host launchers, startup/freeze/reconcile on a disposable full VPS and post-reboot evidence remain outstanding. R2–R6 and Issue #88 are unchanged. Existing successful Stage 3B tests must not be repeated solely to validate this code change. Never promote `READY`, enable protected mode, migrate DB or change live production `wg0`/SSH/PAM/NAT from this draft.
+
+
+### R1 follow-up, same draft PR #92 — disposable boot mechanics, 2026-10-12
+
+Code-only continuation added `edge_egress_r1_systemd.py` (offline, opt-in **DISPOSABLE_ONLY** systemd unit renderer and SHA-pinned Root-only transport boot/start boundary) and `edge_egress_r1_reconcile.py` (read-only deny-first transport + existing 6G journal + protected UID gate assessment). The previous staged WG public-peer regex is corrected and a positive parser test included. The host-local startup mode demands an operator-installed root-only machine-ID-bound disposable marker; it does **not** detect a disposable VM cryptographically. It refuses an existing shadow, unexpected route/firewall resources, incomplete reviewed digests and a broad Edge MASQUERADE. Any successful start means **transport-only**, never UID-ready or proof of fail-closed DNS/IPv6/BadVPN.
+
+**Do not install or enable this renderer on existing Production Core/Edge.** No systemd installer is shipped; no production runtime is registered; no protected mode/schema or customer UID is changed. An on-host disposable full VPS startup/crash/reboot acceptance, verified host installer+rollback, and a concrete 6G-bound production reconciliation adapter **remain incomplete** within R1. R2–R6 remain unchanged. Preserve the old running `stg1` and historical `wg0` rules; do not repeat Stage 3B SOCKS tests to validate this PR.
+
+
+### R1 next-code checkpoint — 2026-10-12: existing 6G admission and disabled-only install
+
+Draft [PR #92](https://github.com/DenaSon/nvl-bot/pull/92) additionally implements `edge_egress_r1_shared6g.py` (read-only existing `failover_operations` RUNNING lease/uniqueness check), `edge_egress_r1_install.py` (explicit disposable-only, SHA-reviewed **disabled** unit+contract materialization and byte-identical rollback) and narrow CI tests. The systemd renderer has been corrected to boot-time **`verify` only** (read-only): it must NOT start WireGuard on reboot without an F2-acquired and revalidated current shared 6G lease. Standalone CLI `start` is forbidden; the injected API now requires a live 6G predicate before and after possible mutation. Installer does not call `systemctl` or change networking; rollback refuses deletion if systemd is not independently attested inactive/disabled, or any dedicated interface/netns remains or is unknown.
+
+**Release status unchanged: R1 code under review, not disposable-VPS accepted; R2–R6 still blocked.** Real host installer/agent dependency trust, reboot/kernel fault E2E, reviewed 6G host caller, signed witness and backup/restore are still pending. Do not touch the existing Production `stg1` or `wg0`, reinstall pilot tests, migrate SQLite, or advance protected mode from this PR. Exact detailed contract: [R1 transport memo](EDGE_EGRESS_R1_PERSISTENT_TRANSPORT.md).
+
+## 9. Disposable R1 lab setup — 2026-10-12
+
+**NEW status:** Two separate fresh LAB hosts were inventoried: Amsterdam Core `107.189.16.36` and reinstalled Frankfurt Edge `216.126.229.12`. Do not confuse these with Production Core `209.200.246.198`. Both Stage manifests and four independent SHA hashes were verified by the operator (`preflight=PASS`, `_stage_owned=PASS`). **No tunnel or production UID has been activated.** Edge IP forwarding was enabled temporarily; reboot durability remains untested. The 10 historical active Production DB account assignments to Frankfurt Edge are intentionally deferred at owner request and remain untouched.
+
+Draft PR #92 now includes opt-in `edge_egress_r1_lab_launcher.py`, `edge_egress_r1_lab_agent.py`, and tests connecting pinned Core/Edge command execution to the *existing* F2/6G lease check and Guard. This is an implementation checkpoint only, not a deployed runtime. The lab Core has no verified 6G journal, UID guard, PAM session gate or installed agent/SSH trust bundle yet; fail-closed customer service remains **unproven**. Continue with the R1 runbook's latest section; do not run Stage `up.sh` or mark the Edge READY.
+
+## 10. Update: live disposable Core→Edge transport smoke PASS — 2026-10-12
+
+Supersedes section 9's offline-only lab state. Operator supplied both host outputs from direct, locally invoked pinned Stage transport `up.sh` (not via guarded 6G Launcher): **Core Amsterdam 107.189.16.36: `TRANSPORT VERIFIED`, default route and IP rules unchanged; Edge Frankfurt 216.126.229.12: same PASS.** A Core namespace HTTPS request `ip netns exec nvl-egress-lab1 curl -4 https://1.1.1.1/cdn-cgi/trace` returned `ip=216.126.229.12`. Core root's `ip -4 route get 1.1.1.1` still reported `via 107.189.16.1 dev eth0 src 107.189.16.36`. Prior staged hash/probe results and probe-only pinned SSH to both hosts also passed.
+
+**Accepted scope:** disposable namespace WireGuard transport smoke only. **Still HOLD** R1 persistent managed startup, actual 6G/PAM/UID fail-closed checks, SSH customer path, DNS/IPv6/BadVPN packet captures, outage/reboot recovery, and production cutover. On LAB Core, `/root/master_bot.db` and PAM Egress hook were absent at latest inventory. Lab interfaces are likely UP and unmanaged; no boot-safe teardown/repair can be inferred. The direct network start was **not authorized by an active 6G lease** and must never be used as a customer-ready precedent. No repeat of smoke proof necessary unless conditions change. Keep PR #92 Draft and Issue #88 open.
+
+## 11. Disposable lab protected UID IPv4 smoke test PASS — 2026-10-12
+
+Operator successfully created `nvlr1test` (UID 1555; password disabled, nologin) on **LAB Core only**, with F1 `BootGuardApplier` enforced as DENY/BLACKHOLE in dedicated table 1791. Then a manually attached, isolated single-UID route to the already active LAB Edge returned `UID_PUBLIC_IP: 216.126.229.12`; exact detachment returned `ROUTE_RETURNED_TO_BLACKHOLE: YES` and `AFTER_DETACH: INTERNET_BLOCKED`, ending in `UID ROUTING LAB PASS`. No production customer was attached; no SSH login was attempted. This verifies a **limited per-UID IPv4 attach/detach smoke case**, not actual Edge outage, DNS, IPv6, BadVPN, PAM, F2/6G, reboot or customer-ready conditions. The UID remains disabled and deny-only. Both LAB transport endpoints had been started by direct Stage scripts outside the 6G controller, so they are not managed/persistent. Proceed with genuine integration, not additional repeated connectivity probes.
+
+## 12. Persistent deny-only LAB BootGuard installed — 2026-10-12
+
+On disposable Amsterdam LAB Core `107.189.16.36`, operator deployed and enabled `/etc/systemd/system/nvl-egress-lab1-guard.service` for the locked, nologin test account `nvlr1test` / UID 1555. The unit invokes `edge_egress_uid_boot.py apply --manifest /etc/nvl-egress/protected/nvlr1test.json --enforce` followed by `verify`, and is enabled via `multi-user.target`. Supplied actual output:
+
+```text
+GUARD_PRESENT_NOT_CUSTOMER_READY
+BOOT_GUARD: ENABLED
+SERVICE: ACTIVE
+UID: 1555
+LOGIN: DISABLED
+SSH_SERVICE: UNCHANGED
+===== PERSISTENT GUARD PASS =====
+```
+
+Evidence scope: a `systemctl enable --now`/is-active/is-enabled success **not** evidence of successful reboot boot-order protection or PAM enforcement. The installed unit declares `Before=multi-user.target` but was not demonstrated to gate all `ssh.service`/`ssh.socket` start paths. User remains locked; temporary UID Edge attachment from previous smoke was removed and table 1791 ended blackhole-only. Do not reboot or unlock until SSH admission/boot ordering and out-of-band recovery are reviewed and tested.
+
+### Blocking integration finding
+
+The **LAB Core has no `/root/master_bot.db` and no `nvlbot.service`**, confirmed by read-only operator audit. Examining the existing Python bot source shows the true Phase 6G control functions `_db_acquire_failover_lock` and `_db_update_failover_operation` and SQLite `failover_operations` schema reside in the bot, while `Existing6GUIDRuntimeBridge` deliberately requires those injected genuine callbacks and a real DB. The existing UID runtime store also requires actual `ssh_accounts`, `host_pool`, `settings`, allocation/readiness schema, F4 readiness and an attested PAM gate. Therefore the next stage is to provision an authentic **isolated lab control plane** and integrate F2 with it under proper operator approval; DO NOT create a synthetic RUNNING operation, copy Production DB, globally install a PAM hook against an absent database, turn on protected customer mode, or claim `READY`. Do not repeat already passed WireGuard/UID smoke tests.
+

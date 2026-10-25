@@ -78,6 +78,18 @@ class CloudzyServiceTests(unittest.TestCase):
                 fn("a/b")
                 self.assert_route("GET", path)
 
+    def test_live_plan_availability_is_get_only_and_url_encoded(self):
+        payload = {"region": "DE-Frankfurt", "checkedAt": "2026-10-25T07:39:30Z",
+                   "plans": [{"planId": "p1", "available": False, "source": "live"}]}
+        self.session.responses = [FakeResponse(payload)]
+        out = self.client.list_plan_availability("DE-Frankfurt")
+        self.assertEqual(out, payload)
+        self.assert_route("GET", "/plan-availability?region=DE-Frankfurt")
+        self.assertIsNone(self.last()[2]["json"])
+        with self.assertRaises(ValueError):
+            self.client.list_plan_availability("")
+        self.assertEqual(len(self.session.calls), 1)
+
     def test_plan_pricing_regional_and_fallback(self):
         self.session.responses.append(FakeResponse({
             "plans": [

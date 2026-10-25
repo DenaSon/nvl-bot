@@ -375,6 +375,25 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.wizard.store.get(opid)["status"], "HOSTKEY_PENDING")
         self.assertEqual(self.api.calls, ["get"])
 
+    async def test_install_failure_logs_precise_safe_stage_without_rebuy(self):
+        async def failed(*args):
+            self.provisions.append(args)
+            return False, None, None
+        self.wizard.provision = failed
+        await self.purchase()
+        await self.cb("apps_cz_operations")
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_")))
+        with self.assertLogs("cloudzy_quick_edge", level="ERROR") as logged:
+            await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_")))
+            await self.app.drain()
+        self.assertEqual(self.wizard.store.latest()["status"], "HOLD_PROVISION")
+        self.assertEqual(len(self.provisions), 1)
+        joined = "\n".join(logged.output)
+        self.assertIn("stage=LEGACY_PROVISION", joined)
+        self.assertIn("code=LEGACY_PROVISION_OR_WG_TUNNEL_NOT_VERIFIED", joined)
+        self.assertNotIn(self.pub, joined)
+        self.assertEqual(len([x for x in self.api.calls if isinstance(x, tuple) and x[0] == "create"]), 1)
+
     async def test_postcheck_rejection_never_reports_edge_ready(self):
         async def rejected(*args):
             self.verifications.append(args)

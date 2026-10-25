@@ -877,44 +877,67 @@ class QuickEdgeWizard:
                 "بدون بررسی دستی، درخواست خرید یا نصب جدید ثبت نکنید.")
 
     async def _install(self, opid, chat, app):
+        stage = "CORE_PREFLIGHT"
+        ip = "UNKNOWN"
         try:
             op = await asyncio.to_thread(self.store.get, opid)
+            ip = op["public_ipv4"]
             port, pub = await self._preflight()
             if port != op["customer_port"] or hashlib.sha256(pub.encode()).hexdigest() != op["public_key_sha"]:
                 raise QuickEdgeHold("CORE_IDENTITY_CHANGED")
+            stage = "HOST_KEY_RECHECK"
             latest_type, latest_b64, _ = await asyncio.to_thread(
                 self.fingerprint, op["public_ipv4"])
             if latest_type != op["host_key_type"] or latest_b64 != op["host_key_base64"]:
                 raise QuickEdgeHold("HOST_KEY_CHANGED")
+            stage = "LEGACY_PROVISION"
+            log.info("CZ06_INSTALL op=%s ip=%s stage=%s code=START", opid[:16], ip, stage)
             ok, _ip, details = await self.provision(
                 op["public_ipv4"], port, op["hostname"], chat, app, op["provider_server_id"],
                 (latest_type, latest_b64),
             )
             if not ok or not isinstance(details, dict) or not details.get("tunnel_ok"):
                 raise QuickEdgeHold("LEGACY_PROVISION_OR_WG_TUNNEL_NOT_VERIFIED")
+            stage = "EDGE_POSTCHECK"
+            log.info("CZ06_INSTALL op=%s ip=%s stage=%s code=START", opid[:16], ip, stage)
             verified = await self.verify(
                 op["public_ipv4"], port, op["provider_server_id"])
             if verified is not True:
                 raise QuickEdgeHold("LEGACY_EDGE_POSTCHECK_FAILED")
+            stage = "RECEIPT_COMMIT"
             await asyncio.to_thread(self.store.change, opid, "PROVISIONING", "EDGE_READY")
             run = await asyncio.to_thread(self.quick_runs.get, opid)
             if run:
+                stage = "CZ06_STANDBY"
                 await self._quick_stage(opid, "EDGE_READY", "INSTALLING", app)
                 await self._activate_standby(opid, chat, app)
                 return
+            log.info("CZ06_INSTALL op=%s ip=%s stage=EDGE_READY code=SUCCESS", opid[:16], ip)
             await app.bot.send_message(
                 chat, f"✅ Edge <code>{_text(op['public_ipv4'])}</code> با منطق Legacy آماده شد.\n"
                 "در host_pool فعلاً غیرفعال است؛ DNS، Relay و کاربران تغییر نکرده‌اند.\n"
                 "تأیید اتصال مشتری و فعال‌سازی Relay در فاز ۳ انجام می‌شود.",
                 parse_mode="HTML")
-        except Exception:
+        except Exception as exc:
+            # Never log raw exception messages, provider payloads or SSH secrets.
+            code = str(exc) if isinstance(exc, QuickEdgeHold) else type(exc).__name__
+            if not re.fullmatch(r"[A-Z0-9_]{1,90}", code):
+                code = "UNCLASSIFIED_INSTALL_ERROR"
+            log.error("CZ06_INSTALL_HOLD op=%s ip=%s stage=%s code=%s",
+                      opid[:16], ip, stage, code)
             try:
                 await asyncio.to_thread(self.store.change, opid, "PROVISIONING",
                     "HOLD_PROVISION", hold_reason="PARTIAL_OR_UNVERIFIED_LEGACY_INSTALL")
             except Exception:
-                pass
-            await self._quick_stage(opid, "HOLD", ("INSTALLING", "HOSTKEY_PENDING"),
-                                    app, code="INSTALL_REQUIRES_RECONCILIATION")
+                log.error("CZ06_INSTALL_HOLD op=%s stage=RECEIPT_COMMIT code=JOURNAL_UPDATE_FAILED",
+                          opid[:16])
+            try:
+                await self._quick_stage(opid, "HOLD", ("INSTALLING", "HOSTKEY_PENDING"),
+                                        app, code="INSTALL_REQUIRES_RECONCILIATION")
+            except Exception:
+                log.error("CZ06_INSTALL_HOLD op=%s stage=CZ06_JOURNAL code=STAGE_UPDATE_FAILED",
+                          opid[:16])
             await app.bot.send_message(chat,
-                "⛔️ نصب Edge نتیجه قطعی ندارد؛ ممکن است VPS یا WireGuard بخشی از تغییرات را دریافت کرده باشد. "
-                "نصب را دوباره اجرا نکنید؛ وضعیت را دستی بررسی کنید.")
+                f"⛔️ نصب Edge نتیجه قطعی ندارد. مرحله: {stage} | کد: {code} | "
+                f"پیگیری: {opid[:16]}. "
+                "ممکن است بخشی از WireGuard تغییر کرده باشد؛ نصب را دوباره اجرا نکنید.")

@@ -653,12 +653,17 @@ class QuickEdgeWizard:
 
     async def _operation_screen(self, query, op, markup, actor, chat):
         status = op["status"]
+        run = await asyncio.to_thread(self.quick_runs.get, op["id"])
         rows = []
         if op["actor_id"] == actor and op["chat_id"] == chat:
             if (status in ("CREATING", "CREATE_UNCERTAIN", "CREATED", "WAITING",
                            "HOLD_WAIT", "HOLD_IP", "HOLD_SSH")
                     and op["id"] not in self._running):
                 rows.append([("🔎 بررسی بدون خرید مجدد", "apps_cz_qcheck_" + op["id"])])
+        if (run and run["actor_id"] == actor and run["chat_id"] == chat
+                and status == "EDGE_READY" and run["stage"] in (
+                    "EDGE_READY", "STANDBY_VERIFYING")):
+            rows.insert(0, [("▶️ ادامه امن Standby", "apps_cz6_resume_" + op["id"])])
         rows.append([("🔄 تازه‌سازی", "apps_cz_qview_" + op["id"])])
         rows.append([("↩️ Cloudzy", "apps_cz_home")])
         text = ("📋 <b>عملیات ساخت Edge</b>\n\n"
@@ -677,6 +682,8 @@ class QuickEdgeWizard:
                      "مثلاً کنسول Cloudzy، مقایسه کنید. مشاهده آن از همین IP کافی نیست.")
             if op["actor_id"] == actor and op["chat_id"] == chat:
                 rows.insert(0, [("🔐 بررسی و تأیید اثرانگشت", "apps_cz_qreview_" + op["id"])])
+        if run:
+            text += "\n" + progress_html(run, op)
         if status.startswith("HOLD") or status == "CREATE_UNCERTAIN":
             text += f"\n⚠️ نیازمند بررسی: {_text(op.get('hold_reason') or 'UNKNOWN')}"
         if status == "EDGE_READY":
@@ -698,6 +705,8 @@ class QuickEdgeWizard:
                                         hold_reason="CZ05_STOCK_OR_PRICE_UNVERIFIED")
             except QuickEdgeHold:
                 log.exception("CZ05_PRE_PURCHASE_JOURNAL_FAILED op=%s", opid[:16])
+            await self._quick_stage(opid, "HOLD", "PURCHASING", app,
+                                    code="PREPURCHASE_STOCK_UNVERIFIED")
             await app.bot.send_message(
                 chat, f"⛔️ خرید انجام نشد؛ موجودی یا قیمت ساعتی تأیید نشد. "
                       f"کد: CZ05_STOCK_OR_PRICE_UNVERIFIED | عملیات: {opid[:16]}")
@@ -709,6 +718,8 @@ class QuickEdgeWizard:
                                         hold_reason="CZ05_PREFLIGHT_ERROR")
             except QuickEdgeHold:
                 pass
+            await self._quick_stage(opid, "HOLD", "PURCHASING", app,
+                                    code="PREPURCHASE_PREFLIGHT_FAILED")
             await app.bot.send_message(chat,
                 f"⛔️ بررسی پیش از خرید ناموفق بود. کد: CZ05_PREFLIGHT_ERROR | عملیات: {opid[:16]}")
             return
@@ -722,6 +733,7 @@ class QuickEdgeWizard:
             server_id = _server_id(data)
             await asyncio.to_thread(
                 self.store.change, opid, "CREATING", "CREATED", provider_server_id=server_id)
+            await self._quick_stage(opid, "WAITING_PROVIDER", "PURCHASING", app)
         except CloudzyAPIError as exc:
             # API definitively rejected POST (4xx); no uncertain provider charge.
             try:
@@ -729,6 +741,8 @@ class QuickEdgeWizard:
                                         hold_reason="CLOUDZY_HTTP_REJECTED_" + str(exc.status))
             except QuickEdgeHold:
                 pass
+            await self._quick_stage(opid, "HOLD", ("PURCHASING", "WAITING_PROVIDER"),
+                                    app, code="PROVIDER_REJECTED")
             log.warning("CZ05_PURCHASE_REJECTED op=%s http=%s code=%s",
                         opid[:16], exc.status, re.sub(r"[^A-Za-z0-9_-]", "", str(exc.code or ""))[:60])
             await app.bot.send_message(
@@ -742,6 +756,8 @@ class QuickEdgeWizard:
                       else "CREATE_OR_RECEIPT_FAILED")
             log.error("CZ05_PURCHASE_UNCERTAIN op=%s reason=%s exception=%s",
                       opid[:16], reason, type(exc).__name__)
+            await self._quick_stage(opid, "HOLD", ("PURCHASING", "WAITING_PROVIDER"),
+                                    app, code=reason)
             try:
                 await asyncio.to_thread(self.store.change, opid, "CREATING",
                     "CREATE_UNCERTAIN", hold_reason=reason)
@@ -778,6 +794,8 @@ class QuickEdgeWizard:
             self.store.change, opid, from_state, "HOSTKEY_PENDING",
             host_key_type=key_type, host_key_base64=key_base64,
             host_key_fingerprint=fingerprint, hold_reason=None)
+        await self._quick_stage(opid, "HOSTKEY_PENDING",
+                                ("PURCHASING", "WAITING_PROVIDER"), app)
         await app.bot.send_message(
             chat,
             "🔐 VPS Cloudzy ساخته شد. قبل از نصب، اثرانگشت SSH را "
@@ -857,6 +875,11 @@ class QuickEdgeWizard:
             if verified is not True:
                 raise QuickEdgeHold("LEGACY_EDGE_POSTCHECK_FAILED")
             await asyncio.to_thread(self.store.change, opid, "PROVISIONING", "EDGE_READY")
+            run = await asyncio.to_thread(self.quick_runs.get, opid)
+            if run:
+                await self._quick_stage(opid, "EDGE_READY", "INSTALLING", app)
+                await self._activate_standby(opid, chat, app)
+                return
             await app.bot.send_message(
                 chat, f"✅ Edge <code>{_text(op['public_ipv4'])}</code> با منطق Legacy آماده شد.\n"
                 "در host_pool فعلاً غیرفعال است؛ DNS، Relay و کاربران تغییر نکرده‌اند.\n"
@@ -868,6 +891,8 @@ class QuickEdgeWizard:
                     "HOLD_PROVISION", hold_reason="PARTIAL_OR_UNVERIFIED_LEGACY_INSTALL")
             except Exception:
                 pass
+            await self._quick_stage(opid, "HOLD", ("INSTALLING", "HOSTKEY_PENDING"),
+                                    app, code="INSTALL_REQUIRES_RECONCILIATION")
             await app.bot.send_message(chat,
                 "⛔️ نصب Edge نتیجه قطعی ندارد؛ ممکن است VPS یا WireGuard بخشی از تغییرات را دریافت کرده باشد. "
                 "نصب را دوباره اجرا نکنید؛ وضعیت را دستی بررسی کنید.")

@@ -202,6 +202,10 @@ class CloudzyService:
     def list_regions(self):
         return self._request("GET", "/regions")
 
+    def list_plan_availability(self, region: str):
+        """Read live plan-level stock for one exact region; never infer from catalog."""
+        return self._request("GET", f"/plan-availability?region={_resource(region)}")
+
     # 02: Plans and region-specific cycle prices (catalog base, not final quote).
     def list_plans(self, *, region: str | None = None, billing_cycle: str = "monthly"):
         if region is not None:

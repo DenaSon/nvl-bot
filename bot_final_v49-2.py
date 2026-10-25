@@ -4588,7 +4588,7 @@ def _db_set_hosts_bulk(usernames, host):
         _db_assert_legacy_host_mutation_allowed(conn)
         _db_assert_account_write_allowed(conn)
         conn.executemany(
-            "UPDATE ssh_accounts SET host=? WHERE username=? AND service_type='ssh'"
+            "UPDATE ssh_accounts SET host=? WHERE username=? AND service_type='ssh'",
             [(host, u) for u in usernames],
         )
 

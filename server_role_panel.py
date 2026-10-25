@@ -304,48 +304,73 @@ def _retirement_plan(conn, host: str, core_ip: str):
 
 
 def dependency_report(db_conn, host: str, core_ip: str, guard=None):
-    """Text+eligibility for a two-stage, explicit retirement review."""
+    """Explain every grounded account/incident dependency, even on HOLD."""
     try:
+        checked_ip(host)
         with db_conn() as conn:
             if guard:
                 guard(conn)
-            accounts, incidents = _retirement_plan(conn, host, core_ip)
-            ssh_inactive = sum(typ == "ssh" for _, typ, _ in accounts)
-            marzban = sum(typ in MARZBAN_TYPES for _, typ, _ in accounts)
             lines = [
                 "🔎 <b>وابستگی‌های IP غیرفعال</b>",
                 "",
                 "🌐 <code>" + escape(host) + "</code>",
-                "🗂 حساب SSH غیرفعال با انتساب تاریخی: " + str(ssh_inactive),
-                "🧩 حساب مستقل Marzban با انتساب تاریخی: " + str(marzban),
-                "🧭 رخداد پایش بازِ قابل بازنشسته‌سازی: " + str(len(incidents)),
             ]
-            for _id, incident_id, state, _reason, updated in incidents[:6]:
-                lines.append(
-                    "• <code>" + escape(str(incident_id or _id)) + "</code> "
-                    + escape(str(state)) + " · " + escape(str(updated or "—"))
-                )
-            if len(incidents) > 6:
-                lines.append("… و " + str(len(incidents) - 6) + " رخداد دیگر")
+            if _table(conn, "ssh_accounts"):
+                counts = conn.execute(
+                    "SELECT COALESCE(service_type,'(NULL)'),"
+                    "COALESCE(status,'(NULL)'),COUNT(*) FROM ssh_accounts "
+                    "WHERE host=? GROUP BY service_type,status "
+                    "ORDER BY COUNT(*) DESC LIMIT 12", (host,)
+                ).fetchall()
+                lines.append("👤 <b>حساب‌های دارای انتساب به IP:</b>")
+                if not counts:
+                    lines.append("• هیچ‌کدام")
+                for typ, status, count in counts:
+                    lines.append(
+                        "• <code>" + escape(str(typ)) + "</code> · "
+                        + escape(str(status)) + ": " + str(count)
+                    )
+            if _table(conn, "filter_incidents"):
+                incidents = conn.execute(
+                    "SELECT incident_id,state,last_reason,updated_at "
+                    "FROM filter_incidents WHERE closed_at IS NULL "
+                    "AND (source_host=? OR target_host=?) "
+                    "ORDER BY updated_at DESC LIMIT 8", (host, host)
+                ).fetchall()
+                lines.append("📡 <b>رخدادهای پایش باز:</b>")
+                if not incidents:
+                    lines.append("• هیچ‌کدام")
+                for incident_id, state, reason, stamp in incidents:
+                    lines.append(
+                        "• <code>" + escape(str(incident_id or "UNKNOWN")) + "</code> "
+                        + escape(str(state or "UNKNOWN"))
+                        + " · " + escape(str(reason or "—"))
+                        + " · " + escape(str(stamp or "—"))
+                    )
+            try:
+                accounts, incidents = _retirement_plan(conn, host, core_ip)
+            except ValueError as exc:
+                lines.extend([
+                    "", "⛔ <b>بازنشسته‌سازی خودکار مجاز نیست</b>",
+                    "علت: <code>" + escape(str(exc)) + "</code>",
+                    "وابستگی فعال یا ناشناخته باید ابتدا جداگانه بررسی شود.",
+                ])
+                return False, "\n".join(lines)
             lines.extend([
-                "", "✅ امکان بازنشسته‌سازی وابستگی‌های تاریخی وجود دارد.",
+                "", "✅ وابستگی‌های تاریخی قابل بازنشسته‌سازی:",
+                "🗂 حساب‌های دارای انتساب قدیمی: " + str(len(accounts)),
+                "🧭 رخدادهای باز قابل بستن: " + str(len(incidents)),
                 "⚠️ رخدادها حذف نمی‌شوند؛ با دلیل HOST_RETIRED_BY_OPERATOR "
                 "بسته و رویداد حسابرسی ثبت می‌شود.",
-                "⚠️ صرفاً فیلد host حساب‌های مشخص‌شده خالی می‌شود؛ "
-                "حساب و اشتراک حذف یا منتقل نمی‌شوند.",
+                "⚠️ فقط فیلد host حساب‌های مشخص‌شده خالی می‌شود؛ "
+                "اشتراک و حساب حذف یا منتقل نمی‌شوند.",
                 "⛔ حذف VPS یا رکورد host_pool در این مرحله انجام نمی‌شود.",
             ])
             return True, "\n".join(lines)
-    except (ValueError, Exception) as exc:
-        code = str(exc)
-        if not code.isascii() or not code.replace("_", "").isalnum():
-            code = "DEPENDENCY_REVIEW_UNAVAILABLE"
+    except Exception:
         return False, (
-            "⛔ <b>بازنشسته‌سازی خودکار مجاز نیست</b>\n\n"
-            "🌐 <code>" + escape(str(host)) + "</code>\n"
-            "علت: <code>" + escape(code) + "</code>\n"
-            "وابستگی فعال یا ناشناخته باید ابتدا جداگانه بررسی شود. "
-            "هیچ رکوردی تغییر نکرد."
+            "⛔ بررسی وابستگی‌های IP به خطای ایمنی برخورد کرد. "
+            "هیچ تغییر یا حذفی انجام نشد."
         )
 
 

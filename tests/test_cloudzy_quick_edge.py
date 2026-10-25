@@ -294,6 +294,9 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.wizard.store.latest())
 
     async def test_cz06_quick_relay_from_one_purchase_to_standby(self):
+        # Production callbacks have a Telegram message ID; this mock defaults
+        # to None, which deliberately skips background progress delivery.
+        self.query.message_id = 123
         standby = FakeStandby()
         self.wizard.standby_service = standby
         self.wizard.cz06_enabled = lambda: True

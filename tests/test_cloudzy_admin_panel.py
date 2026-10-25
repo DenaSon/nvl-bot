@@ -121,7 +121,7 @@ class Phase1PanelTests(unittest.TestCase):
         self.cb("apps_cz_home")
         self.assertIn("مدیریت Cloudzy", self.query.text)
         self.assertIn("Quick Relay: خرید VPS، نصب Edge و Standby", self.query.text)
-        self.assertIn("DNS، Relay پیش‌فرض و کاربران تا CZ-07 تغییر نمی‌کنند", self.query.text)
+        self.assertIn("انتقال DNS و کاربران فقط در CZ-07", self.query.text)
         self.assertNotIn("ساخت سریع Edge در فاز بعد", self.query.text)
         labels = {cb: label for row in self.query.edits[-1][1]["reply_markup"]
                   for label, cb in row}
@@ -131,6 +131,7 @@ class Phase1PanelTests(unittest.TestCase):
             self.assertIn(cb, labels)
         self.assertEqual(labels["apps_cz_wizard"], "⚡ ساخت Edge · مدیریت دستی")
         self.assertIn("Quick Relay", labels["apps_cz6_start"])
+        self.assertIn("apps_cz7_home", labels)
         self.assertEqual(labels["apps_cz_operations"], "📋 وضعیت عملیات")
         self.assertIn("همه NVL", labels["apps_cz_edge"])
         self.assertIn("apps_cz4_vps", labels)

@@ -21619,6 +21619,76 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d.startswith("srv_view_") and role == 'admin':
         await _render_server_detail_panel(query, context, d[len("srv_view_"):])
 
+    # Read-only local dependency inventory and guarded two-step retirement.
+    # This does not delete the VPS or the host_pool row.
+    elif d.startswith("srv_deps_") and role == 'admin':
+        import server_role_panel as server_panel
+        target_ip = d[len("srv_deps_"):]
+        core_ip = await asyncio.to_thread(_get_core_public_ip_cached)
+        ready, detail = await asyncio.to_thread(
+            server_panel.dependency_report, db_conn, target_ip, core_ip,
+            _db_assert_legacy_host_mutation_allowed,
+        )
+        buttons = []
+        if ready:
+            buttons.append([InlineKeyboardButton(
+                "🧹 بررسی بازنشسته‌سازی وابستگی‌ها",
+                callback_data="srv_retire_check_" + target_ip,
+            )])
+        buttons.append([InlineKeyboardButton(
+            "🔙 بررسی حذف IP", callback_data="srv_del_" + target_ip,
+        )])
+        await _safe_edit_or_send(
+            query, detail, reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode="HTML",
+        )
+
+    elif d.startswith("srv_retire_check_") and role == 'admin':
+        import server_role_panel as server_panel
+        target_ip = d[len("srv_retire_check_"):]
+        core_ip = await asyncio.to_thread(_get_core_public_ip_cached)
+        ready, detail = await asyncio.to_thread(
+            server_panel.dependency_report, db_conn, target_ip, core_ip,
+            _db_assert_legacy_host_mutation_allowed,
+        )
+        buttons = []
+        if ready:
+            buttons.append([InlineKeyboardButton(
+                "✅ تأیید بازنشسته‌سازی وابستگی‌های قدیمی",
+                callback_data="srv_retire_confirm_" + target_ip,
+            )])
+        buttons.append([InlineKeyboardButton(
+            "↩️ بازگشت بدون تغییر", callback_data="srv_deps_" + target_ip,
+        )])
+        await _safe_edit_or_send(
+            query,
+            "⚠️ <b>تأیید نهایی بازنشسته‌سازی وابستگی‌ها</b>\n\n"
+            + detail
+            + "\n\nاین عملیات برگشت خودکار ندارد؛ سوابق حسابرسی نگهداری می‌شوند.",
+            reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML",
+        )
+
+    elif d.startswith("srv_retire_confirm_") and role == 'admin':
+        import server_role_panel as server_panel
+        target_ip = d[len("srv_retire_confirm_"):]
+        core_ip = await asyncio.to_thread(_get_core_public_ip_cached)
+        ok, message = await asyncio.to_thread(
+            server_panel.retire_inactive_dependencies,
+            db_conn, target_ip, core_ip,
+            actor=int(update.effective_user.id),
+            guard=_db_assert_legacy_host_mutation_allowed,
+        )
+        await _safe_edit_or_send(
+            query,
+            ("✅ " if ok else "⛔ ") + esc(message) + "\n\n"
+            + "🌐 <code>" + esc(target_ip) + "</code>",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑 بررسی حذف رکورد IP",
+                                      callback_data="srv_del_" + target_ip)],
+                [InlineKeyboardButton("🔙 فهرست سرورها", callback_data="srv_status")],
+            ]), parse_mode="HTML",
+        )
+
     # Safe metadata-only deletion of inactive hosts. Always recheck at commit.
     elif d.startswith("srv_del_confirm_") and role == 'admin':
         import server_role_panel as server_panel
@@ -21650,6 +21720,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buttons.append([InlineKeyboardButton(
                 "🗑 تأیید حذف از فهرست",
                 callback_data="srv_del_confirm_" + target_ip,
+            )])
+        if not ok:
+            buttons.append([InlineKeyboardButton(
+                "🔎 بررسی وابستگی‌ها", callback_data="srv_deps_" + target_ip,
             )])
         buttons.append([InlineKeyboardButton(
             "🔙 جزئیات سرور", callback_data="srv_view_" + target_ip,

@@ -12,7 +12,7 @@ PREFERRED_REGIONS = (
     "UK-London", "CH-Switzerland", "DTX", "US-Utah",
     "SG-Singapore-DC2", "SG-Singapore",
 )
-STANDARD_VPS_SLUG = re.compile(r"vps-(?:512|[1-9][0-9]*gb)\\Z", re.I)
+STANDARD_VPS_SLUG = re.compile(r"vps-(?:512|[1-9][0-9]*gb)\Z", re.I)
 AVAILABILITY_MAX_AGE_SECONDS = 90
 
 

@@ -592,8 +592,35 @@ class QuickEdgeWizard:
         await self._display(query, text, rows, markup)
 
     async def _buy(self, opid, chat, pub, app):
+        # No Cloudzy POST until fresh stock and price still match the receipt.
         try:
             op = await asyncio.to_thread(self.store.get, opid)
+            if op["billing_cycle"] != "hourly":
+                raise CatalogHold("HOURLY_ONLY")
+            await self._check_offer_current(op["region"], op["plan_id"], op["price_cents"])
+        except (CatalogHold, CloudzyAPIError, CloudzyError, QuickEdgeHold) as exc:
+            code = str(exc) if isinstance(exc, CatalogHold) else type(exc).__name__
+            log.warning("CZ05_PRE_PURCHASE_BLOCK op=%s stage=stock code=%s", opid[:16], code)
+            try:
+                await asyncio.to_thread(self.store.change, opid, "CREATING", "REJECTED",
+                                        hold_reason="CZ05_STOCK_OR_PRICE_UNVERIFIED")
+            except QuickEdgeHold:
+                log.exception("CZ05_PRE_PURCHASE_JOURNAL_FAILED op=%s", opid[:16])
+            await app.bot.send_message(
+                chat, f"⛔️ خرید انجام نشد؛ موجودی یا قیمت ساعتی تأیید نشد. "
+                      f"کد: CZ05_STOCK_OR_PRICE_UNVERIFIED | عملیات: {opid[:16]}")
+            return
+        except Exception:
+            log.exception("CZ05_PRE_PURCHASE_UNEXPECTED op=%s", opid[:16])
+            try:
+                await asyncio.to_thread(self.store.change, opid, "CREATING", "REJECTED",
+                                        hold_reason="CZ05_PREFLIGHT_ERROR")
+            except QuickEdgeHold:
+                pass
+            await app.bot.send_message(chat,
+                f"⛔️ بررسی پیش از خرید ناموفق بود. کد: CZ05_PREFLIGHT_ERROR | عملیات: {opid[:16]}")
+            return
+        try:
             data = await self._cloudzy(
                 "create_server", hostname=op["hostname"], plan_id=op["plan_id"],
                 region=op["region"], os_template_id=OS_TEMPLATE,
@@ -610,6 +637,8 @@ class QuickEdgeWizard:
                                         hold_reason="CLOUDZY_HTTP_REJECTED_" + str(exc.status))
             except QuickEdgeHold:
                 pass
+            log.warning("CZ05_PURCHASE_REJECTED op=%s http=%s code=%s",
+                        opid[:16], exc.status, re.sub(r"[^A-Za-z0-9_-]", "", str(exc.code or ""))[:60])
             await app.bot.send_message(
                 chat, f"⛔️ خرید توسط Cloudzy رد شد (HTTP {exc.status}). "
                 "هیچ نصب Edge انجام نشد؛ پس از اصلاح شرایط می‌توانید درخواست جدید ثبت کنید.")
@@ -619,6 +648,8 @@ class QuickEdgeWizard:
             # than allowing another chargeable attempt on an ambiguous deployment.
             reason = ("CREATE_RESULT_UNCERTAIN" if isinstance(exc, CloudzyUncertainError)
                       else "CREATE_OR_RECEIPT_FAILED")
+            log.error("CZ05_PURCHASE_UNCERTAIN op=%s reason=%s exception=%s",
+                      opid[:16], reason, type(exc).__name__)
             try:
                 await asyncio.to_thread(self.store.change, opid, "CREATING",
                     "CREATE_UNCERTAIN", hold_reason=reason)

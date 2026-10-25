@@ -149,9 +149,16 @@ class CloudzyDeleteGuard:
             return ("PROTECTED", "AUTOMATIC_FAILOVER_ENABLED")
         if ipv4 in [h.strip() for h in (settings.get("hosts") or "").split(",")]:
             return ("PROTECTED", "CUSTOMER_HOSTS_REFERENCE")
+        # host is a Legacy SSH Relay assignment, not a Marzban data-plane
+        # dependency. v2ray/v2ray_vol live on a separately managed Marzban
+        # server through its API; their legacy host column can carry a stale
+        # address written by historic "all accounts" host switches.
+        # Unknown and NULL types are conservatively treated as SSH-like.
         users = db.execute(
             "SELECT COUNT(*) FROM ssh_accounts "
-            f"WHERE host=? AND {ACTIVE}", (ipv4,)
+            f"WHERE host=? AND {ACTIVE} "
+            "AND COALESCE(NULLIF(service_type,''),'ssh') "
+            "NOT IN ('v2ray','v2ray_vol')", (ipv4,)
         ).fetchone()[0]
         if users:
             return ("PROTECTED", "ACTIVE_ACCOUNTS_ASSIGNED")

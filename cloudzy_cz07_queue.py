@@ -205,9 +205,19 @@ class DurableCutoverQueue:
             hosts = [h.strip() for h in (st.get("hosts") or "").split(",") if h.strip()]
             if hosts == [target]:
                 return
-            # Do not drop unrelated legacy hosts without explicit review.
-            if hosts != [target, source]:
-                raise CZ07Hold("HOST_LIST_NOT_EXACT_SOURCE_TARGET")
+            # The source must still be the first legacy fallback. Historic
+            # inactive Relays may follow it. Drop only their *eligibility*
+            # after checking there are no active customers on any third host;
+            # never disable/delete their host_pool rows.
+            if not hosts or hosts[0] != target or source not in hosts[1:]:
+                raise CZ07Hold("HOST_LIST_NOT_EXPECTED_ROUTE")
+            if db.execute(
+                "SELECT COUNT(*) FROM ssh_accounts WHERE service_type='ssh' "
+                "AND status LIKE '%فعال%' AND status NOT LIKE '%غیر%' "
+                "AND host IS NOT NULL AND host<>'' AND host NOT IN (?,?)",
+                (source, target)
+            ).fetchone()[0]:
+                raise CZ07Hold("OTHER_ACTIVE_CUSTOMER_HOST")
             if db.execute("UPDATE settings SET value=? WHERE key='hosts' AND value=?",
                           (target, st["hosts"])).rowcount != 1:
                 raise CZ07Hold("HOST_LIST_CAS_FAILED")

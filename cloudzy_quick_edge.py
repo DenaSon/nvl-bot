@@ -566,9 +566,9 @@ class QuickEdgeWizard:
                 log.warning("CZ06_CANCEL op=%s actor=%s code=OPERATOR_CANCELLED",
                             opid[:16], actor)
                 await self._display(query,
-                    "✅ <b>عملیات لغو و قفل خرید آزاد شد.</b>\\n\\n"
-                    f"شناسه: <code>{opid[:16]}</code>\\n"
-                    "🛡 هیچ VPS حذف نشده و Relay/DNS/کاربران تغییر نکرده‌اند.\\n"
+                    "✅ <b>عملیات لغو و قفل خرید آزاد شد.</b>\n\n"
+                    f"شناسه: <code>{opid[:16]}</code>\n"
+                    "🛡 هیچ VPS حذف نشده و Relay/DNS/کاربران تغییر نکرده‌اند.\n"
                     "⚠️ آثار احتمالی نصب ناقص روی Core/WireGuard باید جداگانه بررسی شوند. "
                     "اگر VPS هنوز موجود باشد، ممکن است هزینه آن ادامه داشته باشد.",
                     [[("⚡ ساخت Edge جدید", "apps_cz_wizard")],
@@ -584,12 +584,12 @@ class QuickEdgeWizard:
                     "chat": chat, "nonce": nonce, "expires": self.now() + 180
                 }
                 await self._display(query,
-                    "⚠️ <b>تأیید لغو عملیات Cloudzy</b>\\n\\n"
-                    f"شناسه: <code>{opid[:16]}</code>\\n"
-                    f"وضعیت: <b>{_text(op['status'])}</b>\\n"
-                    f"IP: <code>{_text(op.get('public_ipv4') or 'نامشخص')}</code>\\n\\n"
+                    "⚠️ <b>تأیید لغو عملیات Cloudzy</b>\n\n"
+                    f"شناسه: <code>{opid[:16]}</code>\n"
+                    f"وضعیت: <b>{_text(op['status'])}</b>\n"
+                    f"IP: <code>{_text(op.get('public_ipv4') or 'نامشخص')}</code>\n\n"
                     "این اقدام فقط پرونده عملیات را می‌بندد و قفل خرید را آزاد می‌کند؛ "
-                    "VPS، WireGuard، DNS و کاربران را حذف یا جابه‌جا نمی‌کند.\\n"
+                    "VPS، WireGuard، DNS و کاربران را حذف یا جابه‌جا نمی‌کند.\n"
                     "❗ اگر VPS هنوز وجود دارد، هزینه‌های آن متوقف نمی‌شود. "
                     "آثار احتمالی نصب ناقص نیازمند رسیدگی جداگانه‌اند.",
                     [[("✅ لغو قطعی و آزادسازی قفل", "apps_cz_qcancelyes_" + nonce)],

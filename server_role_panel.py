@@ -8,6 +8,9 @@ from __future__ import annotations
 from html import escape
 from ipaddress import IPv4Address
 from pathlib import Path
+from datetime import datetime
+import json
+import uuid
 
 PAGE_SIZE = 7
 
@@ -198,6 +201,226 @@ def _blocker(conn, host: str, core_ip: str) -> str | None:
         return "رخداد بازِ پایش به این IP وابسته است."
     return _registry_blocker(host)
 
+
+
+# Host inventory retirement is a separate, explicitly confirmed operation from
+# deleting a VPS or removing a host_pool row. It changes only stale local
+# relationships and retains audit records; it never touches traffic or providers.
+RETIRABLE_INCIDENT_STATES = frozenset({
+    "SUSPECTED", "CONFIRMING", "EVIDENCE_DEGRADED",
+    "FILTER_CONFIRMED", "FAILOVER_BLOCKED", "FAILOVER_SUCCEEDED", "RECOVERED",
+})
+MARZBAN_TYPES = frozenset({"v2ray", "v2ray_vol"})
+
+
+def _retirement_plan(conn, host: str, core_ip: str):
+    """Return a fail-closed, read-only cleanup plan for a retired inactive IP."""
+    checked_ip(host)
+    checked_ip(core_ip)
+    if host == core_ip:
+        raise ValueError("CORE_IS_NOT_RETIRABLE")
+    cols = {c[1] for c in conn.execute("PRAGMA table_info(host_pool)")}
+    if not {"host", "active", "is_default", "is_standby"}.issubset(cols):
+        raise ValueError("HOST_ROLE_SCHEMA_UNVERIFIED")
+    row = conn.execute(
+        "SELECT active,is_default,is_standby FROM host_pool WHERE host=?",
+        (host,)
+    ).fetchone()
+    if row is None or any(int(v or 0) != 0 for v in row):
+        raise ValueError("HOST_NOT_INACTIVE_OR_HAS_ROLE")
+    settings = dict(conn.execute(
+        "SELECT key,value FROM settings WHERE key IN ('hosts','dns_current_ip','core_wg_public_ip')"
+    ).fetchall())
+    if (not settings.get("hosts") or not settings.get("dns_current_ip")
+            or host == settings.get("core_wg_public_ip")
+            or host == settings["dns_current_ip"]
+            or host in [v.strip() for v in settings["hosts"].split(",")]):
+        raise ValueError("ACTIVE_ROUTE_OR_CORE_REFERENCE")
+    if _table(conn, "domains") and conn.execute(
+        "SELECT 1 FROM domains WHERE host=? LIMIT 1", (host,)
+    ).fetchone():
+        raise ValueError("DOMAIN_REFERENCE_REQUIRES_REVIEW")
+    if _table(conn, "edge_egress_allocations") and conn.execute(
+        "SELECT 1 FROM edge_egress_allocations WHERE edge_public_ipv4=? LIMIT 1",
+        (host,)
+    ).fetchone():
+        raise ValueError("EGRESS_ALLOCATION_REQUIRES_REVIEW")
+    if _table(conn, "failover_operations") and conn.execute(
+        "SELECT 1 FROM failover_operations WHERE finished_at IS NULL "
+        "AND (source_host=? OR target_host=?) LIMIT 1", (host, host)
+    ).fetchone():
+        raise ValueError("UNRESOLVED_FAILOVER")
+    if _table(conn, "cloudzy_edge_operations") and conn.execute(
+        "SELECT 1 FROM cloudzy_edge_operations WHERE public_ipv4=? "
+        "AND status NOT IN ('CANCELLED','REJECTED','EDGE_READY') LIMIT 1",
+        (host,)
+    ).fetchone():
+        raise ValueError("UNRESOLVED_CLOUDZY_PURCHASE")
+    if _table(conn, "cloudzy_cz07_jobs") and conn.execute(
+        "SELECT 1 FROM cloudzy_cz07_jobs WHERE (source=? OR target=?) "
+        "AND status NOT IN ('DONE','ABORTED') LIMIT 1",
+        (host, host)
+    ).fetchone():
+        raise ValueError("UNRESOLVED_CUSTOMER_MIGRATION")
+    registry = _registry_blocker(host)
+    if registry:
+        raise ValueError("PROTECTED_INGRESS_REGISTRY")
+
+    # All account rows remain in NVL. Only the stale SSH Edge host field may
+    # be detached; no username, subscription, status or expiry is changed.
+    if not _table(conn, "ssh_accounts"):
+        raise ValueError("ACCOUNT_LEDGER_MISSING")
+    account_cols = {c[1] for c in conn.execute("PRAGMA table_info(ssh_accounts)")}
+    if not {"username", "host", "service_type", "status"}.issubset(account_cols):
+        raise ValueError("ACCOUNT_LEDGER_SCHEMA_UNVERIFIED")
+    accounts = conn.execute(
+        "SELECT username,service_type,status FROM ssh_accounts WHERE host=?",
+        (host,)
+    ).fetchall()
+    if any(
+        (typ not in MARZBAN_TYPES and
+         not (typ == "ssh" and status is not None and "غیرفعال" in status))
+        for _username, typ, status in accounts
+    ):
+        raise ValueError("ACTIVE_OR_UNKNOWN_SSH_ACCOUNTS")
+    if not _table(conn, "filter_incidents"):
+        raise ValueError("INCIDENT_LEDGER_MISSING")
+    incident_cols = {c[1] for c in conn.execute("PRAGMA table_info(filter_incidents)")}
+    if not {"id","incident_id","state","last_reason","source_host","target_host",
+            "updated_at","closed_at"}.issubset(incident_cols):
+        raise ValueError("INCIDENT_LEDGER_SCHEMA_UNVERIFIED")
+    incidents = conn.execute(
+        "SELECT id,incident_id,state,last_reason,updated_at "
+        "FROM filter_incidents WHERE closed_at IS NULL "
+        "AND (source_host=? OR target_host=?) ORDER BY id",
+        (host, host)
+    ).fetchall()
+    if any(str(state or "") not in RETIRABLE_INCIDENT_STATES
+           for _id, _incident_id, state, _reason, _updated in incidents):
+        raise ValueError("OPERATIONAL_OR_UNKNOWN_INCIDENT")
+    if incidents and not _table(conn, "filter_incident_events"):
+        raise ValueError("INCIDENT_AUDIT_LEDGER_MISSING")
+    return accounts, incidents
+
+
+def dependency_report(db_conn, host: str, core_ip: str, guard=None):
+    """Text+eligibility for a two-stage, explicit retirement review."""
+    try:
+        with db_conn() as conn:
+            if guard:
+                guard(conn)
+            accounts, incidents = _retirement_plan(conn, host, core_ip)
+            ssh_inactive = sum(typ == "ssh" for _, typ, _ in accounts)
+            marzban = sum(typ in MARZBAN_TYPES for _, typ, _ in accounts)
+            lines = [
+                "🔎 <b>وابستگی‌های IP غیرفعال</b>",
+                "",
+                "🌐 <code>" + escape(host) + "</code>",
+                "🗂 حساب SSH غیرفعال با انتساب تاریخی: " + str(ssh_inactive),
+                "🧩 حساب مستقل Marzban با انتساب تاریخی: " + str(marzban),
+                "🧭 رخداد پایش بازِ قابل بازنشسته‌سازی: " + str(len(incidents)),
+            ]
+            for _id, incident_id, state, _reason, updated in incidents[:6]:
+                lines.append(
+                    "• <code>" + escape(str(incident_id or _id)) + "</code> "
+                    + escape(str(state)) + " · " + escape(str(updated or "—"))
+                )
+            if len(incidents) > 6:
+                lines.append("… و " + str(len(incidents) - 6) + " رخداد دیگر")
+            lines.extend([
+                "", "✅ امکان بازنشسته‌سازی وابستگی‌های تاریخی وجود دارد.",
+                "⚠️ رخدادها حذف نمی‌شوند؛ با دلیل HOST_RETIRED_BY_OPERATOR "
+                "بسته و رویداد حسابرسی ثبت می‌شود.",
+                "⚠️ صرفاً فیلد host حساب‌های مشخص‌شده خالی می‌شود؛ "
+                "حساب و اشتراک حذف یا منتقل نمی‌شوند.",
+                "⛔ حذف VPS یا رکورد host_pool در این مرحله انجام نمی‌شود.",
+            ])
+            return True, "\n".join(lines)
+    except (ValueError, Exception) as exc:
+        code = str(exc)
+        if not code.isascii() or not code.replace("_", "").isalnum():
+            code = "DEPENDENCY_REVIEW_UNAVAILABLE"
+        return False, (
+            "⛔ <b>بازنشسته‌سازی خودکار مجاز نیست</b>\n\n"
+            "🌐 <code>" + escape(str(host)) + "</code>\n"
+            "علت: <code>" + escape(code) + "</code>\n"
+            "وابستگی فعال یا ناشناخته باید ابتدا جداگانه بررسی شود. "
+            "هیچ رکوردی تغییر نکرد."
+        )
+
+
+def retire_inactive_dependencies(db_conn, host: str, core_ip: str,
+                                 *, actor: int, guard=None):
+    """Guarded and audited local-only archival; NOT a host or provider DELETE.
+
+    The preview is not authority: redo every check under BEGIN IMMEDIATE.
+    A rolled-back write must not free a host or lose the incident timeline.
+    """
+    if type(actor) is not int or actor <= 0:
+        return False, "INVALID_ACTOR"
+    try:
+        with db_conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if guard:
+                guard(conn)
+            accounts, incidents = _retirement_plan(conn, host, core_ip)
+            if not accounts and not incidents:
+                return False, "NO_STALE_DEPENDENCIES"
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            opid = uuid.uuid4().hex
+            conn.execute("""CREATE TABLE IF NOT EXISTS host_retirement_audit (
+                operation_id TEXT PRIMARY KEY,host TEXT NOT NULL,actor_id INTEGER NOT NULL,
+                account_count INTEGER NOT NULL,incident_count INTEGER NOT NULL,
+                occurred_at TEXT NOT NULL
+            )""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS host_retirement_account_audit (
+                operation_id TEXT NOT NULL,username TEXT NOT NULL,former_host TEXT NOT NULL,
+                service_type TEXT NOT NULL,status TEXT,PRIMARY KEY(operation_id,username)
+            )""")
+            conn.execute(
+                "INSERT INTO host_retirement_audit VALUES (?,?,?,?,?,?)",
+                (opid, host, actor, len(accounts), len(incidents), stamp)
+            )
+            for username, typ, status in accounts:
+                conn.execute(
+                    "INSERT INTO host_retirement_account_audit VALUES (?,?,?,?,?)",
+                    (opid, username, host, typ, status)
+                )
+                changed = conn.execute(
+                    "UPDATE ssh_accounts SET host=NULL WHERE username=? AND host=? "
+                    "AND service_type=? AND status IS ?",
+                    (username, host, typ, status)
+                ).rowcount
+                if changed != 1:
+                    raise ValueError("CONCURRENT_ACCOUNT_CHANGE")
+            for incident_id, external_id, prior_state, prior_reason, _time in incidents:
+                changed = conn.execute(
+                    "UPDATE filter_incidents SET state='RETIRED',"
+                    "last_reason='HOST_RETIRED_BY_OPERATOR',"
+                    "updated_at=?,closed_at=? WHERE id=? AND closed_at IS NULL AND state=?",
+                    (stamp, stamp, incident_id, prior_state)
+                ).rowcount
+                if changed != 1:
+                    raise ValueError("CONCURRENT_INCIDENT_CHANGE")
+                conn.execute(
+                    "INSERT INTO filter_incident_events "
+                    "(incident_id,event_type,state,reason_code,source_host,target_host,"
+                    "detail_json,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                    (external_id, "HOST_RETIRED", "RETIRED",
+                     "HOST_RETIRED_BY_OPERATOR", host, None,
+                     json.dumps({"actor_id":actor,"operation_id":opid,
+                                 "previous_state":prior_state,
+                                 "previous_reason":prior_reason},
+                                ensure_ascii=False), stamp)
+                )
+            return True, (
+                f"وابستگی‌های تاریخی IP بازنشسته شدند. "
+                f"حساب‌های جداشده: {len(accounts)} · رخدادهای بسته‌شده: {len(incidents)}. "
+                f"شناسه حسابرسی: {opid[:16]}. "
+                "اکنون حذف رکورد IP را جداگانه بررسی کنید."
+            )
+    except Exception:
+        return False, "بازنشسته‌سازی ایمن انجام نشد؛ هیچ تغییر ناقصی نباید اعمال شود."
 
 def deletion_preview(db_conn, host: str, core_ip: str, guard=None):
     try:

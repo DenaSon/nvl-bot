@@ -32,6 +32,38 @@ class FakeQuery:
         return self.screens[-1][0]
 
 
+class FakeStandby:
+    def __init__(self):
+        self.registered = False
+        self.calls = []
+
+    def _state(self, ip, pid, *, mutation):
+        self.calls.append("state")
+        return {"active": self.registered, "standby": self.registered,
+                "default": False, "listed": False, "users": 0, "auto": False,
+                "k2_onboard": False, "port": 2252, "admin_port": 22}
+
+    def _isolated(self, state):
+        assert state["active"] is False
+
+    async def _provider(self, pid, ip):
+        return "active"
+
+    async def probe(self, ip, port, admin_port):
+        return True
+
+    def _reserve(self, actor, chat, ip, pid, action):
+        self.calls.append("reserve")
+        return "standby-operation"
+
+    def _promote(self, opid, ip, pid):
+        self.calls.append("promote")
+        self.registered = True
+
+    def _finish(self, opid, status, reason):
+        self.calls.append("finish")
+
+
 class FakeContext:
     def __init__(self):
         self.user_data = {}
@@ -247,6 +279,70 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         await self.app.drain()
         self.assertEqual(self.wizard.store.latest()["status"], "REJECTED")
         self.assertFalse(any(isinstance(x, tuple) and x[0] == "create" for x in self.api.calls))
+
+    async def test_cz06_disabled_by_default_does_not_purchase(self):
+        self.wizard.cz06_enabled = lambda: False
+        self.wizard.standby_service = FakeStandby()
+        await self.cb("apps_cz6_start")
+        self.assertIn("CZ06_DISABLED", self.query.text)
+        self.assertEqual(self.api.calls, [])
+        self.assertIsNone(self.wizard.store.latest())
+
+    async def test_cz06_quick_relay_from_one_purchase_to_standby(self):
+        standby = FakeStandby()
+        self.wizard.standby_service = standby
+        self.wizard.cz06_enabled = lambda: True
+        await self.cb("apps_cz6_start")
+        self.assertIn("Quick Relay", self.query.text)
+        region = next(x for x in self.query.callbacks if x.startswith("apps_cz_qr_"))
+        await self.cb(region)
+        plan = next(x for x in self.query.callbacks if x.startswith("apps_cz_qp_"))
+        await self.cb(plan)
+        confirm = next(x for x in self.query.callbacks if x.startswith("apps_cz_qbuy_"))
+        await self.cb(confirm)
+        await self.app.drain()
+        record = self.wizard.store.latest()
+        self.assertEqual(record["status"], "HOSTKEY_PENDING")
+        self.assertEqual(self.wizard.quick_runs.get(record["id"])["stage"], "HOSTKEY_PENDING")
+        self.assertEqual(standby.calls, [])
+        await self.cb("apps_cz_operations")
+        review = next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_"))
+        await self.cb(review)
+        accept = next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_"))
+        await self.cb(accept)
+        await self.app.drain()
+        run = self.wizard.quick_runs.get(record["id"])
+        self.assertEqual(run["stage"], "READY")
+        self.assertEqual(standby.calls.count("promote"), 1)
+        self.assertEqual(record["billing_cycle"], "hourly")
+        self.assertEqual(len(self.provisions), 1)
+        self.assertEqual(len([x for x in self.api.calls if isinstance(x, tuple) and x[0] == "create"]), 1)
+
+    async def test_cz06_standby_failure_enters_hold_without_rebuy(self):
+        class FailingStandby(FakeStandby):
+            async def probe(self, *args):
+                return False
+
+        standby = FailingStandby()
+        self.wizard.standby_service = standby
+        self.wizard.cz06_enabled = lambda: True
+        await self.cb("apps_cz6_start")
+        region = next(x for x in self.query.callbacks if x.startswith("apps_cz_qr_"))
+        await self.cb(region)
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qp_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qbuy_")))
+        await self.app.drain()
+        record = self.wizard.store.latest()
+        await self.cb("apps_cz_operations")
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_")))
+        await self.app.drain()
+        self.assertEqual(self.wizard.store.get(record["id"])["status"], "EDGE_READY")
+        self.assertEqual(self.wizard.quick_runs.get(record["id"])["stage"], "HOLD")
+        self.assertEqual(standby.calls.count("promote"), 0)
+        await self.cb("apps_cz_operations")
+        self.assertFalse(any(x.startswith("apps_cz6_resume_") for x in self.query.callbacks))
+        self.assertEqual(len([x for x in self.api.calls if isinstance(x, tuple) and x[0] == "create"]), 1)
 
     async def test_explicit_monthly_reservation_is_rejected(self):
         with self.assertRaises(QuickEdgeHold):

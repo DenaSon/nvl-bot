@@ -120,16 +120,17 @@ class Phase1PanelTests(unittest.TestCase):
     def test_home_shows_available_cz03_actions_and_only_phase3_is_pending(self):
         self.cb("apps_cz_home")
         self.assertIn("مدیریت Cloudzy", self.query.text)
-        self.assertIn("خرید VPS و نصب Legacy", self.query.text)
-        self.assertIn("غیرفعال ثبت می‌شود", self.query.text)
+        self.assertIn("Quick Relay: خرید VPS، نصب Edge و Standby", self.query.text)
+        self.assertIn("DNS، Relay پیش‌فرض و کاربران تا CZ-07 تغییر نمی‌کنند", self.query.text)
         self.assertNotIn("ساخت سریع Edge در فاز بعد", self.query.text)
         labels = {cb: label for row in self.query.edits[-1][1]["reply_markup"]
                   for label, cb in row}
         for cb in ("apps_cz_servers_0", "apps_cz_regions_0", "apps_cz_keys_0",
-                   "apps_cz_wizard", "apps_cz_edge", "apps_cz_operations",
+                   "apps_cz_wizard", "apps_cz6_start", "apps_cz_edge", "apps_cz_operations",
                    "apps_cz_account", "apps_cz_balance"):
             self.assertIn(cb, labels)
-        self.assertEqual(labels["apps_cz_wizard"], "⚡ ساخت سریع Edge")
+        self.assertEqual(labels["apps_cz_wizard"], "⚡ ساخت Edge · مدیریت دستی")
+        self.assertIn("Quick Relay", labels["apps_cz6_start"])
         self.assertEqual(labels["apps_cz_operations"], "📋 وضعیت عملیات")
         self.assertIn("همه NVL", labels["apps_cz_edge"])
         self.assertIn("apps_cz4_vps", labels)
@@ -140,9 +141,10 @@ class Phase1PanelTests(unittest.TestCase):
     def test_cz03_wizard_operations_and_key_add_dispatched_first(self):
         # The read-only presentation module should never intercept CZ-03 actions.
         source = (Path(__file__).resolve().parents[1] / "bot_final_v49-2.py").read_text("utf-8")
-        self.assertIn('d in ("apps_cz_wizard", "apps_cz_operations")', source)
+        self.assertIn('"apps_cz_operations", "apps_cz6_start"', source)
+        self.assertIn('"apps_cz6_status"', source)
         self.assertIn('d == "apps_cz_edge" or d.startswith("apps_cz4_")', source)
-        self.assertIn('d.startswith("apps_cz_q")', source)
+        self.assertIn('d.startswith(("apps_cz_q", "apps_cz6_resume_"))', source)
         self.assertLess(source.index("_cloudzy_quick_edge.handle_callback("),
                         source.index("_cloudzy_admin_panel.handle_callback("))
         self.cb("apps_cz_keys_0")

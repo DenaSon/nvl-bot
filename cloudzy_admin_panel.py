@@ -135,11 +135,13 @@ class CloudzyAdminPanel:
             if data == "apps_cz_home":
                 await self._display(query,
                     "☁️ <b>مدیریت Cloudzy و Edge</b>\n\n"
-                    "⚡ ساخت سریع Edge: خرید VPS و نصب Legacy با تأیید مدیر.\n"
-                    "🛡 Edge جدید ابتدا غیرفعال ثبت می‌شود؛ DNS، Relay و کاربران تغییر نمی‌کنند.\n"
+                    "🚀 Quick Relay: خرید VPS، نصب Edge و Standby با Journal پایدار.\n"
+                    "🔐 نصب SSH فقط پس از تأیید مستقل اثر انگشت انجام می‌شود.\n"
+                    "🛡 DNS، Relay پیش‌فرض و کاربران تا CZ-07 تغییر نمی‌کنند.\n"
                     "ℹ️ آماده‌سازی Relay به‌صورت Standby فعال است؛ تغییر مسیر و انتقال کاربران در CZ-04B است.",
                     [
-                        [("⚡ ساخت سریع Edge", "apps_cz_wizard")],
+                        [("🚀 Quick Relay · خرید تا Standby", "apps_cz6_start")],
+                        [("⚡ ساخت Edge · مدیریت دستی", "apps_cz_wizard")],
                         [("🌐 Edge و Relay · همه NVL", "apps_cz_edge")],
                         [("🖥 سرورهای Cloudzy", "apps_cz_servers_0"),
                          ("🛠 مدیریت VPS", "apps_cz4_vps")],

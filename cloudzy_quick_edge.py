@@ -13,6 +13,7 @@ import base64
 import hashlib
 from html import escape
 import ipaddress
+import logging
 import re
 import secrets
 import socket
@@ -23,14 +24,16 @@ from cloudzy_service import (
     CloudzyAPIError, CloudzyError, CloudzyService, CloudzyUncertainError,
     CloudzyTimeout,
 )
+from cloudzy_cz05_catalog import CatalogHold, eligible_offers, preferred_regions
+
+log = logging.getLogger(__name__)
 
 CHARGEABLE_STATES = frozenset({
     "CREATING", "CREATE_UNCERTAIN", "CREATED", "WAITING", "HOLD_WAIT",
     "HOLD_IP", "HOLD_SSH", "HOSTKEY_PENDING", "PROVISIONING",
     "HOLD_PROVISION", "HOLD_PREFLIGHT", "HOLD_PROVIDER", "HOLD_UNKNOWN",
 })
-CYCLES = {"monthly": "ماهانه", "hourly": "ساعتی",
-          "quarterly": "سه‌ماهه", "annually": "سالانه"}
+CYCLES = {"hourly": "ساعتی"}
 TTL_SECONDS = 600
 PAGE_SIZE = 6
 OS_TEMPLATE = "ubuntu-24.04"
@@ -169,7 +172,7 @@ class ReceiptStore:
 
     def reserve(self, *, actor, chat, region, plan, cycle, price, port, pubkey):
         region, plan = _safe_id(region), _safe_id(plan)
-        if cycle not in CYCLES or not (isinstance(price, int) and price > 0):
+        if cycle != "hourly" or not (type(price) is int and price > 0):
             raise QuickEdgeHold("INVALID_PURCHASE_SELECTION")
         if type(actor) is not int or type(chat) is not int or not 1 <= port <= 65535:
             raise QuickEdgeHold("INVALID_OWNER_OR_PORT")
@@ -299,22 +302,36 @@ class QuickEdgeWizard:
                     return
                 port, pub = await self._preflight()
                 regions = _items(await self._cloudzy("list_regions"))
-                valid = [(str(_val(r, "id", "code") or ""), str(_val(r, "name", "id") or "منطقه")) for r in regions]
-                valid = [(v, title) for v, title in valid if ID_PATTERN.fullmatch(v)]
-                tokens = self._token(valid[:48])
+                valid = preferred_regions(regions)
+                if not valid:
+                    raise CatalogHold("NO_ELIGIBLE_PREFERRED_REGION")
+                tokens = self._token(valid)
                 context.user_data["cz3"] = {
                     "actor": actor, "chat": chat, "expires": self.now() + TTL_SECONDS,
                     "regions": tokens, "port": port,
                     "pub_sha": hashlib.sha256(pub.encode()).hexdigest(),
-                    "cycle": "monthly"
+                    "cycle": "hourly"
                 }
-                rows = [[("🌍 " + name[:27], "apps_cz_qr_" + token)] for token, (_, name) in tokens.items()]
+                rows = [[("⚡ انتخاب خودکار منطقه", "apps_cz_qauto")]]
+                rows.extend([("🌍 " + name[:27], "apps_cz_qr_" + token)] for token, (_, name) in tokens.items())
                 rows.append([("↩️ Cloudzy", "apps_cz_home")])
                 await self._display(query, "⚡ <b>ساخت سریع Edge</b>\n\n"
-                    "۱. منطقه Cloudzy را انتخاب کنید.\n"
+                    "۱. انتخاب خودکار بر اساس اولویت یا انتخاب دستی منطقه.\n"
+                    "✅ فقط Regular CPU با ظرفیت زنده و پرداخت ساعتی.\n"
                     "✅ نصب با مسیر Legacy؛ سیستم‌عامل ثابت و بدون انتخاب.\n"
                     "⚠️ هنوز خریدی انجام نشده و Relay فعلی تغییر نمی‌کند.",
                     rows, markup)
+            elif data == "apps_cz_qauto":
+                s = self._session(context, actor, chat)
+                # On unknown stock/API failure, STOP; never silently mark a region available.
+                for region, name in s["regions"].values():
+                    offers = await self._eligible_for_region(region)
+                    if offers:
+                        s["region"], s["region_name"] = region, name
+                        await self._plans(query, s, markup, offers=offers)
+                        break
+                else:
+                    raise CatalogHold("NO_AVAILABLE_HOURLY_STANDARD_PLAN")
             elif data.startswith("apps_cz_qr_"):
                 s = self._session(context, actor, chat)
                 chosen = s["regions"].get(data[len("apps_cz_qr_"):])
@@ -325,7 +342,7 @@ class QuickEdgeWizard:
             elif data.startswith("apps_cz_qcy_"):
                 s = self._session(context, actor, chat)
                 cycle = data[len("apps_cz_qcy_"):]
-                if cycle not in CYCLES or "region" not in s:
+                if cycle != "hourly" or "region" not in s:
                     raise QuickEdgeHold("INVALID_CYCLE_OR_REGION")
                 s["cycle"] = cycle
                 await self._plans(query, s, markup)
@@ -367,6 +384,7 @@ class QuickEdgeWizard:
                 port, pub = await self._preflight()
                 if port != s["port"] or hashlib.sha256(pub.encode()).hexdigest() != s["pub_sha"]:
                     raise QuickEdgeHold("SSH_PORT_OR_KEY_CHANGED")
+                await self._check_offer_current(s["region"], s["plan"], s["price"])
                 opid = await asyncio.to_thread(
                     self.store.reserve, actor=actor, chat=chat, region=s["region"],
                     plan=s["plan"], cycle=s["cycle"], price=s["price"],
@@ -477,63 +495,68 @@ class QuickEdgeWizard:
             else:
                 raise QuickEdgeHold("INVALID_CALLBACK")
         except CloudzyUncertainError:
+            ref = secrets.token_hex(4)
+            log.error("CZ05_CALLBACK ref=%s stage=provider_write status=UNCERTAIN", ref)
             await query.message.reply_text(
-                "⚠️ پاسخ Cloudzy نامعلوم است. ابتدا کلیدها/سرورها را بررسی کنید؛ عملیات را کورکورانه تکرار نکنید.")
-        except CloudzyAPIError as e:
+                f"⚠️ نتیجه درخواست Cloudzy نامشخص است. پیگیری: CZ05-{ref}. "
+                "ابتدا وضعیت عملیات را بررسی کنید؛ خرید را تکرار نکنید.")
+        except CloudzyAPIError as exc:
+            ref = secrets.token_hex(4)
+            safe_code = re.sub(r"[^A-Za-z0-9_-]", "", str(exc.code or ""))[:60]
+            log.warning("CZ05_CALLBACK ref=%s http=%s provider_code=%s",
+                        ref, exc.status, safe_code)
             await query.message.reply_text(
-                f"⛔️ Cloudzy درخواست را رد کرد (HTTP {e.status}). مجوز یا وضعیت حساب را بررسی کنید.")
-        except (QuickEdgeHold, CloudzyError, ValueError, TypeError, KeyError):
+                f"⛔️ Cloudzy HTTP {exc.status} ({_text(safe_code or 'API_REJECTED')}). "
+                f"پیگیری: CZ05-{ref}")
+        except (QuickEdgeHold, CatalogHold, CloudzyError, ValueError, TypeError, KeyError) as exc:
+            ref = secrets.token_hex(4)
+            code = str(exc) if isinstance(exc, (QuickEdgeHold, CatalogHold)) else type(exc).__name__
+            log.warning("CZ05_CALLBACK ref=%s stage=selection reason=%s", ref, code)
             await query.message.reply_text(
-                "⛔️ عملیات متوقف شد؛ مرحله، مجوز، تنظیمات Core یا وضعیت عملیات تغییر کرده است. "
-                "از «وضعیت عملیات» بررسی کنید. خرید تکراری انجام ندهید.")
+                f"⛔️ بررسی Cloudzy متوقف شد. کد: {_text(code)} | پیگیری: CZ05-{ref}. "
+                "هیچ خریدی انجام ندهید تا علت بررسی شود.")
         except Exception:
+            ref = secrets.token_hex(4)
+            log.exception("CZ05_CALLBACK ref=%s stage=unexpected", ref)
             await query.message.reply_text(
-                "⛔️ خطای غیرمنتظره. وضعیت عملیات را بررسی کنید؛ خرید یا نصب را تکرار نکنید.")
+                f"⛔️ خطای غیرمنتظره Cloudzy. پیگیری: CZ05-{ref}. وضعیت عملیات را بررسی کنید.")
 
-    async def _plans(self, query, session, markup, page=0):
-        raw = await self._cloudzy(
-            "list_plans", region=session["region"], billing_cycle=session["cycle"])
-        plans = raw.get("plans", []) if isinstance(raw, dict) else []
-        all_rows = []
-        for item in plans if isinstance(plans, list) else []:
-            if not isinstance(item, dict):
-                continue
-            pid = _val(item, "id")
-            price = item.get("price")
-            if not isinstance(pid, str) or not ID_PATTERN.fullmatch(pid) or not isinstance(price, dict):
-                continue
-            cents = _val(price, "amountCents", "priceCents", "monthlyEquivCents")
-            if type(cents) is not int or cents <= 0:
-                continue
-            scope = str(item.get("priceScope", "catalog_base"))
-            label = str(_val(item, "name", "slug", "id") or "plan")[:34]
-            basis = ("معادل ماهانه" if _val(price, "monthlyEquivCents") is not None
-                     and _val(price, "amountCents", "priceCents") is None
-                     else CYCLES[session["cycle"]])
-            all_rows.append((pid, label, cents, scope, basis))
+    async def _eligible_for_region(self, region):
+        # Two independently fetched, exact-region reads; no generic price fallback.
+        catalog = await self._cloudzy(
+            "list_plans", region=region, billing_cycle="hourly")
+        availability = await self._cloudzy("list_plan_availability", region)
+        return eligible_offers(catalog, availability, region=region)
+
+    async def _check_offer_current(self, region, plan_id, cents):
+        offers = await self._eligible_for_region(region)
+        if not any(pid == plan_id and amount == cents for pid, _name, amount, _scope, _basis in offers):
+            raise CatalogHold("PLAN_STOCK_OR_HOURLY_PRICE_CHANGED")
+
+    async def _plans(self, query, session, markup, page=0, *, offers=None):
+        if session.get("cycle") != "hourly":
+            raise CatalogHold("HOURLY_ONLY")
+        all_rows = offers if offers is not None else await self._eligible_for_region(session["region"])
         all_rows = all_rows[:120]
         max_page = max(1, (len(all_rows) + PAGE_SIZE - 1) // PAGE_SIZE)
         page = min(page, max_page - 1)
         tokens = self._token(all_rows[page*PAGE_SIZE:(page+1)*PAGE_SIZE])
         session["plans"] = tokens
-        rows = [[(f"📦 {name[:22]} · {price} سنت ({basis})", "apps_cz_qp_" + token)]
-                for token, (_, name, price, _, basis) in tokens.items()]
-        rows.extend([[("◀️ قبلی", f"apps_cz_qpg_{page-1}")] if page else []])
+        rows = [[(f"📦 {name[:22]} · {price} سنت/ساعت", "apps_cz_qp_" + token)]
+                for token, (_, name, price, _, _) in tokens.items()]
+        if page:
+            rows.append([("◀️ قبلی", f"apps_cz_qpg_{page-1}")])
         if page + 1 < max_page:
             rows.append([("بعدی ▶️", f"apps_cz_qpg_{page+1}")])
-        rows.extend([
-            [("ساعتی", "apps_cz_qcy_hourly"), ("ماهانه", "apps_cz_qcy_monthly")],
-            [("سه‌ماهه", "apps_cz_qcy_quarterly"), ("سالانه", "apps_cz_qcy_annually")],
-            [("↩️ شروع مجدد", "apps_cz_wizard")],
-        ])
-        rows = [row for row in rows if row]
+        rows.append([("↩️ انتخاب منطقه", "apps_cz_wizard")])
         await self._display(query,
-            "📦 <b>انتخاب پلن Cloudzy</b>\n"
+            "📦 <b>پلن‌های ساعتی و موجود Regular CPU</b>\n"
             f"منطقه: {_text(session['region_name'])}\n"
-            f"دوره پرداخت: {CYCLES[session['cycle']]}\n"
-            f"صفحه {page+1}/{max_page}\n\n"
-            "⚠️ این مبالغ پایه و تخمینی‌اند، نه قیمت نهایی شامل IPv4.\n"
-            "اگر پلنی نمایش داده نمی‌شود، قیمت معتبر برای این دوره در کاتالوگ موجود نیست.",
+            f"صفحه {page+1}/{max_page}\n"
+            f"پلن‌های واجد شرایط: {len(all_rows)}\n\n"
+            "⚠️ قیمت کاتالوگ برحسب سنت/ساعت و تقریبی است؛ هزینه IPv4 "
+            "و مبلغ نهایی سفارش ممکن است متفاوت باشد.\n"
+            "موجودی لحظه‌ای پیش از خرید دوباره کنترل می‌شود.",
             rows, markup)
 
     async def _operation_screen(self, query, op, markup, actor, chat):
@@ -569,8 +592,35 @@ class QuickEdgeWizard:
         await self._display(query, text, rows, markup)
 
     async def _buy(self, opid, chat, pub, app):
+        # No Cloudzy POST until fresh stock and price still match the receipt.
         try:
             op = await asyncio.to_thread(self.store.get, opid)
+            if op["billing_cycle"] != "hourly":
+                raise CatalogHold("HOURLY_ONLY")
+            await self._check_offer_current(op["region"], op["plan_id"], op["price_cents"])
+        except (CatalogHold, CloudzyAPIError, CloudzyError, QuickEdgeHold) as exc:
+            code = str(exc) if isinstance(exc, CatalogHold) else type(exc).__name__
+            log.warning("CZ05_PRE_PURCHASE_BLOCK op=%s stage=stock code=%s", opid[:16], code)
+            try:
+                await asyncio.to_thread(self.store.change, opid, "CREATING", "REJECTED",
+                                        hold_reason="CZ05_STOCK_OR_PRICE_UNVERIFIED")
+            except QuickEdgeHold:
+                log.exception("CZ05_PRE_PURCHASE_JOURNAL_FAILED op=%s", opid[:16])
+            await app.bot.send_message(
+                chat, f"⛔️ خرید انجام نشد؛ موجودی یا قیمت ساعتی تأیید نشد. "
+                      f"کد: CZ05_STOCK_OR_PRICE_UNVERIFIED | عملیات: {opid[:16]}")
+            return
+        except Exception:
+            log.exception("CZ05_PRE_PURCHASE_UNEXPECTED op=%s", opid[:16])
+            try:
+                await asyncio.to_thread(self.store.change, opid, "CREATING", "REJECTED",
+                                        hold_reason="CZ05_PREFLIGHT_ERROR")
+            except QuickEdgeHold:
+                pass
+            await app.bot.send_message(chat,
+                f"⛔️ بررسی پیش از خرید ناموفق بود. کد: CZ05_PREFLIGHT_ERROR | عملیات: {opid[:16]}")
+            return
+        try:
             data = await self._cloudzy(
                 "create_server", hostname=op["hostname"], plan_id=op["plan_id"],
                 region=op["region"], os_template_id=OS_TEMPLATE,
@@ -587,6 +637,8 @@ class QuickEdgeWizard:
                                         hold_reason="CLOUDZY_HTTP_REJECTED_" + str(exc.status))
             except QuickEdgeHold:
                 pass
+            log.warning("CZ05_PURCHASE_REJECTED op=%s http=%s code=%s",
+                        opid[:16], exc.status, re.sub(r"[^A-Za-z0-9_-]", "", str(exc.code or ""))[:60])
             await app.bot.send_message(
                 chat, f"⛔️ خرید توسط Cloudzy رد شد (HTTP {exc.status}). "
                 "هیچ نصب Edge انجام نشد؛ پس از اصلاح شرایط می‌توانید درخواست جدید ثبت کنید.")
@@ -596,6 +648,8 @@ class QuickEdgeWizard:
             # than allowing another chargeable attempt on an ambiguous deployment.
             reason = ("CREATE_RESULT_UNCERTAIN" if isinstance(exc, CloudzyUncertainError)
                       else "CREATE_OR_RECEIPT_FAILED")
+            log.error("CZ05_PURCHASE_UNCERTAIN op=%s reason=%s exception=%s",
+                      opid[:16], reason, type(exc).__name__)
             try:
                 await asyncio.to_thread(self.store.change, opid, "CREATING",
                     "CREATE_UNCERTAIN", hold_reason=reason)

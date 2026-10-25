@@ -1,5 +1,6 @@
 """CZ-03: hermetic purchase/journal/SSH-pin + Legacy adapter tests."""
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 import asyncio
 import sqlite3
@@ -62,20 +63,37 @@ class FakeCloudzy:
     def __init__(self):
         self.calls = []
         self.fail_create = None
+        self.available = True
+        self.frankfurt_available = True
+        self.amsterdam_available = True
         self.server = {"state": "active", "primaryIpv4": "8.8.8.8",
                        "id": "server-1", "hostname": ""}
         self.keys = []
 
     def list_regions(self):
         self.calls.append("regions")
-        return [{"id": "fra", "name": "Frankfurt"}]
+        return [
+            {"id": "NL-Amsterdam-DC2", "name": "Amsterdam", "isActive": True, "isHidden": False, "isOutOfStock": False},
+            {"id": "DE-Frankfurt", "name": "Frankfurt", "isActive": True, "isHidden": False, "isOutOfStock": False}
+        ]
 
     def list_plans(self, *, region, billing_cycle):
         self.calls.append("plans")
-        return {"plans": [{
-            "id": "plan-1", "name": "Small", "priceScope": "regional_catalog_base",
-            "price": {"amountCents": 250},
+        return {"region": region, "billingCycle": billing_cycle, "plans": [{
+            "id": "plan-1", "name": "VPS 1 GB", "slug": "vps-1gb",
+            "instanceType": "default", "priceScope": "regional_catalog_base",
+            "price": {"regionId": region, "billingCycle": "hourly",
+                      "amount": 1, "monthlyEquivCents": 695, "currency": "USD"},
         }]}
+
+    def list_plan_availability(self, region):
+        self.calls.append("availability")
+        available = (self.available and
+                     (self.frankfurt_available if region == "DE-Frankfurt" else self.amsterdam_available))
+        return {"region": region, "checkedAt": datetime.now(timezone.utc).isoformat(),
+                "plans": [{"planId": "plan-1", "slug": "vps-1gb",
+                           "available": available, "source": "live",
+                           "fitsOnNodes": 2 if available else 0}]}
 
     def create_server(self, **kw):
         self.calls.append(("create", kw))
@@ -188,10 +206,57 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         await self.app.drain()
         return self.wizard.store.latest()
 
+    async def test_auto_skips_unavailable_frankfurt_and_picks_amsterdam(self):
+        self.api.frankfurt_available = False
+        await self.cb("apps_cz_wizard")
+        await self.cb("apps_cz_qauto")
+        self.assertEqual(self.ctx.user_data["cz3"]["region"], "NL-Amsterdam-DC2")
+        self.assertTrue(any(x.startswith("apps_cz_qp_") for x in self.query.callbacks))
+        self.assertFalse(any(isinstance(x, tuple) and x[0] == "create" for x in self.api.calls))
+
+    async def test_no_stock_blocks_manual_plan_and_never_creates(self):
+        self.api.available = False
+        await self.cb("apps_cz_wizard")
+        reg = next(x for x in self.query.callbacks if x.startswith("apps_cz_qr_"))
+        await self.cb(reg)
+        self.assertFalse(any(x.startswith("apps_cz_qp_") for x in self.query.callbacks))
+        await self.cb("apps_cz_qauto")
+        self.assertFalse(any(isinstance(x, tuple) and x[0] == "create" for x in self.api.calls))
+
+    async def test_old_monthly_callback_rejected(self):
+        await self.cb("apps_cz_wizard")
+        await self.cb("apps_cz_qcy_monthly")
+        self.assertIn("INVALID_CYCLE_OR_REGION", self.query.text)
+        self.assertFalse(any(isinstance(x, tuple) and x[0] == "create" for x in self.api.calls))
+
+    async def test_stock_disappears_at_confirmation_without_charge(self):
+        confirm = await self.start_selection()
+        self.api.available = False
+        await self.cb(confirm)
+        self.assertIsNone(self.wizard.store.latest())
+        self.assertFalse(any(isinstance(x, tuple) and x[0] == "create" for x in self.api.calls))
+
+    async def test_stock_disappears_after_reservation_before_provider_post(self):
+        confirm = await self.start_selection()
+        original = self.wizard._launch
+        def change_stock_before_task(app, opid, task):
+            self.api.available = False
+            return original(app, opid, task)
+        self.wizard._launch = change_stock_before_task
+        await self.cb(confirm)
+        await self.app.drain()
+        self.assertEqual(self.wizard.store.latest()["status"], "REJECTED")
+        self.assertFalse(any(isinstance(x, tuple) and x[0] == "create" for x in self.api.calls))
+
+    async def test_explicit_monthly_reservation_is_rejected(self):
+        with self.assertRaises(QuickEdgeHold):
+            self.wizard.store.reserve(actor=112, chat=334, region="DE-Frankfurt",
+                plan="plan-1", cycle="monthly", price=100, port=2252, pubkey=self.pub)
+
     async def test_crash_during_create_recovers_from_exact_provider_name_without_post(self):
         opid = self.wizard.store.reserve(
-            actor=112, chat=334, region="fra", plan="plan-1",
-            cycle="monthly", price=250, port=2252, pubkey=self.pub)
+            actor=112, chat=334, region="DE-Frankfurt", plan="plan-1",
+            cycle="hourly", price=1, port=2252, pubkey=self.pub)
         self.api.server["hostname"] = self.wizard.store.get(opid)["hostname"]
         await self.cb("apps_cz_operations")
         self.assertIn("apps_cz_qcheck_" + opid, self.query.callbacks)
@@ -203,8 +268,8 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
 
     async def test_crash_during_wait_recovers_without_new_order(self):
         opid = self.wizard.store.reserve(
-            actor=112, chat=334, region="fra", plan="plan-1",
-            cycle="monthly", price=250, port=2252, pubkey=self.pub)
+            actor=112, chat=334, region="DE-Frankfurt", plan="plan-1",
+            cycle="hourly", price=1, port=2252, pubkey=self.pub)
         self.wizard.store.change(opid, "CREATING", "CREATED",
                                  provider_server_id="server-1")
         self.wizard.store.change(opid, "CREATED", "WAITING")
@@ -248,7 +313,7 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         args = purchase_calls[0][1]
         self.assertTrue(args["confirm"])
         self.assertEqual(args["os_template_id"], "ubuntu-24.04")
-        self.assertEqual(args["billing_cycle"], "monthly")
+        self.assertEqual(args["billing_cycle"], "hourly")
         self.assertEqual(args["ssh_public_keys"], [self.pub])
         self.assertEqual(args["ip_version"], "ipv4")
         record = self.wizard.store.latest()
@@ -361,8 +426,8 @@ class JournalTests(unittest.TestCase):
         self.journal = ReceiptStore(db, now=lambda: 1234)
 
     def reserve(self):
-        return self.journal.reserve(actor=1, chat=2, region="fra", plan="plan",
-            cycle="monthly", price=350, port=2252, pubkey="ssh-ed25519 AAAA")
+        return self.journal.reserve(actor=1, chat=2, region="DE-Frankfurt", plan="plan",
+            cycle="hourly", price=350, port=2252, pubkey="ssh-ed25519 AAAA")
 
     def test_stable_unique_and_recoverable_without_recharging(self):
         opid = self.reserve()

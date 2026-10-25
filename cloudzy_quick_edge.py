@@ -14,6 +14,7 @@ import hashlib
 from html import escape
 import ipaddress
 import logging
+import os
 import re
 import secrets
 import socket
@@ -246,7 +247,7 @@ class ReceiptStore:
 class QuickEdgeWizard:
     def __init__(self, *, conn_factory, preflight, provision, verify,
                  cloudzy_factory=CloudzyService, fingerprint=capture_ssh_host_key,
-                 now=time.time, standby_service=None):
+                 now=time.time, standby_service=None, cz06_enabled=None):
         self.store = ReceiptStore(conn_factory, now=now)
         self.preflight = preflight
         self.provision = provision
@@ -257,6 +258,8 @@ class QuickEdgeWizard:
         self._running = set()  # same-process single-flight, DB journal survives restarts
         self.quick_runs = QuickRelayJournal(conn_factory, now=now)
         self.standby_service = standby_service  # Wired after CZ-04A construction.
+        self.cz06_enabled = (cz06_enabled if cz06_enabled is not None else
+                             lambda: os.environ.get("NVL_CZ06_ENABLE") == "1")
 
     def _launch(self, app, opid, task):
         if opid in self._running:
@@ -305,6 +308,9 @@ class QuickEdgeWizard:
             return
         try:
             if data in ("apps_cz_wizard", "apps_cz6_start"):
+                if data == "apps_cz6_start" and (
+                        not self.cz06_enabled() or self.standby_service is None):
+                    raise QuickRelayHold("CZ06_DISABLED_OR_STANDBY_ADAPTER_MISSING")
                 self.store.initialize()
                 old = await asyncio.to_thread(self.store.latest)
                 if old and old["status"] not in ("EDGE_READY", "REJECTED"):
@@ -331,9 +337,11 @@ class QuickEdgeWizard:
                     + "۱. انتخاب خودکار بر اساس اولویت یا انتخاب دستی منطقه.\n"
                     "✅ فقط Regular CPU با ظرفیت زنده و پرداخت ساعتی.\n"
                     "✅ نصب با مسیر Legacy؛ سیستم‌عامل ثابت و بدون انتخاب.\n"
-                    "⚠️ پس از تأیید خرید، آماده‌سازی و Standby خودکار است؛ "
-                    "تأیید مستقل هویت SSH همچنان الزامی است. "
-                    "هیچ DNS یا کاربری منتقل نمی‌شود.",
+                    + ("⚠️ بعد از تأیید خرید، آماده‌سازی Standby خودکار است؛ "
+                       "تأیید مستقل SSH همچنان الزامی است. "
+                       if s["quick_relay"] else
+                       "🛠 نصب و ثبت Standby در مسیر دستی و با کنترل مجزا انجام می‌شود. ")
+                    + "هیچ DNS یا کاربری منتقل نمی‌شود.",
                     rows, markup)
             elif data == "apps_cz_qauto":
                 s = self._session(context, actor, chat)
@@ -397,6 +405,9 @@ class QuickEdgeWizard:
                     raise QuickEdgeHold("CONFIRMATION_EXPIRED")
                 if not all(k in s for k in ("region", "plan", "price", "cycle", "port", "pub_sha")):
                     raise QuickEdgeHold("INVALID_SELECTION")
+                if s.get("quick_relay") and (
+                        not self.cz06_enabled() or self.standby_service is None):
+                    raise QuickRelayHold("CZ06_DISABLED_OR_STANDBY_ADAPTER_MISSING")
                 port, pub = await self._preflight()
                 if port != s["port"] or hashlib.sha256(pub.encode()).hexdigest() != s["pub_sha"]:
                     raise QuickEdgeHold("SSH_PORT_OR_KEY_CHANGED")
@@ -437,8 +448,10 @@ class QuickEdgeWizard:
                 if not run or run["actor_id"] != actor or run["chat_id"] != chat:
                     raise QuickRelayHold("WORKFLOW_OWNER_MISMATCH")
                 if op["status"] != "EDGE_READY" or run["stage"] not in (
-                        "EDGE_READY", "STANDBY_VERIFYING"):
+                        "INSTALLING", "EDGE_READY", "STANDBY_VERIFYING"):
                     raise QuickRelayHold("WORKFLOW_NOT_RESUMABLE")
+                if run["stage"] == "INSTALLING":
+                    await self._quick_stage(opid, "EDGE_READY", "INSTALLING", app)
                 if opid in self._running:
                     raise QuickRelayHold("OPERATION_ALREADY_RUNNING")
                 await self._display(query,
@@ -662,7 +675,7 @@ class QuickEdgeWizard:
                 rows.append([("🔎 بررسی بدون خرید مجدد", "apps_cz_qcheck_" + op["id"])])
         if (run and run["actor_id"] == actor and run["chat_id"] == chat
                 and status == "EDGE_READY" and run["stage"] in (
-                    "EDGE_READY", "STANDBY_VERIFYING")):
+                    "INSTALLING", "EDGE_READY", "STANDBY_VERIFYING")):
             rows.insert(0, [("▶️ ادامه امن Standby", "apps_cz6_resume_" + op["id"])])
         rows.append([("🔄 تازه‌سازی", "apps_cz_qview_" + op["id"])])
         rows.append([("↩️ Cloudzy", "apps_cz_home")])
@@ -733,7 +746,6 @@ class QuickEdgeWizard:
             server_id = _server_id(data)
             await asyncio.to_thread(
                 self.store.change, opid, "CREATING", "CREATED", provider_server_id=server_id)
-            await self._quick_stage(opid, "WAITING_PROVIDER", "PURCHASING", app)
         except CloudzyAPIError as exc:
             # API definitively rejected POST (4xx); no uncertain provider charge.
             try:
@@ -765,6 +777,16 @@ class QuickEdgeWizard:
                 pass
             await app.bot.send_message(chat, "⚠️ وضعیت خرید Cloudzy نامشخص است؛ خرید را تکرار نکنید. "
                                            "از «وضعیت عملیات» بررسی کنید.")
+            return
+        # The provider POST and its receipt are already committed. Never
+        # misclassify a progress-journal error as an uncertain charged POST.
+        try:
+            await self._quick_stage(opid, "WAITING_PROVIDER", "PURCHASING", app)
+        except Exception:
+            log.exception("CZ06_AFTER_CHARGE_JOURNAL_HOLD op=%s", opid[:16])
+            await app.bot.send_message(
+                chat, f"⚠️ خرید در Cloudzy ثبت شده، اما ثبت پیشرفت قطع شده است. "
+                      f"پیگیری: {opid[:16]}. خرید را تکرار نکنید.")
             return
         try:
             await asyncio.to_thread(self.store.change, opid, "CREATED", "WAITING")

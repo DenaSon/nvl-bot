@@ -4580,7 +4580,7 @@ def _db_set_account_host(un, host):
         # paths. Automatic balancing also uses this single-account setter.
         _db_assert_legacy_host_mutation_allowed(conn)
         _db_assert_account_write_allowed(conn)
-        conn.execute("UPDATE ssh_accounts SET host=? WHERE username=?", (host, un))
+        conn.execute("UPDATE ssh_accounts SET host=? WHERE username=? AND service_type='ssh'", (host, un))
 
 def _db_set_hosts_bulk(usernames, host):
     with db_conn() as conn:
@@ -4588,7 +4588,7 @@ def _db_set_hosts_bulk(usernames, host):
         _db_assert_legacy_host_mutation_allowed(conn)
         _db_assert_account_write_allowed(conn)
         conn.executemany(
-            "UPDATE ssh_accounts SET host=? WHERE username=?",
+            "UPDATE ssh_accounts SET host=? WHERE username=? AND service_type='ssh'",
             [(host, u) for u in usernames],
         )
 
@@ -4597,7 +4597,7 @@ def _db_set_all_accounts_host(host):
         conn.execute("BEGIN IMMEDIATE")
         _db_assert_legacy_host_mutation_allowed(conn)
         _db_assert_account_write_allowed(conn)
-        conn.execute("UPDATE ssh_accounts SET host=? WHERE status != '⏳ درحال ساخت'", (host,))
+        conn.execute("UPDATE ssh_accounts SET host=? WHERE status != '⏳ درحال ساخت' AND service_type='ssh'", (host,))
 def _db_get_recent_active_accounts(days=7):
     """اکانت‌های فعالی که در N روز اخیر ساخته شده‌اند (برای انتقال خودکار هنگام فشار سرور)."""
     w = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")

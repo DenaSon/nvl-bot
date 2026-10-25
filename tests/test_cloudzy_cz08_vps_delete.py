@@ -176,6 +176,46 @@ class DeleteFlowTests(unittest.TestCase):
         self.assertNotIn("apps_cz_del_" + token, self.query.callbacks)
         self.assertIn("ACTIVE_ACCOUNTS_ASSIGNED", self.query.text)
 
+    def test_independent_active_marzban_records_do_not_block_retired_ssh_edge(self):
+        # Historic global host assignment can have tagged V2Ray metadata
+        # with the old SSH Edge even though their remote server is Marzban.
+        with self.connect() as db:
+            db.executemany("INSERT INTO ssh_accounts VALUES (?,?,?)", [
+                (OLD, "🟢 فعال", "v2ray"),
+                (OLD, "🟢 فعال", "v2ray_vol"),
+                (MAIN, "🟢 فعال", "ssh"),
+            ])
+        token = self.detail("old-id")
+        self.assertIn("apps_cz_del_" + token, self.query.callbacks)
+        self.cb("apps_cz_del_" + token)
+        confirm = next(cb for cb in self.query.callbacks
+                       if cb.startswith("apps_cz_yes_"))
+        self.cb(confirm)
+        self.assertEqual(self.provider.deleted, ["old-id"])
+        # Deletion only retires the old Relay, it never changes Marzban
+        # subscriptions or silently rewrites historical account metadata.
+        with self.connect() as db:
+            self.assertEqual(db.execute(
+                "SELECT service_type,host FROM ssh_accounts "
+                "ORDER BY service_type").fetchall(),
+                [("ssh", MAIN), ("v2ray", OLD), ("v2ray_vol", OLD)])
+            self.assertEqual(db.execute(
+                "SELECT active,is_default FROM host_pool WHERE host=?",
+                (OLD,)).fetchone(), (0, 0))
+
+    def test_unknown_and_null_service_types_remain_protected(self):
+        with self.connect() as db:
+            db.execute("INSERT INTO ssh_accounts VALUES (?,?,?)",
+                       (OLD, "🟢 فعال", None))
+        tok = self.detail("old-id")
+        self.assertNotIn("apps_cz_del_" + tok, self.query.callbacks)
+        self.assertIn("ACTIVE_ACCOUNTS_ASSIGNED", self.query.text)
+        with self.connect() as db:
+            db.execute("UPDATE ssh_accounts SET service_type='unexpected' WHERE host=?", (OLD,))
+        tok = self.detail("old-id")
+        self.assertNotIn("apps_cz_del_" + tok, self.query.callbacks)
+        self.assertIn("ACTIVE_ACCOUNTS_ASSIGNED", self.query.text)
+
     def test_default_dns_mismatch_disables_all_delete(self):
         with self.connect() as db:
             db.execute("UPDATE settings SET value=? WHERE key='dns_current_ip'", (OLD,))
@@ -308,6 +348,24 @@ class DeleteFlowTests(unittest.TestCase):
         self.cb("apps_cz_del_" + token, role="agent")
         self.assertEqual(self.provider.deleted, [])
         self.assertIn("فقط مدیر", self.query.sent[-1])
+
+
+
+class HostWriterScopeTests(unittest.TestCase):
+    def test_legacy_bulk_and_single_host_writers_only_touch_ssh(self):
+        # The large runtime is intentionally not imported by hermetic CI.
+        source = (Path(__file__).resolve().parents[1] /
+                  "bot_final_v49-2.py").read_text(encoding="utf-8")
+        start = source.index("def _db_set_account_host(")
+        end = source.index("def _db_get_recent_active_accounts(", start)
+        section = source[start:end]
+        self.assertIn(
+            "UPDATE ssh_accounts SET host=? WHERE username=? AND service_type='ssh'",
+            section)
+        self.assertIn(
+            "UPDATE ssh_accounts SET host=? WHERE status != '⏳ درحال ساخت' AND service_type='ssh'",
+            section)
+        self.assertEqual(section.count("AND service_type='ssh'"), 3)
 
 
 if __name__ == "__main__":

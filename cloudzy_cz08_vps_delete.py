@@ -231,5 +231,6 @@ class CloudzyDeleteGuard:
             db.execute(
                 "UPDATE cloudzy_cz08_deletions "
                 "SET status=?,detail_code=?,updated_at=? WHERE id=? AND status='DELETING'",
-                ("DONE" if success else "HOLD", code, int(self.now()), opid),
+                ("DONE" if success else "REJECTED" if code.startswith("PROVIDER_REJECTED_") else "HOLD",
+                 code, int(self.now()), opid),
             )

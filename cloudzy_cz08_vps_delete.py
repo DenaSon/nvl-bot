@@ -121,18 +121,27 @@ class CloudzyDeleteGuard:
         if ipv4 == settings.get("core_wg_public_ip"):
             return ("PROTECTED", "CORE_SERVER")
         related = db.execute(
-            "SELECT active,is_default,is_standby FROM host_pool "
-            "WHERE host=? OR (provider='cloudzy' AND provider_instance_id=?)",
+            "SELECT host,active,is_default,is_standby,provider,provider_instance_id "
+            "FROM host_pool WHERE host=? OR "
+            "(provider='cloudzy' AND provider_instance_id=?)",
             (ipv4, provider_id),
         ).fetchall()
-        if any(is_default for _active, is_default, _standby in related):
+        # A legacy Edge can predate provider metadata. Accept only completely
+        # blank legacy identity OR an exact Cloudzy ID/IP pair, never a
+        # conflicting provider association.
+        if any((host != ipv4 or
+                not ((not prov and not pid) or
+                     (prov == "cloudzy" and pid == provider_id)))
+               for host, _active, _default, _standby, prov, pid in related):
+            return ("PROTECTED", "PROVIDER_OWNERSHIP_CONFLICT")
+        if any(is_default for _host, _active, is_default, _standby, _prov, _pid in related):
             return ("PROTECTED", "DEFAULT_HOST_REFERENCE")
         # Automatic failover protects live standby targets, not every retired
         # Edge with no customers and no route. A previously registered,
         # now-unrouted non-standby host can safely be retired after the normal
         # account/route/operation guards below. Unknown inventory remains
         # protected under global auto failover.
-        if any(is_standby for _active, _default, is_standby in related):
+        if any(is_standby for _host, _active, _default, is_standby, _prov, _pid in related):
             return ("PROTECTED", "STANDBY_FAILOVER_TARGET")
         if ((settings.get("phase6h_auto_failover_enabled") == "1"
                 or settings.get("auto_failover_mode") == "1")
@@ -228,17 +237,24 @@ class CloudzyDeleteGuard:
                 # Remove standby/active eligibility but preserve historic host identity.
                 # Never modify the default or user assignments.
                 matching = db.execute(
-                    "SELECT host,active,is_default,is_standby FROM host_pool "
-                    "WHERE host=? AND provider='cloudzy' AND provider_instance_id=?",
-                    (ipv4, provider_id),
+                    "SELECT host,active,is_default,is_standby,provider,provider_instance_id "
+                    "FROM host_pool WHERE host=?",
+                    (ipv4,),
                 ).fetchall()
-                if any(is_default for _, _, is_default, _ in matching):
-                    raise DeletionHold("POST_DELETE_DEFAULT_CHANGED")
+                if any(is_default or is_standby
+                       for _host, _active, is_default, is_standby, _prov, _pid in matching):
+                    raise DeletionHold("POST_DELETE_ROLE_CHANGED")
+                if any(not ((not prov and not pid)
+                            or (prov == "cloudzy" and pid == provider_id))
+                       for _host, _active, _default, _standby, prov, pid in matching):
+                    raise DeletionHold("POST_DELETE_OWNERSHIP_CHANGED")
                 if matching:
+                    # Retire even older NVL entries created before Cloudzy
+                    # provider metadata was persisted. Preserve the history row.
                     db.execute(
                         "UPDATE host_pool SET active=0,is_standby=0 "
-                        "WHERE host=? AND provider='cloudzy' AND provider_instance_id=? "
-                        "AND is_default=0", (ipv4, provider_id),
+                        "WHERE host=? AND is_default=0 AND is_standby=0",
+                        (ipv4,),
                     )
             db.execute(
                 "UPDATE cloudzy_cz08_deletions "

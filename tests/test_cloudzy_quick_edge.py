@@ -314,8 +314,18 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         review = next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_"))
         await self.cb(review)
         accept = next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_"))
-        await self.cb(accept)
-        await self.app.drain()
+        # The hermetic CI intentionally omits python-telegram-bot. Supply its
+        # two formatting primitives locally to exercise real background markup.
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        telegram_stub = SimpleNamespace(
+            InlineKeyboardButton=lambda text, callback_data: SimpleNamespace(
+                text=text, callback_data=callback_data),
+            InlineKeyboardMarkup=lambda rows: SimpleNamespace(inline_keyboard=rows),
+        )
+        with patch.dict("sys.modules", {"telegram": telegram_stub}):
+            await self.cb(accept)
+            await self.app.drain()
         run = self.wizard.quick_runs.get(record["id"])
         self.assertEqual(run["stage"], "READY")
         # Background CZ06 progress updates retain the operation-status button.

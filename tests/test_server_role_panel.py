@@ -200,6 +200,27 @@ class ServerRolePanelTests(unittest.TestCase):
                 detail_json TEXT,created_at TEXT
             )""")
 
+    def test_probe_history_is_archived_before_cascading_host_delete(self):
+        with self.db_conn() as db:
+            db.execute("PRAGMA foreign_keys=ON")
+            db.execute("""CREATE TABLE host_probe_results(
+                id INTEGER PRIMARY KEY,host TEXT NOT NULL,probe_type TEXT NOT NULL,
+                source TEXT NOT NULL,ok INTEGER,latency_ms REAL,reason TEXT,
+                checked_at TEXT NOT NULL,
+                FOREIGN KEY(host) REFERENCES host_pool(host) ON DELETE CASCADE
+            )""")
+            db.execute(
+                "INSERT INTO host_probe_results VALUES(1,?,'service','core',0,"
+                "NULL,'TIMEOUT','2026-01-01')", (OLD,)
+            )
+        self.assertTrue(panel.delete_inactive(self.db_conn, OLD, CORE)[0])
+        with self.db_conn() as db:
+            self.assertEqual(
+                db.execute("SELECT host,probe_type,reason "
+                           "FROM host_probe_archive WHERE original_id=1").fetchone(),
+                (OLD, "service", "TIMEOUT")
+            )
+
     def test_stale_open_incident_is_closed_with_audit_before_metadata_delete(self):
         self.prepare_real_retirement_schema()
         with self.db_conn() as db:

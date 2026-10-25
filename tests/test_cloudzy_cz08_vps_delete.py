@@ -226,6 +226,40 @@ class DeleteFlowTests(unittest.TestCase):
                 "SELECT host FROM ssh_accounts WHERE status='فعال'").fetchall(),
                 [(MAIN,)])
 
+    def test_legacy_old_edge_without_provider_metadata_is_retired_after_delete(self):
+        # User's historic old Relay remained active but had empty provider fields.
+        with self.connect() as db:
+            db.execute(
+                "UPDATE host_pool SET provider=NULL,provider_instance_id=NULL WHERE host=?",
+                (OLD,),
+            )
+            db.execute("INSERT INTO settings VALUES ('phase6h_auto_failover_enabled','1')")
+        tok = self.detail("old-id")
+        self.assertIn("apps_cz_del_" + tok, self.query.callbacks)
+        self.cb("apps_cz_del_" + tok)
+        confirm = next(c for c in self.query.callbacks if c.startswith("apps_cz_yes_"))
+        self.cb(confirm)
+        self.assertEqual(self.provider.deleted, ["old-id"])
+        with self.connect() as db:
+            self.assertEqual(
+                db.execute("SELECT active,is_default,is_standby FROM host_pool WHERE host=?",
+                           (OLD,)).fetchone(), (0, 0, 0),
+            )
+            self.assertEqual(db.execute(
+                "SELECT value FROM settings WHERE key='dns_current_ip'").fetchone()[0],
+                MAIN,
+            )
+
+    def test_mismatched_provider_metadata_cannot_be_deleted(self):
+        with self.connect() as db:
+            db.execute(
+                "UPDATE host_pool SET provider='cloudzy',provider_instance_id='other-id' "
+                "WHERE host=?", (OLD,),
+            )
+        tok = self.detail("old-id")
+        self.assertNotIn("apps_cz_del_" + tok, self.query.callbacks)
+        self.assertIn("PROVIDER_OWNERSHIP_CONFLICT", self.query.text)
+
     def test_standby_vps_is_protected_even_when_failover_disabled(self):
         with self.connect() as db:
             db.execute("UPDATE host_pool SET is_standby=1 WHERE host=?", (OLD,))

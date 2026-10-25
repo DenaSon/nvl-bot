@@ -160,15 +160,24 @@ def _blocker(conn, host: str, core_ip: str) -> str | None:
     checked_ip(core_ip)
     if host == core_ip:
         return "حذف سرور Core مجاز نیست."
-    row = conn.execute(
-        "SELECT active, is_default FROM host_pool WHERE host=?", (host,)
-    ).fetchone()
+    columns = {col[1] for col in conn.execute("PRAGMA table_info(host_pool)")}
+    if "is_standby" in columns:
+        row = conn.execute(
+            "SELECT active,is_default,is_standby FROM host_pool WHERE host=?", (host,)
+        ).fetchone()
+    else:
+        # Legacy test fixtures did not carry standby state.
+        row = conn.execute(
+            "SELECT active,is_default,0 FROM host_pool WHERE host=?", (host,)
+        ).fetchone()
     if row is None:
         return "سرور در فهرست وجود ندارد یا قبلاً حذف شده است."
     if bool(row[0]):
         return "سرور هنوز فعال است؛ حذف فقط برای موارد غیرفعال مجاز است."
     if bool(row[1]):
         return "این سرور پیش‌فرض است؛ حذف مجاز نیست."
+    if bool(row[2]):
+        return "این سرور هنوز نقش Standby دارد؛ حذف مجاز نیست."
     settings = dict(conn.execute(
         "SELECT key, value FROM settings WHERE key IN ('hosts','dns_current_ip')"
     ).fetchall())
@@ -199,6 +208,24 @@ def _blocker(conn, host: str, core_ip: str) -> str | None:
         "AND (source_host=? OR target_host=?) LIMIT 1", (host, host)
     ).fetchone():
         return "رخداد بازِ پایش به این IP وابسته است."
+    if _table(conn, "cloudzy_edge_operations") and conn.execute(
+        "SELECT 1 FROM cloudzy_edge_operations WHERE public_ipv4=? "
+        "AND status NOT IN ('CANCELLED','REJECTED','EDGE_READY') LIMIT 1",
+        (host,)
+    ).fetchone():
+        return "عملیات خرید Cloudzy حل‌نشده به این IP وابسته است."
+    if _table(conn, "cloudzy_cz04b_operations") and conn.execute(
+        "SELECT 1 FROM cloudzy_cz04b_operations WHERE (source=? OR target=?) "
+        "AND status NOT IN ('READY','DONE','ABORTED') LIMIT 1",
+        (host, host)
+    ).fetchone():
+        return "عملیات Cloudzy Cutover حل‌نشده به این IP وابسته است."
+    if _table(conn, "cloudzy_cz07_jobs") and conn.execute(
+        "SELECT 1 FROM cloudzy_cz07_jobs WHERE (source=? OR target=?) "
+        "AND status NOT IN ('DONE','ABORTED') LIMIT 1",
+        (host, host)
+    ).fetchone():
+        return "عملیات انتقال کاربران حل‌نشده به این IP وابسته است."
     return _registry_blocker(host)
 
 
@@ -256,6 +283,12 @@ def _retirement_plan(conn, host: str, core_ip: str):
         (host,)
     ).fetchone():
         raise ValueError("UNRESOLVED_CLOUDZY_PURCHASE")
+    if _table(conn, "cloudzy_cz04b_operations") and conn.execute(
+        "SELECT 1 FROM cloudzy_cz04b_operations WHERE (source=? OR target=?) "
+        "AND status NOT IN ('READY','DONE','ABORTED') LIMIT 1",
+        (host, host)
+    ).fetchone():
+        raise ValueError("UNRESOLVED_CLOUDZY_CUTOVER")
     if _table(conn, "cloudzy_cz07_jobs") and conn.execute(
         "SELECT 1 FROM cloudzy_cz07_jobs WHERE (source=? OR target=?) "
         "AND status NOT IN ('DONE','ABORTED') LIMIT 1",

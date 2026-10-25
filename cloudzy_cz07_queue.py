@@ -52,6 +52,7 @@ class DurableCutoverQueue:
             actor INTEGER NOT NULL, chat INTEGER NOT NULL,
             source TEXT NOT NULL, target TEXT NOT NULL,
             provider_id TEXT NOT NULL, status TEXT NOT NULL,
+            source_fingerprint TEXT NOT NULL,
             total INTEGER NOT NULL, moved INTEGER NOT NULL DEFAULT 0,
             evidence TEXT NOT NULL, started_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL, code TEXT NOT NULL DEFAULT ''
@@ -147,9 +148,10 @@ class DurableCutoverQueue:
             ts = int(self.now())
             db.execute("""INSERT INTO cloudzy_cz07_jobs
                 (id,cz06_operation,actor,chat,source,target,provider_id,
-                 status,total,evidence,started_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,'QUEUED',?,'OPERATOR_ATTESTED_REAL_CLIENT_E2E',?,?)
-            """, (job, opid, actor, chat, source, target, pid, len(rows), ts, ts))
+                 source_fingerprint,status,total,evidence,started_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,'QUEUED',?,'OPERATOR_ATTESTED_REAL_CLIENT_E2E',?,?)
+            """, (job, opid, actor, chat, source, target, pid,
+                  expected_fp, len(rows), ts, ts))
             self._log(db, job, "QUEUED", "APPROVED_AFTER_EXTERNAL_E2E_ATTESTATION",
                       0, len(rows))
             return job
@@ -294,6 +296,11 @@ class DurableCutoverQueue:
         chat = rec["chat"]
         try:
             if not resume:
+                state = await asyncio.to_thread(self.cz04b._state, rec["target"])
+                if (state["source"] != rec["source"] or
+                        state["provider_id"] != rec["provider_id"] or
+                        _digest(state["users"]) != rec["source_fingerprint"]):
+                    raise CZ07Hold("APPROVAL_SOURCE_SNAPSHOT_CHANGED")
                 self.transition(job, "QUEUED", "ROUTING", code="ROUTE_START")
                 log.info("CZ07 job=%s stage=ROUTING code=CZ04B_GUARDED_CUTOVER_START source=%s target=%s",
                          job[:16], rec["source"], rec["target"])

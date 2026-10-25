@@ -204,6 +204,24 @@ class DeleteFlowTests(unittest.TestCase):
         self.assertNotIn("apps_cz_del_" + token, self.query.callbacks)
         self.assertIn("DELETION_HOLD", self.query.text)
 
+    def test_auto_failover_enabled_blocks_delete(self):
+        with self.connect() as db:
+            db.execute("INSERT INTO settings VALUES ('phase6h_auto_failover_enabled','1')")
+        token = self.detail("old-id")
+        self.assertNotIn("apps_cz_del_" + token, self.query.callbacks)
+        self.assertIn("AUTOMATIC_FAILOVER_ENABLED", self.query.text)
+
+    def test_definite_provider_rejection_is_not_ambiguous_hold(self):
+        self.provider.fail = CloudzyAPIError(403, "no delete permission")
+        token = self.detail("old-id")
+        self.cb("apps_cz_del_" + token)
+        confirm = next(x for x in self.query.callbacks if x.startswith("apps_cz_yes_"))
+        self.cb(confirm)
+        with self.connect() as db:
+            self.assertEqual(db.execute(
+                "SELECT status FROM cloudzy_cz08_deletions").fetchone()[0], "REJECTED")
+        self.assertFalse(self.provider.deleted)
+
     def test_live_list_absence_prevents_delete(self):
         token = self.detail("old-id")
         self.cb("apps_cz_del_" + token)

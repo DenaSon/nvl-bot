@@ -173,6 +173,12 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         self.temp = TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name) / "quick.sqlite"
+        with sqlite3.connect(self.path) as db:
+            db.execute("CREATE TABLE host_pool (host TEXT PRIMARY KEY, "
+                       "active INTEGER,is_default INTEGER,is_standby INTEGER,"
+                       "provider TEXT,provider_instance_id TEXT)")
+            db.execute("CREATE TABLE ssh_accounts "
+                       "(host TEXT,status TEXT,service_type TEXT)")
         self.now = [1000.0]
         self.ctx = FakeContext()
         self.query = FakeQuery()
@@ -552,7 +558,8 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         # Simulate an unchanged Core route; cancelled Edge is not registered.
         with self.db() as db:
             db.execute("CREATE TABLE IF NOT EXISTS host_pool "
-                       "(host TEXT,provider TEXT,provider_instance_id TEXT)")
+                       "(host TEXT,active INTEGER,is_default INTEGER,is_standby INTEGER,"
+                       "provider TEXT,provider_instance_id TEXT)")
             db.execute("CREATE TABLE IF NOT EXISTS settings "
                        "(key TEXT PRIMARY KEY,value TEXT)")
             db.executemany("INSERT OR REPLACE INTO settings VALUES(?,?)", [
@@ -623,8 +630,8 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("CANCEL_NOT_ALLOWED_OR_RUNNING", self.query.text)
         self.wizard._running.discard(op["id"])
         with self.db() as db:
-            db.execute("INSERT INTO host_pool VALUES (?,?,?)",
-                       ("8.8.8.8", "cloudzy", "server-1"))
+            db.execute("INSERT INTO host_pool VALUES (?,?,?,?,?,?)",
+                       ("8.8.8.8", 0, 0, 0, "cloudzy", "server-1"))
         await self.cb("apps_cz_qcancel_" + op["id"])
         confirm = next(x for x in self.query.callbacks if x.startswith("apps_cz_qcancelyes_"))
         await self.cb(confirm)
@@ -633,6 +640,114 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         with self.db() as db:
             count = db.execute("SELECT COUNT(*) FROM cloudzy_edge_cancel_events").fetchone()[0]
         self.assertEqual(count, 0)
+
+    async def test_recycled_old_ip_with_detached_host_can_be_cancelled(self):
+        # Regression for 144.172.119.6: old Relay is inactive, has no
+        # provider owner and no active SSH, but still has historic accounts.
+        self.prepare_cancel_guards()
+        with self.db() as db:
+            db.execute("INSERT INTO host_pool VALUES (?,?,?,?,?,?)",
+                       ("8.8.8.8", 0, 0, 0, None, None))
+            db.executemany("INSERT INTO ssh_accounts VALUES (?,?,?)", [
+                ("8.8.8.8", "🔴 غیرفعال", "ssh"),
+                ("8.8.8.8", "🟢 فعال", "v2ray"),
+                ("8.8.8.8", "🟢 فعال", "v2ray_vol"),
+            ])
+        op = await self.purchase()
+        await self.cb("apps_cz_operations")
+        await self.cb(next(x for x in self.query.callbacks
+                           if x.startswith("apps_cz_qreview_")))
+        await self.cb(next(x for x in self.query.callbacks
+                           if x.startswith("apps_cz_qaccept_")))
+        await self.app.drain()
+        self.assertEqual(self.provisions, [])  # no remote/WG changes
+        blocked = self.wizard.store.get(op["id"])
+        self.assertEqual(blocked["status"], "HOLD_PROVISION")
+        self.assertEqual(blocked["hold_reason"], "CLOUDZY_IP_ALREADY_REGISTERED")
+        self.assertEqual(self.wizard.quick_runs.get(op["id"]), None)
+        await self.cb("apps_cz_operations")
+        await self.cb("apps_cz_qcancel_" + op["id"])
+        yes = next(x for x in self.query.callbacks
+                   if x.startswith("apps_cz_qcancelyes_"))
+        await self.cb(yes)
+        self.assertEqual(self.wizard.store.get(op["id"])["status"], "CANCELLED")
+        with self.db() as db:
+            self.assertEqual(db.execute(
+                "SELECT active,is_default,is_standby,provider,provider_instance_id "
+                "FROM host_pool WHERE host='8.8.8.8'").fetchone(),
+                (0, 0, 0, None, None))
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM ssh_accounts WHERE host='8.8.8.8'"
+            ).fetchone()[0], 3)
+        self.wizard.store.reserve(
+            actor=112, chat=334, region="DE-Frankfurt",
+            plan="plan-1", cycle="hourly", price=1,
+            port=2252, pubkey=self.pub)
+
+    async def test_recycled_ip_rejects_active_ssh_or_unknown_account(self):
+        self.prepare_cancel_guards()
+        op = await self.purchase()
+        self.wizard.store.change(
+            op["id"], "HOSTKEY_PENDING", "HOLD_PROVISION",
+            hold_reason="PARTIAL_OR_UNVERIFIED_LEGACY_INSTALL")
+        with self.db() as db:
+            db.execute("INSERT INTO host_pool VALUES (?,?,?,?,?,?)",
+                       ("8.8.8.8", 0, 0, 0, None, None))
+            db.execute("INSERT INTO ssh_accounts VALUES (?,?,?)",
+                       ("8.8.8.8", "🟢 فعال", "ssh"))
+        await self.cb("apps_cz_operations")
+        await self.cb("apps_cz_qcancel_" + op["id"])
+        yes = next(x for x in self.query.callbacks
+                   if x.startswith("apps_cz_qcancelyes_"))
+        await self.cb(yes)
+        self.assertIn("CANCEL_ACTIVE_SSH_ACCOUNTS_ATTACHED", self.query.text)
+        with self.db() as db:
+            db.execute("UPDATE ssh_accounts SET service_type=NULL")
+        await self.cb("apps_cz_qcancel_" + op["id"])
+        yes = next(x for x in self.query.callbacks
+                   if x.startswith("apps_cz_qcancelyes_"))
+        await self.cb(yes)
+        self.assertIn("CANCEL_ACTIVE_SSH_ACCOUNTS_ATTACHED", self.query.text)
+        self.assertEqual(self.wizard.store.get(op["id"])["status"], "HOLD_PROVISION")
+
+    async def test_recycled_ip_rejects_provider_owned_or_live_host(self):
+        self.prepare_cancel_guards()
+        op = await self.purchase()
+        self.wizard.store.change(
+            op["id"], "HOSTKEY_PENDING", "HOLD_PROVISION",
+            hold_reason="PARTIAL_OR_UNVERIFIED_LEGACY_INSTALL")
+        for values in [
+            (1, 0, 0, None, None),
+            (0, 1, 0, None, None),
+            (0, 0, 1, None, None),
+            (0, 0, 0, "cloudzy", "server-1"),
+            (0, 0, 0, "cloudzy", "another-server"),
+        ]:
+            with self.subTest(values=values):
+                with self.db() as db:
+                    db.execute("DELETE FROM host_pool")
+                    db.execute("INSERT INTO host_pool VALUES (?,?,?,?,?,?)",
+                               ("8.8.8.8", *values))
+                with self.assertRaisesRegex(QuickEdgeHold, "CANCEL_HOST_REGISTERED"):
+                    self.wizard.store.cancel(
+                        op["id"], actor=112, chat=334,
+                        expected_status="HOLD_PROVISION")
+        self.assertEqual(self.wizard.store.get(op["id"])["status"], "HOLD_PROVISION")
+
+    async def test_refresh_identical_telegram_message_is_not_cloudzy_error(self):
+        class BadRequest(Exception):
+            pass
+
+        original = self.query.edit_message_text
+        async def unchanged(_text, **_kw):
+            raise BadRequest("Message is not modified: content and markup identical")
+        self.query.edit_message_text = unchanged
+        try:
+            await self.cb("apps_cz_operations")
+        finally:
+            self.query.edit_message_text = original
+        self.assertFalse(any("خطای غیرمنتظره" in text
+                             for text, _kw in self.query.screens))
 
     async def test_cancel_disallowed_during_uncertain_purchase_and_nonadmin(self):
         opid = self.wizard.store.reserve(

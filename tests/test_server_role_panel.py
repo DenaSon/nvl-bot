@@ -182,6 +182,182 @@ class ServerRolePanelTests(unittest.TestCase):
                 "SELECT 1 FROM host_pool WHERE host=?", (OLD,)
             ).fetchone())
 
+
+    def prepare_real_retirement_schema(self):
+        with self.db_conn() as db:
+            db.execute("ALTER TABLE host_pool ADD COLUMN is_standby INTEGER DEFAULT 0")
+            db.execute("ALTER TABLE ssh_accounts ADD COLUMN status TEXT")
+            db.execute("ALTER TABLE ssh_accounts ADD COLUMN service_type TEXT")
+            db.execute("DROP TABLE filter_incidents")
+            db.execute("""CREATE TABLE filter_incidents (
+                id INTEGER PRIMARY KEY,incident_id TEXT,source_host TEXT,
+                target_host TEXT,state TEXT,last_reason TEXT,
+                opened_at TEXT,updated_at TEXT,closed_at TEXT
+            )""")
+            db.execute("""CREATE TABLE filter_incident_events (
+                id INTEGER PRIMARY KEY,incident_id TEXT,event_type TEXT,state TEXT,
+                reason_code TEXT,source_host TEXT,target_host TEXT,
+                detail_json TEXT,created_at TEXT
+            )""")
+
+    def test_probe_history_is_archived_before_cascading_host_delete(self):
+        with self.db_conn() as db:
+            db.execute("PRAGMA foreign_keys=ON")
+            db.execute("""CREATE TABLE host_probe_results(
+                id INTEGER PRIMARY KEY,host TEXT NOT NULL,probe_type TEXT NOT NULL,
+                source TEXT NOT NULL,ok INTEGER,latency_ms REAL,reason TEXT,
+                checked_at TEXT NOT NULL,
+                FOREIGN KEY(host) REFERENCES host_pool(host) ON DELETE CASCADE
+            )""")
+            db.execute(
+                "INSERT INTO host_probe_results VALUES(1,?,'service','core',0,"
+                "NULL,'TIMEOUT','2026-01-01')", (OLD,)
+            )
+        self.assertTrue(panel.delete_inactive(self.db_conn, OLD, CORE)[0])
+        with self.db_conn() as db:
+            self.assertEqual(
+                db.execute("SELECT host,probe_type,reason "
+                           "FROM host_probe_archive WHERE original_id=1").fetchone(),
+                (OLD, "service", "TIMEOUT")
+            )
+
+    def test_stale_open_incident_is_closed_with_audit_before_metadata_delete(self):
+        self.prepare_real_retirement_schema()
+        with self.db_conn() as db:
+            db.execute(
+                "INSERT INTO filter_incidents VALUES "
+                "(1,'INC-OLD',?,NULL,'CONFIRMING','REGIONAL_SUSPECTED',"
+                "'2026-01-01','2026-01-01',NULL)", (OLD,)
+            )
+        ok, why = panel.deletion_preview(self.db_conn, OLD, CORE)
+        self.assertFalse(ok)
+        self.assertIn("رخداد باز", why)
+        ready, report = panel.dependency_report(self.db_conn, OLD, CORE)
+        self.assertTrue(ready, report)
+        self.assertIn("INC-OLD", report)
+        ok, message = panel.retire_inactive_dependencies(
+            self.db_conn, OLD, CORE, actor=101
+        )
+        self.assertTrue(ok, message)
+        with self.db_conn() as db:
+            state = db.execute(
+                "SELECT state,last_reason,closed_at FROM filter_incidents"
+            ).fetchone()
+            self.assertEqual(state[:2], ("RETIRED", "HOST_RETIRED_BY_OPERATOR"))
+            self.assertIsNotNone(state[2])
+            evt = db.execute(
+                "SELECT incident_id,event_type,state,reason_code FROM filter_incident_events"
+            ).fetchone()
+            self.assertEqual(evt, ("INC-OLD", "HOST_RETIRED", "RETIRED",
+                                   "HOST_RETIRED_BY_OPERATOR"))
+            audit = db.execute(
+                "SELECT host,actor_id,account_count,incident_count "
+                "FROM host_retirement_audit"
+            ).fetchone()
+            self.assertEqual(audit, (OLD, 101, 0, 1))
+        self.assertTrue(panel.delete_inactive(self.db_conn, OLD, CORE)[0])
+
+    def test_detach_inactive_ssh_and_independent_marzban_without_deleting_accounts(self):
+        self.prepare_real_retirement_schema()
+        with self.db_conn() as db:
+            db.executemany(
+                "INSERT INTO ssh_accounts(username,host,status,service_type) VALUES (?,?,?,?)",
+                [
+                    ("inactive-ssh", OLD, "🔴 غیرفعال", "ssh"),
+                    ("remote-v2", OLD, "🟢 فعال", "v2ray"),
+                    ("remote-v2-vol", OLD, "🟢 فعال", "v2ray_vol"),
+                ]
+            )
+        self.assertFalse(panel.deletion_preview(self.db_conn, OLD, CORE)[0])
+        ready, report = panel.dependency_report(self.db_conn, OLD, CORE)
+        self.assertTrue(ready, report)
+        self.assertIn("<code>ssh</code> · 🔴 غیرفعال: 1", report)
+        self.assertIn("<code>v2ray</code> · 🟢 فعال: 1", report)
+        ok, message = panel.retire_inactive_dependencies(
+            self.db_conn, OLD, CORE, actor=101
+        )
+        self.assertTrue(ok, message)
+        with self.db_conn() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM ssh_accounts WHERE host IS NULL"
+            ).fetchone()[0], 3)
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM host_retirement_account_audit"
+            ).fetchone()[0], 3)
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM ssh_accounts"
+            ).fetchone()[0], 3)
+        self.assertTrue(panel.delete_inactive(self.db_conn, OLD, CORE)[0])
+
+    def test_retirement_blocks_active_ssh_and_unknown_types(self):
+        self.prepare_real_retirement_schema()
+        with self.db_conn() as db:
+            db.execute("INSERT INTO ssh_accounts VALUES (?,?,?,?)",
+                       ("active-ssh", OLD, "🟢 فعال", "ssh"))
+        self.assertFalse(panel.dependency_report(self.db_conn, OLD, CORE)[0])
+        self.assertFalse(panel.retire_inactive_dependencies(
+            self.db_conn, OLD, CORE, actor=101)[0])
+        with self.db_conn() as db:
+            self.assertEqual(db.execute(
+                "SELECT host FROM ssh_accounts WHERE username='active-ssh'"
+            ).fetchone()[0], OLD)
+            db.execute(
+                "UPDATE ssh_accounts SET status='🔴 غیرفعال',service_type=NULL"
+            )
+        self.assertFalse(panel.retire_inactive_dependencies(
+            self.db_conn, OLD, CORE, actor=101)[0])
+
+    def test_retirement_rejects_operational_incident_and_active_failover(self):
+        self.prepare_real_retirement_schema()
+        with self.db_conn() as db:
+            db.execute(
+                "INSERT INTO filter_incidents VALUES "
+                "(1,'INC-BLOCK',?,NULL,'FAILOVER_STARTED','STARTED',"
+                "'2026-01-01','2026-01-01',NULL)", (OLD,)
+            )
+        self.assertFalse(panel.dependency_report(self.db_conn, OLD, CORE)[0])
+        self.assertFalse(panel.retire_inactive_dependencies(
+            self.db_conn, OLD, CORE, actor=101)[0])
+        with self.db_conn() as db:
+            db.execute(
+                "UPDATE filter_incidents SET state='SUSPECTED' WHERE id=1"
+            )
+            db.execute(
+                "INSERT INTO failover_operations VALUES(?,NULL,NULL)", (OLD,)
+            )
+        self.assertFalse(panel.retire_inactive_dependencies(
+            self.db_conn, OLD, CORE, actor=101)[0])
+        with self.db_conn() as db:
+            self.assertIsNone(db.execute(
+                "SELECT closed_at FROM filter_incidents"
+            ).fetchone()[0])
+
+    def test_retirement_rechecks_route_role_and_egress_at_commit(self):
+        self.prepare_real_retirement_schema()
+        with self.db_conn() as db:
+            db.execute(
+                "INSERT INTO filter_incidents VALUES "
+                "(1,'INC-OLD',?,NULL,'SUSPECTED','REGIONAL_SUSPECTED',"
+                "'2026-01-01','2026-01-01',NULL)", (OLD,)
+            )
+        self.assertTrue(panel.dependency_report(self.db_conn, OLD, CORE)[0])
+        with self.db_conn() as db:
+            db.execute(
+                "UPDATE host_pool SET is_standby=1 WHERE host=?", (OLD,)
+            )
+        self.assertFalse(panel.retire_inactive_dependencies(
+            self.db_conn, OLD, CORE, actor=101)[0])
+        with self.db_conn() as db:
+            db.execute(
+                "UPDATE host_pool SET is_standby=0 WHERE host=?", (OLD,)
+            )
+            db.execute(
+                "INSERT INTO edge_egress_allocations VALUES('edge-staged',?)",
+                (OLD,)
+            )
+        self.assertFalse(panel.retire_inactive_dependencies(
+            self.db_conn, OLD, CORE, actor=101)[0])
+
     def test_malformed_ip_never_approves_delete(self):
         for bad in ("127.0.0.1", "0.0.0.0", "1.2.3.4;DROP", "8.8.8.08", ""):
             self.assertFalse(panel.deletion_preview(self.db_conn, bad, CORE)[0])

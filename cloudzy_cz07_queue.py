@@ -114,6 +114,16 @@ class DurableCutoverQueue:
             db.execute("BEGIN IMMEDIATE")
             self.cz04b.guard(db)
             self.cz04b._guard_settings(self.cz04b._settings(db))
+            # CZ-08 durable delete fences a pending/uncertain provider operation.
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                          "AND name='cloudzy_cz08_deletions'").fetchone():
+                if db.execute(
+                    "SELECT 1 FROM cloudzy_cz08_deletions "
+                    "WHERE provider_id=? AND status IN ('DELETING','HOLD') LIMIT 1",
+                    (pid,)
+                ).fetchone():
+                    raise CZ07Hold("TARGET_PROVIDER_DELETE_UNRESOLVED")
+
             if db.execute("SELECT 1 FROM cloudzy_cz07_jobs WHERE status NOT IN ('DONE','ABORTED')").fetchone():
                 raise CZ07Hold("ANOTHER_CZ07_JOB_UNRESOLVED")
             if self.cz04b._open(db):

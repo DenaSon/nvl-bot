@@ -1,4 +1,4 @@
-"""Cloudzy admin's read-only API views, used alongside the CZ-03 Quick Edge wizard.
+"""Cloudzy admin inventory, safe VPS deletion and read-only account views.
 
 The main bot dispatches purchase, operation-journal and SSH public-key add
 callbacks to QuickEdgeWizard before this panel. This panel itself does not
@@ -14,6 +14,7 @@ import secrets
 import time
 
 from cloudzy_service import CloudzyAPIError, CloudzyError, CloudzyService, CloudzyUncertainError
+from cloudzy_cz08_vps_delete import CloudzyDeleteGuard, DeletionHold, ipv4_from_service
 
 MAX_PAGE = 999
 PAGE_SIZE = 6
@@ -89,9 +90,10 @@ def _paging(prefix, page, count):
 
 
 class CloudzyAdminPanel:
-    def __init__(self, *, factory=CloudzyService, now=time.time):
+    def __init__(self, *, factory=CloudzyService, now=time.time, delete_guard=None):
         self.factory = factory
         self.now = now
+        self.delete_guard = delete_guard if delete_guard is not None else CloudzyDeleteGuard(now=now)
 
     async def _api(self, method, *args, **kwargs):
         return await asyncio.to_thread(lambda: getattr(self.factory(), method)(*args, **kwargs))
@@ -107,7 +109,8 @@ class CloudzyAdminPanel:
             safe = {k: v for k, v in row.items()
                     if k in ("id", "uuid", "serviceId", "keyId",
                              "hostname", "name", "label", "state", "status",
-                             "region", "regionId", "code", "planName", "planId")
+                             "region", "regionId", "code", "planName", "planId",
+                             "primaryIpv4", "ipv4", "publicIp", "ipAddress")
                     and isinstance(v, (str, int, float, bool))}
             refs[token] = (kind, str(_get(row, "id", "uuid", "serviceId", "keyId") or ""), safe)
             tokens.append(token)
@@ -144,8 +147,8 @@ class CloudzyAdminPanel:
                         [("🔁 CZ-07 · انتقال خودکار و صف", "apps_cz7_home")],
                         [("⚡ ساخت Edge · مدیریت دستی", "apps_cz_wizard")],
                         [("🌐 Edge و Relay · همه NVL", "apps_cz_edge")],
-                        [("🖥 سرورهای Cloudzy", "apps_cz_servers_0"),
-                         ("🛠 مدیریت VPS", "apps_cz4_vps")],
+                        [("🖥 سرورهای Cloudzy · مدیریت و حذف", "apps_cz_servers_0")],
+                        [("🛠 مدیریت VPS", "apps_cz4_vps")],
                         [("🌍 مناطق و پلن‌ها", "apps_cz_regions_0"),
                          ("💰 موجودی", "apps_cz_balance")],
                         [("👤 اطلاعات حساب", "apps_cz_account"),
@@ -158,34 +161,144 @@ class CloudzyAdminPanel:
                 all_rows = _items(await self._api("list_servers"))
                 values, page, count = _paged(all_rows, page)
                 tokens = self._refs(context, "server", values, actor, chat)
-                rows = []
+                rows, descriptions = [], []
+                icons = {"PRIMARY": "🟢", "ELIGIBLE": "🖥", "PROTECTED": "🔒", "UNKNOWN": "⚠️"}
                 for entry, token in zip(values, tokens):
-                    title = _get(entry, "hostname", "name", "label", "id") or "سرور"
-                    rows.append([(f"🖥 {str(title)[:32]}", "apps_cz_sv_" + token)])
+                    server_id = str(_get(entry, "id", "uuid", "serviceId") or "")
+                    ip = ipv4_from_service(entry)
+                    state, _ = self.delete_guard.status(server_id, ip)
+                    title = str(_get(entry, "hostname", "name", "label", "id") or "VPS")
+                    label = ("رله اصلی" if state == "PRIMARY" else
+                             "قابل بررسی" if state == "ELIGIBLE" else
+                             "محافظت‌شده" if state == "PROTECTED" else "نامشخص")
+                    rows.append([(f"{icons[state]} {title[:22]} · {label}",
+                                  "apps_cz_sv_" + token)])
+                    descriptions.append(
+                        f"{icons[state]} <b>{_value(title, max_chars=48)}</b>\n"
+                        f"   <code>{_value(ip or 'IP نامشخص')}</code> · {label}")
                 rows += _paging("apps_cz_servers", page, count)
-                rows.append([("↩️ Cloudzy", "apps_cz_home")])
+                rows += [[("🔄 تازه‌سازی فهرست", "apps_cz_servers_0")],
+                         [("↩️ Cloudzy", "apps_cz_home")]]
                 await self._display(query,
                     f"🖥 <b>سرورهای Cloudzy</b>\n"
                     f"تعداد دریافت‌شده: {len(all_rows)}\n"
                     f"صفحه {page + 1} از {count}\n\n"
-                    "این فهرست از حساب Cloudzy دریافت می‌شود؛ هر VPS الزاماً Edge فعال NVL نیست.",
+                    + ("\n\n".join(descriptions) if descriptions else
+                       "📭 در حساب Cloudzy سروری یافت نشد.")
+                    + "\n\n🟢 رله پیش‌فرض NVL فقط نمایش داده می‌شود و حذف ندارد."
+                    "\n🔐 حذف سایر VPSها پس از بازبینی زنده و تأیید مجدد مدیر است.",
                     rows, markup)
             elif data.startswith("apps_cz_sv_"):
-                server_id, fallback = self._resolve(context, data[len("apps_cz_sv_"):], "server", actor, chat)
+                token = data[len("apps_cz_sv_"):]
+                server_id, fallback = self._resolve(context, token, "server", actor, chat)
                 server = _obj(await self._api("get_server", server_id))
+                identified = _get(server, "id", "uuid", "serviceId")
+                if identified is not None and str(identified) != server_id:
+                    raise DeletionHold("PROVIDER_ID_CHANGED")
                 display = server or fallback
+                ip = ipv4_from_service(server) or ipv4_from_service(fallback)
+                state, reason = self.delete_guard.status(server_id, ip)
+                caption = ("🟢 <b>رله اصلی NVL — حفاظت‌شده</b>" if state == "PRIMARY"
+                           else "🔒 <b>دارای وابستگی یا عملیات فعال — حذف غیرفعال</b>"
+                           if state == "PROTECTED"
+                           else "⚠️ <b>نقش سرور قابل تأیید نیست — حذف غیرفعال</b>"
+                           if state == "UNKNOWN"
+                           else "🗑 <b>سرور غیرپیش‌فرض — امکان درخواست حذف</b>")
+                rows = [[("🔎 وضعیت", "apps_cz_st_" + token),
+                         ("📊 مصرف منابع", "apps_cz_use_" + token)]]
+                if state == "ELIGIBLE":
+                    rows.append([("🗑 درخواست حذف از Cloudzy", "apps_cz_del_" + token)])
+                rows.append([("↩️ فهرست سرورها", "apps_cz_servers_0")])
                 await self._display(query,
                     "🖥 <b>جزئیات VPS</b>\n\n"
+                    f"{caption}\n\n"
                     f"نام: {_value(_get(display, 'hostname', 'name'))}\n"
                     f"شناسه: <code>{_value(server_id)}</code>\n"
-                    f"IP: {_value(_get(display, 'ipv4', 'primaryIpv4', 'publicIp', 'ipAddress'))}\n"
+                    f"IP: <code>{_value(ip or 'نامشخص')}</code>\n"
                     f"منطقه: {_value(_get(display, 'region', 'regionId'))}\n"
                     f"پلن: {_value(_get(display, 'planName', 'planId', 'plan'))}\n"
-                    f"وضعیت: {_value(_get(display, 'state', 'status'))}\n\n"
-                    "⚠️ وضعیت VPS به معنی سالم‌بودن Edge یا دسترسی اپراتورهای ایران نیست.",
-                    [[("🔎 وضعیت", "apps_cz_st_" + data[len("apps_cz_sv_"):]),
-                      ("📊 مصرف منابع", "apps_cz_use_" + data[len("apps_cz_sv_"):])],
-                     [("↩️ سرورها", "apps_cz_servers_0")]], markup)
+                    f"وضعیت Cloudzy: {_value(_get(display, 'state', 'status'))}\n"
+                    + (f"کد حفاظت: <code>{_value(reason)}</code>\n"
+                       if state in ("PROTECTED", "UNKNOWN") else "")
+                    + "\n🛡 نقش Relay از دیتابیس زنده NVL خوانده می‌شود؛ "
+                      "هیچ IP ثابتی برای حفاظت استفاده نشده است.",
+                    rows, markup)
+            elif data.startswith("apps_cz_del_"):
+                token = data[len("apps_cz_del_"):]
+                server_id, fallback = self._resolve(context, token, "server", actor, chat)
+                server = _obj(await self._api("get_server", server_id))
+                if _get(server, "id", "uuid", "serviceId") not in (None, server_id):
+                    raise DeletionHold("PROVIDER_ID_CHANGED")
+                ip = ipv4_from_service(server) or ipv4_from_service(fallback)
+                state, reason = self.delete_guard.status(server_id, ip)
+                if state != "ELIGIBLE":
+                    raise DeletionHold(reason)
+                nonce = secrets.token_hex(6)
+                context.user_data["cz_delete_pending"] = {
+                    "actor": actor, "chat": chat, "id": server_id, "ip": ip,
+                    "nonce": nonce, "expires": self.now() + 90,
+                }
+                await self._display(query,
+                    "⚠️ <b>تأیید نهایی حذف VPS از Cloudzy</b>\n\n"
+                    f"سرور: {_value(_get(server, 'hostname', 'name') or server_id)}\n"
+                    f"IP: <code>{_value(ip)}</code>\n"
+                    f"شناسه: <code>{_value(server_id)}</code>\n\n"
+                    "🗑 حذف از Cloudzy واقعی و برگشت‌ناپذیر است و ممکن است هزینه "
+                    "و داده‌های این VPS را از بین ببرد.\n"
+                    "🛡 پیش از DELETE نقش Relay و وابستگی‌ها دوباره بررسی می‌شوند.\n"
+                    "❗ این عملیات Core، DNS و سایر Relayها را تغییر نمی‌دهد.",
+                    [[("🔴 تأیید حذف دائمی VPS", "apps_cz_yes_" + nonce)],
+                     [("❌ انصراف", "apps_cz_servers_0")]], markup)
+            elif data.startswith("apps_cz_yes_"):
+                nonce = data[len("apps_cz_yes_"):]
+                pending = context.user_data.pop("cz_delete_pending", None)
+                if (not isinstance(pending, dict) or pending.get("nonce") != nonce
+                        or pending.get("actor") != actor or pending.get("chat") != chat
+                        or self.now() >= pending.get("expires", 0)):
+                    raise DeletionHold("DELETE_CONFIRMATION_EXPIRED")
+                server_id, expected_ip = pending["id"], pending["ip"]
+                current = _items(await self._api("list_servers"))
+                matched = [item for item in current
+                           if str(_get(item, "id", "uuid", "serviceId") or "") == server_id]
+                if len(matched) != 1:
+                    raise DeletionHold("SERVER_NOT_IN_LIVE_INVENTORY")
+                details = _obj(await self._api("get_server", server_id))
+                if _get(details, "id", "uuid", "serviceId") not in (None, server_id):
+                    raise DeletionHold("PROVIDER_ID_CHANGED")
+                observed_ip = ipv4_from_service(details) or ipv4_from_service(matched[0])
+                if observed_ip != expected_ip:
+                    raise DeletionHold("SERVER_IPV4_CHANGED")
+                state, reason = self.delete_guard.status(server_id, observed_ip)
+                if state != "ELIGIBLE":
+                    raise DeletionHold(reason)
+                opid = await asyncio.to_thread(
+                    self.delete_guard.reserve, server_id, observed_ip,
+                    actor=actor, chat=chat)
+                try:
+                    await self._api("delete_server", server_id, confirm=True)
+                except CloudzyAPIError as exc:
+                    await asyncio.to_thread(
+                        self.delete_guard.finish, opid, success=False,
+                        code=f"PROVIDER_REJECTED_HTTP_{exc.status}")
+                    raise
+                except Exception:
+                    # Timeouts and ambiguous 5xx MUST remain HOLD; never retry blindly.
+                    await asyncio.to_thread(
+                        self.delete_guard.finish, opid, success=False,
+                        code="PROVIDER_RESULT_UNCERTAIN")
+                    raise
+                await asyncio.to_thread(
+                    self.delete_guard.finish, opid, success=True,
+                    code="PROVIDER_DELETE_ACCEPTED")
+                await self._display(query,
+                    "✅ <b>درخواست حذف Cloudzy پذیرفته شد</b>\n\n"
+                    f"شناسه سرور: <code>{_value(server_id)}</code>\n"
+                    f"IP: <code>{_value(observed_ip)}</code>\n"
+                    f"پیگیری: <code>{_value(opid[:16])}</code>\n\n"
+                    "🛡 Relay پیش‌فرض، DNS و حساب‌های NVL تغییر نکرده‌اند.\n"
+                    "ℹ️ برای تأیید حذف نهایی نزد ارائه‌دهنده، فهرست را تازه‌سازی کنید.",
+                    [[("🔄 بررسی فهرست Cloudzy", "apps_cz_servers_0")],
+                     [("↩️ Cloudzy", "apps_cz_home")]], markup)
             elif data.startswith(("apps_cz_st_", "apps_cz_use_")):
                 usage = data.startswith("apps_cz_use_")
                 token = data[len("apps_cz_use_"):] if usage else data[len("apps_cz_st_"):]
@@ -294,6 +407,11 @@ class CloudzyAdminPanel:
                     [[("↩️ کلیدها", "apps_cz_keys_0")]], markup)
             else:
                 await query.message.reply_text("⛔️ گزینه نامعتبر یا منقضی است.")
+        except DeletionHold as exc:
+            await query.message.reply_text(
+                f"⛔️ حذف VPS متوقف شد. کد: <code>{_value(str(exc))}</code>. "
+                "Relay پیش‌فرض یا سرور دارای وابستگی قابل حذف نیست.",
+                parse_mode="HTML")
         except CloudzyUncertainError:
             await query.message.reply_text(
                 "⚠️ نتیجه عملیات Cloudzy قطعی نیست. ابتدا فهرست را بررسی کنید؛ درخواست را کورکورانه تکرار نکنید.")

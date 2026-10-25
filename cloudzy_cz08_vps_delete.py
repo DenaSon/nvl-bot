@@ -118,18 +118,26 @@ class CloudzyDeleteGuard:
             return ("PRIMARY", "PRIMARY_RELAY")
         if not ipv4:
             return ("UNKNOWN", "PROVIDER_IPV4_NOT_VERIFIED")
-        if (settings.get("phase6h_auto_failover_enabled") == "1"
-                or settings.get("auto_failover_mode") == "1"):
-            return ("PROTECTED", "AUTOMATIC_FAILOVER_ENABLED")
         if ipv4 == settings.get("core_wg_public_ip"):
             return ("PROTECTED", "CORE_SERVER")
         related = db.execute(
-            "SELECT active,is_default FROM host_pool "
+            "SELECT active,is_default,is_standby FROM host_pool "
             "WHERE host=? OR (provider='cloudzy' AND provider_instance_id=?)",
             (ipv4, provider_id),
         ).fetchall()
-        if any(is_default for active, is_default in related):
+        if any(is_default for _active, is_default, _standby in related):
             return ("PROTECTED", "DEFAULT_HOST_REFERENCE")
+        # Automatic failover protects live standby targets, not every retired
+        # Edge with no customers and no route. A previously registered,
+        # now-unrouted non-standby host can safely be retired after the normal
+        # account/route/operation guards below. Unknown inventory remains
+        # protected under global auto failover.
+        if any(is_standby for _active, _default, is_standby in related):
+            return ("PROTECTED", "STANDBY_FAILOVER_TARGET")
+        if ((settings.get("phase6h_auto_failover_enabled") == "1"
+                or settings.get("auto_failover_mode") == "1")
+                and not related):
+            return ("PROTECTED", "AUTOMATIC_FAILOVER_ENABLED")
         if ipv4 in [h.strip() for h in (settings.get("hosts") or "").split(",")]:
             return ("PROTECTED", "CUSTOMER_HOSTS_REFERENCE")
         users = db.execute(

@@ -501,6 +501,24 @@ def delete_inactive(db_conn, host: str, core_ip: str, guard=None):
             reason = _blocker(conn, host, core_ip)
             if reason:
                 return False, reason
+            # Legacy host_probe_results has ON DELETE CASCADE on host_pool.
+            # Keep historical measurement evidence even when SQLite FK
+            # enforcement is enabled at this connection.
+            if _table(conn, "host_probe_results"):
+                conn.execute("""CREATE TABLE IF NOT EXISTS host_probe_archive (
+                    original_id INTEGER NOT NULL,host TEXT NOT NULL,
+                    probe_type TEXT NOT NULL,source TEXT NOT NULL,ok INTEGER,
+                    latency_ms REAL,reason TEXT,checked_at TEXT NOT NULL,
+                    archived_at TEXT NOT NULL,PRIMARY KEY(host,original_id)
+                )""")
+                conn.execute(
+                    "INSERT OR IGNORE INTO host_probe_archive "
+                    "(original_id,host,probe_type,source,ok,latency_ms,"
+                    "reason,checked_at,archived_at) "
+                    "SELECT id,host,probe_type,source,ok,latency_ms,reason,"
+                    "checked_at,? FROM host_probe_results WHERE host=?",
+                    (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), host)
+                )
             changed = conn.execute(
                 "DELETE FROM host_pool WHERE host=? AND active=0 "
                 "AND COALESCE(is_default, 0)=0",

@@ -339,7 +339,7 @@ class QuickEdgeWizard:
                     "✅ نصب با مسیر Legacy؛ سیستم‌عامل ثابت و بدون انتخاب.\n"
                     + ("⚠️ بعد از تأیید خرید، آماده‌سازی Standby خودکار است؛ "
                        "تأیید مستقل SSH همچنان الزامی است. "
-                       if s["quick_relay"] else
+                       if data == "apps_cz6_start" else
                        "🛠 نصب و ثبت Standby در مسیر دستی و با کنترل مجزا انجام می‌شود. ")
                     + "هیچ DNS یا کاربری منتقل نمی‌شود.",
                     rows, markup)

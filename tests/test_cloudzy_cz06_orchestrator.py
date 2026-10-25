@@ -62,6 +62,19 @@ class JournalTests(unittest.TestCase):
             self.create("c")  # One in-flight quick workflow at a time.
 
 
+    def test_cancelled_stage_is_terminal_and_new_quick_run_can_begin(self):
+        self.create("a")
+        self.journal.advance("a", "HOLD", expected="PURCHASING",
+                             code="INSTALL_REQUIRES_RECONCILIATION")
+        self.journal.advance("a", "CANCELLED", expected="HOLD",
+                             code="OPERATOR_CANCELLED")
+        self.create("b")
+        self.assertEqual(self.journal.get("a")["stage"], "CANCELLED")
+        self.assertEqual(self.journal.get("b")["stage"], "PURCHASING")
+        self.assertIn("لغو شده", progress_html(
+            self.journal.get("a"), {"public_ipv4": "8.8.8.8"}))
+
+
 class Stub04A:
     def __init__(self):
         self.state = dict(active=False, standby=False, default=False,

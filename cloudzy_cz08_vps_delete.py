@@ -165,7 +165,7 @@ class CloudzyDeleteGuard:
             return ("PROTECTED", "STANDBY_ACTION_BUSY")
         if CloudzyDeleteGuard._table(db, "cloudzy_edge_operations") and db.execute(
             "SELECT 1 FROM cloudzy_edge_operations "
-            "WHERE provider_server_id=? AND status NOT IN ('EDGE_READY','REJECTED') LIMIT 1",
+            "WHERE provider_server_id=? AND status NOT IN ('EDGE_READY','REJECTED','CANCELLED') LIMIT 1",
             (provider_id,),
         ).fetchone():
             return ("PROTECTED", "PROVISIONING_UNRESOLVED")

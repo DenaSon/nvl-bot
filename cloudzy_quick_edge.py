@@ -37,6 +37,13 @@ CHARGEABLE_STATES = frozenset({
     "HOLD_IP", "HOLD_SSH", "HOSTKEY_PENDING", "PROVISIONING",
     "HOLD_PROVISION", "HOLD_PREFLIGHT", "HOLD_PROVIDER", "HOLD_UNKNOWN",
 })
+# A cancellation closes only a local operation journal; it never deletes a VPS.
+# CREATE_UNCERTAIN and running purchase/install states deliberately stay fenced.
+CANCELLABLE_STATES = frozenset({
+    "HOSTKEY_PENDING", "HOLD_WAIT", "HOLD_IP", "HOLD_SSH",
+    "HOLD_PROVISION", "HOLD_PREFLIGHT", "HOLD_PROVIDER", "HOLD_UNKNOWN",
+})
+CLOSED_STATES = ("EDGE_READY", "REJECTED", "CANCELLED")
 CYCLES = {"hourly": "ساعتی"}
 TTL_SECONDS = 600
 PAGE_SIZE = 6
@@ -171,8 +178,27 @@ class ReceiptStore:
                 host_key_fingerprint TEXT,
                 hold_reason TEXT
             )""")
+            # Upgrade the existing partial index: merely adding a CANCELLED
+            # status without rebuilding it would keep purchases locked forever.
+            old_index = db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' "
+                "AND name='cloudzy_edge_one_unfinished'"
+            ).fetchone()
+            if old_index and "'CANCELLED'" not in (old_index[0] or ""):
+                db.execute("DROP INDEX cloudzy_edge_one_unfinished")
             db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS cloudzy_edge_one_unfinished
-                ON cloudzy_edge_operations((1)) WHERE status NOT IN ('EDGE_READY','REJECTED')""")
+                ON cloudzy_edge_operations((1))
+                WHERE status NOT IN ('EDGE_READY','REJECTED','CANCELLED')""")
+            db.execute("""CREATE TABLE IF NOT EXISTS cloudzy_edge_cancel_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                operation_id TEXT NOT NULL,
+                actor_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                previous_status TEXT NOT NULL,
+                previous_reason TEXT,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY(operation_id) REFERENCES cloudzy_edge_operations(id)
+            )""")
 
     def reserve(self, *, actor, chat, region, plan, cycle, price, port, pubkey,
                 quick_relay=False, message_id=None):
@@ -190,7 +216,7 @@ class ReceiptStore:
             with self.db() as db:
                 db.execute("BEGIN IMMEDIATE")
                 prior = db.execute(
-                    "SELECT id FROM cloudzy_edge_operations WHERE status NOT IN ('EDGE_READY','REJECTED') LIMIT 1"
+                    "SELECT id FROM cloudzy_edge_operations WHERE status NOT IN ('EDGE_READY','REJECTED','CANCELLED') LIMIT 1"
                 ).fetchone()
                 if prior:
                     raise QuickEdgeHold("PREVIOUS_CLOUDZY_OPERATION_UNSETTLED")
@@ -226,7 +252,7 @@ class ReceiptStore:
     def latest(self):
         self.initialize()
         with self.db() as db:
-            row = db.execute("SELECT id FROM cloudzy_edge_operations ORDER BY created_at DESC LIMIT 1").fetchone()
+            row = db.execute("SELECT id FROM cloudzy_edge_operations ORDER BY created_at DESC, rowid DESC LIMIT 1").fetchone()
         return self.get(row[0]) if row else None
 
     def change(self, operation_id, old, new, **fields):
@@ -242,6 +268,91 @@ class ReceiptStore:
             )
             if cur.rowcount != 1:
                 raise QuickEdgeHold("STATE_CHANGED_OR_OPERATION_UNSETTLED")
+
+
+    def cancel(self, operation_id, *, actor, chat, expected_status):
+        """Cancel an idle failed/paused purchase ledger, never provider/Edge resources.
+
+        Caller must enforce admin permission and the absence of a live local worker.
+        State is checked again under BEGIN IMMEDIATE, with a durable audit event.
+        """
+        if not isinstance(operation_id, str) or not re.fullmatch(r"[0-9a-f]{32}", operation_id):
+            raise QuickEdgeHold("INVALID_OPERATION")
+        if type(actor) is not int or type(chat) is not int:
+            raise QuickEdgeHold("INVALID_OWNER_OR_CHAT")
+        if expected_status not in CANCELLABLE_STATES:
+            raise QuickEdgeHold("CANCEL_STATE_NOT_ALLOWED")
+        self.initialize()
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT status,public_ipv4,provider_server_id,hold_reason "
+                "FROM cloudzy_edge_operations WHERE id=?", (operation_id,)
+            ).fetchone()
+            if not row or row[0] != expected_status:
+                raise QuickEdgeHold("CANCEL_STATE_CHANGED")
+            status, ip, provider_id, original_reason = row
+
+            # A partially provisioned host may still have WireGuard artefacts.
+            # Never sever the ledger for an attached host or a selected route.
+            if db.execute(
+                "SELECT 1 FROM host_pool WHERE host=? OR "
+                "(provider='cloudzy' AND provider_instance_id=?) LIMIT 1",
+                (ip, provider_id)
+            ).fetchone():
+                raise QuickEdgeHold("CANCEL_HOST_REGISTERED")
+            settings = dict(db.execute(
+                "SELECT key,value FROM settings "
+                "WHERE key IN ('hosts','dns_current_ip','core_wg_public_ip')"
+            ).fetchall())
+            if not settings.get("hosts") or not settings.get("dns_current_ip"):
+                raise QuickEdgeHold("CANCEL_ROUTE_STATE_UNVERIFIED")
+            if ip and (ip in [host.strip() for host in settings["hosts"].split(",")]
+                       or ip in (settings["dns_current_ip"], settings.get("core_wg_public_ip"))):
+                raise QuickEdgeHold("CANCEL_ROUTE_REFERENCES_TARGET")
+            for table, field in (
+                ("cloudzy_cz04b_operations", "target"),
+                ("cloudzy_cz07_jobs", "target"),
+            ):
+                if db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,)
+                ).fetchone() and db.execute(
+                    f"SELECT 1 FROM {table} WHERE {field}=? AND "
+                    "status NOT IN ('READY','DONE','ABORTED') LIMIT 1", (ip,)
+                ).fetchone():
+                    raise QuickEdgeHold("CANCEL_CUTOVER_OR_MIGRATION_UNRESOLVED")
+
+            # Both receipts are updated in one transaction: no orphan CZ06
+            # running state and no prematurely freed purchase lease.
+            from cloudzy_cz06_orchestrator import QuickRelayJournal
+            QuickRelayJournal.initialize(db)
+            quick = db.execute(
+                "SELECT stage FROM cloudzy_cz06_runs WHERE operation_id=?",
+                (operation_id,)
+            ).fetchone()
+            if quick and quick[0] in ("READY", "CANCELLED"):
+                raise QuickEdgeHold("CANCEL_QUICK_STAGE_INVALID")
+            ts = int(self.now())
+            if db.execute(
+                "UPDATE cloudzy_edge_operations "
+                "SET status='CANCELLED',hold_reason='OPERATOR_CANCELLED',updated_at=? "
+                "WHERE id=? AND status=?", (ts, operation_id, status)
+            ).rowcount != 1:
+                raise QuickEdgeHold("CANCEL_CONCURRENT_CHANGE")
+            if quick:
+                db.execute(
+                    "UPDATE cloudzy_cz06_runs SET stage='CANCELLED',"
+                    "detail_code='OPERATOR_CANCELLED',updated_at=? WHERE operation_id=?",
+                    (ts, operation_id)
+                )
+            db.execute(
+                "INSERT INTO cloudzy_edge_cancel_events "
+                "(operation_id,actor_id,chat_id,previous_status,previous_reason,created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (operation_id, actor, chat, status, original_reason, ts)
+            )
+        return "CANCELLED"
 
 
 class QuickEdgeWizard:
@@ -313,7 +424,7 @@ class QuickEdgeWizard:
                     raise QuickRelayHold("CZ06_DISABLED_OR_STANDBY_ADAPTER_MISSING")
                 self.store.initialize()
                 old = await asyncio.to_thread(self.store.latest)
-                if old and old["status"] not in ("EDGE_READY", "REJECTED"):
+                if old and old["status"] not in CLOSED_STATES:
                     await self._operation_screen(query, old, markup, actor, chat)
                     return
                 port, pub = await self._preflight()
@@ -438,6 +549,51 @@ class QuickEdgeWizard:
                         [[("↩️ Cloudzy", "apps_cz_home")]], markup)
                 else:
                     await self._operation_screen(query, op, markup, actor, chat)
+            elif data.startswith("apps_cz_qcancelyes_"):
+                nonce = data[len("apps_cz_qcancelyes_"):]
+                pending = context.user_data.pop("cz3_cancel", None)
+                if (not isinstance(pending, dict) or pending.get("nonce") != nonce
+                        or pending.get("actor") != actor or pending.get("chat") != chat
+                        or self.now() >= pending.get("expires", 0)):
+                    raise QuickEdgeHold("CANCEL_CONFIRMATION_EXPIRED")
+                opid = pending["id"]
+                if opid in self._running:
+                    raise QuickEdgeHold("CANCEL_WORKER_STILL_RUNNING")
+                await asyncio.to_thread(
+                    self.store.cancel, opid, actor=actor, chat=chat,
+                    expected_status=pending["status"]
+                )
+                log.warning("CZ06_CANCEL op=%s actor=%s code=OPERATOR_CANCELLED",
+                            opid[:16], actor)
+                await self._display(query,
+                    "✅ <b>عملیات لغو و قفل خرید آزاد شد.</b>\n\n"
+                    f"شناسه: <code>{opid[:16]}</code>\n"
+                    "🛡 هیچ VPS حذف نشده و Relay/DNS/کاربران تغییر نکرده‌اند.\n"
+                    "⚠️ آثار احتمالی نصب ناقص روی Core/WireGuard باید جداگانه بررسی شوند. "
+                    "اگر VPS هنوز موجود باشد، ممکن است هزینه آن ادامه داشته باشد.",
+                    [[("⚡ ساخت Edge جدید", "apps_cz_wizard")],
+                     [("📋 وضعیت عملیات", "apps_cz_operations")]], markup)
+            elif data.startswith("apps_cz_qcancel_"):
+                opid = data[len("apps_cz_qcancel_"):]
+                op = await asyncio.to_thread(self.store.get, opid)
+                if op["status"] not in CANCELLABLE_STATES or opid in self._running:
+                    raise QuickEdgeHold("CANCEL_NOT_ALLOWED_OR_RUNNING")
+                nonce = secrets.token_hex(6)
+                context.user_data["cz3_cancel"] = {
+                    "id": opid, "status": op["status"], "actor": actor,
+                    "chat": chat, "nonce": nonce, "expires": self.now() + 180
+                }
+                await self._display(query,
+                    "⚠️ <b>تأیید لغو عملیات Cloudzy</b>\n\n"
+                    f"شناسه: <code>{opid[:16]}</code>\n"
+                    f"وضعیت: <b>{_text(op['status'])}</b>\n"
+                    f"IP: <code>{_text(op.get('public_ipv4') or 'نامشخص')}</code>\n\n"
+                    "این اقدام فقط پرونده عملیات را می‌بندد و قفل خرید را آزاد می‌کند؛ "
+                    "VPS، WireGuard، DNS و کاربران را حذف یا جابه‌جا نمی‌کند.\n"
+                    "❗ اگر VPS هنوز وجود دارد، هزینه‌های آن متوقف نمی‌شود. "
+                    "آثار احتمالی نصب ناقص نیازمند رسیدگی جداگانه‌اند.",
+                    [[("✅ لغو قطعی و آزادسازی قفل", "apps_cz_qcancelyes_" + nonce)],
+                     [("↩️ بازگشت بدون لغو", "apps_cz_qview_" + opid)]], markup)
             elif data.startswith("apps_cz_qview_"):
                 op = await asyncio.to_thread(self.store.get, data[len("apps_cz_qview_"):])
                 await self._operation_screen(query, op, markup, actor, chat)
@@ -677,6 +833,8 @@ class QuickEdgeWizard:
                 and status == "EDGE_READY" and run["stage"] in (
                     "INSTALLING", "EDGE_READY", "STANDBY_VERIFYING")):
             rows.insert(0, [("▶️ ادامه امن Standby", "apps_cz6_resume_" + op["id"])])
+        if status in CANCELLABLE_STATES and op["id"] not in self._running:
+            rows.append([("❌ لغو عملیات و آزادسازی قفل", "apps_cz_qcancel_" + op["id"])])
         rows.append([("🔄 تازه‌سازی", "apps_cz_qview_" + op["id"])])
         rows.append([("↩️ Cloudzy", "apps_cz_home")])
         text = ("📋 <b>عملیات ساخت Edge</b>\n\n"
@@ -701,6 +859,8 @@ class QuickEdgeWizard:
             text += f"\n⚠️ نیازمند بررسی: {_text(op.get('hold_reason') or 'UNKNOWN')}"
         if status == "EDGE_READY":
             text += "\n✅ Edge در host_pool به‌صورت غیرفعال ثبت شده و آماده بررسی دستی است."
+        if status == "CANCELLED":
+            text += "\n✅ این عملیات توسط مدیر بسته شده و مانع خرید تازه نیست؛ منابع ابری خودکار حذف نشده‌اند."
         await self._display(query, text, rows, markup)
 
     async def _buy(self, opid, chat, pub, app):

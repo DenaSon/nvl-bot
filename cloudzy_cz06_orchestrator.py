@@ -11,7 +11,7 @@ import time
 
 STAGES = (
     "PURCHASING", "WAITING_PROVIDER", "HOSTKEY_PENDING", "INSTALLING",
-    "EDGE_READY", "STANDBY_VERIFYING", "READY", "HOLD",
+    "EDGE_READY", "STANDBY_VERIFYING", "READY", "HOLD", "CANCELLED",
 )
 
 
@@ -38,10 +38,16 @@ class QuickRelayJournal:
                 updated_at INTEGER NOT NULL
             )
         """)
+        existing = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' "
+            "AND name='cloudzy_cz06_one_open'"
+        ).fetchone()
+        if existing and "'CANCELLED'" not in (existing[0] or ""):
+            conn.execute("DROP INDEX cloudzy_cz06_one_open")
         conn.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS cloudzy_cz06_one_open
             ON cloudzy_cz06_runs((1))
-            WHERE stage NOT IN ('READY','HOLD')
+            WHERE stage NOT IN ('READY','HOLD','CANCELLED')
         """)
 
     def create_in_receipt_transaction(self, conn, *, opid, actor, chat, message_id=None):
@@ -106,6 +112,8 @@ def progress_html(run, receipt):
         icon = "✅" if current == "READY" or (position > i) else "⏳" if position == i else "▫️"
         rows.append(f"{icon} {title}")
     warning = (
+        "\n✅ عملیات لغو شده است؛ هیچ VPS یا تنظیمات Core خودکار حذف نشده‌اند."
+        if current == "CANCELLED" else
         "\n⚠️ توقف امن؛ خرید یا نصب را بدون بررسی تکرار نکنید."
         if current == "HOLD" else
         "\n🔐 اثر انگشت SSH باید با منبع مستقل بررسی شود."

@@ -271,8 +271,8 @@ class ServerRolePanelTests(unittest.TestCase):
         self.assertFalse(panel.deletion_preview(self.db_conn, OLD, CORE)[0])
         ready, report = panel.dependency_report(self.db_conn, OLD, CORE)
         self.assertTrue(ready, report)
-        self.assertIn("حساب SSH غیرفعال", report)
-        self.assertIn("حساب مستقل Marzban", report)
+        self.assertIn("<code>ssh</code> · 🔴 غیرفعال: 1", report)
+        self.assertIn("<code>v2ray</code> · 🟢 فعال: 1", report)
         ok, message = panel.retire_inactive_dependencies(
             self.db_conn, OLD, CORE, actor=101
         )

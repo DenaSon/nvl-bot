@@ -204,12 +204,50 @@ class DeleteFlowTests(unittest.TestCase):
         self.assertNotIn("apps_cz_del_" + token, self.query.callbacks)
         self.assertIn("DELETION_HOLD", self.query.text)
 
-    def test_auto_failover_enabled_blocks_delete(self):
+    def test_auto_failover_enabled_allows_retired_old_edge_after_migration(self):
+        # After CZ07: all active accounts have moved to the new Default,
+        # and the old host is no longer in DNS/hosts or the standby pool.
         with self.connect() as db:
             db.execute("INSERT INTO settings VALUES ('phase6h_auto_failover_enabled','1')")
+            db.execute("INSERT INTO settings VALUES ('auto_failover_mode','1')")
+            db.execute("INSERT INTO ssh_accounts VALUES (?,?,?)", (MAIN, "فعال", "ssh"))
+            db.execute("INSERT INTO cloudzy_cz07_jobs VALUES ('j1','DONE')")
+        token = self.detail("old-id")
+        self.assertIn("apps_cz_del_" + token, self.query.callbacks)
+        self.cb("apps_cz_del_" + token)
+        confirm = next(c for c in self.query.callbacks if c.startswith("apps_cz_yes_"))
+        self.cb(confirm)
+        self.assertEqual(self.provider.deleted, ["old-id"])
+        with self.connect() as db:
+            self.assertEqual(db.execute(
+                "SELECT active,is_default,is_standby FROM host_pool WHERE host=?",
+                (OLD,)).fetchone(), (0, 0, 0))
+            self.assertEqual(db.execute(
+                "SELECT host FROM ssh_accounts WHERE status='فعال'").fetchall(),
+                [(MAIN,)])
+
+    def test_standby_vps_is_protected_even_when_failover_disabled(self):
+        with self.connect() as db:
+            db.execute("UPDATE host_pool SET is_standby=1 WHERE host=?", (OLD,))
+        token = self.detail("old-id")
+        self.assertNotIn("apps_cz_del_" + token, self.query.callbacks)
+        self.assertIn("STANDBY_FAILOVER_TARGET", self.query.text)
+
+    def test_unknown_host_remains_protected_with_auto_failover_enabled(self):
+        with self.connect() as db:
+            db.execute("INSERT INTO settings VALUES ('phase6h_auto_failover_enabled','1')")
+            db.execute("DELETE FROM host_pool WHERE host=?", (OLD,))
         token = self.detail("old-id")
         self.assertNotIn("apps_cz_del_" + token, self.query.callbacks)
         self.assertIn("AUTOMATIC_FAILOVER_ENABLED", self.query.text)
+
+    def test_active_account_blocks_delete_even_with_auto_failover_enabled(self):
+        with self.connect() as db:
+            db.execute("INSERT INTO settings VALUES ('phase6h_auto_failover_enabled','1')")
+            db.execute("INSERT INTO ssh_accounts VALUES (?,?,?)", (OLD, "فعال", "ssh"))
+        token = self.detail("old-id")
+        self.assertNotIn("apps_cz_del_" + token, self.query.callbacks)
+        self.assertIn("ACTIVE_ACCOUNTS_ASSIGNED", self.query.text)
 
     def test_definite_provider_rejection_is_not_ambiguous_hold(self):
         self.provider.fail = CloudzyAPIError(403, "no delete permission")

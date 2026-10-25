@@ -1,4 +1,4 @@
-"""Cloudzy admin's read-only API views, used alongside the CZ-03 Quick Edge wizard.
+"""Cloudzy admin inventory, safe VPS deletion and read-only account views.
 
 The main bot dispatches purchase, operation-journal and SSH public-key add
 callbacks to QuickEdgeWizard before this panel. This panel itself does not

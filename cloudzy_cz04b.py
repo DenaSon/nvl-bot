@@ -106,6 +106,16 @@ class Cloudzy04B:
             self.guard(db)
             st = self._settings(db)
             self._guard_settings(st)
+            # Do not route clients toward a Cloudzy VPS being deleted.
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                          "AND name='cloudzy_cz08_deletions'").fetchone():
+                if db.execute(
+                    "SELECT 1 FROM cloudzy_cz08_deletions "
+                    "WHERE provider_id IN ("
+                    "SELECT provider_instance_id FROM host_pool WHERE host=?) "
+                    "AND status IN ('DELETING','HOLD') LIMIT 1", (target,)
+                ).fetchone():
+                    raise CutoverHold("TARGET_PROVIDER_DELETE_UNRESOLVED")
             if not locked and db.execute(
                 "SELECT 1 FROM failover_operations WHERE status=? LIMIT 1",
                 (FAILOVER_STATUS_RUNNING,),

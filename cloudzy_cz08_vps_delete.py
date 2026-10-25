@@ -108,7 +108,8 @@ class CloudzyDeleteGuard:
         default_host, default_id = defaults[0]
         settings = dict(db.execute(
             "SELECT key,value FROM settings "
-            "WHERE key IN ('dns_current_ip','hosts','core_wg_public_ip')"
+            "WHERE key IN ('dns_current_ip','hosts','core_wg_public_ip'," 
+            "'phase6h_auto_failover_enabled','auto_failover_mode')"
         ).fetchall())
         if (settings.get("dns_current_ip") != default_host
                 or (settings.get("hosts") or "").split(",")[0] != default_host):
@@ -117,6 +118,9 @@ class CloudzyDeleteGuard:
             return ("PRIMARY", "PRIMARY_RELAY")
         if not ipv4:
             return ("UNKNOWN", "PROVIDER_IPV4_NOT_VERIFIED")
+        if (settings.get("phase6h_auto_failover_enabled") == "1"
+                or settings.get("auto_failover_mode") == "1"):
+            return ("PROTECTED", "AUTOMATIC_FAILOVER_ENABLED")
         if ipv4 == settings.get("core_wg_public_ip"):
             return ("PROTECTED", "CORE_SERVER")
         related = db.execute(

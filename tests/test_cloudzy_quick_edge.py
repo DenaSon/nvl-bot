@@ -522,6 +522,126 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([x[0] for x in self.api.calls if isinstance(x, tuple)], ["add_key"])
 
 
+    def prepare_cancel_guards(self):
+        # Simulate an unchanged Core route; cancelled Edge is not registered.
+        with self.db() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS host_pool "
+                       "(host TEXT,provider TEXT,provider_instance_id TEXT)")
+            db.execute("CREATE TABLE IF NOT EXISTS settings "
+                       "(key TEXT PRIMARY KEY,value TEXT)")
+            db.executemany("INSERT OR REPLACE INTO settings VALUES(?,?)", [
+                ("hosts", "1.1.1.1"), ("dns_current_ip", "1.1.1.1"),
+                ("core_wg_public_ip", "2.2.2.2"),
+            ])
+
+    async def test_failed_cz06_cancel_releases_both_journals_without_provider_write(self):
+        self.wizard.standby_service = FakeStandby()
+        self.wizard.cz06_enabled = lambda: True
+
+        async def fail_install(*args):
+            self.provisions.append(args)
+            return False, None, None
+        self.wizard.provision = fail_install
+        await self.cb("apps_cz6_start")
+        region = next(x for x in self.query.callbacks if x.startswith("apps_cz_qr_"))
+        await self.cb(region)
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qp_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qbuy_")))
+        await self.app.drain()
+        op = self.wizard.store.latest()
+        await self.cb("apps_cz_operations")
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_")))
+        await self.app.drain()
+        self.assertEqual(self.wizard.store.get(op["id"])["status"], "HOLD_PROVISION")
+        self.assertEqual(self.wizard.quick_runs.get(op["id"])["stage"], "HOLD")
+        self.prepare_cancel_guards()
+        before = list(self.api.calls)
+        await self.cb("apps_cz_operations")
+        await self.cb("apps_cz_qcancel_" + op["id"])
+        self.assertIn("تأیید لغو", self.query.text)
+        confirm = next(x for x in self.query.callbacks if x.startswith("apps_cz_qcancelyes_"))
+        await self.cb(confirm)
+        self.assertEqual(self.wizard.store.get(op["id"])["status"], "CANCELLED")
+        self.assertEqual(self.wizard.quick_runs.get(op["id"])["stage"], "CANCELLED")
+        self.assertEqual(self.api.calls, before)
+        with self.db() as db:
+            event = db.execute(
+                "SELECT actor_id,chat_id,previous_status,previous_reason "
+                "FROM cloudzy_edge_cancel_events WHERE operation_id=?", (op["id"],)
+            ).fetchone()
+        self.assertEqual(event, (112, 334, "HOLD_PROVISION",
+                                 "PARTIAL_OR_UNVERIFIED_LEGACY_INSTALL"))
+        await self.cb(confirm)
+        self.assertEqual(self.wizard.store.get(op["id"])["status"], "CANCELLED")
+        await self.cb("apps_cz6_start")
+        self.assertTrue(any(x.startswith("apps_cz_qr_") for x in self.query.callbacks))
+        # Both partial unique indexes allow a NEW reservation, with no paid POST.
+        self.wizard.store.reserve(
+            actor=112, chat=334, region="DE-Frankfurt", plan="plan-1",
+            cycle="hourly", price=1, port=2252, pubkey=self.pub,
+            quick_relay=True)
+        self.assertEqual(self.api.calls, before)
+
+    async def test_cancel_fails_closed_for_running_or_registered_edge(self):
+        op = await self.purchase()
+        self.prepare_cancel_guards()
+        self.wizard.store.change(op["id"], "HOSTKEY_PENDING", "HOLD_PROVISION",
+                                 hold_reason="INSTALL_UNVERIFIED")
+        self.wizard._running.add(op["id"])
+        await self.cb("apps_cz_operations")
+        self.assertFalse(any(x.startswith("apps_cz_qcancel_") for x in self.query.callbacks))
+        await self.cb("apps_cz_qcancel_" + op["id"])
+        self.assertIn("CANCEL_NOT_ALLOWED_OR_RUNNING", self.query.text)
+        self.wizard._running.discard(op["id"])
+        with self.db() as db:
+            db.execute("INSERT INTO host_pool VALUES (?,?,?)",
+                       ("8.8.8.8", "cloudzy", "server-1"))
+        await self.cb("apps_cz_qcancel_" + op["id"])
+        confirm = next(x for x in self.query.callbacks if x.startswith("apps_cz_qcancelyes_"))
+        await self.cb(confirm)
+        self.assertIn("CANCEL_HOST_REGISTERED", self.query.text)
+        self.assertEqual(self.wizard.store.get(op["id"])["status"], "HOLD_PROVISION")
+        with self.db() as db:
+            count = db.execute("SELECT COUNT(*) FROM cloudzy_edge_cancel_events").fetchone()[0]
+        self.assertEqual(count, 0)
+
+    async def test_cancel_disallowed_during_uncertain_purchase_and_nonadmin(self):
+        opid = self.wizard.store.reserve(
+            actor=112, chat=334, region="DE-Frankfurt", plan="plan-1",
+            cycle="hourly", price=1, port=2252, pubkey=self.pub)
+        self.wizard.store.change(opid, "CREATING", "CREATE_UNCERTAIN")
+        await self.cb("apps_cz_operations")
+        self.assertFalse(any(x.startswith("apps_cz_qcancel_") for x in self.query.callbacks))
+        await self.cb("apps_cz_qcancel_" + opid)
+        self.assertIn("CANCEL_NOT_ALLOWED_OR_RUNNING", self.query.text)
+        self.assertEqual(self.wizard.store.get(opid)["status"], "CREATE_UNCERTAIN")
+        self.prepare_cancel_guards()
+        with self.assertRaises(QuickEdgeHold):
+            self.wizard.store.cancel(opid, actor=112, chat=334,
+                                     expected_status="CREATE_UNCERTAIN")
+        await self.cb("apps_cz_qcancel_" + opid, role="agent")
+        self.assertIn("فقط مدیر", self.query.text)
+
+    async def test_cancel_route_guard_and_stale_confirm(self):
+        op = await self.purchase()
+        self.prepare_cancel_guards()
+        await self.cb("apps_cz_operations")
+        await self.cb("apps_cz_qcancel_" + op["id"])
+        confirm = next(x for x in self.query.callbacks if x.startswith("apps_cz_qcancelyes_"))
+        self.now[0] += 181
+        await self.cb(confirm)
+        self.assertIn("CANCEL_CONFIRMATION_EXPIRED", self.query.text)
+        self.assertEqual(self.wizard.store.get(op["id"])["status"], "HOSTKEY_PENDING")
+        with self.db() as db:
+            db.execute("UPDATE settings SET value='8.8.8.8' WHERE key='dns_current_ip'")
+        await self.cb("apps_cz_qcancel_" + op["id"])
+        confirm = next(x for x in self.query.callbacks if x.startswith("apps_cz_qcancelyes_"))
+        await self.cb(confirm)
+        self.assertIn("CANCEL_ROUTE_REFERENCES_TARGET", self.query.text)
+        self.assertEqual(self.wizard.store.get(op["id"])["status"], "HOSTKEY_PENDING")
+
+
 class JournalTests(unittest.TestCase):
     def setUp(self):
         self.temp = TemporaryDirectory()

@@ -270,6 +270,14 @@ class ReceiptStore:
                 raise QuickEdgeHold("STATE_CHANGED_OR_OPERATION_UNSETTLED")
 
 
+    def existing_host(self, ip):
+        """Read-only Legacy host identity check before remote provisioning."""
+        self.initialize()
+        with self.db() as db:
+            return db.execute(
+                "SELECT 1 FROM host_pool WHERE host=? LIMIT 1", (ip,)
+            ).fetchone() is not None
+
     def cancel(self, operation_id, *, actor, chat, expected_status):
         """Cancel an idle failed/paused purchase ledger, never provider/Edge resources.
 
@@ -293,14 +301,35 @@ class ReceiptStore:
                 raise QuickEdgeHold("CANCEL_STATE_CHANGED")
             status, ip, provider_id, original_reason = row
 
-            # A partially provisioned host may still have WireGuard artefacts.
-            # Never sever the ledger for an attached host or a selected route.
-            if db.execute(
-                "SELECT 1 FROM host_pool WHERE host=? OR "
-                "(provider='cloudzy' AND provider_instance_id=?) LIMIT 1",
+            # A previously RETIRED host may hold the same recycled public IP.
+            # The purchase receipt identifies the NEW provider VPS; never
+            # mistake a completely detached, unowned legacy host_pool row for
+            # this operation's attached Edge. Do not delete/update that row.
+            # Reject registered, routed, standby, provider-owned or ambiguous
+            # hosts; subsequent checks enforce DNS, route and migration safety.
+            registered = db.execute(
+                "SELECT host,active,is_default,is_standby,provider,provider_instance_id "
+                "FROM host_pool WHERE host=? OR provider_instance_id=?",
                 (ip, provider_id)
-            ).fetchone():
-                raise QuickEdgeHold("CANCEL_HOST_REGISTERED")
+            ).fetchall()
+            if registered:
+                if (not ip or not provider_id or len(registered) != 1
+                        or registered[0][0] != ip
+                        or any(registered[0][i] != 0 for i in (1, 2, 3))
+                        or registered[0][4] not in (None, "")
+                        or registered[0][5] not in (None, "")):
+                    raise QuickEdgeHold("CANCEL_HOST_REGISTERED")
+                # SSH users still assigned to this host (including unknown
+                # service types) are real blockers. Marzban-only account rows
+                # are independent of the Legacy SSH Relay.
+                active_ssh_like = db.execute(
+                    "SELECT COUNT(*) FROM ssh_accounts WHERE host=? "
+                    "AND status LIKE '%فعال%' AND status NOT LIKE '%غیر%' "
+                    "AND COALESCE(NULLIF(service_type,''),'ssh') "
+                    "NOT IN ('v2ray','v2ray_vol')", (ip,)
+                ).fetchone()[0]
+                if active_ssh_like:
+                    raise QuickEdgeHold("CANCEL_ACTIVE_SSH_ACCOUNTS_ATTACHED")
             settings = dict(db.execute(
                 "SELECT key,value FROM settings "
                 "WHERE key IN ('hosts','dns_current_ip','core_wg_public_ip')"
@@ -411,7 +440,15 @@ class QuickEdgeWizard:
         return {secrets.token_hex(4): item for item in items}
 
     async def _display(self, query, text, rows, markup):
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup(rows))
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup(rows))
+        except Exception as exc:
+            # A repeated "Refresh" on an unchanged Telegram message is
+            # idempotent, not a Cloudzy failure. Do not swallow other errors.
+            if type(exc).__name__ == "BadRequest" and (
+                    "Message is not modified" in str(exc)):
+                return
+            raise
 
     async def handle_callback(self, query, context, data, *, actor, chat, role, app, markup):
         if role != "admin":
@@ -1057,6 +1094,13 @@ class QuickEdgeWizard:
                 self.fingerprint, op["public_ipv4"])
             if latest_type != op["host_key_type"] or latest_b64 != op["host_key_base64"]:
                 raise QuickEdgeHold("HOST_KEY_CHANGED")
+            # The Legacy adapter rejects an already registered IP before
+            # touching the provider or WireGuard. Make it an explicit, audited
+            # early HOLD code instead of reporting an opaque RuntimeError.
+            stage = "HOST_POOL_IDENTITY"
+            collision = await asyncio.to_thread(self.store.existing_host, ip)
+            if collision:
+                raise QuickEdgeHold("CLOUDZY_IP_ALREADY_REGISTERED")
             stage = "LEGACY_PROVISION"
             log.info("CZ06_INSTALL op=%s ip=%s stage=%s code=START", opid[:16], ip, stage)
             ok, _ip, details = await self.provision(
@@ -1093,8 +1137,12 @@ class QuickEdgeWizard:
             log.error("CZ06_INSTALL_HOLD op=%s ip=%s stage=%s code=%s",
                       opid[:16], ip, stage, code)
             try:
+                reason = ("CLOUDZY_IP_ALREADY_REGISTERED"
+                          if stage == "HOST_POOL_IDENTITY" and
+                          code == "CLOUDZY_IP_ALREADY_REGISTERED"
+                          else "PARTIAL_OR_UNVERIFIED_LEGACY_INSTALL")
                 await asyncio.to_thread(self.store.change, opid, "PROVISIONING",
-                    "HOLD_PROVISION", hold_reason="PARTIAL_OR_UNVERIFIED_LEGACY_INSTALL")
+                    "HOLD_PROVISION", hold_reason=reason)
             except Exception:
                 log.error("CZ06_INSTALL_HOLD op=%s stage=RECEIPT_COMMIT code=JOURNAL_UPDATE_FAILED",
                           opid[:16])

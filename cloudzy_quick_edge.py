@@ -25,6 +25,9 @@ from cloudzy_service import (
     CloudzyTimeout,
 )
 from cloudzy_cz05_catalog import CatalogHold, eligible_offers, preferred_regions
+from cloudzy_cz06_orchestrator import (
+    QuickRelayHold, QuickRelayJournal, progress_html, promote_standby_once,
+)
 
 log = logging.getLogger(__name__)
 
@@ -170,7 +173,8 @@ class ReceiptStore:
             db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS cloudzy_edge_one_unfinished
                 ON cloudzy_edge_operations((1)) WHERE status NOT IN ('EDGE_READY','REJECTED')""")
 
-    def reserve(self, *, actor, chat, region, plan, cycle, price, port, pubkey):
+    def reserve(self, *, actor, chat, region, plan, cycle, price, port, pubkey,
+                quick_relay=False, message_id=None):
         region, plan = _safe_id(region), _safe_id(plan)
         if cycle != "hourly" or not (type(price) is int and price > 0):
             raise QuickEdgeHold("INVALID_PURCHASE_SELECTION")
@@ -197,6 +201,10 @@ class ReceiptStore:
                     (operation_id, actor, chat, timestamp, timestamp, hostname,
                      region, plan, cycle, price, port,
                      hashlib.sha256(pubkey.encode("utf-8")).hexdigest(), key))
+                if quick_relay:
+                    QuickRelayJournal(self.db, now=self.now).create_in_receipt_transaction(
+                        db, opid=operation_id, actor=actor, chat=chat, message_id=message_id
+                    )
         except Exception as exc:
             if isinstance(exc, QuickEdgeHold):
                 raise
@@ -238,7 +246,7 @@ class ReceiptStore:
 class QuickEdgeWizard:
     def __init__(self, *, conn_factory, preflight, provision, verify,
                  cloudzy_factory=CloudzyService, fingerprint=capture_ssh_host_key,
-                 now=time.time):
+                 now=time.time, standby_service=None):
         self.store = ReceiptStore(conn_factory, now=now)
         self.preflight = preflight
         self.provision = provision
@@ -247,6 +255,8 @@ class QuickEdgeWizard:
         self.fingerprint = fingerprint
         self.now = now
         self._running = set()  # same-process single-flight, DB journal survives restarts
+        self.quick_runs = QuickRelayJournal(conn_factory, now=now)
+        self.standby_service = standby_service  # Wired after CZ-04A construction.
 
     def _launch(self, app, opid, task):
         if opid in self._running:
@@ -294,7 +304,7 @@ class QuickEdgeWizard:
             await query.message.reply_text("⛔️ فقط مدیر مجاز است.")
             return
         try:
-            if data == "apps_cz_wizard":
+            if data in ("apps_cz_wizard", "apps_cz6_start"):
                 self.store.initialize()
                 old = await asyncio.to_thread(self.store.latest)
                 if old and old["status"] not in ("EDGE_READY", "REJECTED"):
@@ -310,16 +320,20 @@ class QuickEdgeWizard:
                     "actor": actor, "chat": chat, "expires": self.now() + TTL_SECONDS,
                     "regions": tokens, "port": port,
                     "pub_sha": hashlib.sha256(pub.encode()).hexdigest(),
-                    "cycle": "hourly"
+                    "cycle": "hourly", "quick_relay": data == "apps_cz6_start"
                 }
                 rows = [[("⚡ انتخاب خودکار منطقه", "apps_cz_qauto")]]
                 rows.extend([("🌍 " + name[:27], "apps_cz_qr_" + token)] for token, (_, name) in tokens.items())
                 rows.append([("↩️ Cloudzy", "apps_cz_home")])
-                await self._display(query, "⚡ <b>ساخت سریع Edge</b>\n\n"
-                    "۱. انتخاب خودکار بر اساس اولویت یا انتخاب دستی منطقه.\n"
+                await self._display(query,
+                    ("⚡ <b>Quick Relay · CZ-06</b>\n\n"
+                     if data == "apps_cz6_start" else "⚡ <b>ساخت سریع Edge</b>\n\n")
+                    + "۱. انتخاب خودکار بر اساس اولویت یا انتخاب دستی منطقه.\n"
                     "✅ فقط Regular CPU با ظرفیت زنده و پرداخت ساعتی.\n"
                     "✅ نصب با مسیر Legacy؛ سیستم‌عامل ثابت و بدون انتخاب.\n"
-                    "⚠️ هنوز خریدی انجام نشده و Relay فعلی تغییر نمی‌کند.",
+                    "⚠️ پس از تأیید خرید، آماده‌سازی و Standby خودکار است؛ "
+                    "تأیید مستقل هویت SSH همچنان الزامی است. "
+                    "هیچ DNS یا کاربری منتقل نمی‌شود.",
                     rows, markup)
             elif data == "apps_cz_qauto":
                 s = self._session(context, actor, chat)
@@ -371,7 +385,9 @@ class QuickEdgeWizard:
                     "⚠️ هزینه IPv4 و سایر افزونه‌ها ممکن است جدا محاسبه شود. "
                     "این عدد قیمت نهایی تضمین‌شده نیست.\n"
                     "✅ با تأیید، درخواست خرید واقعی و پرداخت از موجودی Cloudzy ارسال می‌شود.\n"
-                    "🛡 هیچ کاربر، DNS یا Relay فعلی منتقل نمی‌شود.",
+                    + ("⚡ پس از تأیید مستقل SSH، نصب Edge و Standby خودکار انجام می‌شود.\n"
+                       if s.get("quick_relay") else "")
+                    + "🛡 هیچ کاربر، DNS یا Relay پیش‌فرض منتقل نمی‌شود.",
                     [[("✅ خرید VPS با شرایط اعلام‌شده", "apps_cz_qbuy_" + s["nonce"])],
                      [("❌ انصراف", "apps_cz_home")]], markup)
             elif data.startswith("apps_cz_qbuy_"):
@@ -389,15 +405,22 @@ class QuickEdgeWizard:
                     self.store.reserve, actor=actor, chat=chat, region=s["region"],
                     plan=s["plan"], cycle=s["cycle"], price=s["price"],
                     port=port, pubkey=pub,
+                    quick_relay=s.get("quick_relay") is True,
+                    message_id=(getattr(query.message, "message_id", None)
+                                if s.get("quick_relay") is True else None),
                 )
                 context.user_data.pop("cz3", None)
-                await self._display(query,
-                    f"⏳ <b>درخواست خرید Cloudzy ثبت شد</b>\n"
-                    f"شناسه عملیات: <code>{opid[:16]}</code>\n"
-                    "نتیجه را از «وضعیت عملیات» بررسی کنید؛ تأیید مجدد خرید نزنید.",
+                run = await asyncio.to_thread(self.quick_runs.get, opid)
+                await self._display(
+                    query,
+                    (progress_html(run, await asyncio.to_thread(self.store.get, opid))
+                     if run else
+                     f"⏳ <b>درخواست خرید Cloudzy ثبت شد</b>\n"
+                     f"شناسه عملیات: <code>{opid[:16]}</code>\n"
+                     "نتیجه را از «وضعیت عملیات» بررسی کنید؛ تأیید مجدد خرید نزنید."),
                     [[("📋 وضعیت عملیات", "apps_cz_operations")]], markup)
                 self._launch(app, opid, self._buy(opid, chat, pub, app))
-            elif data == "apps_cz_operations":
+            elif data in ("apps_cz_operations", "apps_cz6_status"):
                 op = await asyncio.to_thread(self.store.latest)
                 if not op:
                     await self._display(query, "📋 هنوز عملیات Cloudzy ثبت نشده است.",
@@ -407,6 +430,21 @@ class QuickEdgeWizard:
             elif data.startswith("apps_cz_qview_"):
                 op = await asyncio.to_thread(self.store.get, data[len("apps_cz_qview_"):])
                 await self._operation_screen(query, op, markup, actor, chat)
+            elif data.startswith("apps_cz6_resume_"):
+                opid = data[len("apps_cz6_resume_"):]
+                op = await asyncio.to_thread(self.store.get, opid)
+                run = await asyncio.to_thread(self.quick_runs.get, opid)
+                if not run or run["actor_id"] != actor or run["chat_id"] != chat:
+                    raise QuickRelayHold("WORKFLOW_OWNER_MISMATCH")
+                if op["status"] != "EDGE_READY" or run["stage"] not in (
+                        "EDGE_READY", "STANDBY_VERIFYING"):
+                    raise QuickRelayHold("WORKFLOW_NOT_RESUMABLE")
+                if opid in self._running:
+                    raise QuickRelayHold("OPERATION_ALREADY_RUNNING")
+                await self._display(query,
+                    "🔍 در حال بررسی ادامه امن Standby؛ خرید یا نصب دوباره انجام نمی‌شود.",
+                    [[("📋 وضعیت", "apps_cz_operations")]], markup)
+                self._launch(app, opid, self._activate_standby(opid, chat, app))
             elif data.startswith("apps_cz_qcheck_"):
                 opid = data[len("apps_cz_qcheck_"):]
                 op = await asyncio.to_thread(self.store.get, opid)
@@ -455,6 +493,7 @@ class QuickEdgeWizard:
                 if port != op["customer_port"] or hashlib.sha256(pub.encode()).hexdigest() != op["public_key_sha"]:
                     raise QuickEdgeHold("PORT_OR_SSH_KEY_CHANGED")
                 await asyncio.to_thread(self.store.change, opid, "HOSTKEY_PENDING", "PROVISIONING")
+                await self._quick_stage(opid, "INSTALLING", ("HOSTKEY_PENDING",), app)
                 await self._display(query, "🛠 شروع نصب Legacy Edge با کلید SSH تأییدشده.\n"
                     "این مرحله ممکن است بخشی از سرور و WireGuard را تغییر دهد؛ "
                     "اگر عملیات نامعلوم ماند، نصب را دوباره شروع نکنید.",
@@ -508,9 +547,9 @@ class QuickEdgeWizard:
             await query.message.reply_text(
                 f"⛔️ Cloudzy HTTP {exc.status} ({_text(safe_code or 'API_REJECTED')}). "
                 f"پیگیری: CZ05-{ref}")
-        except (QuickEdgeHold, CatalogHold, CloudzyError, ValueError, TypeError, KeyError) as exc:
+        except (QuickEdgeHold, QuickRelayHold, CatalogHold, CloudzyError, ValueError, TypeError, KeyError) as exc:
             ref = secrets.token_hex(4)
-            code = str(exc) if isinstance(exc, (QuickEdgeHold, CatalogHold)) else type(exc).__name__
+            code = str(exc) if isinstance(exc, (QuickEdgeHold, QuickRelayHold, CatalogHold)) else type(exc).__name__
             log.warning("CZ05_CALLBACK ref=%s stage=selection reason=%s", ref, code)
             await query.message.reply_text(
                 f"⛔️ بررسی Cloudzy متوقف شد. کد: {_text(code)} | پیگیری: CZ05-{ref}. "
@@ -520,6 +559,59 @@ class QuickEdgeWizard:
             log.exception("CZ05_CALLBACK ref=%s stage=unexpected", ref)
             await query.message.reply_text(
                 f"⛔️ خطای غیرمنتظره Cloudzy. پیگیری: CZ05-{ref}. وضعیت عملیات را بررسی کنید.")
+
+    async def _quick_stage(self, opid, stage, expected, app=None, *, code=""):
+        run = await asyncio.to_thread(self.quick_runs.get, opid)
+        if run is None:
+            return
+        await asyncio.to_thread(self.quick_runs.advance, opid, stage,
+                                expected=expected, code=code)
+        if app is None or run["message_id"] is None:
+            return
+        try:
+            updated = await asyncio.to_thread(self.quick_runs.get, opid)
+            receipt = await asyncio.to_thread(self.store.get, opid)
+            await app.bot.edit_message_text(
+                chat_id=run["chat_id"], message_id=run["message_id"],
+                text=progress_html(updated, receipt), parse_mode="HTML")
+        except Exception:
+            # A Telegram edit failure must never re-run a paid or remote operation.
+            log.warning("CZ06_PROGRESS_DELIVERY_FAILED op=%s stage=%s", opid[:16], stage)
+
+    async def _activate_standby(self, opid, chat, app):
+        run = await asyncio.to_thread(self.quick_runs.get, opid)
+        if run is None:
+            return  # Legacy CZ-03 flow has no auto promotion.
+        receipt = await asyncio.to_thread(self.store.get, opid)
+        if receipt["status"] != "EDGE_READY" or not receipt.get("provider_server_id") or not receipt.get("public_ipv4"):
+            raise QuickRelayHold("EDGE_RECEIPT_NOT_READY")
+        try:
+            if run["stage"] == "EDGE_READY":
+                await self._quick_stage(opid, "STANDBY_VERIFYING", "EDGE_READY", app)
+            elif run["stage"] != "STANDBY_VERIFYING":
+                raise QuickRelayHold("INVALID_STANDBY_STAGE")
+            await self._preflight()  # Protected Core security gate, without creating VPS.
+            await promote_standby_once(
+                self.standby_service,
+                actor=run["actor_id"], chat=run["chat_id"],
+                host=receipt["public_ipv4"], provider_id=receipt["provider_server_id"],
+            )
+            await self._quick_stage(opid, "READY", "STANDBY_VERIFYING", app)
+            await app.bot.send_message(chat,
+                f"✅ CZ-06 آماده: Edge {receipt['public_ipv4']} به Standby تبدیل شد. "
+                "DNS، Relay پیش‌فرض و کاربران بدون تغییر هستند.")
+        except Exception as exc:
+            code = ("STANDBY_VERIFICATION_HOLD" if isinstance(exc, QuickRelayHold)
+                    else "STANDBY_OPERATION_REQUIRES_RECONCILIATION")
+            log.exception("CZ06_STANDBY_HOLD op=%s code=%s", opid[:16], code)
+            try:
+                await self._quick_stage(opid, "HOLD", ("STANDBY_VERIFYING", "EDGE_READY"),
+                                        app, code=code)
+            except QuickRelayHold:
+                pass
+            await app.bot.send_message(chat,
+                f"⛔️ CZ-06 در Standby متوقف شد. کد: {code}. "
+                f"پیگیری: {opid[:16]}. هیچ انتقال کاربری انجام نشد.")
 
     async def _eligible_for_region(self, region):
         # Two independently fetched, exact-region reads; no generic price fallback.

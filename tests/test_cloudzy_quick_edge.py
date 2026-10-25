@@ -76,6 +76,11 @@ class FakeBot:
     async def send_message(self, chat, text, **kw):
         self.messages.append((chat, text, kw))
 
+    async def edit_message_text(self, **kw):
+        if not hasattr(self, "edits"):
+            self.edits = []
+        self.edits.append(kw)
+
 
 class FakeApp:
     def __init__(self):
@@ -313,6 +318,14 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         await self.app.drain()
         run = self.wizard.quick_runs.get(record["id"])
         self.assertEqual(run["stage"], "READY")
+        # Background CZ06 progress updates retain the operation-status button.
+        self.assertTrue(self.app.bot.edits)
+        last = self.app.bot.edits[-1]
+        self.assertIn("READY", last["text"])
+        self.assertEqual(
+            last["reply_markup"].inline_keyboard[0][0].callback_data,
+            "apps_cz_operations",
+        )
         self.assertEqual(standby.calls.count("promote"), 1)
         self.assertEqual(record["billing_cycle"], "hourly")
         self.assertEqual(len(self.provisions), 1)

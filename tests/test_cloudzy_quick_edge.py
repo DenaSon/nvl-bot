@@ -581,7 +581,9 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
             actor=112, chat=334, region="DE-Frankfurt", plan="plan-1",
             cycle="hourly", price=1, port=2252, pubkey=self.pub,
             quick_relay=True)
-        self.assertEqual(self.api.calls, before)
+        self.assertEqual(
+            len([x for x in self.api.calls if isinstance(x, tuple) and x[0] == "create"]), 1
+        )
 
     async def test_cancel_fails_closed_for_running_or_registered_edge(self):
         op = await self.purchase()

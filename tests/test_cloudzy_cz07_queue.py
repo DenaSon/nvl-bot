@@ -42,6 +42,11 @@ class DryRun04B(Fake04B):
         self.dns = FakeDNS(self.source, self.target)
         self.route_calls = 0
         self.batch_sizes = []
+    def _state(self, target):
+        with self.db() as db:
+            rows=self._source_accounts(db,self.source)
+        return {"source":self.source,"target":self.target,
+                "provider_id":"provider-1","users":rows}
     async def _run_route(self, actor, chat, target):
         self.route_calls += 1
         with self.db() as db:

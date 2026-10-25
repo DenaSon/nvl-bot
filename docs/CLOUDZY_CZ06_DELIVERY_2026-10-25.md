@@ -8,6 +8,8 @@ Depends on: CZ-05, CZ-03 and CZ-04A. CZ-07 is explicitly out of scope.
 
 The new `🚀 Quick Relay · خرید تا Standby` button appears in the Cloudzy menu while the legacy `⚡ ساخت Edge · مدیریت دستی` path remains usable.
 
+**Feature gate:** `NVL_CZ06_ENABLE=1` explicitly enables starting/confirming NEW quick purchases; it is OFF when missing. Existing CZ-03 manual flow is unaffected. Before deployment, configure the environment in the systemd process and verify it is loaded. The operator must opt in for actual charged runs; CI does not place orders.
+
 One explicit confirmation authorizes the chargeable Cloudzy VPS purchase **and subsequent guarded Edge/Standby preparation**. No additional *routine* confirmation is required to promote a verified Edge to **inactive customer / active standby**. **Exception:** SSH host-key fingerprint must be compared independently with Cloudzy console or another trusted source, and the operator must attest that comparison before Legacy remote provisioning. A fingerprint observed only over the target connection is not independent evidence. Removing that checkpoint is unsafe and is **not** part of CZ-06.
 
 No CZ-06 operation changes public DNS, source Relay, default route, user ownership, SSH account records, or any customer migration state.
@@ -38,7 +40,7 @@ Telegram status screen provides source receipt and quick progress; existing mess
 | Already promoted standby | Crash after DB commit before CZ-06 journal READY | A guarded replay can verify exact ownership/isolation and mark READY without another promote |
 | Progress message | Telegram edit fails | Log only; authoritative SQLite and receipt remain |
 
-A `HOLD` is deliberately not blindly retryable. Resume is exposed only for `EDGE_READY` receipt with CZ-06 `EDGE_READY/STANDBY_VERIFYING` journal, owner-bound and only one in-process job. On restart after an uncertain 04A commit, inspect CZ04A journal before allowing a new mutation.
+A `HOLD` is deliberately not blindly retryable. Resume is exposed only for `EDGE_READY` receipt with CZ-06 `INSTALLING` (postcheck already committed), `EDGE_READY`, or `STANDBY_VERIFYING` journal, owner-bound and only one in-process job. On restart after an uncertain 04A commit, inspect CZ04A journal before allowing a new mutation.
 
 ## Acceptance tests
 

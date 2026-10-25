@@ -588,7 +588,7 @@ class QuickEdgeWizard:
                     await self._operation_screen(query, op, markup, actor, chat)
             elif data.startswith("apps_cz_qcancelyes_"):
                 nonce = data[len("apps_cz_qcancelyes_"):]
-                pending = context.user_data.pop("cz3_cancel", None)
+                pending = context.user_data.get("cz3_cancel")
                 if (not isinstance(pending, dict) or pending.get("nonce") != nonce
                         or pending.get("actor") != actor or pending.get("chat") != chat
                         or self.now() >= pending.get("expires", 0)):
@@ -600,6 +600,10 @@ class QuickEdgeWizard:
                     self.store.cancel, opid, actor=actor, chat=chat,
                     expected_status=pending["status"]
                 )
+                # Consume confirmation only after durable journal cancellation.
+                # A rejected safety check must not silently invalidate the
+                # operator's confirmation page.
+                context.user_data.pop("cz3_cancel", None)
                 log.warning("CZ06_CANCEL op=%s actor=%s code=OPERATOR_CANCELLED",
                             opid[:16], actor)
                 await self._display(query,

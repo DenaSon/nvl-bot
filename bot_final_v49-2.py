@@ -403,6 +403,7 @@ import edge_egress_k2_root_direct as k2_root_direct_flags
 from cloudzy_quick_edge import QuickEdgeWizard
 from cloudzy_cz04a import Cloudzy04A
 from cloudzy_cz04b import Cloudzy04B
+from cloudzy_cz07_queue import DurableCutoverQueue
 from cloudzy_cz04b_dns import CloudflareExactDNS
 from cloudzy_admin_panel import CloudzyAdminPanel
 from edge_egress_k2_root_direct import (
@@ -7242,6 +7243,12 @@ _cloudzy_04b = Cloudzy04B(
     nat=_cloudzy_04b_nat,
     dns=CloudflareExactDNS(_cf_get_config),
     enabled=lambda: os.environ.get("NVL_CZ04B_ENABLE", "0") == "1",
+)
+
+_cloudzy_07 = DurableCutoverQueue(
+    db_conn=db_conn,
+    cz04b=_cloudzy_04b,
+    enabled=lambda: os.environ.get("NVL_CZ07_ENABLE", "0") == "1",
 )
 
 
@@ -16347,6 +16354,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d == 'apps_home':
         context.user_data.pop("mza_nodes_origin", None)
         await _show_admin_programs_hub(query, context)
+        return
+    elif d.startswith("apps_cz7_"):
+        await _cloudzy_07.handle_callback(
+            query, context, d, role=role,
+            actor=update.effective_user.id, chat=update.effective_chat.id,
+            markup=_cloudzy_markup, app=context.application,
+        )
         return
     elif d.startswith("apps_cz5_"):
         await _cloudzy_04b.handle_callback(

@@ -166,16 +166,20 @@ class CloudzyAdminPanel:
                 for entry, token in zip(values, tokens):
                     server_id = str(_get(entry, "id", "uuid", "serviceId") or "")
                     ip = ipv4_from_service(entry)
-                    state, _ = self.delete_guard.status(server_id, ip)
+                    state, reason = self.delete_guard.status(server_id, ip)
                     title = str(_get(entry, "hostname", "name", "label", "id") or "VPS")
                     label = ("رله اصلی" if state == "PRIMARY" else
-                             "قابل بررسی" if state == "ELIGIBLE" else
+                             "قابل حذف با تأیید" if state == "ELIGIBLE" else
+                             "Standby محافظت‌شده" if reason == "STANDBY_FAILOVER_TARGET" else
                              "محافظت‌شده" if state == "PROTECTED" else "نامشخص")
                     rows.append([(f"{icons[state]} {title[:22]} · {label}",
                                   "apps_cz_sv_" + token)])
+                    detail = (f"\n   علت: <code>{_value(reason)}</code>"
+                              if state in ("PROTECTED", "UNKNOWN") else "")
                     descriptions.append(
                         f"{icons[state]} <b>{_value(title, max_chars=48)}</b>\n"
-                        f"   <code>{_value(ip or 'IP نامشخص')}</code> · {label}")
+                        f"   <code>{_value(ip or 'IP نامشخص')}</code> · {label}"
+                        + detail)
                 rows += _paging("apps_cz_servers", page, count)
                 rows += [[("🔄 تازه‌سازی فهرست", "apps_cz_servers_0")],
                          [("↩️ Cloudzy", "apps_cz_home")]]

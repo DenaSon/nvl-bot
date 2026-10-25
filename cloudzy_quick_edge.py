@@ -740,9 +740,16 @@ class QuickEdgeWizard:
         try:
             updated = await asyncio.to_thread(self.quick_runs.get, opid)
             receipt = await asyncio.to_thread(self.store.get, opid)
+            # Preserve a direct return to the operation journal on every
+            # automatic progress edit, including the terminal READY screen.
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
             await app.bot.edit_message_text(
                 chat_id=run["chat_id"], message_id=run["message_id"],
-                text=progress_html(updated, receipt), parse_mode="HTML")
+                text=progress_html(updated, receipt), parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📋 وضعیت عملیات",
+                                         callback_data="apps_cz_operations")
+                ]]))
         except Exception:
             # A Telegram edit failure must never re-run a paid or remote operation.
             log.warning("CZ06_PROGRESS_DELIVERY_FAILED op=%s stage=%s", opid[:16], stage)

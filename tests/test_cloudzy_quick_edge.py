@@ -76,6 +76,11 @@ class FakeBot:
     async def send_message(self, chat, text, **kw):
         self.messages.append((chat, text, kw))
 
+    async def edit_message_text(self, **kw):
+        if not hasattr(self, "edits"):
+            self.edits = []
+        self.edits.append(kw)
+
 
 class FakeApp:
     def __init__(self):
@@ -289,6 +294,9 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.wizard.store.latest())
 
     async def test_cz06_quick_relay_from_one_purchase_to_standby(self):
+        # Production callbacks have a Telegram message ID; this mock defaults
+        # to None, which deliberately skips background progress delivery.
+        self.query.message_id = 123
         standby = FakeStandby()
         self.wizard.standby_service = standby
         self.wizard.cz06_enabled = lambda: True
@@ -309,10 +317,28 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         review = next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_"))
         await self.cb(review)
         accept = next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_"))
-        await self.cb(accept)
-        await self.app.drain()
+        # The hermetic CI intentionally omits python-telegram-bot. Supply its
+        # two formatting primitives locally to exercise real background markup.
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        telegram_stub = SimpleNamespace(
+            InlineKeyboardButton=lambda text, callback_data: SimpleNamespace(
+                text=text, callback_data=callback_data),
+            InlineKeyboardMarkup=lambda rows: SimpleNamespace(inline_keyboard=rows),
+        )
+        with patch.dict("sys.modules", {"telegram": telegram_stub}):
+            await self.cb(accept)
+            await self.app.drain()
         run = self.wizard.quick_runs.get(record["id"])
         self.assertEqual(run["stage"], "READY")
+        # Background CZ06 progress updates retain the operation-status button.
+        self.assertTrue(self.app.bot.edits)
+        last = self.app.bot.edits[-1]
+        self.assertIn("READY", last["text"])
+        self.assertEqual(
+            last["reply_markup"].inline_keyboard[0][0].callback_data,
+            "apps_cz_operations",
+        )
         self.assertEqual(standby.calls.count("promote"), 1)
         self.assertEqual(record["billing_cycle"], "hourly")
         self.assertEqual(len(self.provisions), 1)

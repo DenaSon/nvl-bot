@@ -28,6 +28,65 @@ class Fake04B:
                           "WHERE host=? ORDER BY username", (source,)).fetchall()
 
 
+class FakeDNS:
+    def __init__(self, source, target):
+        self.current, self.source, self.target = source, source, target
+    def snapshot(self):
+        return [{"name": "dns.example", "ip": self.current}]
+
+
+class DryRun04B(Fake04B):
+    def __init__(self, db):
+        super().__init__()
+        self.db = db
+        self.dns = FakeDNS(self.source, self.target)
+        self.route_calls = 0
+        self.batch_sizes = []
+    async def _run_route(self, actor, chat, target):
+        self.route_calls += 1
+        with self.db() as db:
+            db.execute("UPDATE host_pool SET is_default=0 WHERE host=?", (self.source,))
+            db.execute("UPDATE host_pool SET is_default=1,is_standby=0 WHERE host=?", (self.target,))
+            db.execute("UPDATE settings SET value=? WHERE key='hosts'",
+                       (self.target+","+self.source,))
+            db.execute("UPDATE settings SET value=? WHERE key='dns_current_ip'",
+                       (self.target,))
+        self.dns.current = target
+        return "READY"
+    def _route_ready(self):
+        return self.source,self.target,"provider-1"
+    def _expect_dns(self, values, target):
+        if any(value["ip"] != target for value in values):
+            raise CZ07Hold("DNS_CHANGED")
+    def _migration_snapshot(self, source, target):
+        from cloudzy_cz04b import _digest
+        with self.db() as db:
+            rows = self._source_accounts(db,source)
+        return rows,_digest(rows)
+    def _ready_probe_state(self, source, target, pid):
+        return {}
+    async def _fresh(self, state):
+        return
+    async def _run_users(self, actor, chat, names, fingerprint):
+        from cloudzy_cz04b import _digest
+        with self.db() as db:
+            rows = self._source_accounts(db,self.source)
+            if _digest(rows) != fingerprint:
+                raise CZ07Hold("ACCOUNT_CAS_CHANGED")
+            for name in names:
+                db.execute("UPDATE ssh_accounts SET host=? WHERE username=? AND host=?",
+                           (self.target,name,self.source))
+        self.batch_sizes.append(len(names))
+        return len(names)
+
+
+class OfflineApp:
+    class Bot:
+        async def send_message(self, chat, text):
+            return
+    bot = Bot()
+
+
 class QueueTests(unittest.TestCase):
     def setUp(self):
         temp = TemporaryDirectory()
@@ -112,6 +171,28 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(db.execute(
                 "SELECT value FROM settings WHERE key='hosts'").fetchone()[0],
                 "source.example")
+
+    def test_dry_run_473_accounts_through_bounded_worker(self):
+        from cloudzy_cz04b import _digest
+        import asyncio
+        dry=DryRun04B(self.factory)
+        self.q.cz04b=dry
+        with self.factory() as db:
+            rows=dry._source_accounts(db,dry.source)
+        job=self.q.reserve(self.q.candidate(),dry.source,actor=7,chat=8,
+                           expected_fp=_digest(rows),expected_count=len(rows))
+        asyncio.run(self.q._work(job,OfflineApp(),resume=False))
+        final=self.q.get(job)
+        self.assertEqual(final["status"],"DONE")
+        self.assertEqual((final["moved"],final["total"]),(473,473))
+        self.assertEqual(dry.route_calls,1)
+        self.assertEqual(dry.batch_sizes,[50]*9+[23])
+        with self.factory() as db:
+            self.assertEqual(db.execute("SELECT value FROM settings WHERE key='hosts'").fetchone()[0],
+                             dry.target)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM ssh_accounts WHERE host=?",
+                                        (dry.target,)).fetchone()[0],473)
+
 
 
 if __name__ == "__main__":

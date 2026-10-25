@@ -280,9 +280,18 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.wizard.store.latest()["status"], "REJECTED")
         self.assertFalse(any(isinstance(x, tuple) and x[0] == "create" for x in self.api.calls))
 
+    async def test_cz06_disabled_by_default_does_not_purchase(self):
+        self.wizard.cz06_enabled = lambda: False
+        self.wizard.standby_service = FakeStandby()
+        await self.cb("apps_cz6_start")
+        self.assertIn("CZ06_DISABLED", self.query.text)
+        self.assertEqual(self.api.calls, [])
+        self.assertIsNone(self.wizard.store.latest())
+
     async def test_cz06_quick_relay_from_one_purchase_to_standby(self):
         standby = FakeStandby()
         self.wizard.standby_service = standby
+        self.wizard.cz06_enabled = lambda: True
         await self.cb("apps_cz6_start")
         self.assertIn("Quick Relay", self.query.text)
         region = next(x for x in self.query.callbacks if x.startswith("apps_cz_qr_"))
@@ -316,6 +325,7 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
 
         standby = FailingStandby()
         self.wizard.standby_service = standby
+        self.wizard.cz06_enabled = lambda: True
         await self.cb("apps_cz6_start")
         region = next(x for x in self.query.callbacks if x.startswith("apps_cz_qr_"))
         await self.cb(region)

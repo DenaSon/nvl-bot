@@ -7164,6 +7164,9 @@ _cloudzy_04a = Cloudzy04A(
     probe=_cloudzy_04a_probe,
 )
 
+# CZ-06: reuse the existing CZ-04A protected standby operation after CZ-03.
+_cloudzy_quick_edge.standby_service = _cloudzy_04a
+
 
 def _cloudzy_04b_guard(conn):
     """Shared legacy/K2 write fence; CZ04B itself holds the original 6G lease."""
@@ -16359,8 +16362,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             markup=_cloudzy_markup,
         )
         return
-    elif (d in ("apps_cz_wizard", "apps_cz_operations")
-          or d.startswith("apps_cz_q")):
+    elif (d in ("apps_cz_wizard", "apps_cz_operations", "apps_cz6_start",
+                "apps_cz6_status")
+          or d.startswith(("apps_cz_q", "apps_cz6_resume_"))):
         await _cloudzy_quick_edge.handle_callback(
             query, context, d, role=role,
             actor=update.effective_user.id, chat=update.effective_chat.id,

@@ -94,6 +94,7 @@ import qrcode
 import v2ray_engine
 import marzban_admin
 import cloudflare_dns
+from ssh_reactivation import resolve_ssh_reactivation_host, audit_ssh_reactivation
 from dns_route_guard import DNSDecision, RelayCandidate, plan_host_retirement_dns
 from critical_operation_notice import send_critical_notice
 import radar_runtime
@@ -4703,13 +4704,81 @@ def _db_get_users_with_agents_by_type(stype='ssh'):
         """, (stype,)).fetchall()
 def _db_search_users(term):
     with db_conn() as conn: return conn.execute("SELECT username FROM ssh_accounts WHERE username LIKE ? AND status != '⏳ درحال ساخت'", (f"%{term}%",)).fetchall()
-def _db_toggle_status(un):
+def _db_preflight_ssh_reactivation(un):
+    """Reject invalid/retired routing before unlocking or recreating Linux users."""
     with db_conn() as conn:
-        row = conn.execute("SELECT status FROM ssh_accounts WHERE username=?", (un,)).fetchone()
-        if not row: return None
-        nxt = "🔴 غیرفعال" if row[0] == "🟢 فعال" else "🟢 فعال"
-        conn.execute("UPDATE ssh_accounts SET status=? WHERE username=?", (nxt, un))
-        return nxt
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT status,host,service_type FROM ssh_accounts WHERE username=?", (un,)
+        ).fetchone()
+        if not row or row[2] != "ssh" or row[0] not in ("🟢 فعال", "🔴 غیرفعال"):
+            raise RuntimeError("SSH_REACTIVATION_ACCOUNT_INVALID")
+        _db_assert_account_write_allowed(conn)
+        new_host, _ = resolve_ssh_reactivation_host(conn, row[1])
+        if new_host != row[1]:
+            _db_assert_legacy_host_mutation_allowed(conn)
+        return new_host
+
+
+def _db_activate_ssh_account_tx(conn, un, *, expected_status=None,
+                                expire_date=None, actor="unknown"):
+    """Atomic CAS for status + resolved host + optional renewal, within BEGIN IMMEDIATE."""
+    row = conn.execute(
+        "SELECT status,host,service_type FROM ssh_accounts WHERE username=?", (un,)
+    ).fetchone()
+    if not row or row[2] != "ssh" or row[0] not in ("🟢 فعال", "🔴 غیرفعال"):
+        raise RuntimeError("SSH_REACTIVATION_ACCOUNT_INVALID")
+    if expected_status is not None and row[0] != expected_status:
+        raise RuntimeError("SSH_REACTIVATION_STATUS_CHANGED")
+    _db_assert_account_write_allowed(conn)
+    target, reason = resolve_ssh_reactivation_host(conn, row[1])
+    if target != row[1]:
+        _db_assert_legacy_host_mutation_allowed(conn)
+
+    if expire_date is None:
+        cur = conn.execute(
+            "UPDATE ssh_accounts SET status='🟢 فعال',host=? "
+            "WHERE username=? AND service_type='ssh' AND status=?",
+            (target, un, row[0]),
+        )
+    else:
+        cur = conn.execute(
+            "UPDATE ssh_accounts SET status='🟢 فعال',host=?,expire_date=?,hold_active=0 "
+            "WHERE username=? AND service_type='ssh' AND status=?",
+            (target, expire_date, un, row[0]),
+        )
+    if cur.rowcount != 1:
+        raise RuntimeError("SSH_REACTIVATION_CAS_FAILED")
+    if target != row[1]:
+        audit_ssh_reactivation(conn, un, row[1], target, reason, actor)
+        log.info("SSH reactivation host reconciled account=%s reason=%s", un, reason)
+    return "🟢 فعال"
+
+
+def _db_toggle_status(un, expected_status=None, actor="manual"):
+    with db_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT status,service_type FROM ssh_accounts WHERE username=?", (un,)
+        ).fetchone()
+        if not row:
+            return None
+        if expected_status is not None and row[0] != expected_status:
+            raise RuntimeError("SSH_REACTIVATION_STATUS_CHANGED")
+        if row[0] == "🟢 فعال":
+            cur = conn.execute(
+                "UPDATE ssh_accounts SET status='🔴 غیرفعال' "
+                "WHERE username=? AND status='🟢 فعال'", (un,)
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError("SSH_STATUS_CAS_FAILED")
+            return "🔴 غیرفعال"
+        if row[1] == "ssh":
+            return _db_activate_ssh_account_tx(
+                conn, un, expected_status=row[0], actor=actor
+            )
+        conn.execute("UPDATE ssh_accounts SET status='🟢 فعال' WHERE username=?", (un,))
+        return "🟢 فعال"
 
 # ==========================================
 # 🛡️ پایش تخطی از ظرفیت مجاز (جلوگیری از اشتراک‌گذاری غیرمجاز اکانت)
@@ -24069,6 +24138,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML")
             return
 
+        # Reactivation must fail closed before any Linux unlock. Re-check under
+        # BEGIN IMMEDIATE during the final DB CAS after the OS operation.
+        if not will_lock:
+            try:
+                await asyncio.to_thread(_db_preflight_ssh_reactivation, un)
+            except Exception as exc:
+                log.warning("SSH reactivation preflight HOLD account=%s: %s", un, exc)
+                await query.message.reply_text(
+                    f"⛔️ فعال‌سازی متوقف شد: مسیر SSH معتبر نیست یا مهاجرت در جریان است. "
+                    f"کد: <code>{esc(str(exc))}</code>",
+                    parse_mode="HTML",
+                )
+                return
+
         # 🔧 ابتدا دستور لینوکسی اجرا و بررسی می‌شود؛ فقط در صورت موفقیتِ قطعی، وضعیت دیتابیس
         # تغییر می‌کند — تا دیتابیس و وضعیت واقعی سرور همیشه هم‌خوان بمانند.
         ok, err, kind = await run_cmd("sudo", "usermod", "-L" if will_lock else "-U", un)
@@ -24079,15 +24162,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.info("وضعیت لینوکسی %s با موفقیت به %s تغییر کرد.", un, "قفل" if will_lock else "باز")
 
         try:
-            nxt = await asyncio.to_thread(_db_toggle_status, un)
-        except Exception:
+            nxt = await asyncio.to_thread(
+                _db_toggle_status, un, cur_status, f"telegram:{query.from_user.id}"
+            )
+        except Exception as exc:
             # 🔙 Rollback: چون لینوکس با موفقیت تغییر کرد ولی ثبت آن در دیتابیس شکست خورد،
             # برای هم‌خوان‌ماندن دو طرف، تغییر لینوکس را به حالت قبل برمی‌گردانیم.
             log.exception("ثبت تغییر وضعیت %s در دیتابیس شکست خورد؛ تلاش برای Rollback وضعیت لینوکس...", un)
             ok_rb, err_rb, _ = await run_cmd("sudo", "usermod", "-U" if will_lock else "-L", un)
             if not ok_rb:
                 log.error("Rollback لینوکس برای %s هم شکست خورد: %s — وضعیت دیتابیس و لینوکس ممکن است ناهم‌خوان باشند و نیاز به بررسی دستی دارد.", un, err_rb)
-            await query.message.reply_text("❌ خطا در ثبت تغییر وضعیت در دیتابیس. تغییر روی سرور لینوکس نیز بازگردانده شد (Rollback) تا وضعیت دو طرف ناهم‌خوان نماند.")
+            await query.message.reply_text(
+                f"❌ ثبت وضعیت متوقف شد: <code>{esc(str(exc))}</code>\n"
+                "عملیات Linux rollback درخواست شد؛ وضعیت واقعی سرور را بررسی کنید.",
+                parse_mode="HTML",
+            )
             return
 
         if nxt is None: return await query.edit_message_text("❌ این کاربر دیگر وجود ندارد.")
@@ -26689,6 +26778,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             new_exp_db = new_exp_dt.strftime("%Y-%m-%d")
 
+            if mode == "extend":
+                try:
+                    await asyncio.to_thread(_db_preflight_ssh_reactivation, un)
+                except Exception as exc:
+                    log.warning("SSH renewal activation HOLD account=%s: %s", un, exc)
+                    await query.message.reply_text(
+                        f"⛔️ تمدید/فعال‌سازی متوقف شد؛ مسیر SSH معتبر نیست. "
+                        f"کد: <code>{esc(str(exc))}</code>", parse_mode="HTML"
+                    )
+                    safe_clear_context(context)
+                    return
+
             # Linux lifecycle is Core-local; cur.host remains endpoint/routing metadata.
 
             # 🛠 Self-heal فقط برای تمدید: بعضی اکانت‌های منقضیِ قدیمی بعد از Migration در DB
@@ -26713,19 +26814,36 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text(_fmt_linux_error("تمدید اکانت" if mode == 'extend' else "کاهش تمدید اکانت", err, kind), parse_mode="HTML")
                 safe_clear_context(context); return
 
-            # فعال‌سازی خودکار اکانت در لینوکس (باز کردن قفل)
+            # Confirm Linux unlock; never mark active or charge if it failed.
             if mode == 'extend':
-                await run_cmd("sudo", "usermod", "-U", un)
+                ok_unlock, err_unlock, kind_unlock = await run_cmd(
+                    "sudo", "usermod", "-U", un
+                )
+                if not ok_unlock:
+                    await run_cmd("sudo", "usermod", "-e", old_exp, un)
+                    await query.message.reply_text(
+                        _fmt_linux_error("بازکردن قفل اکانت در تمدید", err_unlock, kind_unlock),
+                        parse_mode="HTML",
+                    )
+                    safe_clear_context(context)
+                    return
 
             try:
                 if mode == 'extend':
                     def _db_extend_and_activate():
                         with db_conn() as conn:
-                            conn.execute("UPDATE ssh_accounts SET expire_date=?, hold_active=0, status='🟢 فعال' WHERE username=?", (new_exp_db, un))
+                            conn.execute("BEGIN IMMEDIATE")
+                            _db_activate_ssh_account_tx(
+                                conn, un, expected_status=cur[4],
+                                expire_date=new_exp_db,
+                                actor=f"renewal:{role}:{ag_id}",
+                            )
                     await asyncio.to_thread(_db_extend_and_activate)
                 else:
                     await asyncio.to_thread(_db_extend_user, un, new_exp_db)
             except Exception:
+                if mode == 'extend' and cur[4] != "🟢 فعال":
+                    await run_cmd("sudo", "usermod", "-L", un)
                 log.exception("ثبت %s %s در دیتابیس شکست خورد؛ بازگردانی تاریخ انقضا روی لینوکس...", "کاهش تمدید" if mode == 'reduce' else "تمدید", un)
                 await run_cmd("sudo", "usermod", "-e", old_exp, un)  # 🔙 Rollback
                 await query.message.reply_text("❌ خطا در ثبت تغییرات در دیتابیس. تغییر روی سرور لینوکس نیز بازگردانده شد.")

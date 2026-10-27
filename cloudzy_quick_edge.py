@@ -768,6 +768,8 @@ class QuickEdgeWizard:
                     self._launch(app, opid, self._recover_existing_edge(
                         opid, actor, chat, app))
                 elif pending["kind"] == "standby":
+                    if not self.cz06_enabled() or self.standby_service is None:
+                        raise RecoveryHold("RECOVERY_STANDBY_DISABLED")
                     op = await asyncio.to_thread(self.store.get, opid)
                     if (op["actor_id"], op["chat_id"]) != (actor, chat) or op["status"] != "EDGE_READY":
                         raise RecoveryHold("RECOVERY_EDGE_NOT_READY_OR_OWNER_CHANGED")

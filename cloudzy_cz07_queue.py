@@ -617,24 +617,48 @@ class DurableCutoverQueue:
                 f"🚨 خطای نامشخص CZ-07؛ پیگیری {ref}. هیچ اقدام مجدد انجام ندهید.")
 
     async def _show_status(self, query, job, markup, actor, chat):
+        """Read-only CZ-07 progress. The journal remains the only authority."""
+        labels = {
+            "QUEUED": "در صف بررسی و انتقال",
+            "ROUTING": "در حال بررسی و تنظیم مسیر",
+            "MIGRATING": "در حال انتقال مرحله‌ای کاربران",
+            "HOLD": "توقف امن؛ نیازمند بررسی",
+            "DONE": "انتقال ثبت‌شده به پایان رسید",
+            "ABORTED": "عملیات متوقف و بسته شده است",
+        }
+        status = job["status"]
         events = await asyncio.to_thread(self.events, job["id"])
-        lines = [f"🔹 {_short(stage)} · {_short(code)} | {moved}/{job['total']}"
+        lines = [f"▫️ {_short(stage)} · {_short(code)} | {moved}/{job['total']}"
                  for stage, code, moved, _remaining, _at in events[:5]]
-        rows = [[("🔄 به‌روزرسانی", "apps_cz7_status")]]
+        rows = [[("🔄 تازه‌سازی وضعیت", "apps_cz7_status")]]
         if ((actor, chat) == (job["actor"], job["chat"])
-                and job["status"] == "MIGRATING"
+                and status == "MIGRATING"
                 and job["id"] not in self._running):
-            rows.insert(0, [("▶️ ادامه امن صف", "apps_cz7_resume_"+job["id"])])
+            rows.insert(0, [("▶️ بررسی و ادامه امن صف", "apps_cz7_resume_"+job["id"])])
         rows.append([("↩️ Cloudzy", "apps_cz_home")])
+        elapsed = max(0, int(self.now()) - int(job.get("updated_at") or self.now()))
+        minutes, seconds = divmod(elapsed, 60)
+        note = (
+            "🔒 عملیات در توقف امن قرار دارد. پیش از هر تغییر، وضعیت DNS،"
+            " Journal و قفل 6G باید بررسی شوند."
+            if status == "HOLD" else
+            "⏳ این مرحله در جریان است؛ عملیات تازه یا انتقال دوم آغاز نکنید."
+            if status in ("QUEUED", "ROUTING", "MIGRATING") else
+            "ℹ️ نتیجه نهایی ثبت‌شده را با اتصال واقعی مشتری جداگانه کنترل کنید."
+            if status == "DONE" else
+            "ℹ️ پیش از اقدام جدید وضعیت سرور و منابع فعلی را بررسی کنید."
+        )
+        detail = (f"\nکد ثبت‌شده: <code>{_short(job['code'])}</code>"
+                  if job.get("code") else "")
         await self._display(query,
             "📋 <b>CZ-07 | وضعیت انتقال</b>\n"
             f"شناسه: <code>{_short(job['id'][:16])}</code>\n"
-            f"مرحله: <b>{_short(job['status'])}</b>\n"
+            f"وضعیت: <b>{_short(labels.get(status, 'وضعیت نیازمند بررسی است'))}</b>\n"
             f"مبدأ: <code>{_short(job['source'])}</code>\n"
             f"مقصد: <code>{_short(job['target'])}</code>\n"
-            f"پیشرفت ثبت‌شده: {job['moved']}/{job['total']}\n"
-            f"آخرین خطا: <code>{_short(job['code'])}</code>\n\n"
-            + "\n".join(lines) +
-            "\n\n⚠️ برای وضعیت HOLD یا ROUTING متوقف‌شده، "
-            "پیش از هر عملیات وضعیت DNS، SQLite و قفل 6G را بررسی کنید.",
+            f"کاربران ثبت‌شده: <b>{job['moved']}/{job['total']}</b>\n"
+            + (f"⏱ زمان از آخرین ثبت مرحله: {minutes:02d}:{seconds:02d}\n"
+               if status in ("QUEUED", "ROUTING", "MIGRATING") else "")
+            + detail + "\n\n" + note
+            + (("\n\n<b>سوابق اخیر</b>\n" + "\n".join(lines)) if lines else ""),
             rows, markup)

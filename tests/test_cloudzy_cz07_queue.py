@@ -26,6 +26,9 @@ class Fake04B:
     def _source_accounts(self, db, source):
         return db.execute("SELECT username,host,status FROM ssh_accounts "
                           "WHERE host=? ORDER BY username", (source,)).fetchall()
+    def _expect_dns(self, values, target):
+        if not values or any(value["ip"] != target for value in values):
+            raise CZ07Hold("DNS_CHANGED")
 
 
 class FakeDNS:
@@ -121,6 +124,8 @@ class QueueTests(unittest.TestCase):
                     public_ipv4 TEXT,provider_server_id TEXT);
                 CREATE TABLE failover_operations(status TEXT);
                 CREATE TABLE cloudzy_cz04a_actions(status TEXT);
+                CREATE TABLE cloudzy_cz04b_operations(
+                    source TEXT,target TEXT,status TEXT,started_at INTEGER);
             """)
             db.executemany("INSERT INTO settings VALUES(?,?)", [
                 ("hosts","source.example"),("dns_current_ip","source.example"),
@@ -368,6 +373,159 @@ class QueueTests(unittest.TestCase):
                              dry.target)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM ssh_accounts WHERE host=?",
                                         (dry.target,)).fetchone()[0],473)
+
+
+    def _stale_route(self):
+        from cloudzy_cz04b import _digest
+        self.fake.dns = FakeDNS(self.fake.source, self.fake.target)
+        with self.factory() as db:
+            rows = self.fake._source_accounts(db, self.fake.source)
+        job = self.q.reserve(self.q.candidate(), self.fake.source,
+                             actor=7, chat=8, expected_fp=_digest(rows),
+                             expected_count=len(rows))
+        self.q.transition(job, "QUEUED", "ROUTING", code="ROUTE_START")
+        self.q.now = lambda: 400
+        return job
+
+    def test_cloudzy_timeout_journals_hold_instead_of_stuck_routing(self):
+        from cloudzy_cz04b import _digest
+        from cloudzy_service import CloudzyError
+        import asyncio
+        class TimedOut04B(DryRun04B):
+            async def _run_route(self, actor, chat, target):
+                self.route_calls += 1
+                raise CloudzyError("Cloudzy read request failed: TimeoutError")
+        dry = TimedOut04B(self.factory)
+        self.q.cz04b = dry
+        with self.factory() as db:
+            rows = dry._source_accounts(db, dry.source)
+        job = self.q.reserve(self.q.candidate(), dry.source, actor=7, chat=8,
+                             expected_fp=_digest(rows), expected_count=len(rows))
+        asyncio.run(self.q._work(job, OfflineApp(), resume=False))
+        record = self.q.get(job)
+        self.assertEqual(record["status"], "HOLD")
+        self.assertEqual(record["code"], "CLOUDZY_PROVIDER_UNAVAILABLE")
+        self.assertEqual(record["moved"], 0)
+        self.assertEqual(self.q.events(job)[0][:2],
+                         ("HOLD", "CLOUDZY_PROVIDER_UNAVAILABLE"))
+        self.assertEqual(dry.dns.current, dry.source)
+        self.assertEqual(dry.route_calls, 1)
+
+    def test_safe_stale_close_and_fresh_approval_rearm_same_cz06(self):
+        from cloudzy_cz04b import _digest
+        job = self._stale_route()
+        with self.assertRaisesRegex(CZ07Hold, "RECOVERY_OWNER_MISMATCH"):
+            self.q.recovery_preview(job, 9, 8)
+        preview = self.q.recovery_preview(job, 7, 8)
+        with self.assertRaisesRegex(CZ07Hold, "RECOVERY_PREVIEW_EXPIRED"):
+            self.q.close_stale_route(job, 7, 8, preview["updated_at"]+1)
+        self.q.close_stale_route(job, 7, 8, preview["updated_at"])
+        closed = self.q.get(job)
+        self.assertEqual((closed["status"], closed["code"], closed["moved"]),
+                         ("ABORTED", "SAFE_STALE_ROUTING_CLOSED", 0))
+        with self.factory() as db:
+            db.execute("DELETE FROM ssh_accounts WHERE username='user0000'")
+            rows = self.fake._source_accounts(db, self.fake.source)
+        # The initial total is now stale, but a fresh independently approved
+        # snapshot is allowed. UNIQUE cz06_operation must NOT block it.
+        rearmed = self.q.reserve(self.q.candidate(), self.fake.source,
+                                 actor=7, chat=8, expected_fp=_digest(rows),
+                                 expected_count=len(rows))
+        self.assertEqual(rearmed, job)
+        item = self.q.get(job)
+        self.assertEqual((item["status"], item["total"], item["moved"]),
+                         ("QUEUED", 472, 0))
+        self.assertEqual(self.q.events(job)[0][:2],
+                         ("QUEUED", "RESTART_APPROVED_AFTER_SAFE_ABORT"))
+        self.assertTrue(any(stage == "ABORTED" for stage,*rest in self.q.events(job)))
+        with self.factory() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM cloudzy_cz07_jobs").fetchone()[0], 1)
+
+    def test_recovery_rejects_worker_and_unverified_dns_and_changed_default(self):
+        job = self._stale_route()
+        self.q._running.add(job)
+        with self.assertRaisesRegex(CZ07Hold, "RECOVERY_WORKER_STILL_ACTIVE"):
+            self.q.recovery_preview(job, 7, 8)
+        self.q._running.remove(job)
+        self.fake.dns.current = self.fake.target
+        with self.assertRaisesRegex(CZ07Hold, "RECOVERY_LIVE_DNS_UNVERIFIED"):
+            self.q.recovery_preview(job, 7, 8)
+        self.fake.dns.current = self.fake.source
+        with self.factory() as db:
+            db.execute("UPDATE host_pool SET is_default=0 WHERE host=?",
+                       (self.fake.source,))
+            db.execute("UPDATE host_pool SET is_default=1 WHERE host=?",
+                       (self.fake.target,))
+        with self.assertRaisesRegex(CZ07Hold, "RECOVERY_DEFAULT_CHANGED"):
+            self.q.recovery_preview(job, 7, 8)
+
+    def test_recovery_rejects_route_journal_lock_and_target_accounts(self):
+        job = self._stale_route()
+        with self.factory() as db:
+            db.execute("INSERT INTO cloudzy_cz04b_operations VALUES (?,?,?,?)",
+                       (self.fake.source,self.fake.target,"ABORTED",101))
+        with self.assertRaisesRegex(CZ07Hold, "RECOVERY_CZ04B_HISTORY_NEEDS_REVIEW"):
+            self.q.recovery_preview(job, 7, 8)
+        with self.factory() as db:
+            db.execute("DELETE FROM cloudzy_cz04b_operations")
+            db.execute("INSERT INTO failover_operations VALUES ('RUNNING')")
+        with self.assertRaisesRegex(CZ07Hold, "RECOVERY_SHARED_LEASE_BUSY"):
+            self.q.recovery_preview(job, 7, 8)
+        with self.factory() as db:
+            db.execute("DELETE FROM failover_operations")
+            db.execute("INSERT INTO ssh_accounts VALUES (?,?,?,?)",
+                       ("target-user",self.fake.target,"inactive","ssh"))
+        with self.assertRaisesRegex(CZ07Hold, "RECOVERY_TARGET_HAS_ACCOUNTS"):
+            self.q.recovery_preview(job, 7, 8)
+
+    def test_recovery_not_immediate_or_after_any_migration(self):
+        job = self._stale_route()
+        self.q.now = lambda: 110
+        with self.assertRaisesRegex(CZ07Hold, "RECOVERY_JOB_NOT_STALE"):
+            self.q.recovery_preview(job, 7, 8)
+        self.q.now = lambda: 400
+        with self.factory() as db:
+            self.q._log(db, job, "MIGRATING", "BATCH_CAS_COMMITTED", 1, 472)
+        with self.assertRaisesRegex(CZ07Hold, "RECOVERY_MIGRATION_HISTORY_PRESENT"):
+            self.q.recovery_preview(job, 7, 8)
+
+    def test_bot_recovery_requires_one_use_confirmation(self):
+        from asyncio import run
+        job = self._stale_route()
+        class Query:
+            def __init__(self):
+                self.message = self
+                self.text = ""
+                self.callbacks = []
+            async def edit_message_text(self, text, **kw):
+                self.text = text
+                self.callbacks = [callback for row in kw["reply_markup"]
+                                  for _,callback in row]
+            async def reply_text(self, text, **kw):
+                self.text = text
+        query = Query()
+        context = type("Ctx", (), {"user_data": {}})()
+        async def cb(data, actor=7):
+            await self.q.handle_callback(query, context, data, role="admin",
+                                         actor=actor,chat=8,markup=lambda x:x,
+                                         app=OfflineApp())
+        run(cb("apps_cz7_status"))
+        callback = "apps_cz7_recover_"+job
+        self.assertIn(callback, query.callbacks)
+        run(cb(callback))
+        confirm = [x for x in query.callbacks if x.startswith("apps_cz7_close_")]
+        self.assertEqual(len(confirm), 1)
+        run(cb(confirm[0],actor=9))
+        self.assertEqual(self.q.get(job)["status"], "ROUTING")
+        # Invalid actor consumes confirmation; re-open a fresh preview.
+        run(cb(callback))
+        renewed = [x for x in query.callbacks if x.startswith("apps_cz7_close_")]
+        self.assertEqual(len(renewed), 1)
+        self.assertNotEqual(renewed[0], confirm[0])
+        run(cb(renewed[0]))
+        self.assertEqual(self.q.get(job)["status"], "ABORTED")
+        self.assertIn("شروع دوباره از مرحله اول", query.text)
 
 
 

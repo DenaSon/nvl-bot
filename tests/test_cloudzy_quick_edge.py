@@ -445,6 +445,96 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len([x for x in self.api.calls
                               if isinstance(x, tuple) and x[0] == "create"]), 1)
 
+    async def test_phase2_recovery_uses_existing_vps_without_new_install(self):
+        async def failed(*args):
+            self.provisions.append(args)
+            return False, None, None
+        self.wizard.provision = failed
+        self.wizard.standby_service = FakeStandby()
+        await self.purchase()
+        op = self.wizard.store.latest()
+        await self.cb("apps_cz_operations")
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_")))
+        await self.app.drain()
+        self.assertEqual(self.wizard.store.get(op["id"])["status"], "HOLD_PROVISION")
+        self.prepare_cancel_guards()
+        with self.db() as db:
+            db.execute("ALTER TABLE host_pool ADD COLUMN service_port INTEGER")
+            db.execute("ALTER TABLE host_pool ADD COLUMN admin_ssh_port INTEGER")
+            db.execute("INSERT INTO host_pool VALUES "
+                       "('8.8.8.8',0,0,0,'cloudzy','server-1',2252,22)")
+
+        await self.cb("apps_cz_operations")
+        recover = "apps_cz_qrecover_" + op["id"]
+        self.assertIn(recover, self.query.callbacks)
+        await self.cb(recover)
+        self.assertIn("apps_cz_qrinstalled_" + op["id"], self.query.callbacks)
+        self.assertEqual(len(self.provisions), 1)
+        await self.cb("apps_cz_qrinstalled_" + op["id"])
+        confirm = next(x for x in self.query.callbacks if x.startswith("apps_cz_qryes_"))
+        await self.cb(confirm)
+        await self.app.drain()
+        self.assertEqual(self.wizard.store.get(op["id"])["status"], "EDGE_READY")
+        self.assertEqual(len(self.provisions), 1)
+        self.assertEqual(len([x for x in self.api.calls
+                              if isinstance(x, tuple) and x[0] == "create"]), 1)
+        self.assertEqual(self.wizard.quick_runs.get(op["id"]), None)
+        await self.cb(confirm)
+        self.assertEqual(len(self.provisions), 1)
+
+    async def test_phase2_no_existing_install_evidence_fails_closed(self):
+        async def failed(*args):
+            self.provisions.append(args)
+            return False, None, None
+        self.wizard.provision = failed
+        await self.purchase()
+        op = self.wizard.store.latest()
+        await self.cb("apps_cz_operations")
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_")))
+        await self.app.drain()
+        await self.cb("apps_cz_qrecover_" + op["id"])
+        self.assertIn("apps_cz_servers_0", self.query.callbacks)
+        self.assertNotIn("apps_cz_qrinstalled_" + op["id"], self.query.callbacks)
+        self.assertEqual(self.wizard.store.get(op["id"])["status"], "HOLD_PROVISION")
+        self.assertEqual(len(self.provisions), 1)
+
+    async def test_phase2_standby_hold_reopens_once_after_confirmation(self):
+        class OnceBadStandby(FakeStandby):
+            def __init__(self):
+                super().__init__()
+                self.fail = True
+            async def probe(self, *args):
+                return not self.fail
+
+        standby = OnceBadStandby()
+        self.wizard.standby_service = standby
+        self.wizard.cz06_enabled = lambda: True
+        await self.cb("apps_cz6_start")
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qr_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qp_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qbuy_")))
+        await self.app.drain()
+        op = self.wizard.store.latest()
+        await self.cb("apps_cz_operations")
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_")))
+        await self.app.drain()
+        self.assertEqual(self.wizard.quick_runs.get(op["id"])["stage"], "HOLD")
+        standby.fail = False
+        await self.cb("apps_cz_qrecover_" + op["id"])
+        self.assertIn("apps_cz_qrstandby_" + op["id"], self.query.callbacks)
+        await self.cb("apps_cz_qrstandby_" + op["id"])
+        confirm = next(x for x in self.query.callbacks if x.startswith("apps_cz_qryes_"))
+        await self.cb(confirm)
+        await self.app.drain()
+        self.assertEqual(self.wizard.quick_runs.get(op["id"])["stage"], "READY")
+        self.assertEqual(standby.calls.count("promote"), 1)
+        self.assertEqual(len(self.provisions), 1)
+        await self.cb(confirm)
+        self.assertEqual(standby.calls.count("promote"), 1)
+
     async def test_postcheck_rejection_never_reports_edge_ready(self):
         async def rejected(*args):
             self.verifications.append(args)

@@ -30,6 +30,10 @@ from cloudzy_cz06_orchestrator import (
     QuickRelayHold, QuickRelayJournal, progress_html, promote_standby_once,
 )
 from cloudzy_phase1_ui import receipt_title, receipt_result, technical_receipt
+from cloudzy_recovery import (
+    RecoveryHold, RECONCILABLE, recovery_kind, recovery_message,
+    inspect_inactive_install, commit_existing_install, commit_standby_resume,
+)
 
 log = logging.getLogger(__name__)
 
@@ -696,6 +700,90 @@ class QuickEdgeWizard:
                 await self._display(query, technical_receipt(op, run),
                     [[("↩️ بازگشت به وضعیت عملیات", "apps_cz_qview_" + opid)]],
                     markup)
+            elif data.startswith("apps_cz_qrecover_"):
+                opid = data[len("apps_cz_qrecover_"):]
+                op = await asyncio.to_thread(self.store.get, opid)
+                if (op["actor_id"], op["chat_id"]) != (actor, chat):
+                    raise RecoveryHold("RECOVERY_OWNER_MISMATCH")
+                await self._recovery_screen(query, op, markup, actor, chat)
+            elif data.startswith("apps_cz_qrinstalled_"):
+                opid = data[len("apps_cz_qrinstalled_"):]
+                op = await asyncio.to_thread(self.store.get, opid)
+                if (op["actor_id"], op["chat_id"]) != (actor, chat) or op["status"] != "HOLD_PROVISION":
+                    raise RecoveryHold("RECOVERY_NOT_AVAILABLE")
+                if opid in self._running:
+                    raise RecoveryHold("OPERATION_ALREADY_RUNNING")
+                # A receipt alone is NOT proof of an installed Edge.
+                await asyncio.to_thread(self._check_install_evidence, op)
+                nonce = secrets.token_hex(6)
+                context.user_data["cz_recovery"] = {
+                    "id": opid, "kind": "existing", "actor": actor, "chat": chat,
+                    "nonce": nonce, "expires": self.now() + 180,
+                }
+                await self._display(query,
+                    "🔎 <b>تأیید نصب موجود Edge</b>\n\n"
+                    f"IP: <code>{_text(op['public_ipv4'])}</code>\n"
+                    "✅ رکورد Edge موجود با VPS مطابقت دارد و در مسیر کاربران نیست.\n"
+                    "⚠️ این بررسی هنوز سلامت زنده SSH، WireGuard و Provider را ثابت نکرده است.\n"
+                    "با تأیید، فقط این شواهد زنده بررسی می‌شوند و در صورت موفقیت، "
+                    "Journal نصب موجود ثبت می‌شود. اسکریپت نصب اجرا نخواهد شد.",
+                    [[("✅ بررسی زنده و ثبت نصب موجود", "apps_cz_qryes_" + nonce)],
+                     [("↩️ بازگشت", "apps_cz_qrecover_" + opid)]], markup)
+            elif data.startswith("apps_cz_qrstandby_"):
+                opid = data[len("apps_cz_qrstandby_"):]
+                op = await asyncio.to_thread(self.store.get, opid)
+                run = await asyncio.to_thread(self.quick_runs.get, opid)
+                if (op["actor_id"], op["chat_id"]) != (actor, chat) or op["status"] != "EDGE_READY":
+                    raise RecoveryHold("RECOVERY_OWNER_MISMATCH")
+                if not run or run["stage"] != "HOLD" or opid in self._running:
+                    raise RecoveryHold("RECOVERY_STANDBY_NOT_RESUMABLE")
+                nonce = secrets.token_hex(6)
+                context.user_data["cz_recovery"] = {
+                    "id": opid, "kind": "standby", "actor": actor, "chat": chat,
+                    "nonce": nonce, "expires": self.now() + 180,
+                }
+                await self._display(query,
+                    "🎯 <b>ادامه کنترل‌شده Standby</b>\n\n"
+                    f"Edge: <code>{_text(op['public_ipv4'])}</code>\n"
+                    "نصب Edge قبلاً تأیید شده است. بررسی‌های تازه Core، "
+                    "Cloudzy، SSH و WireGuard با همان VPS انجام می‌شوند.\n"
+                    "✅ هیچ خرید یا نصب جدید و هیچ انتقال کاربری انجام نمی‌شود.\n"
+                    "⚠️ اگر نتیجه نامعلوم بماند، عملیات دوباره وارد توقف امن خواهد شد.",
+                    [[("✅ شروع بررسی و ادامه امن", "apps_cz_qryes_" + nonce)],
+                     [("↩️ بازگشت", "apps_cz_qrecover_" + opid)]], markup)
+            elif data.startswith("apps_cz_qryes_"):
+                pending = context.user_data.get("cz_recovery")
+                nonce = data[len("apps_cz_qryes_"):]
+                if (not isinstance(pending, dict) or pending.get("nonce") != nonce
+                        or pending.get("actor") != actor or pending.get("chat") != chat
+                        or self.now() >= pending.get("expires", 0)):
+                    raise RecoveryHold("RECOVERY_CONFIRMATION_EXPIRED")
+                opid = pending["id"]
+                if opid in self._running:
+                    raise RecoveryHold("OPERATION_ALREADY_RUNNING")
+                context.user_data.pop("cz_recovery", None)  # single-use approval
+                if pending["kind"] == "existing":
+                    # No automatic retries: this worker only reads live evidence
+                    # and conditionally commits a previously installed Edge.
+                    self._launch(app, opid, self._recover_existing_edge(
+                        opid, actor, chat, app))
+                elif pending["kind"] == "standby":
+                    if not self.cz06_enabled() or self.standby_service is None:
+                        raise RecoveryHold("RECOVERY_STANDBY_DISABLED")
+                    op = await asyncio.to_thread(self.store.get, opid)
+                    if (op["actor_id"], op["chat_id"]) != (actor, chat) or op["status"] != "EDGE_READY":
+                        raise RecoveryHold("RECOVERY_EDGE_NOT_READY_OR_OWNER_CHANGED")
+                    await self._preflight()
+                    await asyncio.to_thread(
+                        commit_standby_resume, self.store.db, opid,
+                        actor=actor, chat=chat, now=self.now())
+                    self._launch(app, opid, self._activate_standby(opid, chat, app))
+                else:
+                    raise RecoveryHold("RECOVERY_UNKNOWN_ACTION")
+                await self._display(query,
+                    "🔍 <b>بازیابی کنترل‌شده آغاز شد.</b>\n"
+                    "نتیجه را از وضعیت عملیات بررسی کنید. هیچ خرید یا نصب دوباره‌ای آغاز نشده است.",
+                    [[("📋 وضعیت همان عملیات", "apps_cz_qview_" + opid)]], markup)
             elif data.startswith("apps_cz6_resume_"):
                 opid = data[len("apps_cz6_resume_"):]
                 op = await asyncio.to_thread(self.store.get, opid)
@@ -815,9 +903,9 @@ class QuickEdgeWizard:
             await query.message.reply_text(
                 f"⛔️ Cloudzy HTTP {exc.status} ({_text(safe_code or 'API_REJECTED')}). "
                 f"پیگیری: CZ05-{ref}")
-        except (QuickEdgeHold, QuickRelayHold, CatalogHold, CloudzyError, ValueError, TypeError, KeyError) as exc:
+        except (QuickEdgeHold, QuickRelayHold, RecoveryHold, CatalogHold, CloudzyError, ValueError, TypeError, KeyError) as exc:
             ref = secrets.token_hex(4)
-            code = str(exc) if isinstance(exc, (QuickEdgeHold, QuickRelayHold, CatalogHold)) else type(exc).__name__
+            code = str(exc) if isinstance(exc, (QuickEdgeHold, QuickRelayHold, RecoveryHold, CatalogHold)) else type(exc).__name__
             log.warning("CZ05_CALLBACK ref=%s stage=selection reason=%s", ref, code)
             await query.message.reply_text(
                 f"⛔️ بررسی Cloudzy متوقف شد. کد: {_text(code)} | پیگیری: CZ05-{ref}. "
@@ -963,6 +1051,11 @@ class QuickEdgeWizard:
                 rows.append([("🖥 مشاهده VPSهای موجود", "apps_cz_servers_0")])
                 rows.append([("🌐 مشاهده فهرست Edgeها", "apps_cz_edge")])
 
+            if (status not in ("REJECTED", "CANCELLED")
+                    and not is_running
+                    and recovery_kind(op, run) not in ("READY", "MANUAL_EDGE")):
+                rows.append([("🩺 مسیر بازیابی همین VPS", "apps_cz_qrecover_" + opid)])
+
             if status in CANCELLABLE_STATES and not is_running:
                 rows.append([("❌ بررسی بستن پرونده (بدون حذف VPS)",
                              "apps_cz_qcancel_" + opid)])
@@ -993,6 +1086,117 @@ class QuickEdgeWizard:
                      "\nفقط پس از تطبیق با منبع مستقل آن را تأیید کنید.")
         text += "\n\n🛡 تا قبل از تأییدهای جداگانه، DNS و کاربران منتقل نمی‌شوند."
         await self._display(query, text, rows, markup)
+
+    def _check_install_evidence(self, op):
+        with self.store.db() as db:
+            return inspect_inactive_install(db, op)
+
+    async def _recovery_screen(self, query, op, markup, actor, chat):
+        if (op["actor_id"], op["chat_id"]) != (actor, chat):
+            raise RecoveryHold("RECOVERY_OWNER_MISMATCH")
+        run = await asyncio.to_thread(self.quick_runs.get, op["id"])
+        kind = recovery_kind(op, run)
+        opid = op["id"]
+        rows = []
+        if opid not in self._running:
+            if kind == "NEEDS_PROVIDER_CHECK" and op["status"] in RECONCILABLE:
+                rows.append([("🔎 بررسی Cloudzy بدون خرید", "apps_cz_qcheck_" + opid)])
+            if kind == "NEEDS_FINGERPRINT":
+                rows.append([("🔐 تأیید مستقل SSH همان VPS", "apps_cz_qreview_" + opid)])
+            if kind in ("IN_PROGRESS", "REVIEW_ONLY"):
+                rows.append([("🖥 مشاهده VPSهای موجود", "apps_cz_servers_0")])
+                rows.append([("🌐 بررسی فهرست Edgeها", "apps_cz_edge")])
+            if kind == "EXISTING_INSTALL_CHECK":
+                try:
+                    await asyncio.to_thread(self._check_install_evidence, op)
+                except (RecoveryHold, __import__("sqlite3").Error):
+                    # A partial/uncertain install cannot be automatically replayed.
+                    rows.append([("🖥 بررسی VPS موجود", "apps_cz_servers_0")])
+                    rows.append([("🌐 بررسی فهرست Edgeها", "apps_cz_edge")])
+                else:
+                    rows.append([("🔍 بررسی و تأیید نصب موجود", "apps_cz_qrinstalled_" + opid)])
+            if kind == "STANDBY_RECHECK" and run and run["stage"] == "HOLD":
+                rows.append([("🎯 ادامه امن Standby", "apps_cz_qrstandby_" + opid)])
+            if kind in ("STANDBY_RECHECK", "MANUAL_EDGE"):
+                rows.append([("↪️ مدیریت Standby دستی", "apps_cz4_vps")])
+                rows.append([("↪️ انتقال کنترل‌شده دستی", "apps_cz5_home")])
+            if kind == "CANCELLED":
+                rows.append([("🖥 VPSهای Cloudzy", "apps_cz_servers_0")])
+        rows.append([("📋 وضعیت پرونده", "apps_cz_qview_" + opid)])
+        rows.append([("↩️ Cloudzy", "apps_cz_home")])
+        text = recovery_message(op, run)
+        if kind == "EXISTING_INSTALL_CHECK":
+            text += ("\n\n⚠️ اگر شواهد نصب موجود معتبر نباشند، فقط بررسی دستی مجاز است؛"
+                     " تکرار کامل نصب توسط بات ارائه نمی‌شود.")
+        if kind == "STANDBY_RECHECK" and run and run["stage"] == "HOLD":
+            text += ("\n\n✅ Edge قبلاً تأیید شده است؛ فقط مرحله Standby"
+                     " با گیت‌های قبلی دوباره بررسی می‌شود.")
+        await self._display(query, text, rows, markup)
+
+    async def _recover_existing_edge(self, opid, actor, chat, app):
+        """Read-only remote proofs then atomic journal commit, never re-install."""
+        safe_code = "RECOVERY_EVIDENCE_UNVERIFIED"
+        try:
+            op = await asyncio.to_thread(self.store.get, opid)
+            if ((op["actor_id"], op["chat_id"]) != (actor, chat)
+                    or op["status"] != "HOLD_PROVISION"):
+                raise RecoveryHold("RECOVERY_STATE_CHANGED")
+            await asyncio.to_thread(self._check_install_evidence, op)
+            port, pub = await self._preflight()
+            if port != op["customer_port"] or hashlib.sha256(pub.encode()).hexdigest() != op["public_key_sha"]:
+                raise RecoveryHold("RECOVERY_CORE_IDENTITY_CHANGED")
+            if not op.get("host_key_type") or not op.get("host_key_base64"):
+                raise RecoveryHold("RECOVERY_SSH_PIN_MISSING")
+            key_type, key_b64, _fp = await asyncio.to_thread(self.fingerprint, op["public_ipv4"])
+            if (key_type, key_b64) != (op["host_key_type"], op["host_key_base64"]):
+                raise RecoveryHold("RECOVERY_SSH_HOST_KEY_CHANGED")
+            if self.standby_service is None:
+                raise RecoveryHold("RECOVERY_STANDBY_ADAPTER_MISSING")
+            server_state = await self.standby_service._provider(
+                op["provider_server_id"], op["public_ipv4"])
+            if server_state != "active":
+                raise RecoveryHold("RECOVERY_PROVIDER_NOT_ACTIVE")
+            # The actual Legacy postcheck also verifies provider ownership and
+            # service reachability; probe additionally requires WG/Core path.
+            if await self.verify(
+                    op["public_ipv4"], op["customer_port"],
+                    op["provider_server_id"]) is not True:
+                raise RecoveryHold("RECOVERY_LEGACY_POSTCHECK_FAILED")
+            with self.store.db() as db:
+                network_row = db.execute(
+                    "SELECT service_port,admin_ssh_port FROM host_pool WHERE host=?",
+                    (op["public_ipv4"],)
+                ).fetchone()
+                if (not network_row or int(network_row[0] or 0) != op["customer_port"]):
+                    raise RecoveryHold("RECOVERY_PORT_CHANGED")
+                management_port = int(network_row[1] or 22)
+            if await self.standby_service.probe(
+                    op["public_ipv4"], op["customer_port"], management_port) is not True:
+                raise RecoveryHold("RECOVERY_WIREGUARD_NOT_VERIFIED")
+            await asyncio.to_thread(
+                commit_existing_install, self.store.db, opid,
+                actor=actor, chat=chat, now=self.now())
+        except Exception as exc:
+            if isinstance(exc, RecoveryHold):
+                safe_code = str(exc)
+            log.warning("CZ_RECOVERY_INSTALL_HOLD op=%s code=%s", opid[:16], safe_code)
+            try:
+                await app.bot.send_message(
+                    chat, f"⛔️ شواهد برای پذیرش نصب موجود کافی نیست. "
+                          f"کد: {safe_code} | عملیات: {opid[:16]}. "
+                          "وضعیت قبلی حفظ شده است؛ نصب را تکرار نکنید.")
+            except Exception:
+                log.warning("CZ_RECOVERY_HOLD_DELIVERY_FAILED op=%s", opid[:16])
+            return
+        # Telegram delivery is not part of the committed journal transaction.
+        # Failure to send a success message must not be reported as a rollback.
+        try:
+            await app.bot.send_message(
+                chat, f"✅ نصب موجود Edge {op['public_ipv4']} با شواهد زنده تأیید شد. "
+                      "هیچ اسکریپتی دوباره اجرا نشد. اکنون از «وضعیت عملیات»"
+                      " آماده‌سازی Standby را ادامه دهید.")
+        except Exception:
+            log.warning("CZ_RECOVERY_SUCCESS_DELIVERY_FAILED op=%s", opid[:16])
 
     async def _buy(self, opid, chat, pub, app):
         # No Cloudzy POST until fresh stock and price still match the receipt.

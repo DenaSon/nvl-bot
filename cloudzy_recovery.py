@@ -89,7 +89,7 @@ def inspect_inactive_install(conn, receipt):
         "FROM host_pool WHERE host=? OR provider_instance_id=?",
         (ip, provider),
     ).fetchall()
-    if len(host) != 1 or host[0] != (ip, 0, 0, 0, "cloudzy", provider):
+    if len(host) != 1 or tuple(host[0]) != (ip, 0, 0, 0, "cloudzy", provider):
         raise RecoveryHold("RECOVERY_HOST_NOT_ISOLATED")
     count = conn.execute("SELECT COUNT(*) FROM ssh_accounts WHERE host=?", (ip,)).fetchone()[0]
     if count:
@@ -191,13 +191,13 @@ def commit_standby_resume(db_factory, opid, *, actor, chat, now):
             "SELECT status,actor_id,chat_id FROM cloudzy_edge_operations WHERE id=?",
             (opid,)
         ).fetchone()
-        if not row or row != ("EDGE_READY", actor, chat):
+        if not row or tuple(row) != ("EDGE_READY", actor, chat):
             raise RecoveryHold("RECOVERY_EDGE_NOT_READY_OR_OWNER_CHANGED")
         run = db.execute(
             "SELECT stage,actor_id,chat_id FROM cloudzy_cz06_runs "
             "WHERE operation_id=?", (opid,)
         ).fetchone()
-        if not run or run != ("HOLD", actor, chat):
+        if not run or tuple(run) != ("HOLD", actor, chat):
             raise RecoveryHold("RECOVERY_STANDBY_STAGE_CHANGED")
         for table, where in (
             ("cloudzy_cz04a_actions", "status NOT IN ('DONE','REJECTED')"),

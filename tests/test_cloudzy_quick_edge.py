@@ -493,7 +493,7 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
     async def test_reviewed_pinned_key_reuses_inactive_legacy_install(self):
         record = await self.purchase()
         await self.cb("apps_cz_operations")
-        self.assertIn("HOSTKEY_PENDING", self.query.text)
+        self.assertIn("منتظر تأیید اثرانگشت SSH", self.query.text)
         review = next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_"))
         await self.cb(review)
         accept = next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_"))
@@ -509,6 +509,50 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(hostname.startswith("nvl-edge-"))
         await self.cb(accept)
         self.assertEqual(len(self.provisions), 1)
+
+    async def test_manual_edge_ready_shows_manual_standby_not_automatic_cz07(self):
+        op = await self.purchase()
+        await self.cb("apps_cz_operations")
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_")))
+        await self.app.drain()
+        await self.cb("apps_cz_operations")
+        self.assertIn("مسیر دستی", self.query.text)
+        self.assertIn("apps_cz4_vps", self.query.callbacks)
+        self.assertIn("apps_cz5_home", self.query.callbacks)
+        self.assertNotIn("apps_cz7_home", self.query.callbacks)
+        self.assertIn("apps_cz_qdetails_" + op["id"], self.query.callbacks)
+        await self.cb("apps_cz_qdetails_" + op["id"])
+        self.assertIn("Receipt:", self.query.text)
+        self.assertIn("EDGE_READY", self.query.text)
+        self.assertIn("apps_cz_qview_" + op["id"], self.query.callbacks)
+        await self.cb("apps_cz_qdetails_" + op["id"], actor=998)
+        self.assertIn("OPERATION_OWNER_MISMATCH", self.query.text)
+
+    async def test_cz06_standby_hold_has_safe_manual_navigation_not_retry(self):
+        class FailingStandby(FakeStandby):
+            async def probe(self, *args):
+                return False
+
+        self.wizard.standby_service = FailingStandby()
+        self.wizard.cz06_enabled = lambda: True
+        await self.cb("apps_cz6_start")
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qr_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qp_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qbuy_")))
+        await self.app.drain()
+        await self.cb("apps_cz_operations")
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_")))
+        await self.app.drain()
+        self.assertEqual(self.wizard.quick_runs.get(self.wizard.store.latest()["id"])["stage"], "HOLD")
+        await self.cb("apps_cz_operations")
+        self.assertIn("✅ نصب و بررسی Edge", self.query.text)
+        self.assertIn("⚠️ فعال‌سازی Standby", self.query.text)
+        self.assertIn("apps_cz4_vps", self.query.callbacks)
+        self.assertIn("apps_cz5_home", self.query.callbacks)
+        self.assertNotIn("apps_cz7_home", self.query.callbacks)
+        self.assertFalse(any(x.startswith("apps_cz6_resume_") for x in self.query.callbacks))
 
     async def test_definite_4xx_rejects_without_permanent_purchase_lock(self):
         self.api.fail_create = CloudzyAPIError(402, "private provider rejection")

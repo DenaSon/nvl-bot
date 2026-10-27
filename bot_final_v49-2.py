@@ -3959,6 +3959,11 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
 
     m = re.search(r'کلید عمومی این Edge:\s*(\S+)', out)
     if not m:
+        if "APT_LOCK_BUSY:" in err:
+            # Installation never reached WireGuard key generation. Classify the
+            # actual package-manager blocker instead of a misleading key error.
+            return False, ("⚠️ APT_LOCK_BUSY: نصب بسته‌ها در Edge به دلیل اشغال بودن "
+                           "APT متوقف شد. نصب خودکار تکرار نشود؛ وضعیت عملیات را بررسی کنید."), None
         return False, (f"❌ اسکریپت روی Edge اجرا شد ولی کلید عمومی در خروجی پیدا نشد.\n\n"
                         f"انتهای خروجی:\n<code>{esc(out[-1200:])}</code>\n\n"
                         f"خطا:\n<code>{esc(err[-500:])}</code>"), None

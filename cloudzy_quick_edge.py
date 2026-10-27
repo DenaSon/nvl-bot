@@ -407,9 +407,17 @@ class QuickEdgeWizard:
         self._running.add(opid)
 
         async def wrapped():
+            # Only one transient UI clock per in-process operation. The durable
+            # operation journal, not this clock, is the source of truth.
+            clock = asyncio.create_task(self._progress_clock(app, opid))
             try:
                 await task
             finally:
+                clock.cancel()
+                try:
+                    await clock
+                except asyncio.CancelledError:
+                    pass
                 self._running.discard(opid)
         try:
             app.create_task(wrapped())
@@ -417,6 +425,44 @@ class QuickEdgeWizard:
             self._running.discard(opid)
             task.close()
             raise
+
+    async def _progress_clock(self, app, opid):
+        """Update the existing CZ-06 Telegram progress message every 30 seconds.
+
+        Never restarts Cloudzy/SSH operations. Stops when the worker finishes,
+        progress is blocked, or the message cannot be tracked.
+        """
+        try:
+            run = await asyncio.to_thread(self.quick_runs.get, opid)
+            if not run or run.get("message_id") is None:
+                return
+            while True:
+                await asyncio.sleep(30)
+                if opid not in self._running:
+                    return
+                run = await asyncio.to_thread(self.quick_runs.get, opid)
+                if not run or run["stage"] not in (
+                        "PURCHASING", "WAITING_PROVIDER", "INSTALLING", "STANDBY_VERIFYING"):
+                    return
+                receipt = await asyncio.to_thread(self.store.get, opid)
+                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                try:
+                    await app.bot.edit_message_text(
+                        chat_id=run["chat_id"], message_id=run["message_id"],
+                        text=progress_html(run, receipt, now=self.now()),
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("📋 وضعیت عملیات",
+                                                 callback_data="apps_cz_operations")
+                        ]]),
+                    )
+                except Exception:
+                    # UI delivery is best effort; never affect provisioning.
+                    log.warning("CZ06_CLOCK_DELIVERY_FAILED op=%s", opid[:16])
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.warning("CZ06_CLOCK_UNAVAILABLE op=%s", opid[:16])
 
     async def _cloudzy(self, method, *args, **kwargs):
         return await asyncio.to_thread(
@@ -1112,6 +1158,8 @@ class QuickEdgeWizard:
                 (latest_type, latest_b64),
             )
             if not ok or not isinstance(details, dict) or not details.get("tunnel_ok"):
+                if isinstance(details, dict) and details.get("error_code") == "APT_LOCK_BUSY":
+                    raise QuickEdgeHold("EDGE_APT_LOCK_BUSY")
                 raise QuickEdgeHold("LEGACY_PROVISION_OR_WG_TUNNEL_NOT_VERIFIED")
             stage = "EDGE_POSTCHECK"
             log.info("CZ06_INSTALL op=%s ip=%s stage=%s code=START", opid[:16], ip, stage)
@@ -1141,7 +1189,8 @@ class QuickEdgeWizard:
             log.error("CZ06_INSTALL_HOLD op=%s ip=%s stage=%s code=%s",
                       opid[:16], ip, stage, code)
             try:
-                reason = ("CLOUDZY_IP_ALREADY_REGISTERED"
+                reason = ("EDGE_APT_LOCK_BUSY" if code == "EDGE_APT_LOCK_BUSY"
+                          else "CLOUDZY_IP_ALREADY_REGISTERED"
                           if stage == "HOST_POOL_IDENTITY" and
                           code == "CLOUDZY_IP_ALREADY_REGISTERED"
                           else "PARTIAL_OR_UNVERIFIED_LEGACY_INSTALL")
@@ -1156,7 +1205,17 @@ class QuickEdgeWizard:
             except Exception:
                 log.error("CZ06_INSTALL_HOLD op=%s stage=CZ06_JOURNAL code=STAGE_UPDATE_FAILED",
                           opid[:16])
-            await app.bot.send_message(chat,
-                f"⛔️ نصب Edge نتیجه قطعی ندارد. مرحله: {stage} | کد: {code} | "
-                f"پیگیری: {opid[:16]}. "
-                "ممکن است بخشی از WireGuard تغییر کرده باشد؛ نصب را دوباره اجرا نکنید.")
+            if code == "EDGE_APT_LOCK_BUSY":
+                await app.bot.send_message(
+                    chat,
+                    "⚠️ <b>آماده‌سازی بسته‌های Edge متوقف شد.</b>\n"
+                    "APT سرور مشغول بود و پس از انتظار محدود آزاد نشد.\n"
+                    "✅ هیچ اجرای مجدد خودکاری انجام نشده است.\n"
+                    "🔒 پرونده در وضعیت توقف امن باقی مانده؛ نصب را از ابتدا تکرار نکنید.\n"
+                    f"کد: <code>{code}</code> | پیگیری: <code>{opid[:16]}</code>",
+                    parse_mode="HTML")
+            else:
+                await app.bot.send_message(chat,
+                    f"⛔️ نصب Edge نتیجه قطعی ندارد. مرحله: {stage} | کد: {code} | "
+                    f"پیگیری: {opid[:16]}. "
+                    "ممکن است بخشی از WireGuard تغییر کرده باشد؛ نصب را دوباره اجرا نکنید.")

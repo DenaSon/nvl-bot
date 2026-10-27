@@ -1176,18 +1176,27 @@ class QuickEdgeWizard:
             await asyncio.to_thread(
                 commit_existing_install, self.store.db, opid,
                 actor=actor, chat=chat, now=self.now())
-            await app.bot.send_message(
-                chat, f"✅ نصب موجود Edge {op['public_ipv4']} با شواهد زنده تأیید شد. "
-                      "هیچ اسکریپتی دوباره اجرا نشد. اکنون از «وضعیت عملیات»"
-                      " آماده‌سازی Standby را ادامه دهید.")
         except Exception as exc:
             if isinstance(exc, RecoveryHold):
                 safe_code = str(exc)
             log.warning("CZ_RECOVERY_INSTALL_HOLD op=%s code=%s", opid[:16], safe_code)
+            try:
+                await app.bot.send_message(
+                    chat, f"⛔️ شواهد برای پذیرش نصب موجود کافی نیست. "
+                          f"کد: {safe_code} | عملیات: {opid[:16]}. "
+                          "وضعیت قبلی حفظ شده است؛ نصب را تکرار نکنید.")
+            except Exception:
+                log.warning("CZ_RECOVERY_HOLD_DELIVERY_FAILED op=%s", opid[:16])
+            return
+        # Telegram delivery is not part of the committed journal transaction.
+        # Failure to send a success message must not be reported as a rollback.
+        try:
             await app.bot.send_message(
-                chat, f"⛔️ شواهد برای پذیرش نصب موجود کافی نیست. "
-                      f"کد: {safe_code} | عملیات: {opid[:16]}. "
-                      "وضعیت قبلی حفظ شده است؛ نصب را تکرار نکنید.")
+                chat, f"✅ نصب موجود Edge {op['public_ipv4']} با شواهد زنده تأیید شد. "
+                      "هیچ اسکریپتی دوباره اجرا نشد. اکنون از «وضعیت عملیات»"
+                      " آماده‌سازی Standby را ادامه دهید.")
+        except Exception:
+            log.warning("CZ_RECOVERY_SUCCESS_DELIVERY_FAILED op=%s", opid[:16])
 
     async def _buy(self, opid, chat, pub, app):
         # No Cloudzy POST until fresh stock and price still match the receipt.

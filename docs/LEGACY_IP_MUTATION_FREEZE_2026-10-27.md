@@ -12,25 +12,37 @@ Owner read-only evidence at 2026-10-27:
 - `phase6h_auto_failover_enabled=0`, `auto_failover_mode=0`.
 - IP pressure streak 0 / no elapsed pressure; `nvl-edge-sync.timer` disabled.
 
-## Scope
+## Scope — compatible with the 2026-10-27 follow-up patch
 
-1. Retain automatic CPU/RAM and Edge health monitoring, persistence, and alerts;
-   retire automatic 3-hour full account rebalancing and automatic host disable
-   or DNS changes from `_host_health_tick`.
-2. Only a single active, non-Standby, non-Core default Relay with matching
-   `dns_current_ip` may be written into `settings.hosts`. Inventory membership
-   is **not** the list of customer routes. A mismatch blocks publishing.
-3. Legacy direct host-override setters refuse nondefault destinations. This
-   prevents one-click old Telegram controls and future accidental callers
-   from scattering SSH account metadata across all active inventory entries.
-4. Old Round-Robin and pressure-based immediate migrate callbacks remain
-   present but explicitly refuse mutation; legacy default selection/retirement
-   refuses changing the current global route outside the journaled cutover.
-5. CZ-04B/CZ-07 guarded operations and original 6G/6H transaction engine
-   are deliberately **not modified**. Phase 6H is still a separate opt-in
-   capability and remains OFF in the observed Production configuration.
-6. In legacy IP Service UI, the old filtering traffic anomaly is described
-   as alert-only, matching the existing runtime semantics.
+1. Automatic CPU/RAM pressure and Edge health tasks are **monitor/alert only**:
+   no background account reassignment, default change, DNS update, or host retirement.
+2. Admin-initiated **Legacy** paths are preserved as fallback while CZ-04B/CZ-07
+   is not operationally reliable: manual Edge provision, activation, choosing a
+   default (`hpdef_`), and the second-stage manual customer transfer
+   (`hpdef_migrate_` / `hpdefmig_yes_`).
+3. `_db_rebuild_hosts_from_pool` is kept for explicit manual operations: it
+   rebuilds the legacy host picker from active `host_pool`, default first.
+   This may include the Core fallback and additional active Edges, as it did
+   prior to PR #208. It does NOT allocate customers or change DNS.
+4. Legacy account setters keep the existing 6G running-operation lock and
+   protected Egress/bindings guard. They may set manually chosen nondefault
+   hosts; automatic callers have been retired.
+5. **New Legacy customers still use only the verified active, non-Standby,
+   non-Core default** via `_default_customer_relay_checked`. This rule is
+   independent of additional inventory entries in `settings.hosts`.
+6. The old Round-Robin confirm callback and CPU-pressure automatic transfer
+   remain disabled; no automatic routing is restored.
+7. CZ-04A/CZ-04B/CZ-07 and original 6G/6H paths remain unchanged. The Phase
+   6H opt-in flag was OFF in the Production snapshot; it is NOT changed by
+   this patch.
+
+**Important historic behavior:** The Legacy default-selection button is
+two-stage. It updates the database default before the separate transfer+DNS
+confirmation. During that gap, the new-customer routing guard intentionally
+refuses to issue new accounts (`DEFAULT_CUSTOMER_RELAY_ROUTE_MISMATCH`) rather
+than silently selling an account on the wrong Relay. The manual cutover is
+not atomic and must be operator-controlled and verified carefully; do not
+treat it as equivalent to the journaled CZ-04B/CZ-07 flow.
 
 ## Pressure escalation
 
@@ -42,16 +54,17 @@ Owner read-only evidence at 2026-10-27:
 - When pressure clears, reset the incident counters; a new episode may alert
   again.
 
-## Deliberate compatibility holds
+## Retained safety restrictions
 
-- The legacy `hpdef_` handler cannot atomically change the default plus DNS
-  plus customer ownership. It now instructs the admin to use CZ-04B.
-- The legacy `hpblk_`/`hpdelyes_` handlers refuse the current default. An
-  unselected nondefault host may still be manually managed with existing
-  verification and lock guards.
-- Bulk/single metadata host reassignment can only target the verified current
-  default. Multi-relay movement must use CZ-04B/CZ-07 or the protected
-  migration engine, not metadata-only legacy callbacks.
+- Default-host disable/delete from the old host-pool UI still requires a
+  safe cutover first; deleting the active Relay or its WireGuard peer is not
+  a rescue operation.
+- Protected Egress mode, protected UID bindings, and the shared Phase 6G
+  running-operation lease continue to block conflicting Legacy mutations.
+- A manually chosen Core/Standby fallback may appear in historical inventory.
+  This is **not** automatic eligibility for new customer subscriptions.
+- For new live migrations, verify real client connectivity, preserve backups
+  and inspect both Cloudflare live DNS and database default before/after.
 
 ## Verification and deployment boundary
 

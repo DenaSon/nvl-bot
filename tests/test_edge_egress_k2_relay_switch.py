@@ -33,24 +33,28 @@ class LegacyRelayContractTests(unittest.TestCase):
         for mutator in ('useradd ', 'adduser ', 'passwd ', 'CREATE TABLE ', 'ssh_accounts'):
             self.assertNotIn(mutator,src)
 
-    def test_legacy_default_change_requires_guarded_cutover(self):
+    def test_legacy_default_and_manual_confirmed_migration_are_preserved(self):
         src=BOT.read_text(encoding="utf-8")
         self.assertIn('callback_data=f"hpdef_{edge_ip}"',src)
-        # Old Telegram buttons are still recognized, but cannot change the
-        # default outside CZ-04B's DNS+ownership journal.
         start=src.index('    elif d.startswith("hpdef_")')
         end=src.index('    # 🗑 حذف‌شده: خریدِ خودکارِ VPS',start)
-        callback=src[start:end]
-        self.assertIn("CZ-04B",callback)
-        self.assertIn("return",callback)
-        self.assertNotIn("_db_set_default_host",callback)
-        # The existing reactivation/metadata control may only target the
-        # verified current default (guarded in its shared database setter).
-        start=src.index("def _db_set_all_accounts_host(")
-        end=src.index("def _db_get_recent_active_accounts(",start)
-        setter=src[start:end]
-        self.assertIn("_default_customer_relay_checked(conn)",setter)
-        self.assertNotIn('useradd',setter)
+        block=src[start:end]
+        # Admin callback requires a live customer SSH service before changing
+        # the default, and offers a separate confirmation for moving customers.
+        self.assertLess(block.index("_check_ssh_reachable"),
+                        block.index("_db_set_default_host"))
+        self.assertIn('callback_data=f"hpdef_migrate_{host}"',block)
+        confirm_start=src.index('    elif d.startswith("hpdefmig_yes_")')
+        confirm_end=src.index('    elif d.startswith("hpdef_")',confirm_start)
+        confirmed=src[confirm_start:confirm_end]
+        self.assertLess(confirmed.index("_check_ssh_reachable"),
+                        confirmed.index("_db_set_all_accounts_host"))
+        self.assertIn("_update_cloudflare_dns(host)",confirmed)
+        # Provisioning still uses the same installer + optional Egress stage.
+        self.assertIn("_provision_new_edge_sync, edge_ip",src)
+        self.assertIn("_db_add_host_pool, edge_ip",src)
+        self.assertIn('callback_data=f"hpdef_{edge_ip}"',src)
+        self.assertNotIn('useradd ',confirmed)
 
     def test_failover_rebuild_is_distinct_emergency_flow(self):
         src=BOT.read_text(encoding="utf-8")

@@ -4263,37 +4263,21 @@ def _install_local_pubkey_on_open_ssh(ssh):
 # host_pool کار می‌کند (نگاه کنید به _activate_standby_for_filtered_edge پایین‌تر در همین فایل).
 
 def _db_rebuild_hosts_from_pool():
-    """Reconcile one routed customer Relay, never all active inventory entries.
-
-    host_pool also includes Core and nondefault/unused Edges; those are not
-    automatically eligible for assignment or public client configuration.
-    """
+    """تنظیم «hosts» (که همه‌جای ربات برای ساخت فاکتور/کد اتصال استفاده می‌شود) را از روی
+    IPهای فعالِ host_pool بازسازی می‌کند. سایر بخش‌های کد بدون هیچ تغییری همچنان از همان
+    تنظیم قدیمی «hosts» می‌خوانند؛ فقط منبع تولیدش عوض شده.
+    🆕 اگر یک IP به‌عنوان «پیش‌فرض کل سیستم» ست شده باشد، همیشه اول لیست قرار می‌گیرد — چون
+    تمام جاهای کد قدیمی که fallback را با hl[0] می‌گرفتند، دقیقاً همین رفتار را انتظار دارند."""
     with db_conn() as conn:
+        # Only invoked by explicitly approved/manual legacy host operations.
+        # Preserve the original complete active inventory (Default first)
+        # for the legacy manual picker; never call this from health/pressure.
         conn.execute("BEGIN IMMEDIATE")
         _db_assert_legacy_host_mutation_allowed(conn)
         _db_assert_account_write_allowed(conn)
-        defaults = conn.execute(
-            "SELECT host,active,is_standby FROM host_pool WHERE is_default=1"
-        ).fetchall()
-        if len(defaults) != 1:
-            raise RuntimeError("HOSTS_DEFAULT_RELAY_AMBIGUOUS")
-        host, active, standby = defaults[0]
-        host = str(host or "").strip()
-        settings = dict(conn.execute(
-            "SELECT key,value FROM settings "
-            "WHERE key IN ('core_wg_public_ip','dns_current_ip')"
-        ).fetchall())
-        core = str(settings.get("core_wg_public_ip") or "").strip()
-        dns = str(settings.get("dns_current_ip") or "").strip()
-        if not host or not core or host == core or int(active or 0) != 1 or int(standby or 0) != 0:
-            raise RuntimeError("HOSTS_DEFAULT_RELAY_NOT_ELIGIBLE")
-        if dns != host:
-            raise RuntimeError("HOSTS_DEFAULT_DNS_MISMATCH")
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key,value) VALUES ('hosts',?)",
-            (host,),
-        )
-
+        active = [r[0] for r in conn.execute("SELECT host FROM host_pool WHERE active=1 ORDER BY is_default DESC, host").fetchall()]
+        if active:  # هرگز لیست را کامل خالی نمی‌کنیم تا فاکتورسازی از کار نیفتد
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('hosts', ?)", (",".join(active),))
 def _db_resync_host_pool_from_full_list(hosts_list):
     """وقتی ادمین از مسیر قدیمیِ متنیِ «تنظیمات هاست» کل لیست را یک‌جا جایگزین می‌کند، این تابع
     host_pool را با همان لیست هماهنگ می‌کند: مواردی که در لیست جدید هستند فعال می‌شوند، مواردی
@@ -4609,8 +4593,6 @@ def _db_set_account_host(un, host):
         # paths. Automatic balancing also uses this single-account setter.
         _db_assert_legacy_host_mutation_allowed(conn)
         _db_assert_account_write_allowed(conn)
-        if _default_customer_relay_checked(conn) != str(host).strip():
-            raise RuntimeError("LEGACY_CUSTOMER_TARGET_NOT_DEFAULT")
         conn.execute("UPDATE ssh_accounts SET host=? WHERE username=? AND service_type='ssh'", (host, un))
 
 def _db_set_hosts_bulk(usernames, host):
@@ -4618,8 +4600,6 @@ def _db_set_hosts_bulk(usernames, host):
         conn.execute("BEGIN IMMEDIATE")
         _db_assert_legacy_host_mutation_allowed(conn)
         _db_assert_account_write_allowed(conn)
-        if _default_customer_relay_checked(conn) != str(host).strip():
-            raise RuntimeError("LEGACY_CUSTOMER_TARGET_NOT_DEFAULT")
         conn.executemany(
             "UPDATE ssh_accounts SET host=? WHERE username=? AND service_type='ssh'",
             [(host, u) for u in usernames],
@@ -4630,8 +4610,6 @@ def _db_set_all_accounts_host(host):
         conn.execute("BEGIN IMMEDIATE")
         _db_assert_legacy_host_mutation_allowed(conn)
         _db_assert_account_write_allowed(conn)
-        if _default_customer_relay_checked(conn) != str(host).strip():
-            raise RuntimeError("LEGACY_CUSTOMER_TARGET_NOT_DEFAULT")
         conn.execute("UPDATE ssh_accounts SET host=? WHERE status != '⏳ درحال ساخت' AND service_type='ssh'", (host,))
 def _db_get_recent_active_accounts(days=7):
     """اکانت‌های فعالی که در N روز اخیر ساخته شده‌اند (برای انتقال خودکار هنگام فشار سرور)."""
@@ -25965,13 +25943,40 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"✅ سرویس مشتری زنده تأیید شد و هاستِ همهٔ اکانت‌های موجود به <code>{esc(host)}</code> منتقل شد." + cf_suffix, reply_markup=kb, parse_mode="HTML")
 
     elif d.startswith("hpdef_") and role == 'admin':
-        # Previous callback changed default before DNS and customer ownership.
-        # Keep the legacy callback visible but route cutovers through CZ-04B.
-        await query.message.reply_text(
-            "⛔️ تغییر Relay پیش‌فرض از مسیر قدیمی متوقف است. "
-            "از روند تأییدشده Cloudzy/CZ-04B استفاده کنید."
-        )
-        return
+        host = d[len("hpdef_"):]
+        active_now = await asyncio.to_thread(_db_get_active_hosts_from_pool)
+        if host not in active_now:
+            await query.message.reply_text("⛔️ فقط یک IP فعال می‌تواند پیش‌فرض شود؛ اول آن را فعال کنید."); return
+
+        # 🐛🔧 رفع باگ واقعی: قبلاً اینجا بدون هیچ چکی، IP به‌عنوان پیش‌فرض ثبت و آمادهٔ انتقال
+        # همهٔ کاربران می‌شد، حتی اگر سرویس SSH واقعی رویش هنوز درست بالا نیامده باشد (مثلاً درست
+        # همان مشکلی که با ssh.socket پیش آمد: پورت توی دیتابیس یک چیز بود، پورت واقعی گوش‌داده‌شده
+        # چیز دیگر). نتیجه: انتقال کور به یک IP که واقعاً آماده نیست و قطعی کامل کاربران. الان قبل
+        # از هرچیز، با یک چک سبک (بدون نیاز به رمز) مطمئن می‌شویم واقعاً یک SSH زنده آن‌جا هست.
+        port_to_check = await asyncio.to_thread(_db_get_host_service_port, host, 22)
+        reachable, reach_detail = await _check_ssh_reachable(host, port_to_check)
+        if not reachable:
+            await query.message.reply_text(
+                f"⛔️ <b>پیش‌فرض نشد.</b>\n\n"
+                f"قبل از پیش‌فرض‌کردن، سرویس مشتری روی <code>{esc(host)}:{port_to_check}</code> امتحان شد و جواب نداد:\n"
+                f"<code>{esc(reach_detail)}</code>\n\n"
+                f"اگر این IP تازه اضافه شده، اول مطمئن شوید SSH رویش کامل بالا آمده (و پورت ثبت‌شده در "
+                f"«سرویس IP» با پورت واقعی سرور یکی است)، بعد دوباره امتحان کنید.",
+                parse_mode="HTML")
+            return
+
+        await asyncio.to_thread(_db_set_default_host, host)
+        await asyncio.to_thread(_db_rebuild_hosts_from_pool)
+        await asyncio.to_thread(_db_mark_ip_switch_now)  # 🆕 شروع دورهٔ خنک‌شدن برای پایش خودکار
+        # 🆕 قبلاً فقط اکانت‌های تازه/فاکتورهای بدون هاست مشخص را تحت‌تاثیر قرار می‌داد؛ حالا صراحتاً
+        # می‌پرسد آیا اکانت‌های موجود هم به همین IP جدید منتقل شوند («کل کاربران منتقل شوند»).
+        kb = [[InlineKeyboardButton("👥 بله، اکانت‌های موجود هم به این IP منتقل شوند", callback_data=f"hpdef_migrate_{host}")],
+              [InlineKeyboardButton("🔙 بازگشت به سرویس IP", callback_data="ipsvc_menu")]]
+        await query.edit_message_text(
+            f"⭐ <code>{esc(host)}</code> به‌عنوان پیش‌فرض کل سیستم ثبت شد (سرویس مشتری هم تأیید شد ✅)؛ از این پس اکانت‌های جدید و هر "
+            f"فاکتور بدون هاست مشخص، اول همین IP را نشان می‌دهند.\n\n"
+            f"می‌خواهید هاستِ اکانت‌های <b>از قبل ساخته‌شده</b> هم به همین IP جدید منتقل شود؟",
+            reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
     # 🗑 حذف‌شده: خریدِ خودکارِ VPS از DigitalOcean + خریدِ دستی/مدیریتِ سرورهای Cloudzy.
     # طبقِ معماریِ جدید، افزودنِ Edge فقط دستی (🚀 افزودن Edge جدید) و Failover فقط با

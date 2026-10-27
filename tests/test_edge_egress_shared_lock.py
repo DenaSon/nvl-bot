@@ -322,26 +322,24 @@ class ProtectedLegacyDbMutationTests(unittest.TestCase):
             "172.86.94.174",
         )
 
-    def test_unprotected_single_account_rejects_nondefault_relay(self):
-        with self.assertRaisesRegex(RuntimeError, "LEGACY_CUSTOMER_TARGET_NOT_DEFAULT"):
-            self.single("nvl0557", "216.126.229.12")
+    def test_unprotected_manual_single_account_move_remains_available(self):
+        # A selected, admin-confirmed legacy host transfer must not be
+        # blocked merely because its destination is not yet Default.
+        self.single("nvl0557", "216.126.229.12")
         self.assertEqual(
             self.conn.execute(
                 "SELECT host FROM ssh_accounts WHERE username='nvl0557'"
             ).fetchone()[0],
-            "172.86.94.174",
+            "216.126.229.12",
         )
-        self.single("nvl0557", "172.86.94.174")
 
-    def test_nondefault_bulk_rejected_until_verified_default_and_dns(self):
+    def test_unprotected_manual_default_and_bulk_move_remain_available(self):
+        # No protected bindings or 6G lease: original manual legacy flow.
         self.default("216.126.229.12")
-        with self.assertRaises(RuntimeError):
-            self.bulk("216.126.229.12")
-        self.conn.execute(
-            "UPDATE host_pool SET is_standby=0 WHERE host='216.126.229.12'"
+        self.assertEqual(
+            self.conn.execute("SELECT host FROM host_pool WHERE is_default=1").fetchone()[0],
+            "216.126.229.12",
         )
-        self.set_setting("dns_current_ip", "216.126.229.12")
-        self.set_setting("hosts", "216.126.229.12")
         self.bulk("216.126.229.12")
         self.assertEqual(
             self.conn.execute("SELECT host FROM ssh_accounts WHERE username='nvl0557'").fetchone()[0],

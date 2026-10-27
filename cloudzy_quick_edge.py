@@ -916,6 +916,21 @@ class QuickEdgeWizard:
 
     async def _operation_screen(self, query, op, markup, actor, chat):
         status = op["status"]
+        status_title = {
+            "CREATING": "در حال ثبت خرید VPS",
+            "CREATE_UNCERTAIN": "نتیجه خرید نامشخص؛ نیازمند بررسی",
+            "CREATED": "VPS خریداری شد",
+            "WAITING": "در انتظار آماده‌شدن VPS",
+            "HOLD_WAIT": "آماده‌سازی VPS متوقف شد",
+            "HOLD_IP": "IP سرور نیازمند بررسی است",
+            "HOLD_SSH": "دسترسی SSH نیازمند بررسی است",
+            "HOSTKEY_PENDING": "منتظر تأیید هویت SSH",
+            "PROVISIONING": "در حال نصب Edge",
+            "HOLD_PROVISION": "نصب Edge متوقف شد؛ بررسی لازم است",
+            "EDGE_READY": "نصب Edge تأیید شد",
+            "CANCELLED": "لغوشده",
+            "REJECTED": "درخواست رد شد",
+        }.get(status, status)
         run = await asyncio.to_thread(self.quick_runs.get, op["id"])
         rows = []
         if op["actor_id"] == actor and op["chat_id"] == chat:
@@ -933,10 +948,15 @@ class QuickEdgeWizard:
         rows.append([("↩️ Cloudzy", "apps_cz_home")])
         text = ("📋 <b>عملیات ساخت Edge</b>\n\n"
                 f"شناسه: <code>{op['id'][:16]}</code>\n"
-                f"مرحله: <b>{_text(status)}</b>\n"
+                f"مرحله: <b>{_text(status_title)}</b> <code>{_text(status)}</code>\n"
                 f"VPS: <code>{_text(op.get('provider_server_id') or 'ثبت نشده')}</code>\n"
                 f"IP: <code>{_text(op.get('public_ipv4') or 'نامشخص')}</code>\n\n"
                 "⚠️ هیچ سرور قدیمی حذف نشده و هیچ Relay/DNS/اکانتی منتقل نشده است.\n")
+        if status in ("CREATING", "WAITING", "PROVISIONING"):
+            elapsed = max(0, int(self.now()) - int(op.get("updated_at") or self.now()))
+            minutes, seconds = divmod(elapsed, 60)
+            text += (f"\n⏱ مدت سپری‌شده از این مرحله: {minutes:02d}:{seconds:02d}"
+                     "\n🔒 خرید یا نصب مجدد انجام ندهید؛ زمان با «تازه‌سازی» به‌روز می‌شود.")
         if status in ("CREATING", "PROVISIONING"):
             text += "\n⏳ پس از ری‌استارت بات، این مرحله ممکن است نامعلوم باشد؛ درخواست تکراری نفرستید."
         if status == "HOSTKEY_PENDING":

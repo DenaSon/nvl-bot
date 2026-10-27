@@ -29,6 +29,7 @@ from cloudzy_cz05_catalog import CatalogHold, eligible_offers, preferred_regions
 from cloudzy_cz06_orchestrator import (
     QuickRelayHold, QuickRelayJournal, progress_html, promote_standby_once,
 )
+from cloudzy_phase1_ui import receipt_title, receipt_result, technical_receipt
 
 log = logging.getLogger(__name__)
 
@@ -683,7 +684,18 @@ class QuickEdgeWizard:
                      [("↩️ بازگشت بدون لغو", "apps_cz_qview_" + opid)]], markup)
             elif data.startswith("apps_cz_qview_"):
                 op = await asyncio.to_thread(self.store.get, data[len("apps_cz_qview_"):])
+                if not op:
+                    raise QuickEdgeHold("OPERATION_NOT_FOUND")
                 await self._operation_screen(query, op, markup, actor, chat)
+            elif data.startswith("apps_cz_qdetails_"):
+                opid = data[len("apps_cz_qdetails_"):]
+                op = await asyncio.to_thread(self.store.get, opid)
+                if not op or (op["actor_id"], op["chat_id"]) != (actor, chat):
+                    raise QuickEdgeHold("OPERATION_OWNER_MISMATCH")
+                run = await asyncio.to_thread(self.quick_runs.get, opid)
+                await self._display(query, technical_receipt(op, run),
+                    [[("↩️ بازگشت به وضعیت عملیات", "apps_cz_qview_" + opid)]],
+                    markup)
             elif data.startswith("apps_cz6_resume_"):
                 opid = data[len("apps_cz6_resume_"):]
                 op = await asyncio.to_thread(self.store.get, opid)
@@ -915,66 +927,71 @@ class QuickEdgeWizard:
             rows, markup)
 
     async def _operation_screen(self, query, op, markup, actor, chat):
+        """One readable status for an existing receipt; buttons are pure gates.
+
+        Only legacy handlers execute mutations. A visible navigation button
+        never qualifies an Edge, repairs a HOLD, or bypasses the CZ-06 journal.
+        """
         status = op["status"]
-        status_title = {
-            "CREATING": "در حال ثبت خرید VPS",
-            "CREATE_UNCERTAIN": "نتیجه خرید نامشخص؛ نیازمند بررسی",
-            "CREATED": "VPS خریداری شد",
-            "WAITING": "در انتظار آماده‌شدن VPS",
-            "HOLD_WAIT": "آماده‌سازی VPS متوقف شد",
-            "HOLD_IP": "IP سرور نیازمند بررسی است",
-            "HOLD_SSH": "دسترسی SSH نیازمند بررسی است",
-            "HOSTKEY_PENDING": "منتظر تأیید هویت SSH",
-            "PROVISIONING": "در حال نصب Edge",
-            "HOLD_PROVISION": "نصب Edge متوقف شد؛ بررسی لازم است",
-            "EDGE_READY": "نصب Edge تأیید شد",
-            "CANCELLED": "لغوشده",
-            "REJECTED": "درخواست رد شد",
-        }.get(status, status)
-        run = await asyncio.to_thread(self.quick_runs.get, op["id"])
+        opid = op["id"]
+        run = await asyncio.to_thread(self.quick_runs.get, opid)
+        owner = (op["actor_id"], op["chat_id"]) == (actor, chat)
+        is_running = opid in self._running
         rows = []
-        if op["actor_id"] == actor and op["chat_id"] == chat:
-            if (status in ("CREATING", "CREATE_UNCERTAIN", "CREATED", "WAITING",
-                           "HOLD_WAIT", "HOLD_IP", "HOLD_SSH")
-                    and op["id"] not in self._running):
-                rows.append([("🔎 بررسی بدون خرید مجدد", "apps_cz_qcheck_" + op["id"])])
-        if (run and run["actor_id"] == actor and run["chat_id"] == chat
-                and status == "EDGE_READY" and run["stage"] in (
-                    "INSTALLING", "EDGE_READY", "STANDBY_VERIFYING")):
-            rows.insert(0, [("▶️ ادامه امن Standby", "apps_cz6_resume_" + op["id"])])
-        if status in CANCELLABLE_STATES and op["id"] not in self._running:
-            rows.append([("❌ لغو عملیات و آزادسازی قفل", "apps_cz_qcancel_" + op["id"])])
-        rows.append([("🔄 تازه‌سازی", "apps_cz_qview_" + op["id"])])
+
+        if owner:
+            if status in ("CREATING", "CREATE_UNCERTAIN", "CREATED", "WAITING",
+                          "HOLD_WAIT", "HOLD_IP", "HOLD_SSH") and not is_running:
+                rows.append([("🔎 بررسی همان VPS؛ بدون خرید", "apps_cz_qcheck_" + opid)])
+
+            if status == "HOSTKEY_PENDING":
+                rows.append([("🔐 تأیید مستقل اثرانگشت SSH", "apps_cz_qreview_" + opid)])
+
+            if status == "EDGE_READY":
+                if run and run["stage"] in ("INSTALLING", "EDGE_READY", "STANDBY_VERIFYING"):
+                    if not is_running:
+                        rows.append([("▶️ بررسی و ادامه امن Standby", "apps_cz6_resume_" + opid)])
+                elif run and run["stage"] == "READY":
+                    rows.append([("🔍 بررسی آمادگی انتقال CZ-07", "apps_cz7_home")])
+                else:
+                    # Navigates to the existing guarded manual standby flow.
+                    # Does NOT mark CZ06 READY or enable automatic CZ07.
+                    rows.append([("🎯 مدیریت Standby همین Edge", "apps_cz4_vps")])
+                    rows.append([("↪️ مسیر کنترل‌شده دستی", "apps_cz5_home")])
+
+            if status.startswith("HOLD") or status == "CREATE_UNCERTAIN":
+                rows.append([("🖥 مشاهده VPSهای موجود", "apps_cz_servers_0")])
+                rows.append([("🌐 مشاهده فهرست Edgeها", "apps_cz_edge")])
+
+            if status in CANCELLABLE_STATES and not is_running:
+                rows.append([("❌ بررسی بستن پرونده (بدون حذف VPS)",
+                             "apps_cz_qcancel_" + opid)])
+
+            rows.append([("🔎 جزئیات فنی و کد خطا", "apps_cz_qdetails_" + opid)])
+        rows.append([("🔄 تازه‌سازی وضعیت", "apps_cz_qview_" + opid)])
         rows.append([("↩️ Cloudzy", "apps_cz_home")])
-        text = ("📋 <b>عملیات ساخت Edge</b>\n\n"
-                f"شناسه: <code>{op['id'][:16]}</code>\n"
-                f"مرحله: <b>{_text(status_title)}</b> <code>{_text(status)}</code>\n"
-                f"VPS: <code>{_text(op.get('provider_server_id') or 'ثبت نشده')}</code>\n"
-                f"IP: <code>{_text(op.get('public_ipv4') or 'نامشخص')}</code>\n\n"
-                "⚠️ هیچ سرور قدیمی حذف نشده و هیچ Relay/DNS/اکانتی منتقل نشده است.\n")
-        if status in ("CREATING", "WAITING", "PROVISIONING"):
+
+        if run:
+            text = progress_html(run, op, now=self.now())
+        else:
+            text = ("📋 <b>پرونده ساخت Edge</b>\n"
+                    f"مرحله: <b>{_text(receipt_title(status))}</b>\n"
+                    f"IP: <code>{_text(op.get('public_ipv4') or 'نامشخص')}</code>\n"
+                    f"شناسه: <code>{opid[:16]}</code>")
+
+        text += "\n\n<b>نتیجه فعلی</b>\n" + receipt_result(op, run)
+        if status in ("CREATING", "WAITING", "PROVISIONING") and not run:
             elapsed = max(0, int(self.now()) - int(op.get("updated_at") or self.now()))
             minutes, seconds = divmod(elapsed, 60)
-            text += (f"\n⏱ مدت سپری‌شده از این مرحله: {minutes:02d}:{seconds:02d}"
-                     "\n🔒 خرید یا نصب مجدد انجام ندهید؛ زمان با «تازه‌سازی» به‌روز می‌شود.")
+            text += f"\n\n⏱ زمان سپری‌شده این مرحله: {minutes:02d}:{seconds:02d}"
         if status in ("CREATING", "PROVISIONING"):
-            text += "\n⏳ پس از ری‌استارت بات، این مرحله ممکن است نامعلوم باشد؛ درخواست تکراری نفرستید."
+            text += ("\n⚠️ اگر بات ری‌استارت شده، وضعیت مرحله ممکن است نامشخص باشد؛"
+                     " به‌جای نصب مجدد، سوابق را بررسی کنید.")
         if status == "HOSTKEY_PENDING":
-            text += (f"\n🔐 <b>SSH host-key fingerprint</b>\n"
-                     f"نوع: <code>{_text(op.get('host_key_type') or 'نامشخص')}</code>\n"
-                     f"<code>{_text(op.get('host_key_fingerprint') or 'نامشخص')}</code>\n\n"
-                     "این اثرانگشت را با یک منبع مستقل و مورداعتماد، "
-                     "مثلاً کنسول Cloudzy، مقایسه کنید. مشاهده آن از همین IP کافی نیست.")
-            if op["actor_id"] == actor and op["chat_id"] == chat:
-                rows.insert(0, [("🔐 بررسی و تأیید اثرانگشت", "apps_cz_qreview_" + op["id"])])
-        if run:
-            text += "\n" + progress_html(run, op)
-        if status.startswith("HOLD") or status == "CREATE_UNCERTAIN":
-            text += f"\n⚠️ نیازمند بررسی: {_text(op.get('hold_reason') or 'UNKNOWN')}"
-        if status == "EDGE_READY":
-            text += "\n✅ Edge در host_pool به‌صورت غیرفعال ثبت شده و آماده بررسی دستی است."
-        if status == "CANCELLED":
-            text += "\n✅ این عملیات توسط مدیر بسته شده و مانع خرید تازه نیست؛ منابع ابری خودکار حذف نشده‌اند."
+            text += (f"\n\n🔐 اثرانگشت SSH: "
+                     f"<code>{_text(op.get('host_key_fingerprint') or 'نامشخص')}</code>"
+                     "\nفقط پس از تطبیق با منبع مستقل آن را تأیید کنید.")
+        text += "\n\n🛡 تا قبل از تأییدهای جداگانه، DNS و کاربران منتقل نمی‌شوند."
         await self._display(query, text, rows, markup)
 
     async def _buy(self, opid, chat, pub, app):

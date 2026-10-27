@@ -209,6 +209,38 @@ class QueueTests(unittest.TestCase):
         # Repeat navigation edits a single message; no paid or route operation.
         self.assertIsNone(self.q.latest())
 
+    def test_cz07_status_screen_uses_persian_stage_and_guarded_actions(self):
+        from cloudzy_cz04b import _digest
+        from asyncio import run
+
+        class Query:
+            def __init__(self):
+                self.text, self.callbacks = "", []
+
+            async def edit_message_text(self, text, **kw):
+                self.text = text
+                self.callbacks = [callback for row in kw["reply_markup"]
+                                  for _label, callback in row]
+
+        with self.factory() as db:
+            rows = self.fake._source_accounts(db, "source.example")
+        job_id = self.q.reserve(self.q.candidate(), "source.example",
+                                actor=7, chat=8, expected_fp=_digest(rows),
+                                expected_count=473)
+        self.q.transition(job_id, "QUEUED", "ROUTING", code="ROUTE_START")
+        query = Query()
+        run(self.q._show_status(query, self.q.get(job_id),
+                                lambda rows: rows, 7, 8))
+        self.assertIn("در حال بررسی و تنظیم مسیر", query.text)
+        self.assertIn("apps_cz7_status", query.callbacks)
+        self.assertFalse(any(x.startswith("apps_cz7_resume_") for x in query.callbacks))
+        self.q.transition(job_id, "ROUTING", "HOLD", code="ROUTE_UNVERIFIED")
+        run(self.q._show_status(query, self.q.get(job_id),
+                                lambda rows: rows, 7, 8))
+        self.assertIn("توقف امن", query.text)
+        self.assertIn("ROUTE_UNVERIFIED", query.text)
+        self.assertNotIn("ادامه امن صف", query.text)
+
     def test_authorization_one_job_and_durable_events(self):
         from cloudzy_cz04b import _digest
         with self.factory() as db:

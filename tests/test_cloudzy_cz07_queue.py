@@ -161,6 +161,79 @@ class QueueTests(unittest.TestCase):
             db.execute("DELETE FROM cloudzy_cz06_runs")
         self.assertEqual(self.q.readiness()["code"], "NO_CZ06_RUN")
 
+    def test_cancelled_cz06_receipt_never_becomes_a_destination(self):
+        """Real operator feedback: cancelled .127, newer manual .157."""
+        with self.factory() as db:
+            db.execute("UPDATE cloudzy_cz06_runs SET stage='CANCELLED'")
+            db.execute(
+                "UPDATE cloudzy_edge_operations SET public_ipv4='144.172.68.127' "
+                "WHERE id='purchase-1'"
+            )
+            db.execute(
+                "INSERT INTO cloudzy_edge_operations "
+                "(id,status,public_ipv4,provider_server_id) VALUES (?,?,?,?)",
+                ("manual-2","EDGE_READY","144.172.68.157","provider-2")
+            )
+            db.execute(
+                "INSERT INTO host_pool VALUES (?,?,?,?,?,?)",
+                ("144.172.68.157",0,0,0,"cloudzy","provider-2")
+            )
+        state = self.q.readiness()
+        self.assertFalse(state["ready"])
+        self.assertIsNone(state["target"])
+        self.assertEqual(state["code"], "CZ06_CANCELLED")
+        self.assertEqual(state["last_quick_ip"], "144.172.68.127")
+        with self.assertRaisesRegex(CZ07Hold, "NO_VERIFIED_CZ06_STANDBY"):
+            self.q.candidate()
+
+        from asyncio import run
+        class Query:
+            def __init__(self):
+                self.message = self
+                self.text = ""
+                self.callbacks = []
+            async def edit_message_text(self, text, **kwargs):
+                self.text = text
+                self.callbacks = [
+                    value for row in kwargs["reply_markup"] for _, value in row
+                ]
+            async def reply_text(self, text, **kwargs):
+                self.text = text
+
+        query = Query()
+        context = type("Ctx", (), {"user_data": {}})()
+        run(self.q.handle_callback(
+            query, context, "apps_cz7_home", role="admin",
+            actor=7, chat=8, markup=lambda rows: rows, app=None
+        ))
+        self.assertIn("مقصد معتبر برای CZ-07", query.text)
+        self.assertIn("وجود ندارد", query.text)
+        self.assertIn("آخرین پرونده Quick Relay (لغوشده)", query.text)
+        self.assertIn("144.172.68.127", query.text)
+        self.assertIn("این IP مقصد انتقال نیست", query.text)
+        self.assertNotIn("مقصد: <code>144.172.68.127</code>", query.text)
+        self.assertNotIn("مقصد: <code>144.172.68.157</code>", query.text)
+        self.assertNotIn("apps_cz7_preview", query.callbacks)
+        self.assertIn("apps_cz4_vps", query.callbacks)
+        self.assertIn("apps_cz_operations", query.callbacks)
+        # Idempotent read-only navigation: no job reserved, no migration.
+        self.assertIsNone(self.q.latest())
+
+    def test_unqualified_recent_standby_is_not_presented_as_destination(self):
+        with self.factory() as db:
+            db.execute("UPDATE cloudzy_cz06_runs SET stage='HOLD'")
+        snapshot = self.q.readiness()
+        self.assertEqual(snapshot["code"], "CZ06_HOLD")
+        self.assertIsNone(snapshot["target"])
+        self.assertEqual(snapshot["last_quick_ip"], "target.example")
+        self.assertTrue(snapshot["manual_standby"])
+
+    def test_verified_candidate_still_presents_its_actual_destination(self):
+        snapshot = self.q.readiness()
+        self.assertTrue(snapshot["ready"])
+        self.assertEqual(snapshot["target"], "target.example")
+        self.assertNotIn("last_quick_ip", snapshot)
+
     def test_fresh_install_without_cz06_tables_shows_help(self):
         with self.factory() as db:
             db.execute("DROP TABLE cloudzy_cz06_runs")

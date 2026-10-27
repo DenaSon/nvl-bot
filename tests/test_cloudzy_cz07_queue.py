@@ -143,6 +143,64 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(self.q.candidate()[:3],
                          ("purchase-1","target.example","provider-1"))
 
+    def test_readiness_reports_exact_standby_prerequisites(self):
+        self.assertTrue(self.q.readiness()["ready"])
+        with self.factory() as db:
+            db.execute("UPDATE cloudzy_cz06_runs SET stage='HOLD'")
+        state = self.q.readiness()
+        self.assertFalse(state["ready"])
+        self.assertEqual(state["code"], "CZ06_HOLD")
+        self.assertTrue(state["manual_standby"])
+        with self.factory() as db:
+            db.execute("UPDATE cloudzy_cz06_runs SET stage='READY'")
+            db.execute("UPDATE host_pool SET active=0,is_standby=0 WHERE host='target.example'")
+        state = self.q.readiness()
+        self.assertFalse(state["ready"])
+        self.assertEqual(state["code"], "STANDBY_NOT_READY")
+        with self.factory() as db:
+            db.execute("DELETE FROM cloudzy_cz06_runs")
+        self.assertEqual(self.q.readiness()["code"], "NO_CZ06_RUN")
+
+    def test_cz07_entry_shows_guidance_without_errors_or_mutations(self):
+        class Query:
+            def __init__(self):
+                self.message = self
+                self.text = ""
+                self.callbacks = []
+
+            async def edit_message_text(self, text, **kw):
+                self.text = text
+                self.callbacks = [callback for row in kw["reply_markup"]
+                                  for _label, callback in row]
+
+            async def reply_text(self, text, **_kw):
+                self.text = text
+
+        async def view(actor=7):
+            query = Query()
+            ctx = type("Ctx", (), {"user_data": {}})()
+            await self.q.handle_callback(
+                query, ctx, "apps_cz7_home", role="admin", actor=actor,
+                chat=8, markup=lambda rows: rows, app=None)
+            return query
+
+        from asyncio import run
+        ready = run(view())
+        self.assertIn("CZ-07 | آمادگی", ready.text)
+        self.assertIn("apps_cz7_preview", ready.callbacks)
+        other = run(view(actor=99))
+        self.assertNotIn("apps_cz7_preview", other.callbacks)
+        self.assertIn("ثبت‌کننده", other.text)
+        with self.factory() as db:
+            db.execute("UPDATE cloudzy_cz06_runs SET stage='HOLD'")
+        blocked = run(view())
+        self.assertIn("توقف", blocked.text)
+        self.assertIn("apps_cz_operations", blocked.callbacks)
+        self.assertIn("apps_cz5_home", blocked.callbacks)
+        self.assertNotIn("apps_cz7_preview", blocked.callbacks)
+        # Repeat navigation edits a single message; no paid or route operation.
+        self.assertIsNone(self.q.latest())
+
     def test_authorization_one_job_and_durable_events(self):
         from cloudzy_cz04b import _digest
         with self.factory() as db:

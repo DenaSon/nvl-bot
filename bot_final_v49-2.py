@@ -4263,15 +4263,37 @@ def _install_local_pubkey_on_open_ssh(ssh):
 # host_pool کار می‌کند (نگاه کنید به _activate_standby_for_filtered_edge پایین‌تر در همین فایل).
 
 def _db_rebuild_hosts_from_pool():
-    """تنظیم «hosts» (که همه‌جای ربات برای ساخت فاکتور/کد اتصال استفاده می‌شود) را از روی
-    IPهای فعالِ host_pool بازسازی می‌کند. سایر بخش‌های کد بدون هیچ تغییری همچنان از همان
-    تنظیم قدیمی «hosts» می‌خوانند؛ فقط منبع تولیدش عوض شده.
-    🆕 اگر یک IP به‌عنوان «پیش‌فرض کل سیستم» ست شده باشد، همیشه اول لیست قرار می‌گیرد — چون
-    تمام جاهای کد قدیمی که fallback را با hl[0] می‌گرفتند، دقیقاً همین رفتار را انتظار دارند."""
+    """Reconcile one routed customer Relay, never all active inventory entries.
+
+    host_pool also includes Core and nondefault/unused Edges; those are not
+    automatically eligible for assignment or public client configuration.
+    """
     with db_conn() as conn:
-        active = [r[0] for r in conn.execute("SELECT host FROM host_pool WHERE active=1 ORDER BY is_default DESC, host").fetchall()]
-        if active:  # هرگز لیست را کامل خالی نمی‌کنیم تا فاکتورسازی از کار نیفتد
-            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('hosts', ?)", (",".join(active),))
+        conn.execute("BEGIN IMMEDIATE")
+        _db_assert_legacy_host_mutation_allowed(conn)
+        _db_assert_account_write_allowed(conn)
+        defaults = conn.execute(
+            "SELECT host,active,is_standby FROM host_pool WHERE is_default=1"
+        ).fetchall()
+        if len(defaults) != 1:
+            raise RuntimeError("HOSTS_DEFAULT_RELAY_AMBIGUOUS")
+        host, active, standby = defaults[0]
+        host = str(host or "").strip()
+        settings = dict(conn.execute(
+            "SELECT key,value FROM settings "
+            "WHERE key IN ('core_wg_public_ip','dns_current_ip')"
+        ).fetchall())
+        core = str(settings.get("core_wg_public_ip") or "").strip()
+        dns = str(settings.get("dns_current_ip") or "").strip()
+        if not host or not core or host == core or int(active or 0) != 1 or int(standby or 0) != 0:
+            raise RuntimeError("HOSTS_DEFAULT_RELAY_NOT_ELIGIBLE")
+        if dns != host:
+            raise RuntimeError("HOSTS_DEFAULT_DNS_MISMATCH")
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key,value) VALUES ('hosts',?)",
+            (host,),
+        )
+
 def _db_resync_host_pool_from_full_list(hosts_list):
     """وقتی ادمین از مسیر قدیمیِ متنیِ «تنظیمات هاست» کل لیست را یک‌جا جایگزین می‌کند، این تابع
     host_pool را با همان لیست هماهنگ می‌کند: مواردی که در لیست جدید هستند فعال می‌شوند، مواردی
@@ -4587,6 +4609,8 @@ def _db_set_account_host(un, host):
         # paths. Automatic balancing also uses this single-account setter.
         _db_assert_legacy_host_mutation_allowed(conn)
         _db_assert_account_write_allowed(conn)
+        if _default_customer_relay_checked(conn) != str(host).strip():
+            raise RuntimeError("LEGACY_CUSTOMER_TARGET_NOT_DEFAULT")
         conn.execute("UPDATE ssh_accounts SET host=? WHERE username=? AND service_type='ssh'", (host, un))
 
 def _db_set_hosts_bulk(usernames, host):
@@ -4594,6 +4618,8 @@ def _db_set_hosts_bulk(usernames, host):
         conn.execute("BEGIN IMMEDIATE")
         _db_assert_legacy_host_mutation_allowed(conn)
         _db_assert_account_write_allowed(conn)
+        if _default_customer_relay_checked(conn) != str(host).strip():
+            raise RuntimeError("LEGACY_CUSTOMER_TARGET_NOT_DEFAULT")
         conn.executemany(
             "UPDATE ssh_accounts SET host=? WHERE username=? AND service_type='ssh'",
             [(host, u) for u in usernames],
@@ -4604,6 +4630,8 @@ def _db_set_all_accounts_host(host):
         conn.execute("BEGIN IMMEDIATE")
         _db_assert_legacy_host_mutation_allowed(conn)
         _db_assert_account_write_allowed(conn)
+        if _default_customer_relay_checked(conn) != str(host).strip():
+            raise RuntimeError("LEGACY_CUSTOMER_TARGET_NOT_DEFAULT")
         conn.execute("UPDATE ssh_accounts SET host=? WHERE status != '⏳ درحال ساخت' AND service_type='ssh'", (host,))
 def _db_get_recent_active_accounts(days=7):
     """اکانت‌های فعالی که در N روز اخیر ساخته شده‌اند (برای انتقال خودکار هنگام فشار سرور)."""
@@ -5797,59 +5825,20 @@ async def _get_health_for_host(host):
 
 
 async def _run_ip_service_auto_migrate():
-    """
-    🌐 سرویس IP → «انجام خودکار»: با همان تابع _get_server_health وضعیت لحظه‌ای CPU/RAM/Load
-    را می‌سنجد. اگر سرور زیر فشار باشد (هرکدام از آستانه‌های هشدار رد شود)، تا ۱۰ اکانت فعالی
-    که در ۷ روز اخیر ساخته شده‌اند را به‌صورت خودکار و بی‌سروصدا (بدون اطلاع به خودِ کاربر) به
-    هاست دیگری از لیست «تنظیمات هاست» منتقل می‌کند تا احتمال قطعی/کندی اتصال کاهش یابد.
-    خروجی: (health_dict یا None, پیام_اطلاعاتی یا None, لیست [(username, new_host), ...])
-    """
-    health, herr = await _get_server_health()
+    """Legacy button compatibility: provide health without account migration."""
+    health, error = await _get_server_health()
     if not health:
-        return None, herr, []
-    under_pressure = (health['cpu_pct'] >= 85 or health['ram_pct'] >= 85
-                       or health['load1'] >= health['cpu_count'] * 1.5)
-    if not under_pressure:
-        return health, "فشار خاصی روی سرور نیست؛ نیازی به انتقال کاربران نبود.", []
-    hl = [h.strip() for h in (await asyncio.to_thread(_db_get_setting, 'hosts', LAST_RESORT_HOST_IP)).split(',') if h.strip()]
-    if len(hl) < 2:
-        return health, "برای انتقال خودکار حداقل باید ۲ هاست در «تنظیمات هاست» ثبت شده باشد.", []
-    rows = await asyncio.to_thread(_db_get_recent_active_accounts, 7)
-    if not rows:
-        return health, "سرور زیر فشار است ولی هیچ اکانتی در ۷ روز اخیر ساخته نشده که بشود منتقلش کرد.", []
-    primary = hl[0]
-    batch = rows[:10]  # حداکثر ۱۰ اکانت در هر بار اجرا، تا فشار یک‌باره روی سرور مقصد هم زیاد نشود
-    moved = []
-    for i, (un, cur_host) in enumerate(batch):
-        cur_effective = cur_host or primary
-        candidates = [h for h in hl if h != cur_effective]
-        if not candidates: continue
-        target = candidates[i % len(candidates)]
-        await asyncio.to_thread(_db_set_account_host, un, target)
-        moved.append((un, target))
-    return health, None, moved
+        return None, error, []
+    return health, (
+        "🛡 جابه‌جایی خودکار کاربران غیرفعال است. "
+        "برای انتقال از روند تأییدشده Relay استفاده کنید."
+    ), []
+
 
 async def _run_ip_service_full_balance():
-    """
-    🆕 بالانس کامل خودکار: برخلاف _run_ip_service_auto_migrate (که فقط تا ۱۰ اکانتِ تازه را به یک
-    هاست جایگزین منتقل می‌کند)، این تابع همهٔ اکانت‌های فعال سرور را به‌صورت round-robin بین تمام
-    هاست‌های ثبت‌شده در «تنظیمات هاست» پخش می‌کند. فقط توسط حلقهٔ پس‌زمینهٔ پایش فشار IP و پس از
-    گذشتن مهلت IP_PRESSURE_AUTOBALANCE_AFTER_HOURS بدون رفع فشار صدا زده می‌شود.
-    خروجی: (moved: [(username, new_host), ...], error_str یا None)
-    """
-    hl = [h.strip() for h in (await asyncio.to_thread(_db_get_setting, 'hosts', LAST_RESORT_HOST_IP)).split(',') if h.strip()]
-    if len(hl) < 2:
-        return [], "برای بالانس خودکار حداقل باید ۲ هاست در «تنظیمات هاست» ثبت شده باشد."
-    rows = await asyncio.to_thread(_db_get_all_active_accounts_with_host)
-    if not rows:
-        return [], None
-    moved = []
-    for i, (un, cur_host) in enumerate(sorted(rows)):
-        target = hl[i % len(hl)]
-        if target != (cur_host or hl[0]):
-            await asyncio.to_thread(_db_set_account_host, un, target)
-            moved.append((un, target))
-    return moved, None
+    """Retired legacy background mover; fail closed if called indirectly."""
+    return [], "LEGACY_IP_AUTO_BALANCE_DISABLED"
+
 
 from collections import defaultdict
 import re
@@ -24394,28 +24383,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         filter_threshold = await asyncio.to_thread(_db_get_filter_detect_threshold)
         kb = [[InlineKeyboardButton("🔍 انتخاب و انتقال کاربر(ها)", callback_data="ipsvc_search")],
               [InlineKeyboardButton("👥 انتقال همهٔ کاربران", callback_data="ipsvc_allusers")],
-              [InlineKeyboardButton("⚖️ تقسیم متوازن کاربران بین IPها (Round-Robin)", callback_data="ipsvc_distribute")],
-              [InlineKeyboardButton("🤖 انجام خودکار (بر اساس فشار سرور)", callback_data="ipsvc_auto")],
+              [InlineKeyboardButton("⚖️ تقسیم متوازن (غیرفعال — مسیر قدیمی)", callback_data="ipsvc_distribute")],
+              [InlineKeyboardButton("🩺 بررسی فشار سرور (بدون انتقال)", callback_data="ipsvc_auto")],
               [InlineKeyboardButton("🛡 وضعیت و مسدودسازی IPها / 📡خرید سرور جدید(دستی)", callback_data="hp_menu")],
               [InlineKeyboardButton(f"{filter_icon} شناسایی خودکار فیلتر ({'\u0641\u0639\u0627\u0644' if filter_enabled else '\u063a\u06cc\u0631\u0641\u0639\u0627\u0644'}) — آستانه: {filter_threshold:.0f}\u066a", callback_data="ipsvc_filter_settings")],
               [InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")]]
         await query.edit_message_text(
             "🌐 <b>سرویس IP</b>\n\n"
-            "از این بخش می‌توانید هاستِ ثبت‌شده برای فاکتور/کد اتصال یک یا چند کاربر خاص، یا همهٔ "
-            "کاربران را به یکی دیگر از IPهای «تنظیمات هاست» تغییر دهید.\n\n"
-            "⚖️ <b>تقسیم متوازن (Round-Robin):</b> همهٔ کاربران فعال را به‌صورت متوازن بین تمام IPهای فعال تقسیم می‌کند.\n\n"
-            "🤖 <b>انجام خودکار:</b> وضعیت لحظه‌ای CPU/RAM سرور را می‌سنجد و فقط در صورت وجود "
-            "فشار، بخشی از کاربران تازه (۷ روز اخیر) را بی‌سروصدا به هاست دیگری منتقل می‌کند.\n\n"
-            f"🛰 <b>پایش خودکار پس‌زمینه (بدون نیاز به فشردن دکمه):</b> ربات هر {IP_PRESSURE_CHECK_INTERVAL_SECONDS // 60} "
-            f"دقیقه وضعیت سرور را می‌سنجد (با نمونه‌گیری ۳ ثانیه‌ای برای دقت بیشتر، نه یک لحظه‌ی آنی). "
-            f"اگر CPU یا RAM از {IP_PRESSURE_WARN_PCT}٪ رد شود و این وضعیت در {IP_PRESSURE_CONFIRM_TICKS} بررسیِ "
-            f"متوالی هم تکرار شود (یعنی واقعاً حداقل چند دقیقه ادامه‌دار بوده، نه یک اسپایک لحظه‌ای)، "
-            f"ابتدا فقط یک هشدار برای شما ارسال می‌کند؛ اگر تا {IP_PRESSURE_AUTOBALANCE_AFTER_HOURS} ساعت بعد "
-            f"همچنان فشار ادامه داشت، خودش بدون نیاز به تایید شما همهٔ کاربران را بین IPهای ثبت‌شده بالانس می‌کند.\n\n"
-            f"🛡 <b>پایش خودکار در‌دسترس‌بودن IPها:</b> هر {HOST_HEALTH_CHECK_INTERVAL_SECONDS // 60} دقیقه هر IP با یک "
-            f"تست اتصال ساده بررسی می‌شود. اگر {HOST_HEALTH_FAIL_THRESHOLD} بار متوالی پاسخ ندهد، خودش از لیست "
-            f"IPهای فعال حذف می‌شود (بدون این‌که هیچ سروری نابود شود) و به شما اطلاع می‌دهد. جزئیات و مسدودسازی "
-            f"دستی از دکمهٔ «🛡 وضعیت و مسدودسازی IPها».",
+            "🛡 وضعیت CPU/RAM و سلامت Edgeها خودکار پایش و به ادمین گزارش می‌شود.\n"
+            f"پایش فشار هر {IP_PRESSURE_CHECK_INTERVAL_SECONDS // 60} دقیقه انجام می‌شود؛ "
+            f"اگر فشار بیش از {IP_PRESSURE_AUTOBALANCE_AFTER_HOURS} ساعت ادامه داشته باشد، هشدار تشدید می‌شود.\n\n"
+            "⛔ جابه‌جایی خودکار کاربران، تغییر خودکار DNS و Round-Robin قدیمی غیرفعال‌اند.\n"
+            "انتقال امن کاربران به Relay دیگر تنها با روند تأییدشده CZ-04B/CZ-07 انجام می‌شود.",
             reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
     elif d == "hp_menu" and role == 'admin':
@@ -25735,6 +25714,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d.startswith("hpblk_") and role == 'admin':
         host = d[len("hpblk_"):]
+        # Default-route retirement must pass through journaled CZ-04B/CZ-07.
+        if host == await asyncio.to_thread(_db_get_default_host):
+            await query.message.reply_text(
+                "⛔️ غیرفعال‌سازی Relay پیش‌فرض از این مسیر امن نیست. "
+                "ابتدا انتقال تأییدشده CZ-04B/CZ-07 را انجام دهید."
+            )
+            return
         active_now = await asyncio.to_thread(_db_get_active_hosts_from_pool)
         if len(active_now) <= 1:
             await query.message.reply_text("⛔️ این تنها IP فعال شماست؛ اول یک IP دیگر اضافه کنید تا فاکتورسازی متوقف نشود."); return
@@ -25841,6 +25827,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML", reply_markup=kb)
     elif d.startswith("hpdelyes_") and role == 'admin':
         host = d[len("hpdelyes_"):]
+        if host == await asyncio.to_thread(_db_get_default_host):
+            await query.answer(
+                "⛔️ حذف Relay پیش‌فرض فقط پس از انتقال تأییدشده مجاز است.",
+                show_alert=True,
+            )
+            return
         try:
             if await asyncio.to_thread(is_managed_egress_deletion, db_conn, host):
                 await query.answer("⛔️ حذف Edge جدید فقط از «مدیریت Egress» مجاز است.", show_alert=True)
@@ -25973,40 +25965,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"✅ سرویس مشتری زنده تأیید شد و هاستِ همهٔ اکانت‌های موجود به <code>{esc(host)}</code> منتقل شد." + cf_suffix, reply_markup=kb, parse_mode="HTML")
 
     elif d.startswith("hpdef_") and role == 'admin':
-        host = d[len("hpdef_"):]
-        active_now = await asyncio.to_thread(_db_get_active_hosts_from_pool)
-        if host not in active_now:
-            await query.message.reply_text("⛔️ فقط یک IP فعال می‌تواند پیش‌فرض شود؛ اول آن را فعال کنید."); return
-
-        # 🐛🔧 رفع باگ واقعی: قبلاً اینجا بدون هیچ چکی، IP به‌عنوان پیش‌فرض ثبت و آمادهٔ انتقال
-        # همهٔ کاربران می‌شد، حتی اگر سرویس SSH واقعی رویش هنوز درست بالا نیامده باشد (مثلاً درست
-        # همان مشکلی که با ssh.socket پیش آمد: پورت توی دیتابیس یک چیز بود، پورت واقعی گوش‌داده‌شده
-        # چیز دیگر). نتیجه: انتقال کور به یک IP که واقعاً آماده نیست و قطعی کامل کاربران. الان قبل
-        # از هرچیز، با یک چک سبک (بدون نیاز به رمز) مطمئن می‌شویم واقعاً یک SSH زنده آن‌جا هست.
-        port_to_check = await asyncio.to_thread(_db_get_host_service_port, host, 22)
-        reachable, reach_detail = await _check_ssh_reachable(host, port_to_check)
-        if not reachable:
-            await query.message.reply_text(
-                f"⛔️ <b>پیش‌فرض نشد.</b>\n\n"
-                f"قبل از پیش‌فرض‌کردن، سرویس مشتری روی <code>{esc(host)}:{port_to_check}</code> امتحان شد و جواب نداد:\n"
-                f"<code>{esc(reach_detail)}</code>\n\n"
-                f"اگر این IP تازه اضافه شده، اول مطمئن شوید SSH رویش کامل بالا آمده (و پورت ثبت‌شده در "
-                f"«سرویس IP» با پورت واقعی سرور یکی است)، بعد دوباره امتحان کنید.",
-                parse_mode="HTML")
-            return
-
-        await asyncio.to_thread(_db_set_default_host, host)
-        await asyncio.to_thread(_db_rebuild_hosts_from_pool)
-        await asyncio.to_thread(_db_mark_ip_switch_now)  # 🆕 شروع دورهٔ خنک‌شدن برای پایش خودکار
-        # 🆕 قبلاً فقط اکانت‌های تازه/فاکتورهای بدون هاست مشخص را تحت‌تاثیر قرار می‌داد؛ حالا صراحتاً
-        # می‌پرسد آیا اکانت‌های موجود هم به همین IP جدید منتقل شوند («کل کاربران منتقل شوند»).
-        kb = [[InlineKeyboardButton("👥 بله، اکانت‌های موجود هم به این IP منتقل شوند", callback_data=f"hpdef_migrate_{host}")],
-              [InlineKeyboardButton("🔙 بازگشت به سرویس IP", callback_data="ipsvc_menu")]]
-        await query.edit_message_text(
-            f"⭐ <code>{esc(host)}</code> به‌عنوان پیش‌فرض کل سیستم ثبت شد (سرویس مشتری هم تأیید شد ✅)؛ از این پس اکانت‌های جدید و هر "
-            f"فاکتور بدون هاست مشخص، اول همین IP را نشان می‌دهند.\n\n"
-            f"می‌خواهید هاستِ اکانت‌های <b>از قبل ساخته‌شده</b> هم به همین IP جدید منتقل شود؟",
-            reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+        # Previous callback changed default before DNS and customer ownership.
+        # Keep the legacy callback visible but route cutovers through CZ-04B.
+        await query.message.reply_text(
+            "⛔️ تغییر Relay پیش‌فرض از مسیر قدیمی متوقف است. "
+            "از روند تأییدشده Cloudzy/CZ-04B استفاده کنید."
+        )
+        return
 
     # 🗑 حذف‌شده: خریدِ خودکارِ VPS از DigitalOcean + خریدِ دستی/مدیریتِ سرورهای Cloudzy.
     # طبقِ معماریِ جدید، افزودنِ Edge فقط دستی (🚀 افزودن Edge جدید) و Failover فقط با
@@ -26217,7 +26182,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"✅ هاست همهٔ کاربران به <code>{esc(new_host)}</code> تغییر کرد." + cf_suffix, reply_markup=kb, parse_mode="HTML")
 
     elif d == "ipsvc_auto" and role == 'admin':
-        await query.edit_message_text("⏳ در حال بررسی وضعیت سرور و انتقال خودکار در صورت نیاز...")
+        await query.edit_message_text("⏳ در حال بررسی فشار سرور (بدون انتقال خودکار کاربران)...")
         health, note, moved = await _run_ip_service_auto_migrate()
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="ipsvc_menu")]])
         if not health:
@@ -26235,63 +26200,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🆕 V89 — تقسیم متوازن کاربران بین IPها (Round-Robin)
     # ==========================================
     elif d == "ipsvc_distribute" and role == 'admin':
-        pool = await asyncio.to_thread(_db_get_host_pool)
-        active_hosts = [r[0] for r in pool if r[1]]
-        if len(active_hosts) < 2:
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="ipsvc_menu")]])
-            await query.edit_message_text("❌ حداقل باید ۲ IP فعال برای تقسیم وجود داشته باشد.", reply_markup=kb)
-            return
-        hosts_text = "\n".join(f"• <code>{esc(h)}</code>" for h in active_hosts)
-        kb = [
-            [InlineKeyboardButton("✅ بله، تقسیم متوازن انجام شود", callback_data="ipsvc_distribute_confirm")],
-            [InlineKeyboardButton("↩️ خیر، انصراف", callback_data="ipsvc_menu")]
-        ]
         await query.edit_message_text(
-            f"⚖️ <b>تقسیم متوازن کاربران (Round-Robin)</b>\n\n"
-            f"همهٔ کاربران فعال بین {len(active_hosts)} IP فعال به‌صورت متوازن تقسیم می‌شوند:\n{hosts_text}\n\n"
-            f"⚠️ این عملیات هاست ثبت‌شده در فاکتور/کد اتصال تمام کاربران را تغییر می‌دهد.\n"
-            f"آیا مطمئنید?",
-            reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+            "🛡 تقسیم Round-Robin قدیمی غیرفعال است.\n\n"
+            "فهرست Hostهای فعال شامل Core و Edgeهای غیرپیش‌فرض است؛ "
+            "پخش حساب‌ها بین آنها ایمن نیست. "
+            "انتقال مشتریان فقط با CZ-04B/CZ-07 انجام می‌شود.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="ipsvc_menu")]
+            ]),
+        )
 
     elif d == "ipsvc_distribute_confirm" and role == 'admin':
-        pool = await asyncio.to_thread(_db_get_host_pool)
-        active_hosts = [r[0] for r in pool if r[1]]
-        if len(active_hosts) < 2:
-            await query.edit_message_text("❌ حداقل باید ۲ IP فعال برای تقسیم وجود داشته باشد.")
-            return
-        await query.edit_message_text("⏳ در حال تقسیم کاربران بین IPها...")
-        # دریافت تمام کاربران فعال
-        all_accounts = await asyncio.to_thread(_db_get_all_active_accounts_with_host)
-        if not all_accounts:
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="ipsvc_menu")]])
-            await query.edit_message_text("❌ هیچ کاربر فعالی وجود ندارد.", reply_markup=kb)
-            return
-        # Round-Robin: تقسیم متوازن بین IPها
-        assignments = {}
-        for i, (username, _) in enumerate(all_accounts):
-            host = active_hosts[i % len(active_hosts)]
-            assignments[username] = host
-        # اعمال تغییرات در دیتابیس
-        def _apply_distribution():
-            with db_conn() as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                _db_assert_legacy_host_mutation_allowed(conn)
-                _db_assert_account_write_allowed(conn)
-                for username, host in assignments.items():
-                    conn.execute("UPDATE ssh_accounts SET host=? WHERE username=?", (host, username))
-        await asyncio.to_thread(_apply_distribution)
-        # آمار توزیع
-        host_counts = {}
-        for h in assignments.values():
-            host_counts[h] = host_counts.get(h, 0) + 1
-        stats_lines = "\n".join(f"• <code>{esc(h)}</code>: {c} کاربر" for h, c in sorted(host_counts.items(), key=lambda x: -x[1]))
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به سرویس IP", callback_data="ipsvc_menu")]])
-        await query.edit_message_text(
-            f"✅ <b>تقسیم متوازن انجام شد</b>\n\n"
-            f"👥 تعداد کل کاربران: {len(assignments)}\n\n"
-            f"📊 توزیع بین IPها:\n{stats_lines}\n\n"
-            f"ℹ️ هاست ثبت‌شده در فاکتور/کد اتصال بعدی هر کاربر تغییر کرد.",
-            reply_markup=kb, parse_mode="HTML")
+        # Reject stale confirmation buttons from earlier Telegram messages.
+        await query.answer(
+            "⛔️ تقسیم بین IPها غیرفعال است؛ از انتقال امن استفاده کنید.",
+            show_alert=True,
+        )
+        return
 
     # ==========================================
     # 🆕 V89 — تنظیمات سیستم شناسایی خودکار فیلتر
@@ -26315,9 +26240,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📝 <b>نحوهٔ کار:</b>\n"
             f"• هر {FILTER_DETECT_CHECK_INTERVAL_SECONDS // 60} دقیقه یک‌بار تعداد کاربران آنلاین چک می‌شود.\n"
             f"• اگر {FILTER_DETECT_CONFIRM_TICKS} بار متوالی زیر آستانه بودند → IP فیلتر تشخیص داده می‌شود.\n"
-            f"• سیستم خودکار به سریع‌ترین IP فعال تغییر می‌کند.\n"
+            f"• این پایش فقط هشدار صادر می‌کند و DNS/کاربران را تغییر نمی‌دهد.\n"
             f"• حداقل {FILTER_DETECT_MIN_ACTIVE_ACCOUNTS} کاربر فعال برای فعال‌شدن سیستم لازم است.\n\n"
-            f"⚠️ بعد از تشخیص فیلتر، همهٔ کاربران به سریع‌ترین IP موجود منتقل می‌شوند و به ادمین اطلاع داده می‌شود.",
+            f"⚠️ انتقال Relay فقط پس از بررسی و تأیید صریح ادمین انجام می‌شود.",
             reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
     elif d == "ipsvc_filter_enable" and role == 'admin':
@@ -28099,97 +28024,74 @@ async def _activate_standby_for_filtered_edge(app, filtered_host: str, target_ho
 
 
 async def _ip_pressure_monitor_tick(app):
-    """
-    یک دور بررسیِ فشار CPU/RAM سرور، مستقل از حلقهٔ «پایش تخطی ظرفیت هر اکانت»:
-    - 🆕 برای جلوگیری از هشدار کاذب سرِ یک اسپایک لحظه‌ای (که واقعاً هم دیده شد: یک بررسی CPU=۹۲٪
-      نشان داد ولی دو دقیقه بعد کاملاً عادی بود)، فشار باید در IP_PRESSURE_CONFIRM_TICKS بررسیِ
-      متوالی (پیش‌فرض ۲ بررسی = حداقل ۵ دقیقه واقعی) دیده شود تا اصلاً به‌عنوان «فشار تاییدشده»
-      حساب و هشدار اول ارسال شود.
-    - بعد از تاییدشدن، اگر فشار همچنان ادامه داشت و از زمان همان هشدار بیش از
-      IP_PRESSURE_AUTOBALANCE_AFTER_HOURS ساعت گذشت (یعنی کسی از «سرویس IP» اقدامی نکرده که فشار
-      را برطرف کند)، ربات با _run_ip_service_full_balance خودش کاربران را بین تمام هاست‌های
-      ثبت‌شده بالانس می‌کند.
-    - اگر فشار (حتی یک بررسیِ تک) برطرف شد، هم شمارندهٔ تایید و هم وضعیت پایش کامل ریست می‌شوند تا
-      دور بعدی فشار از صفر و با همان قاعدهٔ تاییدِ دومرحله‌ای دوباره حساب شود.
+    """Monitor Core CPU/RAM pressure, alert, and NEVER move customer hosts.
+
+    Historic 3-hour full round-robin was unsafe for the Core-terminated Relay
+    topology: a metadata reassignment cannot establish an Edge data path.
     """
     health, herr = await _get_server_health()
     if not health:
-        log.warning("پایش فشار IP: بررسی وضعیت سرور ناموفق بود (%s) — این دور رد شد.", herr)
+        log.warning("IP pressure check failed (%s); monitoring continues.", herr)
         return
-    raw_pressure = health['cpu_pct'] >= IP_PRESSURE_WARN_PCT or health['ram_pct'] >= IP_PRESSURE_WARN_PCT
-    since_raw = await asyncio.to_thread(_db_get_setting, 'ip_pressure_since', None)
-    autobalanced_raw = await asyncio.to_thread(_db_get_setting, 'ip_pressure_autobalanced', None)
+    raw_pressure = (
+        health['cpu_pct'] >= IP_PRESSURE_WARN_PCT
+        or health['ram_pct'] >= IP_PRESSURE_WARN_PCT
+    )
     now = datetime.now()
-
-    # 🆕 شمارندهٔ بررسی‌های متوالیِ «زیر فشار» — مستقل از since_raw (که فقط از لحظهٔ تاییدشدنِ
-    # فشار شروع می‌شود). این شمارنده در دیتابیس نگه‌داری می‌شود تا حتی با ری‌استارت ربات هم از
-    # دست نرود و یک ری‌استارت باعث نشود شمارش از نو با یک بررسی معتبر اشتباه گرفته شود.
+    since_raw = await asyncio.to_thread(_db_get_setting, 'ip_pressure_since', '')
+    escalated = await asyncio.to_thread(_db_get_setting, 'ip_pressure_escalated_at', '')
     streak_raw = await asyncio.to_thread(_db_get_setting, 'ip_pressure_streak', '0')
-    try: streak = int(streak_raw)
-    except Exception: streak = 0
+    try:
+        streak = int(streak_raw)
+    except (TypeError, ValueError):
+        streak = 0
 
     if not raw_pressure:
         if streak:
             await asyncio.to_thread(_db_update_setting, 'ip_pressure_streak', '0')
-        if since_raw:
+        if since_raw or escalated:
             await asyncio.to_thread(_db_update_setting, 'ip_pressure_since', '')
+            await asyncio.to_thread(_db_update_setting, 'ip_pressure_escalated_at', '')
             await asyncio.to_thread(_db_update_setting, 'ip_pressure_autobalanced', '')
-            log.info("پایش فشار IP: فشار سرور برطرف شد؛ پایش ریست شد.")
+            log.info("IP pressure recovered; monitoring counters cleared.")
         return
 
     streak += 1
     await asyncio.to_thread(_db_update_setting, 'ip_pressure_streak', str(streak))
     if streak < IP_PRESSURE_CONFIRM_TICKS:
-        # هنوز فشار به‌اندازهٔ کافی ادامه‌دار نبوده تا مطمئن شویم اسپایکِ لحظه‌ای نیست — فعلاً فقط لاگ
-        log.info("پایش فشار IP: نمونهٔ زیر فشار دیده شد (CPU=%s٪, RAM=%s٪) ولی هنوز تاییدنشده (%s/%s)؛ هشدار ارسال نمی‌شود.",
-                  health['cpu_pct'], health['ram_pct'], streak, IP_PRESSURE_CONFIRM_TICKS)
         return
-    under_pressure = True
 
     if not since_raw:
-        # اولین باری که فشار دیده می‌شود — فقط هشدار؛ هیچ اقدامی روی کاربران انجام نمی‌شود
         await asyncio.to_thread(_db_update_setting, 'ip_pressure_since', now.isoformat())
-        await _notify_admins(app,
+        await _notify_admins(
+            app,
             f"🟠 <b>هشدار فشار سرور</b>\n\n"
             f"⚙️ CPU: {health['cpu_pct']}٪ | 🧠 RAM: {health['ram_pct']}٪ | Load: {health['load1']}\n\n"
-            f"مصرف سرور به مرز بحرانی رسیده است (بالای {IP_PRESSURE_WARN_PCT}٪). اگر ظرف "
-            f"{IP_PRESSURE_AUTOBALANCE_AFTER_HOURS} ساعت آینده از «🌐 سرویس IP» اقدامی انجام نشود "
-            f"و فشار همچنان ادامه داشته باشد، ربات خودش کاربران را به‌صورت خودکار بین IPهای ثبت‌شده "
-            f"بالانس می‌کند.\n\n"
-            f"برای اقدام دستی: تنظیمات سرور ← 🌐 سرویس IP")
-        log.info("پایش فشار IP: فشار جدید تشخیص داده شد (CPU=%s٪, RAM=%s٪)؛ هشدار ارسال شد.",
-                  health['cpu_pct'], health['ram_pct'])
+            "🛡 هیچ جابه‌جایی خودکار IP، DNS یا کاربری انجام نمی‌شود. "
+            "لطفاً وضعیت را بررسی و در صورت نیاز انتقال امن را دستی تأیید کنید."
+        )
         return
 
     try:
         since = datetime.fromisoformat(since_raw)
-    except Exception:
-        await asyncio.to_thread(_db_update_setting, 'ip_pressure_since', now.isoformat())  # مقدار خراب/قدیمی؛ از الان دوباره بشمار
+    except (TypeError, ValueError):
+        await asyncio.to_thread(_db_update_setting, 'ip_pressure_since', now.isoformat())
         return
 
     elapsed_hours = (now - since).total_seconds() / 3600
-    if elapsed_hours < IP_PRESSURE_AUTOBALANCE_AFTER_HOURS or autobalanced_raw:
-        return  # هنوز مهلت تمام نشده، یا در همین دورهٔ فشار قبلاً یک‌بار بالانس خودکار انجام شده
+    if elapsed_hours < IP_PRESSURE_AUTOBALANCE_AFTER_HOURS or escalated:
+        return
+    await asyncio.to_thread(_db_update_setting, 'ip_pressure_escalated_at', now.isoformat())
+    await _notify_admins(
+        app,
+        f"🔴 <b>فشار طولانی سرور</b>\n\n"
+        f"CPU: {health['cpu_pct']}٪ | RAM: {health['ram_pct']}٪\n"
+        f"فشار بیش از {IP_PRESSURE_AUTOBALANCE_AFTER_HOURS} ساعت ادامه داشته است.\n"
+        "⛔ بالانس خودکار غیرفعال است؛ هیچ IP یا اکانتی تغییر نکرد. "
+        "بررسی و اقدام از طریق ادمین لازم است."
+    )
+    log.warning("Sustained IP pressure: admin notified; automatic balancing disabled.")
 
-    moved, berr = await _run_ip_service_full_balance()
-    await asyncio.to_thread(_db_update_setting, 'ip_pressure_autobalanced', now.isoformat())
-    if berr:
-        await _notify_admins(app,
-            f"⚠️ فشار سرور {IP_PRESSURE_AUTOBALANCE_AFTER_HOURS} ساعت برطرف نشد و تلاش ربات برای بالانس خودکار "
-            f"هم ناموفق بود:\n{esc(berr)}")
-        log.warning("پایش فشار IP: بالانس خودکار ناموفق بود (%s).", berr)
-        return
-    if not moved:
-        await _notify_admins(app,
-            f"⚠️ فشار سرور {IP_PRESSURE_AUTOBALANCE_AFTER_HOURS} ساعت ادامه داشت، ولی هیچ اکانتی برای بالانس پیدا نشد.")
-        return
-    lines = "\n".join(f"• {esc(u)} → <code>{esc(h)}</code>" for u, h in moved[:30])
-    more = f"\n… و {len(moved) - 30} اکانت دیگر" if len(moved) > 30 else ""
-    await _notify_admins(app,
-        f"🤖 <b>بالانس خودکار کاربران بین IPها</b>\n\n"
-        f"فشار سرور {IP_PRESSURE_AUTOBALANCE_AFTER_HOURS} ساعت متوالی ادامه داشت و اقدامی ثبت نشد، "
-        f"پس ربات خودش {len(moved)} اکانت را بین IPهای ثبت‌شده بالانس کرد:\n{lines}{more}")
-    log.warning("پایش فشار IP: بالانس خودکار %s اکانت را جابه‌جا کرد.", len(moved))
 
 async def _ip_pressure_monitor_loop(app):
     log.info("🌐 حلقهٔ پایش فشار IP آغاز شد (بازهٔ چک: %ss، آستانهٔ هشدار: %s٪، مهلت بالانس خودکار: %sساعت).",
@@ -28484,44 +28386,22 @@ async def _host_health_tick(app):
         if service_ok or new_fails < HOST_HEALTH_FAIL_THRESHOLD:
             continue
 
-        active_now = await asyncio.to_thread(_db_get_active_hosts_from_pool)
-        if len(active_now) <= 1:
-            await _notify_admins(
-                app,
-                f"🔴 <b>هشدار بحرانی — تنها Service فعال پاسخ نمی‌دهد</b>\n\n"
-                f"Service <code>{esc(host)}:{service_port}</code> در {new_fails} بررسی متوالی پاسخ نداد، "
-                f"ولی چون تنها هاست فعال است خودکار غیرفعال نشد.\n"
-                f"آخرین خطای Service: <code>{esc(service_err)}</code>\n"
-                f"Admin SSH: {'✅ سالم' if admin_ok else '❌ ناموفق'}",
-            )
-            continue
-
-        # Only the affected DNS endpoint may trigger a route decision.
-        decision = await _hf01_plan_host_deactivation(host)
-        if decision.action == "BLOCKED":
-            log.error("HF01 automatic host retirement held host=%s reason=%s", host, decision.reason)
-            await _hf02_notify_route_event(app, "ROUTE_CHANGE_BLOCKED", host, reason=decision.reason)
-            continue
-        if decision.action == "SWITCH":
-            # Switch to a verified relay before disabling the routed host.
-            changed, detail = await _cf_switch_public_domain(decision.target, app=None)
-            if not changed:
-                log.error("HF01 automatic DNS change failed host=%s reason=%s", host, detail)
-                await _hf02_notify_route_event(app, "ROUTE_CHANGE_FAILED", host, target=decision.target, reason="DNS_UPDATE_NOT_CONFIRMED")
-                continue
-            await _hf02_notify_route_event(app, "ROUTE_CHANGED", host, target=decision.target)
-        await asyncio.to_thread(
-            _db_set_host_active,
-            host,
-            False,
-            f"Service port failed after {new_fails} consecutive checks: {service_err}",
-        )
-        await asyncio.to_thread(_db_rebuild_hosts_from_pool)
-
+        # Health signals may ONLY record evidence and notify. Even a failing
+        # default must not switch DNS or retire host_pool rows in the background.
         log.warning(
-            "Service endpoint %s:%s disabled after %s failures: %s",
+            "Host service unhealthy (monitor-only): host=%s port=%s fails=%s error=%s",
             host, service_port, new_fails, service_err,
         )
+        if new_fails == HOST_HEALTH_FAIL_THRESHOLD:
+            await _notify_admins(
+                app,
+                f"🔴 <b>هشدار سلامت Edge — نیازمند بررسی دستی</b>\n\n"
+                f"IP: <code>{esc(host)}</code> · Service: <code>{service_port}</code>\n"
+                f"تعداد خطاهای متوالی: {new_fails}\n"
+                f"جزئیات: <code>{esc(service_err)}</code>\n"
+                f"Admin SSH: {'✅ سالم' if admin_ok else '❌ ناموفق'}\n\n"
+                "🛡 به‌صورت خودکار هیچ DNS، Edge یا کاربری تغییر نکرد."
+            )
 
 
 async def _host_health_loop(app):
@@ -30903,7 +30783,7 @@ if __name__ == '__main__':
     if MATPLOTLIB_AVAILABLE: print("📈 ماژول رسم نمودار فروش (Matplotlib) فعال است.")
     else: print("⚠️ ماژول رسم نمودار غیرفعال است (جهت فعال‌سازی: pip3 install matplotlib)")
     print(f"🛡️ پایش تخطی ظرفیت اکانت‌ها فعال است (هر {CAPACITY_CHECK_INTERVAL_SECONDS}s چک، آستانه {CAPACITY_SUSPEND_AFTER_MINUTES} دقیقه).")
-    print(f"🌐 پایش خودکار فشار IP فعال است (هر {IP_PRESSURE_CHECK_INTERVAL_SECONDS}s چک، آستانهٔ هشدار {IP_PRESSURE_WARN_PCT}٪، بالانس خودکار بعد از {IP_PRESSURE_AUTOBALANCE_AFTER_HOURS} ساعت بدون واکنش).")
+    print(f"🌐 پایش فشار IP هشدارمحور است (هر {IP_PRESSURE_CHECK_INTERVAL_SECONDS}s؛ هشدار طولانی پس از {IP_PRESSURE_AUTOBALANCE_AFTER_HOURS} ساعت؛ بدون جابه‌جایی خودکار).")
     print(f"🛡️ پایش سلامت IPها فعال است (هر {HOST_HEALTH_CHECK_INTERVAL_SECONDS}s چک، غیرفعال‌سازی خودکار بعد از {HOST_HEALTH_FAIL_THRESHOLD} شکست متوالی).")
     print(f"📉 Traffic Anomaly signal فعال است (هر {FILTER_DETECT_CHECK_INTERVAL_SECONDS}s؛ بدون Failover).")
     auto_state = "ON" if _db_get_setting('phase6h_auto_failover_enabled', '0') == '1' else "OFF"

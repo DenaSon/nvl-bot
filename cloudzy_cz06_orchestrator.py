@@ -95,7 +95,12 @@ class QuickRelayJournal:
                 raise QuickRelayHold("WORKFLOW_CAS_FAILED")
 
 
-def progress_html(run, receipt):
+def progress_html(run, receipt, *, now=None):
+    # Elapsed time is an observation, not an ETA or a promise of completion.
+    current_time = int(time.time() if now is None else now)
+    stage_started = int(run.get("updated_at") or current_time)
+    elapsed = max(0, current_time - stage_started)
+    minutes, seconds = divmod(elapsed, 60)
     stages = [
         ("خرید VPS", "PURCHASING"),
         ("دریافت IP", "WAITING_PROVIDER"),
@@ -104,6 +109,17 @@ def progress_html(run, receipt):
         ("فعال‌سازی Standby", "STANDBY_VERIFYING"),
     ]
     current = run["stage"]
+    stage_title = {
+        "PURCHASING": "ثبت خرید VPS",
+        "WAITING_PROVIDER": "آماده‌شدن سرور و دریافت IP",
+        "HOSTKEY_PENDING": "منتظر تأیید اثرانگشت SSH مدیر",
+        "INSTALLING": "نصب و بررسی Edge",
+        "EDGE_READY": "نصب Edge تأیید شد",
+        "STANDBY_VERIFYING": "بررسی و فعال‌سازی Standby",
+        "READY": "آماده ✅",
+        "HOLD": "توقف امن؛ نیازمند بررسی",
+        "CANCELLED": "لغوشده",
+    }.get(current, current)
     position = {"PURCHASING": 0, "WAITING_PROVIDER": 1,
                 "HOSTKEY_PENDING": 2, "INSTALLING": 3, "EDGE_READY": 4,
                 "STANDBY_VERIFYING": 4, "READY": 5}.get(current, -1)
@@ -123,9 +139,13 @@ def progress_html(run, receipt):
     return (
         "⚡ <b>Quick Relay | CZ-06</b>\n"
         f"پیگیری: <code>{escape(run['operation_id'][:16])}</code>\n"
-        f"مرحله: <b>{escape(current)}</b>\n"
-        f"IP: <code>{escape(str(receipt.get('public_ipv4') or '—'))}</code>\n\n"
-        + "\n".join(rows) + warning +
+        f"وضعیت: <b>{escape(stage_title)}</b> <code>{escape(current)}</code>\n"
+        f"IP: <code>{escape(str(receipt.get('public_ipv4') or '—'))}</code>\n"
+        + (f"⏱ سپری‌شده از شروع این مرحله: <b>{minutes:02d}:{seconds:02d}</b>\n"
+           "🔒 عملیات در حال اجراست؛ درخواست خرید یا نصب تازه نزنید.\n"
+           if current in ("PURCHASING", "WAITING_PROVIDER", "INSTALLING", "STANDBY_VERIFYING")
+           else "")
+        + "\n" + "\n".join(rows) + warning +
         (f"\nکد: <code>{escape(run['detail_code'])}</code>"
          if run["detail_code"] else "") +
         "\n\n🛡 DNS، Relay پیش‌فرض و کاربران تا CZ-07 تغییر نمی‌کنند."

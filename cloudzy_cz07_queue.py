@@ -16,12 +16,14 @@ import sqlite3
 import time
 
 from cloudzy_cz04b import CutoverHold, _digest
+from cloudzy_service import CloudzyError
 from cloudzy_phase1_ui import cz07_issue
 
 log = logging.getLogger(__name__)
 BATCH_SIZE = 50
 BATCH_PAUSE_SECONDS = 0.2
 APPROVAL_TTL = 180
+RECOVERY_STALE_SECONDS = 120
 FINAL = ("DONE", "ABORTED")
 PENDING = ("QUEUED", "ROUTING", "MIGRATING", "HOLD")
 
@@ -220,16 +222,48 @@ class DurableCutoverQueue:
             rows = self.cz04b._source_accounts(db, source)
             if _digest(rows) != expected_fp or len(rows) != expected_count:
                 raise CZ07Hold("ACCOUNT_PREVIEW_CHANGED")
-            job = secrets.token_hex(16)
+            # CZ06_OPERATION is UNIQUE: restart an explicitly, safely closed
+            # pre-route attempt in-place rather than deleting history or
+            # rewriting the CZ06 identity. All prior events remain durable.
+            previous = db.execute(
+                "SELECT id,status,code,moved FROM cloudzy_cz07_jobs "
+                "WHERE cz06_operation=?", (opid,)
+            ).fetchone()
             ts = int(self.now())
-            db.execute("""INSERT INTO cloudzy_cz07_jobs
-                (id,cz06_operation,actor,chat,source,target,provider_id,
-                 source_fingerprint,status,total,evidence,started_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,?,'QUEUED',?,'OPERATOR_ATTESTED_REAL_CLIENT_E2E',?,?)
-            """, (job, opid, actor, chat, source, target, pid,
-                  expected_fp, len(rows), ts, ts))
-            self._log(db, job, "QUEUED", "APPROVED_AFTER_EXTERNAL_E2E_ATTESTATION",
-                      0, len(rows))
+            if previous:
+                job, previous_status, previous_code, moved = previous
+                if (previous_status != "ABORTED"
+                        or previous_code != "SAFE_STALE_ROUTING_CLOSED"
+                        or moved != 0):
+                    raise CZ07Hold("CZ06_OPERATION_ALREADY_USED")
+                if db.execute(
+                    "SELECT 1 FROM cloudzy_cz07_events WHERE job_id=? "
+                    "AND stage IN ('MIGRATING','DONE') LIMIT 1", (job,)
+                ).fetchone():
+                    raise CZ07Hold("RESTART_AFTER_MIGRATION_FORBIDDEN")
+                updated = db.execute(
+                    "UPDATE cloudzy_cz07_jobs SET actor=?,chat=?,source=?,target=?,"
+                    "provider_id=?,source_fingerprint=?,status='QUEUED',total=?,"
+                    "moved=0,evidence='OPERATOR_ATTESTED_REAL_CLIENT_E2E',"
+                    "started_at=?,updated_at=?,code='' WHERE id=? "
+                    "AND status='ABORTED' AND code='SAFE_STALE_ROUTING_CLOSED'",
+                    (actor, chat, source, target, pid, expected_fp, len(rows),
+                     ts, ts, job)
+                ).rowcount
+                if updated != 1:
+                    raise CZ07Hold("RESTART_CAS_FAILED")
+                code = "RESTART_APPROVED_AFTER_SAFE_ABORT"
+            else:
+                job = secrets.token_hex(16)
+                db.execute("""INSERT INTO cloudzy_cz07_jobs
+                    (id,cz06_operation,actor,chat,source,target,provider_id,
+                     source_fingerprint,status,total,evidence,started_at,updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,'QUEUED',?,
+                            'OPERATOR_ATTESTED_REAL_CLIENT_E2E',?,?)
+                """, (job, opid, actor, chat, source, target, pid,
+                      expected_fp, len(rows), ts, ts))
+                code = "APPROVED_AFTER_EXTERNAL_E2E_ATTESTATION"
+            self._log(db, job, "QUEUED", code, 0, len(rows))
             return job
 
     def transition(self, job, expected, next_status, *, code="", moved=None, remaining=None):
@@ -260,6 +294,106 @@ class DurableCutoverQueue:
             self._log(db, job, next_status, code or "OK", moved, remaining)
         log.info("CZ07 job=%s stage=%s code=%s moved=%d remaining=%d",
                  job[:16], next_status, code or "OK", moved, remaining)
+
+    def _stale_route_guard(self, db, rec):
+        """Fail closed unless this zero-move job provably never cut over."""
+        if not rec or rec["status"] not in ("ROUTING", "HOLD") or rec["moved"] != 0:
+            raise CZ07Hold("RECOVERY_NOT_ZERO_MOVE_ROUTE")
+        if rec["id"] in self._running:
+            raise CZ07Hold("RECOVERY_WORKER_STILL_ACTIVE")
+        if int(self.now()) - int(rec["updated_at"]) < RECOVERY_STALE_SECONDS:
+            raise CZ07Hold("RECOVERY_JOB_NOT_STALE")
+        live = db.execute(
+            "SELECT status,moved,updated_at,source,target,provider_id,started_at "
+            "FROM cloudzy_cz07_jobs WHERE id=?", (rec["id"],)
+        ).fetchone()
+        if live != (rec["status"], 0, rec["updated_at"], rec["source"],
+                    rec["target"], rec["provider_id"], rec["started_at"]):
+            raise CZ07Hold("RECOVERY_JOB_CHANGED")
+        if db.execute(
+            "SELECT 1 FROM cloudzy_cz07_events WHERE job_id=? "
+            "AND stage IN ('MIGRATING','DONE') LIMIT 1", (rec["id"],)
+        ).fetchone():
+            raise CZ07Hold("RECOVERY_MIGRATION_HISTORY_PRESENT")
+        if self.cz04b._open(db):
+            raise CZ07Hold("RECOVERY_CZ04B_UNRESOLVED")
+        # A later CZ04B journal entry may indicate even a partial DNS write,
+        # including an operation whose final state is ABORTED.
+        if db.execute(
+            "SELECT 1 FROM cloudzy_cz04b_operations WHERE started_at>=? "
+            "AND (source=? OR target=?) LIMIT 1",
+            (rec["started_at"], rec["source"], rec["target"])
+        ).fetchone():
+            raise CZ07Hold("RECOVERY_CZ04B_HISTORY_NEEDS_REVIEW")
+        if db.execute(
+            "SELECT 1 FROM failover_operations WHERE status='RUNNING' LIMIT 1"
+        ).fetchone():
+            raise CZ07Hold("RECOVERY_SHARED_LEASE_BUSY")
+        if db.execute(
+            "SELECT 1 FROM cloudzy_cz04a_actions "
+            "WHERE status NOT IN ('DONE','REJECTED') LIMIT 1"
+        ).fetchone():
+            raise CZ07Hold("RECOVERY_CZ04A_UNRESOLVED")
+        self.cz04b._guard_settings(self.cz04b._settings(db))
+        settings = self.cz04b._settings(db)
+        hosts = [h.strip() for h in (settings.get("hosts") or "").split(",") if h.strip()]
+        if (settings.get("dns_current_ip") != rec["source"]
+                or not hosts or hosts[0] != rec["source"]
+                or rec["target"] in hosts):
+            raise CZ07Hold("RECOVERY_SOURCE_METADATA_CHANGED")
+        defaults = db.execute(
+            "SELECT host FROM host_pool WHERE active=1 AND is_default=1"
+        ).fetchall()
+        if defaults != [(rec["source"],)]:
+            raise CZ07Hold("RECOVERY_DEFAULT_CHANGED")
+        target = db.execute(
+            "SELECT active,is_default,is_standby,provider,provider_instance_id "
+            "FROM host_pool WHERE host=?", (rec["target"],)
+        ).fetchone()
+        if target != (1, 0, 1, "cloudzy", rec["provider_id"]):
+            raise CZ07Hold("RECOVERY_STANDBY_CHANGED")
+        if db.execute(
+            "SELECT 1 FROM ssh_accounts WHERE host=? LIMIT 1",
+            (rec["target"],)
+        ).fetchone():
+            raise CZ07Hold("RECOVERY_TARGET_HAS_ACCOUNTS")
+
+    def recovery_preview(self, job, actor, chat):
+        """Read-only Cloudflare + SQLite checks; never infer DNS from cache."""
+        rec = self.get(job)
+        if not rec or (actor, chat) != (rec["actor"], rec["chat"]):
+            raise CZ07Hold("RECOVERY_OWNER_MISMATCH")
+        with self.db() as db:
+            self._stale_route_guard(db, rec)
+        try:
+            self.cz04b._expect_dns(self.cz04b.dns.snapshot(), rec["source"])
+        except Exception as exc:
+            raise CZ07Hold("RECOVERY_LIVE_DNS_UNVERIFIED") from None
+        with self.db() as db:
+            self._stale_route_guard(db, rec)
+        return rec
+
+    def close_stale_route(self, job, actor, chat, expected_updated_at):
+        """Explicit one-use operator action. Closes metadata only, no DNS write."""
+        rec = self.recovery_preview(job, actor, chat)
+        if rec["updated_at"] != expected_updated_at:
+            raise CZ07Hold("RECOVERY_PREVIEW_EXPIRED")
+        with self.db() as db:
+            self._init(db)
+            db.execute("BEGIN IMMEDIATE")
+            self._stale_route_guard(db, rec)
+            updated = db.execute(
+                "UPDATE cloudzy_cz07_jobs SET status='ABORTED',"
+                "code='SAFE_STALE_ROUTING_CLOSED',updated_at=? "
+                "WHERE id=? AND status=? AND updated_at=? AND moved=0",
+                (int(self.now()), job, rec["status"], rec["updated_at"])
+            ).rowcount
+            if updated != 1:
+                raise CZ07Hold("RECOVERY_CLOSE_CAS_FAILED")
+            self._log(db, job, "ABORTED", "SAFE_STALE_ROUTING_CLOSED",
+                      0, rec["total"])
+        log.warning("CZ07 job=%s stage=ABORTED code=SAFE_STALE_ROUTING_CLOSED", job[:16])
+        return rec
 
     def route_pin(self, job):
         """Fix issue #191 for CZ07 only: no new SSH buyer may choose old Relay."""
@@ -423,10 +557,15 @@ class DurableCutoverQueue:
                          moved, len(fresh_rows))
                 await self.pause(BATCH_PAUSE_SECONDS)
         except Exception as exc:
-            safe = exc.args[0] if isinstance(exc, (CZ07Hold, CutoverHold)) and exc.args else type(exc).__name__
-            safe = str(safe)
-            safe = safe if safe.isascii() and safe.replace("_", "").isalnum() else "UNEXPECTED_ERROR"
-            safe = safe[:85]
+            safe = (exc.args[0] if isinstance(exc, (CZ07Hold, CutoverHold)) and exc.args
+                    else "CLOUDZY_PROVIDER_UNAVAILABLE" if isinstance(exc, CloudzyError)
+                    else type(exc).__name__)
+            # Persist only the exact ASCII enum accepted by transition().
+            # Previously "CloudzyError" passed the weak alnum test, then
+            # transition() rejected lowercase and left ROUTING unresolved.
+            safe = "".join(c if c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" else "_"
+                           for c in str(safe).upper()).strip("_")[:85]
+            safe = safe or "UNEXPECTED_ERROR"
             log.exception("CZ07 job=%s stage=%s code=%s hold=1 source=%s target=%s",
                           job[:16], self.get(job)["status"], safe,
                           rec["source"], rec["target"])
@@ -522,6 +661,55 @@ class DurableCutoverQueue:
                     return
                 await self._show_readiness(query, markup, actor, chat)
                 return
+            if data.startswith("apps_cz7_recover_"):
+                job = data[len("apps_cz7_recover_"):]
+                rec = await asyncio.to_thread(self.recovery_preview, job, actor, chat)
+                nonce = secrets.token_hex(8)
+                context.user_data["cz7_recovery"] = {
+                    "actor": actor, "chat": chat, "job": job,
+                    "updated_at": rec["updated_at"],
+                    "nonce": nonce, "expires": self.now() + APPROVAL_TTL,
+                }
+                await self._display(query,
+                    "🛡 <b>بازیابی Job متوقف‌شده</b>
+
+"
+                    f"مبدأ: <code>{_short(rec['source'])}</code>
+"
+                    f"مقصد: <code>{_short(rec['target'])}</code>
+"
+                    f"جابجایی ثبت‌شده: <b>{rec['moved']}</b>
+
+"
+                    "✅ مسیر پیش‌فرض، DNS زنده Cloudflare، Journalهای CZ-04B و قفل 6G "
+                    "بررسی شدند و اثری از شروع Cutover این Job دیده نشد.
+"
+                    "با تأیید، فقط همین Job با حفظ تاریخچه ABORTED می‌شود. "
+                    "هیچ DNS، اکانت یا Relay تغییر نمی‌کند. سپس از مرحله اول "
+                    "بررسی و تأیید اتصال مشتری، انتقال جدید را آغاز کنید.",
+                    [[("✅ بستن امن Job گیرکرده", "apps_cz7_close_"+nonce)],
+                     [("❌ انصراف", "apps_cz7_status")]], markup)
+                return
+            if data.startswith("apps_cz7_close_"):
+                session = context.user_data.pop("cz7_recovery", None)
+                if (not session or session["actor"] != actor or session["chat"] != chat
+                        or self.now() > session["expires"]
+                        or data != "apps_cz7_close_"+session["nonce"]):
+                    raise CZ07Hold("RECOVERY_CONFIRMATION_EXPIRED")
+                await asyncio.to_thread(
+                    self.close_stale_route, session["job"], actor, chat,
+                    session["updated_at"])
+                await self._display(query,
+                    "✅ <b>Job گیرکرده با حفظ تاریخچه بسته شد.</b>
+
+"
+                    "مسیر DNS و کاربران بدون تغییر باقی ماندند.
+"
+                    "↪️ برای شروع دوباره از مرحله اول روی دکمه زیر بزنید. "
+                    "بررسی زنده Cloudzy و تأیید واقعی مشتری همچنان الزامی است.",
+                    [[("🔄 شروع دوباره از مرحله اول", "apps_cz7_home")],
+                     [("📋 وضعیت صف", "apps_cz7_status")]], markup)
+                return
             if data == "apps_cz7_preview":
                 if not self.enabled() or not self.cz04b.enabled():
                     raise CZ07Hold("CZ07_OR_CZ04B_DISABLED")
@@ -604,8 +792,9 @@ class DurableCutoverQueue:
                     [[("🔄 وضعیت", "apps_cz7_status")]], markup)
                 return
             raise CZ07Hold("UNKNOWN_CZ07_CALLBACK")
-        except (CZ07Hold, CutoverHold, sqlite3.Error, ValueError) as exc:
-            code = (str(exc) if isinstance(exc, (CZ07Hold, CutoverHold))
+        except (CZ07Hold, CutoverHold, CloudzyError, sqlite3.Error, ValueError) as exc:
+            code = ("CLOUDZY_PROVIDER_UNAVAILABLE" if isinstance(exc, CloudzyError)
+                    else str(exc) if isinstance(exc, (CZ07Hold, CutoverHold))
                     else type(exc).__name__)
             code = code if code.isascii() and code.replace("_", "").isalnum() else "CHECK_FAILED"
             log.warning("CZ07 stage=UI actor=%s code=%s", actor, code[:90])
@@ -650,6 +839,11 @@ class DurableCutoverQueue:
                 and status == "MIGRATING"
                 and job["id"] not in self._running):
             rows.insert(0, [("▶️ بررسی و ادامه امن صف", "apps_cz7_resume_"+job["id"])])
+        if ((actor, chat) == (job["actor"], job["chat"])
+                and status in ("ROUTING", "HOLD") and job["moved"] == 0
+                and job["id"] not in self._running):
+            rows.insert(0, [("🛠 بررسی و بستن امن Job گیرکرده",
+                             "apps_cz7_recover_"+job["id"])])
         rows.append([("↩️ Cloudzy", "apps_cz_home")])
         elapsed = max(0, int(self.now()) - int(job.get("updated_at") or self.now()))
         minutes, seconds = divmod(elapsed, 60)

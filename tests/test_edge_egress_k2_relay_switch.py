@@ -33,17 +33,24 @@ class LegacyRelayContractTests(unittest.TestCase):
         for mutator in ('useradd ', 'adduser ', 'passwd ', 'CREATE TABLE ', 'ssh_accounts'):
             self.assertNotIn(mutator,src)
 
-    def test_legacy_wizard_default_and_existing_host_switch_are_metadata_only(self):
+    def test_legacy_default_change_requires_guarded_cutover(self):
         src=BOT.read_text(encoding="utf-8")
         self.assertIn('callback_data=f"hpdef_{edge_ip}"',src)
-        self.assertIn('callback_data=f"hpdef_migrate_{host}"',src)
-        start=src.index('    elif d.startswith("hpdefmig_yes_")')
-        end=src.index('    elif d.startswith("hpdef_")',start)
-        block=src[start:end]
-        self.assertIn('_db_set_all_accounts_host',block)
-        self.assertIn('_update_cloudflare_dns(host)',block)
-        self.assertNotIn('useradd',block)
-        self.assertNotIn('edge_egress_uid_runtime_kernel',block)
+        # Old Telegram buttons are still recognized, but cannot change the
+        # default outside CZ-04B's DNS+ownership journal.
+        start=src.index('    elif d.startswith("hpdef_")')
+        end=src.index('    # 🗑 حذف‌شده: خریدِ خودکارِ VPS',start)
+        callback=src[start:end]
+        self.assertIn("CZ-04B",callback)
+        self.assertIn("return",callback)
+        self.assertNotIn("_db_set_default_host",callback)
+        # The existing reactivation/metadata control may only target the
+        # verified current default (guarded in its shared database setter).
+        start=src.index("def _db_set_all_accounts_host(")
+        end=src.index("def _db_get_recent_active_accounts(",start)
+        setter=src[start:end]
+        self.assertIn("_default_customer_relay_checked(conn)",setter)
+        self.assertNotIn('useradd',setter)
 
     def test_failover_rebuild_is_distinct_emergency_flow(self):
         src=BOT.read_text(encoding="utf-8")

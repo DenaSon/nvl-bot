@@ -101,7 +101,8 @@ class Phase6APortHealthSeparationTests(unittest.TestCase):
         self.assertIn("_db_record_host_check", region)
         self.assertIn("_db_record_admin_host_check", region)
         self.assertIn("if service_ok or new_fails < HOST_HEALTH_FAIL_THRESHOLD:", region)
-        self.assertIn("_db_set_host_active", region)
+        self.assertNotIn("_db_set_host_active", region)
+        self.assertIn("_notify_admins", region)
         self.assertNotIn("admin_fails < HOST_HEALTH_FAIL_THRESHOLD", region)
 
     def test_manual_reactivation_requires_service_health_not_admin_health(self):

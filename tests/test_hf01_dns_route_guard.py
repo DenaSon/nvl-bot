@@ -62,11 +62,14 @@ class BotWiringTests(unittest.TestCase):
         x = self.source.index(before)
         return self.source[x:self.source.index(after, x)]
 
-    def test_guard_precedes_automatic_host_mutation(self):
+    def test_automatic_health_only_monitors_and_notifies(self):
         sec = self.region("async def _host_health_tick(app):", "async def _host_health_loop(app):")
-        self.assertLess(sec.index("decision = await _hf01_plan_host_deactivation(host)"),
-                        sec.index("_db_set_host_active,"))
-        self.assertNotIn("remaining_active[0]", sec)
+        self.assertIn("_db_record_host_check", sec)
+        self.assertIn("_notify_admins", sec)
+        self.assertNotIn("_hf01_plan_host_deactivation", sec)
+        self.assertNotIn("_db_set_host_active", sec)
+        self.assertNotIn("_db_rebuild_hosts_from_pool", sec)
+        self.assertNotIn("_cf_switch_public_domain", sec)
 
     def test_guard_precedes_manual_host_mutation(self):
         sec = self.region('elif d.startswith("hpblk_")', 'elif d.startswith("hpact_")')

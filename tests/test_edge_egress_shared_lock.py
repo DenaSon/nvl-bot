@@ -37,7 +37,11 @@ def memory_database():
     CREATE TABLE ssh_accounts (
       username TEXT PRIMARY KEY, host TEXT, service_type TEXT, status TEXT
     );
-    INSERT INTO settings(key,value) VALUES ('edge_egress_protected_mode','0');
+    INSERT INTO settings(key,value) VALUES
+        ('edge_egress_protected_mode','0'),
+        ('core_wg_public_ip','91.107.170.239'),
+        ('dns_current_ip','172.86.94.174'),
+        ('hosts','172.86.94.174');
     INSERT INTO host_pool(host,active,is_default,is_standby)
       VALUES ('172.86.94.174',1,1,0), ('216.126.229.12',1,0,1);
     INSERT INTO ssh_accounts(username,host,service_type,status)
@@ -248,6 +252,7 @@ class ProtectedLegacyDbMutationTests(unittest.TestCase):
             "db_conn": db_conn,
             "_db_assert_legacy_host_mutation_allowed": self.guard,
             "_db_assert_account_write_allowed": lambda c: None,
+            "_default_customer_relay_checked": get_function("_default_customer_relay_checked"),
             "datetime": datetime,
         }
         self.default = get_function("_db_set_default_host", env)
@@ -317,21 +322,26 @@ class ProtectedLegacyDbMutationTests(unittest.TestCase):
             "172.86.94.174",
         )
 
-    def test_unprotected_single_account_mutation_still_works(self):
-        self.single("nvl0557", "216.126.229.12")
+    def test_unprotected_single_account_rejects_nondefault_relay(self):
+        with self.assertRaisesRegex(RuntimeError, "LEGACY_CUSTOMER_TARGET_NOT_DEFAULT"):
+            self.single("nvl0557", "216.126.229.12")
         self.assertEqual(
             self.conn.execute(
                 "SELECT host FROM ssh_accounts WHERE username='nvl0557'"
             ).fetchone()[0],
-            "216.126.229.12",
+            "172.86.94.174",
         )
+        self.single("nvl0557", "172.86.94.174")
 
-    def test_default_zero_keeps_existing_default_host_behavior(self):
+    def test_nondefault_bulk_rejected_until_verified_default_and_dns(self):
         self.default("216.126.229.12")
-        self.assertEqual(
-            self.conn.execute("SELECT host FROM host_pool WHERE is_default=1").fetchone()[0],
-            "216.126.229.12",
+        with self.assertRaises(RuntimeError):
+            self.bulk("216.126.229.12")
+        self.conn.execute(
+            "UPDATE host_pool SET is_standby=0 WHERE host='216.126.229.12'"
         )
+        self.set_setting("dns_current_ip", "216.126.229.12")
+        self.set_setting("hosts", "216.126.229.12")
         self.bulk("216.126.229.12")
         self.assertEqual(
             self.conn.execute("SELECT host FROM ssh_accounts WHERE username='nvl0557'").fetchone()[0],

@@ -98,13 +98,13 @@ class CriticalWiringTests(unittest.TestCase):
     def setUpClass(cls):
         cls.text=(ROOT/"bot_final_v49-2.py").read_text(encoding="utf-8")
 
-    def test_auto_retirement_uses_notice_only_on_critical_route(self):
+    def test_auto_health_raises_alert_but_never_mutates_route(self):
         x=self.text.split("async def _host_health_tick(app):",1)[1].split("async def _host_health_loop(app):",1)[0]
-        self.assertEqual(x.count('"ROUTE_CHANGED"'),1)
-        self.assertEqual(x.count('"ROUTE_CHANGE_FAILED"'),1)
-        self.assertEqual(x.count('"ROUTE_CHANGE_BLOCKED"'),1)
-        self.assertNotIn("یک Service endpoint از سرویس خارج شد",x)
-        self.assertNotIn("remaining_active[0]",x)
+        self.assertIn("_notify_admins",x)
+        self.assertIn("_db_record_host_check",x)
+        self.assertNotIn("_db_set_host_active",x)
+        self.assertNotIn("_cf_switch_public_domain",x)
+        self.assertNotIn("_hf02_notify_route_event",x)
 
     def test_manual_path_does_not_notify_on_unrelated_host(self):
         x=self.text.split('elif d.startswith("hpblk_")',1)[1].split('elif d.startswith("hpact_")',1)[0]

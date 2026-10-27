@@ -155,16 +155,21 @@ class K2TelegramWiringTests(unittest.TestCase):
                     "Legacy", "release_uid_deny", "mark_ready"):
             self.assertNotIn(bad, handler)
 
-    def test_round_robin_is_protected_inside_same_transaction(self):
+    def test_old_round_robin_callback_is_notification_only(self):
         start = self.source.index('    elif d == "ipsvc_distribute_confirm"')
-        end = self.source.index("        # آمار توزیع", start)
+        end = self.source.index("    # 🆕 V89 — تنظیمات سیستم شناسایی خودکار فیلتر", start)
         handler = self.source[start:end]
-        self.assertLess(handler.index('conn.execute("BEGIN IMMEDIATE")'),
-                        handler.index('_db_assert_legacy_host_mutation_allowed(conn)'))
-        self.assertLess(handler.index('_db_assert_legacy_host_mutation_allowed(conn)'),
-                        handler.index('UPDATE ssh_accounts SET host=?'))
-        self.assertLess(handler.index('_db_assert_account_write_allowed(conn)'),
-                        handler.index('UPDATE ssh_accounts SET host=?'))
+        self.assertIn("show_alert=True", handler)
+        self.assertIn("return", handler)
+        self.assertNotIn('UPDATE ssh_accounts SET host=?', handler)
+        self.assertNotIn('_db_set_account_host', handler)
+        # Guard the remaining explicit legacy setters under a single DB lease.
+        start = self.source.index("def _db_set_account_host(")
+        end = self.source.index("def _db_get_recent_active_accounts(", start)
+        setters = self.source[start:end]
+        self.assertIn('conn.execute("BEGIN IMMEDIATE")', setters)
+        self.assertIn("_db_assert_legacy_host_mutation_allowed(conn)", setters)
+        self.assertIn("_default_customer_relay_checked(conn)", setters)
 
 
 if __name__ == "__main__":

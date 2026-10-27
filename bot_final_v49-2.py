@@ -28094,7 +28094,7 @@ async def _ip_pressure_monitor_tick(app):
 
 
 async def _ip_pressure_monitor_loop(app):
-    log.info("🌐 حلقهٔ پایش فشار IP آغاز شد (بازهٔ چک: %ss، آستانهٔ هشدار: %s٪، مهلت بالانس خودکار: %sساعت).",
+    log.info("🌐 حلقهٔ پایش فشار IP آغاز شد (بازهٔ چک: %ss، آستانهٔ هشدار: %s٪، تشدید هشدار بدون انتقال: %sساعت).",
               IP_PRESSURE_CHECK_INTERVAL_SECONDS, IP_PRESSURE_WARN_PCT, IP_PRESSURE_AUTOBALANCE_AFTER_HOURS)
     while True:
         try:
@@ -28405,7 +28405,7 @@ async def _host_health_tick(app):
 
 
 async def _host_health_loop(app):
-    log.info("🛡️ حلقهٔ پایش سلامت/در دسترس‌بودن IPها آغاز شد (بازهٔ چک: %ss، آستانهٔ غیرفعال‌سازی: %s شکست متوالی).",
+    log.info("🛡️ حلقهٔ پایش سلامت IPها آغاز شد (بازهٔ چک: %ss، آستانهٔ هشدار: %s شکست متوالی؛ بدون تغییر خودکار مسیر).",
               HOST_HEALTH_CHECK_INTERVAL_SECONDS, HOST_HEALTH_FAIL_THRESHOLD)
     while True:
         try:
@@ -30784,7 +30784,7 @@ if __name__ == '__main__':
     else: print("⚠️ ماژول رسم نمودار غیرفعال است (جهت فعال‌سازی: pip3 install matplotlib)")
     print(f"🛡️ پایش تخطی ظرفیت اکانت‌ها فعال است (هر {CAPACITY_CHECK_INTERVAL_SECONDS}s چک، آستانه {CAPACITY_SUSPEND_AFTER_MINUTES} دقیقه).")
     print(f"🌐 پایش فشار IP هشدارمحور است (هر {IP_PRESSURE_CHECK_INTERVAL_SECONDS}s؛ هشدار طولانی پس از {IP_PRESSURE_AUTOBALANCE_AFTER_HOURS} ساعت؛ بدون جابه‌جایی خودکار).")
-    print(f"🛡️ پایش سلامت IPها فعال است (هر {HOST_HEALTH_CHECK_INTERVAL_SECONDS}s چک، غیرفعال‌سازی خودکار بعد از {HOST_HEALTH_FAIL_THRESHOLD} شکست متوالی).")
+    print(f"🛡️ پایش سلامت IPها هشدارمحور است (هر {HOST_HEALTH_CHECK_INTERVAL_SECONDS}s؛ هشدار پس از {HOST_HEALTH_FAIL_THRESHOLD} شکست؛ بدون غیرفعال‌سازی خودکار).")
     print(f"📉 Traffic Anomaly signal فعال است (هر {FILTER_DETECT_CHECK_INTERVAL_SECONDS}s؛ بدون Failover).")
     auto_state = "ON" if _db_get_setting('phase6h_auto_failover_enabled', '0') == '1' else "OFF"
     print(f"⚡ V119A Fast Detection فعال است (Default Regional هر {REGIONAL_FILTER_MONITOR_INTERVAL_SECONDS}s؛ Sentinel هر {FAST_SENTINEL_INTERVAL_SECONDS}s؛ Auto Failover={auto_state}).")

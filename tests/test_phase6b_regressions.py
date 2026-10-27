@@ -140,7 +140,8 @@ class Phase6BUnifiedHealthModelTests(unittest.TestCase):
             "if service_ok or new_fails < HOST_HEALTH_FAIL_THRESHOLD:",
             region,
         )
-        self.assertIn("_db_set_host_active", region)
+        self.assertNotIn("_db_set_host_active", region)
+        self.assertIn("_notify_admins", region)
         self.assertNotIn("if overall_state", region)
         self.assertNotIn("if health_state", region)
 

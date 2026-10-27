@@ -165,7 +165,10 @@ class DurableCutoverQueue:
             code = "CZ06_STANDBY_PENDING"
         else:
             code = "CZ06_NOT_READY"
-        return {"ready": False, "code": code, "target": ip,
+        # A historical Quick Relay receipt is NOT a CZ-07 destination.
+        # Only candidate() establishes a qualified transferable target.
+        return {"ready": False, "code": code, "target": None,
+                "last_quick_ip": ip, "last_quick_stage": stage,
                 "manual_standby": manual_standby}
 
     def reserve(self, candidate, source, *, actor, chat, expected_fp, expected_count):
@@ -479,10 +482,22 @@ class DurableCutoverQueue:
         if not enabled:
             summary += ("\n\n🔒 اجرای خودکار در تنظیمات مجاز نیست؛"
                         " برای انتقال، تنظیمات عملیاتی باید جداگانه تأیید شوند.")
+        if ready:
+            destination = f"✅ مقصد تأییدشده: <code>{_short(snapshot['target'])}</code>\n"
+        else:
+            destination = "⛔️ مقصد معتبر برای CZ-07: <b>وجود ندارد</b>\n"
+            last_ip = snapshot.get("last_quick_ip")
+            if last_ip:
+                description = ("لغوشده" if snapshot["code"] == "CZ06_CANCELLED"
+                               else "تأییدنشده")
+                destination += (
+                    f"📁 آخرین پرونده Quick Relay ({description}): "
+                    f"<code>{_short(last_ip)}</code>\n"
+                    "ℹ️ این IP مقصد انتقال نیست.\n"
+                )
         text = (
             "🔎 <b>CZ-07 | آمادگی انتقال خودکار</b>\n\n"
-            f"مقصد: <code>{_short(snapshot['target'] or 'هنوز تأیید نشده')}</code>\n"
-            + summary +
+            + destination + summary +
             "\n\n🛡 ورود به این صفحه هیچ DNS، Relay یا کاربری را تغییر نمی‌دهد."
         )
         await self._display(query, text, rows, markup)

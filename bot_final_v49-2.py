@@ -4071,6 +4071,12 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
         await app.bot.send_message(chat_id,
             "⛔️ راه‌اندازی کامل نشد. ابتدا وضعیت سرور را بررسی کنید؛ نصب را تکرار نکنید."
             if egress_stage_requested else err, parse_mode="HTML")
+        # Keep the legacy caller contract, but return a safe machine-readable
+        # code to the Cloudzy installer (which uses inactive/pinned provisioning).
+        # Do not classify arbitrary package errors as a transient APT lock.
+        if not pool_active:
+            reason = "APT_LOCK_BUSY" if "APT_LOCK_BUSY:" in (err or "") else "LEGACY_INSTALL_FAILED"
+            return False, None, {"error_code": reason}
         return False, None, None
 
     # I — opt-in dedicated Egress STAGING added to the existing Edge wizard.

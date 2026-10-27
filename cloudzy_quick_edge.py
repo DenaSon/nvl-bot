@@ -1101,6 +1101,11 @@ class QuickEdgeWizard:
         if opid not in self._running:
             if kind == "NEEDS_PROVIDER_CHECK" and op["status"] in RECONCILABLE:
                 rows.append([("🔎 بررسی Cloudzy بدون خرید", "apps_cz_qcheck_" + opid)])
+            if kind == "NEEDS_FINGERPRINT":
+                rows.append([("🔐 تأیید مستقل SSH همان VPS", "apps_cz_qreview_" + opid)])
+            if kind in ("IN_PROGRESS", "REVIEW_ONLY"):
+                rows.append([("🖥 مشاهده VPSهای موجود", "apps_cz_servers_0")])
+                rows.append([("🌐 بررسی فهرست Edgeها", "apps_cz_edge")])
             if kind == "EXISTING_INSTALL_CHECK":
                 try:
                     await asyncio.to_thread(self._check_install_evidence, op)

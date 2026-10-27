@@ -124,8 +124,14 @@ def progress_html(run, receipt, *, now=None):
                 "HOSTKEY_PENDING": 2, "INSTALLING": 3, "EDGE_READY": 4,
                 "STANDBY_VERIFYING": 4, "READY": 5}.get(current, -1)
     rows = []
+    edge_installed = receipt.get("status") == "EDGE_READY"
     for i, (title, _) in enumerate(stages):
-        icon = "✅" if current == "READY" or (position > i) else "⏳" if position == i else "▫️"
+        if current == "HOLD" and edge_installed:
+            # The install receipt proves steps through Edge install, but NOT
+            # standby. HOLD must never erase completed steps or imply READY.
+            icon = "✅" if i < 4 else "⚠️"
+        else:
+            icon = "✅" if current == "READY" or (position > i) else "⏳" if position == i else "▫️"
         rows.append(f"{icon} {title}")
     warning = (
         "\n✅ عملیات لغو شده است؛ هیچ VPS یا تنظیمات Core خودکار حذف نشده‌اند."

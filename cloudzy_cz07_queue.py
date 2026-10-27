@@ -16,6 +16,7 @@ import sqlite3
 import time
 
 from cloudzy_cz04b import CutoverHold, _digest
+from cloudzy_phase1_ui import cz07_issue
 
 log = logging.getLogger(__name__)
 BATCH_SIZE = 50
@@ -104,6 +105,68 @@ class DurableCutoverQueue:
             if not row or not all(row[:3]):
                 raise CZ07Hold("NO_VERIFIED_CZ06_STANDBY")
             return tuple(row)
+
+    def readiness(self):
+        """Read-only explanation of the *real* CZ-07 prerequisites.
+
+        Never treats a manual standby or an EDGE_READY receipt as a forged
+        CZ-06 READY. The exact candidate() guard remains authoritative.
+        """
+        # A fresh installation may have no CZ-03/CZ-06 tables yet. This
+        # navigation check must remain read-only and still explain what to do.
+        with self.db() as db:
+            tables = {row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+                "('cloudzy_cz06_runs','cloudzy_edge_operations','host_pool')"
+            ).fetchall()}
+        if len(tables) != 3:
+            return {"ready": False, "code": "NO_CZ06_RUN",
+                    "target": None, "manual_standby": False}
+        try:
+            candidate = self.candidate()
+        except CZ07Hold as exc:
+            if str(exc) != "NO_VERIFIED_CZ06_STANDBY":
+                raise
+        else:
+            return {"ready": True, "code": "READY", "target": candidate[1],
+                    "manual_standby": True, "owner": (candidate[3], candidate[4])}
+        with self.db() as db:
+            row = db.execute("""
+                SELECT c.stage,e.status,e.public_ipv4,e.provider_server_id,
+                       h.active,h.is_standby,h.is_default,h.provider,
+                       h.provider_instance_id
+                FROM cloudzy_cz06_runs c
+                LEFT JOIN cloudzy_edge_operations e ON e.id=c.operation_id
+                LEFT JOIN host_pool h ON h.host=e.public_ipv4
+                ORDER BY c.updated_at DESC,c.operation_id DESC LIMIT 1
+            """).fetchone()
+        if not row:
+            return {"ready": False, "code": "NO_CZ06_RUN", "target": None,
+                    "manual_standby": False}
+        stage, receipt, ip, pid, active, standby, default, provider, matched_pid = row
+        manual_standby = (receipt == "EDGE_READY" and active == 1
+                          and standby == 1 and default == 0
+                          and provider == "cloudzy" and matched_pid == pid)
+        if stage == "CANCELLED":
+            code = "CZ06_CANCELLED"
+        elif stage == "HOLD":
+            code = "CZ06_HOLD"
+        elif receipt != "EDGE_READY":
+            code = "EDGE_NOT_VERIFIED"
+        elif not ip or active is None:
+            code = "HOST_NOT_REGISTERED"
+        elif provider != "cloudzy" or pid != matched_pid:
+            code = "PROVIDER_MISMATCH"
+        elif default == 1:
+            code = "STANDBY_ALREADY_DEFAULT"
+        elif active != 1 or standby != 1:
+            code = "STANDBY_NOT_READY"
+        elif stage in ("INSTALLING", "EDGE_READY", "STANDBY_VERIFYING"):
+            code = "CZ06_STANDBY_PENDING"
+        else:
+            code = "CZ06_NOT_READY"
+        return {"ready": False, "code": code, "target": ip,
+                "manual_standby": manual_standby}
 
     def reserve(self, candidate, source, *, actor, chat, expected_fp, expected_count):
         opid, target, pid, original_actor, original_chat = candidate
@@ -376,7 +439,53 @@ class DurableCutoverQueue:
                 "هیچ انتقال یا تغییر مسیر را بدون بررسی مجدد اجرا نکنید.")
 
     async def _display(self, query, text, rows, markup):
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup(rows))
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup(rows))
+        except Exception as exc:
+            if type(exc).__name__ == "BadRequest" and "Message is not modified" in str(exc):
+                return
+            raise
+
+    async def _show_readiness(self, query, markup, actor, chat):
+        snapshot = await asyncio.to_thread(self.readiness)
+        ready = snapshot["ready"]
+        enabled = bool(self.enabled() and self.cz04b.enabled())
+        same_owner = snapshot.get("owner") == (actor, chat)
+        rows = []
+        if ready and enabled and same_owner:
+            rows.append([("🔍 بررسی زنده پیش از انتقال", "apps_cz7_preview")])
+        if ready or snapshot["manual_standby"]:
+            rows.append([("↪️ بررسی مسیر دستی CZ-04B", "apps_cz5_home")])
+        else:
+            rows.append([("🎯 بررسی و آماده‌سازی Standby", "apps_cz4_vps")])
+        rows.extend([
+            [("📋 وضعیت Quick Relay", "apps_cz_operations")],
+            [("📋 وضعیت صف CZ-07", "apps_cz7_status")],
+            [("🔄 بررسی مجدد آمادگی", "apps_cz7_home")],
+            [("↩️ Cloudzy", "apps_cz_home")],
+        ])
+        if ready:
+            summary = ("✅ <b>Standby معتبر CZ-06 آماده است.</b>\n"
+                       "برای اجرای انتقال، بررسی زنده و تأیید مستقل اتصال واقعی "
+                       "از شبکه مشتری هنوز الزامی است.")
+        else:
+            reason, action = cz07_issue(snapshot["code"])
+            summary = (f"🟡 <b>{escape(reason)}</b>\n"
+                       f"↪️ {escape(action)}\n"
+                       f"کد بررسی: <code>{_short(snapshot['code'])}</code>")
+        if ready and not same_owner:
+            summary += ("\n\n🔒 شروع انتقال خودکار فقط برای مدیر و گفتگوی "
+                        "ثبت‌کننده همان عملیات مجاز است.")
+        if not enabled:
+            summary += ("\n\n🔒 اجرای خودکار در تنظیمات مجاز نیست؛"
+                        " برای انتقال، تنظیمات عملیاتی باید جداگانه تأیید شوند.")
+        text = (
+            "🔎 <b>CZ-07 | آمادگی انتقال خودکار</b>\n\n"
+            f"مقصد: <code>{_short(snapshot['target'] or 'هنوز تأیید نشده')}</code>\n"
+            + summary +
+            "\n\n🛡 ورود به این صفحه هیچ DNS، Relay یا کاربری را تغییر نمی‌دهد."
+        )
+        await self._display(query, text, rows, markup)
 
     def _session(self, context, actor, chat):
         session = context.user_data.get("cz7")
@@ -396,24 +505,14 @@ class DurableCutoverQueue:
                 if existing and existing["status"] not in FINAL:
                     await self._show_status(query, existing, markup, actor, chat)
                     return
-                candidate = await asyncio.to_thread(self.candidate)
-                target = candidate[1]
-                await self._display(query,
-                    f"🚀 <b>CZ-07 | Cutover و انتقال صفی</b>\n\n"
-                    f"مقصد: <code>{_short(target)}</code>\n"
-                    "⛔️ هیچ تست Core/WG/NAT به‌تنهایی اثبات دسترسی شبکه ایران نیست.\n"
-                    "پیش از تأیید باید اتصال واقعی از شبکه مشتری، DNS و IP خروجی "
-                    "روی همین مقصد را مستقل آزمایش کرده باشید.\n"
-                    "🛡 سرور قبلی روشن می‌ماند؛ انتقال‌ها در دسته‌های حداکثر ۵۰تایی است.\n"
-                    "🔒 راه‌اندازی فقط با NVL_CZ07_ENABLE و NVL_CZ04B_ENABLE فعال می‌شود.",
-                    [[("🔍 بررسی زنده قبل از انتقال", "apps_cz7_preview")],
-                     [("📋 وضعیت صف", "apps_cz7_status")],
-                     [("↩️ Cloudzy", "apps_cz_home")]], markup)
+                await self._show_readiness(query, markup, actor, chat)
                 return
             if data == "apps_cz7_preview":
                 if not self.enabled() or not self.cz04b.enabled():
                     raise CZ07Hold("CZ07_OR_CZ04B_DISABLED")
                 candidate = await asyncio.to_thread(self.candidate)
+                if (candidate[3], candidate[4]) != (actor, chat):
+                    raise CZ07Hold("CZ06_OWNER_MISMATCH")
                 state = await asyncio.to_thread(self.cz04b._state, candidate[1])
                 if state["provider_id"] != candidate[2]:
                     raise CZ07Hold("PROVIDER_OWNERSHIP_CHANGED")
@@ -495,8 +594,22 @@ class DurableCutoverQueue:
                     else type(exc).__name__)
             code = code if code.isascii() and code.replace("_", "").isalnum() else "CHECK_FAILED"
             log.warning("CZ07 stage=UI actor=%s code=%s", actor, code[:90])
-            await query.message.reply_text(
-                f"⛔️ CZ-07 اجرا نشد: {code[:90]}. Journal و وضعیت عملیات را بررسی کنید.")
+            if code in ("NO_VERIFIED_CZ06_STANDBY", "CZ06_STANDBY_CHANGED"):
+                await self._show_readiness(query, markup, actor, chat)
+                return
+            reason, action = cz07_issue(code)
+            try:
+                await self._display(query,
+                    "⚠️ <b>انتقال خودکار متوقف شد.</b>\n\n"
+                    f"{escape(reason)}\n↪️ {escape(action)}\n"
+                    f"کد فنی: <code>{_short(code)}</code>\n\n"
+                    "هیچ تلاش تازه‌ای را بدون بررسی Journal آغاز نکنید.",
+                    [[("🔎 بررسی آمادگی انتقال", "apps_cz7_home")],
+                     [("📋 وضعیت صف", "apps_cz7_status")],
+                     [("↩️ Cloudzy", "apps_cz_home")]], markup)
+            except Exception:
+                await query.message.reply_text(
+                    "⚠️ انتقال متوقف شد؛ وضعیت را از بخش بررسی آمادگی پیگیری کنید.")
         except Exception:
             ref = secrets.token_hex(4)
             log.exception("CZ07 stage=UI ref=%s code=UNEXPECTED", ref)
@@ -504,24 +617,48 @@ class DurableCutoverQueue:
                 f"🚨 خطای نامشخص CZ-07؛ پیگیری {ref}. هیچ اقدام مجدد انجام ندهید.")
 
     async def _show_status(self, query, job, markup, actor, chat):
+        """Read-only CZ-07 progress. The journal remains the only authority."""
+        labels = {
+            "QUEUED": "در صف بررسی و انتقال",
+            "ROUTING": "در حال بررسی و تنظیم مسیر",
+            "MIGRATING": "در حال انتقال مرحله‌ای کاربران",
+            "HOLD": "توقف امن؛ نیازمند بررسی",
+            "DONE": "انتقال ثبت‌شده به پایان رسید",
+            "ABORTED": "عملیات متوقف و بسته شده است",
+        }
+        status = job["status"]
         events = await asyncio.to_thread(self.events, job["id"])
-        lines = [f"🔹 {_short(stage)} · {_short(code)} | {moved}/{job['total']}"
+        lines = [f"▫️ {_short(stage)} · {_short(code)} | {moved}/{job['total']}"
                  for stage, code, moved, _remaining, _at in events[:5]]
-        rows = [[("🔄 به‌روزرسانی", "apps_cz7_status")]]
+        rows = [[("🔄 تازه‌سازی وضعیت", "apps_cz7_status")]]
         if ((actor, chat) == (job["actor"], job["chat"])
-                and job["status"] == "MIGRATING"
+                and status == "MIGRATING"
                 and job["id"] not in self._running):
-            rows.insert(0, [("▶️ ادامه امن صف", "apps_cz7_resume_"+job["id"])])
+            rows.insert(0, [("▶️ بررسی و ادامه امن صف", "apps_cz7_resume_"+job["id"])])
         rows.append([("↩️ Cloudzy", "apps_cz_home")])
+        elapsed = max(0, int(self.now()) - int(job.get("updated_at") or self.now()))
+        minutes, seconds = divmod(elapsed, 60)
+        note = (
+            "🔒 عملیات در توقف امن قرار دارد. پیش از هر تغییر، وضعیت DNS،"
+            " Journal و قفل 6G باید بررسی شوند."
+            if status == "HOLD" else
+            "⏳ این مرحله در جریان است؛ عملیات تازه یا انتقال دوم آغاز نکنید."
+            if status in ("QUEUED", "ROUTING", "MIGRATING") else
+            "ℹ️ نتیجه نهایی ثبت‌شده را با اتصال واقعی مشتری جداگانه کنترل کنید."
+            if status == "DONE" else
+            "ℹ️ پیش از اقدام جدید وضعیت سرور و منابع فعلی را بررسی کنید."
+        )
+        detail = (f"\nکد ثبت‌شده: <code>{_short(job['code'])}</code>"
+                  if job.get("code") else "")
         await self._display(query,
             "📋 <b>CZ-07 | وضعیت انتقال</b>\n"
             f"شناسه: <code>{_short(job['id'][:16])}</code>\n"
-            f"مرحله: <b>{_short(job['status'])}</b>\n"
+            f"وضعیت: <b>{_short(labels.get(status, 'وضعیت نیازمند بررسی است'))}</b>\n"
             f"مبدأ: <code>{_short(job['source'])}</code>\n"
             f"مقصد: <code>{_short(job['target'])}</code>\n"
-            f"پیشرفت ثبت‌شده: {job['moved']}/{job['total']}\n"
-            f"آخرین خطا: <code>{_short(job['code'])}</code>\n\n"
-            + "\n".join(lines) +
-            "\n\n⚠️ برای وضعیت HOLD یا ROUTING متوقف‌شده، "
-            "پیش از هر عملیات وضعیت DNS، SQLite و قفل 6G را بررسی کنید.",
+            f"کاربران ثبت‌شده: <b>{job['moved']}/{job['total']}</b>\n"
+            + (f"⏱ زمان از آخرین ثبت مرحله: {minutes:02d}:{seconds:02d}\n"
+               if status in ("QUEUED", "ROUTING", "MIGRATING") else "")
+            + detail + "\n\n" + note
+            + (("\n\n<b>سوابق اخیر</b>\n" + "\n".join(lines)) if lines else ""),
             rows, markup)

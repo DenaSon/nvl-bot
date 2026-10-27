@@ -119,7 +119,7 @@ class DurableCutoverQueue:
                 raise
         else:
             return {"ready": True, "code": "READY", "target": candidate[1],
-                    "manual_standby": True}
+                    "manual_standby": True, "owner": (candidate[3], candidate[4])}
         with self.db() as db:
             row = db.execute("""
                 SELECT c.stage,e.status,e.public_ipv4,e.provider_server_id,
@@ -436,12 +436,13 @@ class DurableCutoverQueue:
                 return
             raise
 
-    async def _show_readiness(self, query, markup):
+    async def _show_readiness(self, query, markup, actor, chat):
         snapshot = await asyncio.to_thread(self.readiness)
         ready = snapshot["ready"]
         enabled = bool(self.enabled() and self.cz04b.enabled())
+        same_owner = snapshot.get("owner") == (actor, chat)
         rows = []
-        if ready and enabled:
+        if ready and enabled and same_owner:
             rows.append([("🔍 بررسی زنده پیش از انتقال", "apps_cz7_preview")])
         if ready or snapshot["manual_standby"]:
             rows.append([("↪️ بررسی مسیر دستی CZ-04B", "apps_cz5_home")])
@@ -462,6 +463,9 @@ class DurableCutoverQueue:
             summary = (f"🟡 <b>{escape(reason)}</b>\n"
                        f"↪️ {escape(action)}\n"
                        f"کد بررسی: <code>{_short(snapshot['code'])}</code>")
+        if ready and not same_owner:
+            summary += ("\n\n🔒 شروع انتقال خودکار فقط برای مدیر و گفتگوی "
+                        "ثبت‌کننده همان عملیات مجاز است.")
         if not enabled:
             summary += ("\n\n🔒 اجرای خودکار در تنظیمات مجاز نیست؛"
                         " برای انتقال، تنظیمات عملیاتی باید جداگانه تأیید شوند.")
@@ -491,12 +495,14 @@ class DurableCutoverQueue:
                 if existing and existing["status"] not in FINAL:
                     await self._show_status(query, existing, markup, actor, chat)
                     return
-                await self._show_readiness(query, markup)
+                await self._show_readiness(query, markup, actor, chat)
                 return
             if data == "apps_cz7_preview":
                 if not self.enabled() or not self.cz04b.enabled():
                     raise CZ07Hold("CZ07_OR_CZ04B_DISABLED")
                 candidate = await asyncio.to_thread(self.candidate)
+                if (candidate[3], candidate[4]) != (actor, chat):
+                    raise CZ07Hold("CZ06_OWNER_MISMATCH")
                 state = await asyncio.to_thread(self.cz04b._state, candidate[1])
                 if state["provider_id"] != candidate[2]:
                     raise CZ07Hold("PROVIDER_OWNERSHIP_CHANGED")
@@ -579,7 +585,7 @@ class DurableCutoverQueue:
             code = code if code.isascii() and code.replace("_", "").isalnum() else "CHECK_FAILED"
             log.warning("CZ07 stage=UI actor=%s code=%s", actor, code[:90])
             if code in ("NO_VERIFIED_CZ06_STANDBY", "CZ06_STANDBY_CHANGED"):
-                await self._show_readiness(query, markup)
+                await self._show_readiness(query, markup, actor, chat)
                 return
             reason, action = cz07_issue(code)
             try:

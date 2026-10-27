@@ -88,48 +88,62 @@ class DefaultOnlyLegacyDB(unittest.TestCase):
         with self.db() as db:
             return db.execute("SELECT host FROM ssh_accounts WHERE username='nvl-test'").fetchone()[0]
 
-    def test_four_active_hosts_include_core_but_published_hosts_remain_default_only(self):
-        with self.db() as db:
-            db.execute("UPDATE settings SET value=? WHERE key='hosts'",
-                       (f"{DEFAULT},{OTHER},{CORE}",))
+    def test_four_active_hosts_remain_available_to_manual_legacy_picker(self):
+        # PR #208 had reduced the manual picker to Default only, breaking
+        # existing Edge onboarding and the legacy rescue/transfer controls.
         self.ns["_db_rebuild_hosts_from_pool"]()
-        self.assertEqual(self.setting("hosts"), DEFAULT)
+        self.assertEqual(
+            self.setting("hosts"),
+            f"{DEFAULT},{OTHER},144.172.68.62,{CORE}",
+        )
         self.assertEqual(self.account_host(), DEFAULT)
+        # New customers still never load-balance from this inventory list.
+        with self.db() as db:
+            self.assertEqual(self.ns["_default_customer_relay_checked"](db), DEFAULT)
 
-    def test_bad_dns_cannot_rebuild_configured_routes(self):
+    def test_manual_rebuild_does_not_auto_change_dns_or_customer_host(self):
         with self.db() as db:
             db.execute("UPDATE settings SET value='previous-value' WHERE key='hosts'")
             db.execute("UPDATE settings SET value=? WHERE key='dns_current_ip'", (OTHER,))
-        with self.assertRaisesRegex(RuntimeError, "HOSTS_DEFAULT_DNS_MISMATCH"):
-            self.ns["_db_rebuild_hosts_from_pool"]()
-        self.assertEqual(self.setting("hosts"), "previous-value")
+        self.ns["_db_rebuild_hosts_from_pool"]()
+        self.assertEqual(self.setting("dns_current_ip"), OTHER)
+        self.assertEqual(self.account_host(), DEFAULT)
+        with self.db() as db:
+            with self.assertRaisesRegex(RuntimeError, "DEFAULT_CUSTOMER_RELAY_ROUTE_MISMATCH"):
+                self.ns["_default_customer_relay_checked"](db)
 
-    def test_core_or_standby_default_is_rejected(self):
+    def test_core_or_standby_may_be_visible_to_operator_but_never_sold_to(self):
         with self.db() as db:
             db.execute("UPDATE host_pool SET is_default=0")
             db.execute("UPDATE host_pool SET is_default=1 WHERE host=?", (CORE,))
             db.execute("UPDATE settings SET value=? WHERE key='dns_current_ip'", (CORE,))
-        with self.assertRaisesRegex(RuntimeError, "HOSTS_DEFAULT_RELAY_NOT_ELIGIBLE"):
-            self.ns["_db_rebuild_hosts_from_pool"]()
+        self.ns["_db_rebuild_hosts_from_pool"]()
+        with self.db() as db:
+            with self.assertRaisesRegex(RuntimeError, "DEFAULT_CUSTOMER_RELAY_NOT_ELIGIBLE"):
+                self.ns["_default_customer_relay_checked"](db)
         with self.db() as db:
             db.execute("UPDATE host_pool SET is_default=0 WHERE host=?", (CORE,))
             db.execute("UPDATE host_pool SET is_default=1,is_standby=1 WHERE host=?", (OTHER,))
             db.execute("UPDATE settings SET value=? WHERE key='dns_current_ip'", (OTHER,))
-        with self.assertRaisesRegex(RuntimeError, "HOSTS_DEFAULT_RELAY_NOT_ELIGIBLE"):
-            self.ns["_db_rebuild_hosts_from_pool"]()
-
-    def test_all_legacy_account_setters_refuse_other_active_edge(self):
+        self.ns["_db_rebuild_hosts_from_pool"]()
         with self.db() as db:
-            db.execute("UPDATE settings SET value=? WHERE key='hosts'", (f"{DEFAULT},{OTHER}",))
+            with self.assertRaisesRegex(RuntimeError, "DEFAULT_CUSTOMER_RELAY_NOT_ELIGIBLE"):
+                self.ns["_default_customer_relay_checked"](db)
+
+    def test_explicit_legacy_account_setters_can_target_other_active_edge(self):
         for operation, args in [
             ("_db_set_account_host", ("nvl-test", OTHER)),
             ("_db_set_hosts_bulk", (["nvl-test"], OTHER)),
             ("_db_set_all_accounts_host", (OTHER,)),
         ]:
             with self.subTest(operation=operation):
-                with self.assertRaisesRegex(RuntimeError, "LEGACY_CUSTOMER_TARGET_NOT_DEFAULT"):
-                    self.ns[operation](*args)
-                self.assertEqual(self.account_host(), DEFAULT)
+                self.ns[operation](*args)
+                self.assertEqual(self.account_host(), OTHER)
+                with self.db() as db:
+                    db.execute(
+                        "UPDATE ssh_accounts SET host=? WHERE username='nvl-test'",
+                        (DEFAULT,),
+                    )
 
 
 class BackgroundMutationFreeze(unittest.TestCase):
@@ -207,7 +221,17 @@ class BackgroundMutationFreeze(unittest.TestCase):
         self.assertIn("return", sec)
         default_callback = region("elif d.startswith(\"hpdef_\")",
                                   "# 🗑 حذف‌شده: خریدِ خودکارِ VPS")
-        self.assertNotIn("_db_set_default_host", default_callback)
+        self.assertIn("_check_ssh_reachable", default_callback)
+        self.assertIn("_db_set_default_host", default_callback)
+        self.assertIn("_db_rebuild_hosts_from_pool", default_callback)
+        self.assertIn('callback_data=f"hpdef_migrate_{host}"', default_callback)
+        confirm = region('elif d.startswith("hpdefmig_yes_")',
+                         'elif d.startswith("hpdef_")')
+        self.assertLess(confirm.index("_check_ssh_reachable"),
+                        confirm.index("_db_set_all_accounts_host"))
+        self.assertLess(confirm.index("_db_set_all_accounts_host"),
+                        confirm.index("_update_cloudflare_dns"))
+        self.assertIn('elif d == "ipsvc_distribute_confirm"', SOURCE)
 
 
 if __name__ == "__main__":

@@ -75,6 +75,27 @@ class JournalTests(unittest.TestCase):
             self.journal.get("a"), {"public_ipv4": "8.8.8.8"}))
 
 
+class ProgressTimerTests(unittest.TestCase):
+    def test_elapsed_stage_timer_is_not_countdown(self):
+        run = {
+            "operation_id": "abc123", "stage": "INSTALLING",
+            "updated_at": 100, "detail_code": "",
+        }
+        text = progress_html(run, {"public_ipv4": "8.8.8.8"}, now=225)
+        self.assertIn("02:05", text)
+        self.assertIn("در حال اجراست", text)
+        self.assertNotIn("باقی‌مانده", text)
+
+    def test_hold_does_not_appear_active(self):
+        run = {
+            "operation_id": "abc123", "stage": "HOLD",
+            "updated_at": 100, "detail_code": "APT_LOCK_BUSY",
+        }
+        text = progress_html(run, {"public_ipv4": "8.8.8.8"}, now=999)
+        self.assertIn("توقف امن", text)
+        self.assertNotIn("سپری‌شده از شروع این مرحله", text)
+
+
 class Stub04A:
     def __init__(self):
         self.state = dict(active=False, standby=False, default=False,

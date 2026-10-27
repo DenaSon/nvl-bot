@@ -3523,53 +3523,48 @@ def _db_assert_account_write_allowed(conn):
         raise RuntimeError(f"FAILOVER_WRITE_LOCKED:{operation_id}")
 
 
-def _pick_target_host_for_new_account():
-    """Select a customer-facing Legacy Relay, never the Core or a standby.
+def _default_customer_relay_checked(conn):
+    """Return the sole verified active default Relay; never balance new SSH users.
 
-    The host_pool also contains the Core as an active fallback. Balancing over
-    all active host_pool rows previously assigned newly sold SSH accounts to the
-    Core whenever its customer count was lower than the active Relay's.
-    A customer endpoint must be explicitly listed in settings.hosts *and*
-    active/non-standby in the pool. Do not silently fall back to Core.
+    The legacy CZ-07 cutover requires every active SSH account to belong to
+    the current default. This predicate must be shared by selection and the
+    final ownership CAS to fence concurrent DNS/Relay cutovers.
+    """
+    settings = dict(conn.execute(
+        "SELECT key, value FROM settings "
+        "WHERE key IN ('hosts', 'dns_current_ip', 'core_wg_public_ip')"
+    ).fetchall())
+    core = str(settings.get("core_wg_public_ip") or "").strip()
+    if not core:
+        raise RuntimeError("CORE_PUBLIC_IP_UNVERIFIED")
+    defaults = conn.execute(
+        "SELECT host, active, is_standby FROM host_pool "
+        "WHERE is_default=1"
+    ).fetchall()
+    if len(defaults) != 1:
+        raise RuntimeError("DEFAULT_CUSTOMER_RELAY_AMBIGUOUS")
+    host, active, standby = defaults[0]
+    host = str(host or "").strip()
+    if not host or host == core or int(active or 0) != 1 or int(standby or 0) != 0:
+        raise RuntimeError("DEFAULT_CUSTOMER_RELAY_NOT_ELIGIBLE")
+    configured = [
+        h.strip() for h in str(settings.get("hosts") or "").split(",")
+        if h.strip()
+    ]
+    if (not configured or configured[0] != host
+            or str(settings.get("dns_current_ip") or "").strip() != host):
+        raise RuntimeError("DEFAULT_CUSTOMER_RELAY_ROUTE_MISMATCH")
+    return host
+
+
+def _pick_target_host_for_new_account():
+    """Select only the verified default Relay for new Legacy SSH accounts.
+
+    Non-default active Edges and Standby servers are never selected, even if
+    they have fewer users. Abort sales fail-closed on ambiguous cutover state.
     """
     with db_conn() as conn:
-        settings = dict(conn.execute(
-            "SELECT key, value FROM settings "
-            "WHERE key IN ('hosts', 'core_wg_public_ip')"
-        ).fetchall())
-        core = str(settings.get("core_wg_public_ip") or "").strip()
-        if not core:
-            log.error("SSH customer host selection HOLD: CORE_PUBLIC_IP_UNVERIFIED")
-            raise RuntimeError("CORE_PUBLIC_IP_UNVERIFIED")
-
-        configured = list(dict.fromkeys(
-            host.strip() for host in str(settings.get("hosts") or "").split(",")
-            if host.strip()
-        ))
-        pool = {
-            host: (active, standby)
-            for host, active, standby in conn.execute(
-                "SELECT host, active, is_standby FROM host_pool"
-            ).fetchall()
-        }
-        candidates = [
-            host for host in configured
-            if host != core and host in pool
-            and int(pool[host][0] or 0) == 1
-            and int(pool[host][1] or 0) == 0
-        ]
-        if not candidates:
-            log.error("SSH customer host selection HOLD: NO_ELIGIBLE_CUSTOMER_RELAY")
-            raise RuntimeError("NO_ELIGIBLE_CUSTOMER_RELAY")
-
-        counts = dict(conn.execute(
-            "SELECT host, COUNT(*) FROM ssh_accounts "
-            "WHERE service_type='ssh' AND status='🟢 فعال' "
-            "AND host IS NOT NULL AND host<>'' GROUP BY host"
-        ).fetchall())
-    # Preserve legacy least-loaded allocation among *eligible* customer Relays.
-    # Python min is stable, so ties follow the explicit settings.hosts order.
-    return min(candidates, key=lambda host: counts.get(host, 0))
+        return _default_customer_relay_checked(conn)
 
 async def _acct_host_port(owner_row):
     """
@@ -4872,6 +4867,11 @@ def _db_finalize_reserved_user(un, pw, exp, cr, lim, cnt, br, agid=0, conn_mode=
     with db_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         _db_assert_account_write_allowed(conn)
+        # A route may change between the initial selection, useradd and this
+        # transaction. Never activate an SSH user on a stale/default-lost Edge.
+        # CZ-04B/CZ-07 use BEGIN IMMEDIATE for their route commit as well.
+        if _default_customer_relay_checked(conn) != host:
+            raise RuntimeError("SSH_CUSTOMER_RELAY_CHANGED_BEFORE_FINALIZE")
         cur = conn.execute(
             "UPDATE ssh_accounts SET password=?, expire_date=?, creation_date=?, users_limit=?, status='🟢 فعال', "
             "agent_id=?, conn_mode=?, hold_active=?, hold_deadline=?, hold_duration_days=?, host=? "

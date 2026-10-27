@@ -43,9 +43,41 @@ EDGE_WG_IP="$4"
 CUSTOMER_SSH_PORT="$5"
 TLS_PORT="${6:-2088}" # پورت پیش‌فرض TLS اگر داده نشد
 
+# APT on a fresh Ubuntu VPS may be busy with cloud-init/unattended-upgrades.
+# Retry ONLY a proven APT lock conflict, with a finite time budget. Never kill
+# apt/dpkg, delete system lock files, or restart the entire Edge installer.
+apt_with_lock_wait() {
+    local stage="$1"; shift
+    local elapsed=0 rc=0
+    local error_file
+    error_file="$(mktemp)"
+    while true; do
+        if "$@" 2>"$error_file"; then
+            rm -f "$error_file"
+            return 0
+        else
+            rc=$?
+        fi
+        if ! grep -Eiq 'Could not get lock|Unable to lock directory|Unable to acquire the dpkg frontend lock|is another process using it' "$error_file"; then
+            cat "$error_file" >&2
+            rm -f "$error_file"
+            return "$rc"
+        fi
+        if (( elapsed >= 90 )); then
+            echo "APT_LOCK_BUSY: $stage still blocked after $elapsed seconds; installer stopped before WireGuard configuration." >&2
+            cat "$error_file" >&2
+            rm -f "$error_file"
+            return 75
+        fi
+        echo "APT_LOCK_WAIT: $stage is busy; waiting 10 seconds ($elapsed/90 elapsed)..." >&2
+        sleep 10
+        elapsed=$((elapsed + 10))
+    done
+}
+
 echo "🔹 ۱) نصب WireGuard و iptables-persistent..."
-apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard iptables-persistent python3 curl openssh-client >/dev/null
+apt_with_lock_wait update apt-get -o DPkg::Lock::Timeout=5 update -qq
+apt_with_lock_wait install env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=5 install -y wireguard iptables-persistent python3 curl openssh-client >/dev/null
 echo "   ✅ نصب شد."
 
 echo "🔹 ۲) ساخت کلید این Edge..."

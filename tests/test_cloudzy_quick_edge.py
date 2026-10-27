@@ -426,6 +426,25 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(self.pub, joined)
         self.assertEqual(len([x for x in self.api.calls if isinstance(x, tuple) and x[0] == "create"]), 1)
 
+    async def test_apt_lock_failure_has_explicit_hold_without_reinstall(self):
+        async def busy_apt(*args):
+            self.provisions.append(args)
+            return False, None, {"error_code": "APT_LOCK_BUSY"}
+        self.wizard.provision = busy_apt
+        await self.purchase()
+        await self.cb("apps_cz_operations")
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_")))
+        await self.app.drain()
+        receipt = self.wizard.store.latest()
+        self.assertEqual(receipt["status"], "HOLD_PROVISION")
+        self.assertEqual(receipt["hold_reason"], "EDGE_APT_LOCK_BUSY")
+        self.assertEqual(len(self.provisions), 1)
+        self.assertTrue(any("APT" in text and "تکرار نکنید" in text
+                            for _, text, _ in self.app.bot.messages))
+        self.assertEqual(len([x for x in self.api.calls
+                              if isinstance(x, tuple) and x[0] == "create"]), 1)
+
     async def test_postcheck_rejection_never_reports_edge_ready(self):
         async def rejected(*args):
             self.verifications.append(args)

@@ -161,6 +161,14 @@ class QueueTests(unittest.TestCase):
             db.execute("DELETE FROM cloudzy_cz06_runs")
         self.assertEqual(self.q.readiness()["code"], "NO_CZ06_RUN")
 
+    def test_fresh_install_without_cz06_tables_shows_help(self):
+        with self.factory() as db:
+            db.execute("DROP TABLE cloudzy_cz06_runs")
+            db.execute("DROP TABLE cloudzy_edge_operations")
+        state = self.q.readiness()
+        self.assertEqual(state["code"], "NO_CZ06_RUN")
+        self.assertFalse(state["ready"])
+
     def test_cz07_entry_shows_guidance_without_errors_or_mutations(self):
         class Query:
             def __init__(self):

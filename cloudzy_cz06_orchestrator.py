@@ -109,6 +109,17 @@ def progress_html(run, receipt, *, now=None):
         ("فعال‌سازی Standby", "STANDBY_VERIFYING"),
     ]
     current = run["stage"]
+    stage_title = {
+        "PURCHASING": "ثبت خرید VPS",
+        "WAITING_PROVIDER": "آماده‌شدن سرور و دریافت IP",
+        "HOSTKEY_PENDING": "منتظر تأیید اثرانگشت SSH مدیر",
+        "INSTALLING": "نصب و بررسی Edge",
+        "EDGE_READY": "نصب Edge تأیید شد",
+        "STANDBY_VERIFYING": "بررسی و فعال‌سازی Standby",
+        "READY": "آماده ✅",
+        "HOLD": "توقف امن؛ نیازمند بررسی",
+        "CANCELLED": "لغوشده",
+    }.get(current, current)
     position = {"PURCHASING": 0, "WAITING_PROVIDER": 1,
                 "HOSTKEY_PENDING": 2, "INSTALLING": 3, "EDGE_READY": 4,
                 "STANDBY_VERIFYING": 4, "READY": 5}.get(current, -1)
@@ -128,7 +139,7 @@ def progress_html(run, receipt, *, now=None):
     return (
         "⚡ <b>Quick Relay | CZ-06</b>\n"
         f"پیگیری: <code>{escape(run['operation_id'][:16])}</code>\n"
-        f"مرحله: <b>{escape(current)}</b>\n"
+        f"وضعیت: <b>{escape(stage_title)}</b> <code>{escape(current)}</code>\n"
         f"IP: <code>{escape(str(receipt.get('public_ipv4') or '—'))}</code>\n"
         + (f"⏱ سپری‌شده از شروع این مرحله: <b>{minutes:02d}:{seconds:02d}</b>\n"
            "🔒 عملیات در حال اجراست؛ درخواست خرید یا نصب تازه نزنید.\n"

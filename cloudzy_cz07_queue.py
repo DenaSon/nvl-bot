@@ -671,19 +671,12 @@ class DurableCutoverQueue:
                     "nonce": nonce, "expires": self.now() + APPROVAL_TTL,
                 }
                 await self._display(query,
-                    "🛡 <b>بازیابی Job متوقف‌شده</b>
-
-"
-                    f"مبدأ: <code>{_short(rec['source'])}</code>
-"
-                    f"مقصد: <code>{_short(rec['target'])}</code>
-"
-                    f"جابجایی ثبت‌شده: <b>{rec['moved']}</b>
-
-"
+                    "🛡 <b>بازیابی Job متوقف‌شده</b>\n\n"
+                    f"مبدأ: <code>{_short(rec['source'])}</code>\n"
+                    f"مقصد: <code>{_short(rec['target'])}</code>\n"
+                    f"جابجایی ثبت‌شده: <b>{rec['moved']}</b>\n\n"
                     "✅ مسیر پیش‌فرض، DNS زنده Cloudflare، Journalهای CZ-04B و قفل 6G "
-                    "بررسی شدند و اثری از شروع Cutover این Job دیده نشد.
-"
+                    "بررسی شدند و اثری از شروع Cutover این Job دیده نشد.\n"
                     "با تأیید، فقط همین Job با حفظ تاریخچه ABORTED می‌شود. "
                     "هیچ DNS، اکانت یا Relay تغییر نمی‌کند. سپس از مرحله اول "
                     "بررسی و تأیید اتصال مشتری، انتقال جدید را آغاز کنید.",
@@ -700,11 +693,8 @@ class DurableCutoverQueue:
                     self.close_stale_route, session["job"], actor, chat,
                     session["updated_at"])
                 await self._display(query,
-                    "✅ <b>Job گیرکرده با حفظ تاریخچه بسته شد.</b>
-
-"
-                    "مسیر DNS و کاربران بدون تغییر باقی ماندند.
-"
+                    "✅ <b>Job گیرکرده با حفظ تاریخچه بسته شد.</b>\n\n"
+                    "مسیر DNS و کاربران بدون تغییر باقی ماندند.\n"
                     "↪️ برای شروع دوباره از مرحله اول روی دکمه زیر بزنید. "
                     "بررسی زنده Cloudzy و تأیید واقعی مشتری همچنان الزامی است.",
                     [[("🔄 شروع دوباره از مرحله اول", "apps_cz7_home")],

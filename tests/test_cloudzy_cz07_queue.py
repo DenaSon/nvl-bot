@@ -26,6 +26,9 @@ class Fake04B:
     def _source_accounts(self, db, source):
         return db.execute("SELECT username,host,status FROM ssh_accounts "
                           "WHERE host=? ORDER BY username", (source,)).fetchall()
+    def _expect_dns(self, values, target):
+        if not values or any(value["ip"] != target for value in values):
+            raise CZ07Hold("DNS_CHANGED")
 
 
 class FakeDNS:
@@ -517,7 +520,10 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(self.q.get(job)["status"], "ROUTING")
         # Invalid actor consumes confirmation; re-open a fresh preview.
         run(cb(callback))
-        run(cb(confirm[0]))
+        renewed = [x for x in query.callbacks if x.startswith("apps_cz7_close_")]
+        self.assertEqual(len(renewed), 1)
+        self.assertNotEqual(renewed[0], confirm[0])
+        run(cb(renewed[0]))
         self.assertEqual(self.q.get(job)["status"], "ABORTED")
         self.assertIn("شروع دوباره از مرحله اول", query.text)
 

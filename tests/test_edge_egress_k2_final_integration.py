@@ -169,7 +169,13 @@ class K2TelegramWiringTests(unittest.TestCase):
         setters = self.source[start:end]
         self.assertIn('conn.execute("BEGIN IMMEDIATE")', setters)
         self.assertIn("_db_assert_legacy_host_mutation_allowed(conn)", setters)
-        self.assertIn("_default_customer_relay_checked(conn)", setters)
+        self.assertNotIn("_default_customer_relay_checked(conn)", setters)
+        self.assertIn("_db_assert_account_write_allowed(conn)", setters)
+        # New account enrollment still has its own default-only safety check.
+        creation_start = self.source.index("def _db_finalize_reserved_user(")
+        creation_end = self.source.index("def _db_set_account_host(", creation_start)
+        self.assertIn("_default_customer_relay_checked(conn)",
+                      self.source[creation_start:creation_end])
 
 
 if __name__ == "__main__":

@@ -570,7 +570,7 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         record = await self.purchase()
         self.assertEqual(record["status"], "CREATE_UNCERTAIN")
         await self.cb("apps_cz_wizard")
-        self.assertIn("CREATE_UNCERTAIN", self.query.text)
+        self.assertIn("نتیجه خرید VPS نامشخص است", self.query.text)
         self.api.fail_create = None
         await self.cb("apps_cz_operations")
         retry_read = next(x for x in self.query.callbacks if x.startswith("apps_cz_qcheck_"))

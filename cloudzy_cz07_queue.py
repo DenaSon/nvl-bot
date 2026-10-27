@@ -112,6 +112,16 @@ class DurableCutoverQueue:
         Never treats a manual standby or an EDGE_READY receipt as a forged
         CZ-06 READY. The exact candidate() guard remains authoritative.
         """
+        # A fresh installation may have no CZ-03/CZ-06 tables yet. This
+        # navigation check must remain read-only and still explain what to do.
+        with self.db() as db:
+            tables = {row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+                "('cloudzy_cz06_runs','cloudzy_edge_operations','host_pool')"
+            ).fetchall()}
+        if len(tables) != 3:
+            return {"ready": False, "code": "NO_CZ06_RUN",
+                    "target": None, "manual_standby": False}
         try:
             candidate = self.candidate()
         except CZ07Hold as exc:

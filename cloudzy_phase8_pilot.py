@@ -220,6 +220,15 @@ def evaluate_pilot(db, *, phase, expected_target=None,
                         blocks.append("INDEPENDENT_CREATE_RENEW_CLIENT_PROOF_MISSING")
                 else:
                     blocks.append("CZ07_ACCEPTANCE_JOURNAL_MISSING")
+        # Final DNS must still prove exact record identity and public target,
+        # not merely match an IP with a missing/changed Cloudflare record ID.
+        if live_dns is not None and (
+            not target or not isinstance(live_dns, list) or not live_dns
+            or any(not isinstance(rec, dict) or not rec.get("name")
+                   or not rec.get("id") or _ip(rec.get("ip")) != target
+                   for rec in live_dns)
+        ):
+            blocks.append("LIVE_DNS_FINAL_IDENTITY_UNVERIFIED")
         if live_dns is None:
             verdict = "READY_FOR_LIVE_DNS_TEST" if not blocks else "BLOCKED"
         else:
@@ -227,6 +236,27 @@ def evaluate_pilot(db, *, phase, expected_target=None,
     return PilotReport(
         phase, verdict, source, target, cohort,
         tuple(sorted(set(blocks))), tuple(next_checks), tuple(facts))
+
+
+def retirement_preview(final_report, *, independent_signoff=None):
+    """Reversible review decision; never switches/deletes a legacy callback.
+
+    Signoff must be an injected trusted witness; operator-supplied text, local
+    CLI argument, or historical metadata cannot auto-retire existing routes.
+    """
+    if (not isinstance(final_report, PilotReport)
+            or final_report.phase != "final"
+            or final_report.verdict != "FINAL_AUDIT_PASS"
+            or final_report.blockers):
+        return "KEEP_LEGACY_ACTIVE"
+    if not callable(independent_signoff):
+        return "KEEP_LEGACY_ACTIVE"
+    try:
+        approved = independent_signoff(final_report) is True
+    except Exception:
+        approved = False
+    return ("ELIGIBLE_FOR_SEPARATE_REVERSIBLE_RETIREMENT_REVIEW" if approved
+            else "KEEP_LEGACY_ACTIVE")
 
 
 def open_core_readonly(path):

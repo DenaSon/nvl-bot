@@ -18,7 +18,7 @@ STAGES = (
     "تأیید هویت سرور Cloudzy",
     "نصب Edge و بررسی WireGuard",
     "آماده‌سازی Standby",
-    "تست اتصال واقعی مشتری",
+    "بازبینی آمادگی تغییر مسیر",
     "تغییر محافظت‌شده DNS و Default",
     "انتقال حساب‌های SSH",
     "تأیید ساخت، تمدید و اتصال",
@@ -29,6 +29,23 @@ UO_STEP = {
     "CLIENT_E2E": 4, "DNS_CUTOVER": 5,
     "CUSTOMER_MIGRATION": 6, "FINAL_VERIFY": 7,
 }
+STATE_LABELS = {
+    "PLANNED": "برنامه‌ریزی‌شده", "RUNNING": "در حال اجرا",
+    "WAITING_EXTERNAL": "در انتظار پاسخ زیرساخت",
+    "NEEDS_ATTESTATION": "در انتظار تأیید شواهد",
+    "RETRYABLE": "قابل پیگیری",
+    "RECONCILE_REQUIRED": "نیازمند تطبیق وضعیت",
+    "CANCELLATION_REQUESTED": "درخواست توقف ثبت شده",
+    "PAUSED_SAFE": "متوقف‌شده در نقطه امن",
+    "COMPLETED": "تکمیل و تأییدشده",
+    "CANCELLED_SAFE": "لغو امن", "NEEDS_OPERATOR": "نیازمند بررسی مدیر",
+    "QUEUED": "در صف انتقال", "ROUTING": "در حال تغییر مسیر",
+    "MIGRATING": "در حال انتقال حساب‌ها",
+    "VERIFYING": "انتقال انجام شده؛ پذیرش نهایی باز است",
+    "DONE": "تکمیل و تأییدشده", "HOLD": "متوقف برای بررسی",
+    "ABORTED": "لغوشده",
+}
+
 CZ07_STEP = {
     "QUEUED": 4, "ROUTING": 5, "MIGRATING": 6, "PAUSED_SAFE": 6,
     "VERIFYING": 7, "DONE": 7, "HOLD": 6, "ABORTED": 5,
@@ -61,9 +78,17 @@ ERRORS = {
         "توقف درخواست شده است", "عملیات پس از Batch جاری در مرز امن متوقف می‌شود.",
         "WAIT"),
     "AWAITING_BUSINESS_E2E": (
-        "انتقال ثبت شد، پذیرش نهایی باقی است",
-        "ساخت، تمدید و اتصال واقعی SSH هنوز مستقلاً تأیید نشده‌اند.",
-        "NEEDS_ATTESTATION"),
+        "انتقال حساب‌ها ثبت شد؛ پذیرش نهایی باز است",
+        "ثبت تغییر Host به‌تنهایی موفقیت سرویس نیست؛ شواهد مستقل ساخت، تمدید و اتصال مشتری باید بررسی شوند.",
+        "VERIFY_EVIDENCE"),
+    "CZ06_STANDBY_READY_AWAITING_CLIENT_E2E": (
+        "سرور و Standby آماده‌اند",
+        "آماده‌بودن زیرساخت تأیید شده؛ قبل از تغییر مسیر باید شواهد مستقل اتصال وجود داشته باشد.",
+        "VERIFY_EVIDENCE"),
+    "CZ07_BUSINESS_E2E_REQUIRED": (
+        "انتقال کامل؛ تأیید سرویس باقی است",
+        "ساخت و تمدید حساب و اتصال مشتری باید با شواهد مستقل تأیید شوند.",
+        "VERIFY_EVIDENCE"),
     "HOST_KEY_CHANGED": (
         "هویت SSH سرور تغییر کرده است",
         "اثر انگشت SSH باید از مسیر مستقل تأیید شود.", "SECURITY_HOLD"),
@@ -201,13 +226,16 @@ def _progress(view):
     return f"{view.moved}/{view.total}"
 
 
-def render_card(view: OperationView, *, details=False):
+def render_card(view: OperationView, *, details=False, refresh_stamp=None):
     """Bot API 10.3 InputRichMessage, blocks-only. Never HTML fallback."""
     _identity(view.kind, view.operation_id, view.actor, view.chat)
     if type(view.stage) is not int or view.stage not in range(8):
         raise RichViewHold("INVALID_STAGE")
     if type(view.version) is not int or view.version < 0:
         raise RichViewHold("INVALID_EVENT_VERSION")
+    if refresh_stamp is not None and (not isinstance(refresh_stamp, str)
+            or not re.fullmatch(r"[a-f0-9]{8}", refresh_stamp)):
+        raise RichViewHold("INVALID_REFRESH_REFERENCE")
     title, explanation, policy = issue(view.code)
     if view.code in ("", "UNSPECIFIED"):
         title, explanation, policy = ("وضعیت در Journal ثبت شده است",
@@ -222,9 +250,10 @@ def render_card(view: OperationView, *, details=False):
         icon = "✅" if index in accepted else ("🔹" if index == view.stage else "▫️")
         timeline.append({"type": "paragraph", "text": f"{icon} {label}"})
     blocks = [
-        {"type": "heading", "size": 3, "text": "🚀 عملیات یکپارچه Edge"},
+        {"type": "heading", "size": 3, "text": "📊 مرکز عملیات Edge"},
         {"type": "paragraph", "text": [
-            {"type": "bold", "text": "وضعیت: "}, str(view.state)[:36]]},
+            {"type": "bold", "text": "وضعیت: "},
+            STATE_LABELS.get(view.state, "نیازمند بررسی")]},
         {"type": "table", "is_compact": True,
          "cells": [
              [{"text": "شناسه"}, {"text": view.operation_id[:12]}],
@@ -243,11 +272,14 @@ def render_card(view: OperationView, *, details=False):
              {"type": "paragraph", "text": explanation},
              {"type": "paragraph", "text": f"راهبرد: {policy}"},
              {"type": "paragraph", "text": f"نسخه Journal: {view.version}"},
+             {"type": "paragraph", "text": f"وضعیت سیستمی: {view.state[:36]}"},
+             *([{"type": "paragraph", "text": f"شناسه بازبینی: {refresh_stamp}"}]
+               if refresh_stamp else []),
          ]},
         {"type": "buttons", "align": "right", "buttons": [
             {"text": "🔄 تازه‌سازی", "style": "primary",
              "callback_data": _callback(view, "r")},
-            {"text": "📋 جزئیات", "callback_data": _callback(view, "d")},
+            {"text": "🔎 جزئیات فنی", "callback_data": _callback(view, "d")},
         ]},
     ]
     if view.state in ("VERIFYING", "RECONCILE_REQUIRED", "HOLD", "PAUSED_SAFE"):

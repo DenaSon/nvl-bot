@@ -201,6 +201,11 @@ def observe_native_status(db, *, operation_id, status, now=None):
 
 def observe_cz06_status(db, *, operation_id, stage, now=None):
     """CZ06 continuation is not proof of the client's ISP or cutover success."""
+    # Old CZ06 fixtures and historic receipts may use different native IDs.
+    # Validate the new UO ID format ONLY when a UO link actually exists.
+    linked = _linked(db, operation_id)
+    if linked is None:
+        return False
     _assert_identity(operation_id)
     row = db.execute(
         "SELECT stage,actor_id,chat_id FROM cloudzy_cz06_runs WHERE operation_id=?",
@@ -208,9 +213,6 @@ def observe_cz06_status(db, *, operation_id, stage, now=None):
     ).fetchone()
     if not row or row[0] != stage:
         raise UnifiedLinkHold("NATIVE_CZ06_STATUS_CHANGED")
-    linked = _linked(db, operation_id)
-    if linked is None:
-        return False
     if (linked[1], linked[2]) != (row[1], row[2]):
         raise UnifiedLinkHold("NATIVE_CZ06_OWNER_MISMATCH")
     step = _CZ06_STEPS.get(stage)
@@ -241,7 +243,6 @@ def observe_cz07_status(db, *, job_id, expected_status, now=None):
     This runs inside the *native CZ07 transaction*. For an old source receipt
     lacking a new unified link, simply leave its historical journals alone.
     """
-    _assert_identity(job_id)
     row = db.execute(
         "SELECT cz06_operation,actor,chat,source,target,provider_id,"
         "status,moved,total FROM cloudzy_cz07_jobs WHERE id=?", (job_id,)
@@ -252,6 +253,8 @@ def observe_cz07_status(db, *, job_id, expected_status, now=None):
     link = _linked(db, origin)
     if link is None:
         return False
+    _assert_identity(job_id)
+    _assert_identity(origin)
     if (actor, chat) != (link[1], link[2]):
         raise UnifiedLinkHold("CZ07_UNIFIED_OWNER_MISMATCH")
     provider = db.execute(

@@ -162,5 +162,59 @@ class StandbyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(svc.reserved, [])
 
 
+    async def test_existing_committed_standby_must_pass_fresh_probe(self):
+        svc = Stub04A()
+        svc.state.update(active=True, standby=True)
+        svc.probe_ok = False
+        args = dict(actor=12, chat=34, host="8.8.8.8", provider_id="vps-1")
+        with self.assertRaisesRegex(QuickRelayHold, "FRESH_SSH_WG_PREFLIGHT_FAILED"):
+            await promote_standby_once(svc, **args)
+        self.assertEqual(svc.reserved, [])
+        svc.probe_ok = True
+        self.assertEqual(await promote_standby_once(svc, **args), "READY")
+        self.assertEqual(svc.reserved, [])
+
+    async def test_committed_standby_rejects_stale_route_and_provider(self):
+        args = dict(actor=12, chat=34, host="8.8.8.8", provider_id="vps-1")
+        for change in ("listed", "default", "users", "auto", "k2_onboard"):
+            svc = Stub04A()
+            svc.state.update(active=True, standby=True)
+            svc.state[change] = 1 if change == "users" else True
+            with self.subTest(change=change):
+                with self.assertRaisesRegex(QuickRelayHold, "STANDBY_ROUTE_OR_AUTOMATION_CHANGED"):
+                    await promote_standby_once(svc, **args)
+                self.assertEqual(svc.reserved, [])
+        svc = Stub04A()
+        svc.state.update(active=True, standby=True)
+        svc.provider_status = "stopped"
+        with self.assertRaisesRegex(QuickRelayHold, "PROVIDER_NOT_ACTIVE"):
+            await promote_standby_once(svc, **args)
+
+    async def test_postcommit_probe_failure_holds_then_adopts_without_repromote(self):
+        class ProbeFallsAfterCommit(Stub04A):
+            async def probe(self, host, port, admin_port):
+                return self.probe_ok if not self.promoted else False
+        svc = ProbeFallsAfterCommit()
+        args = dict(actor=12, chat=34, host="8.8.8.8", provider_id="vps-1")
+        with self.assertRaisesRegex(QuickRelayHold, "FRESH_SSH_WG_PREFLIGHT_FAILED"):
+            await promote_standby_once(svc, **args)
+        self.assertTrue(svc.state["standby"])
+        self.assertEqual(len(svc.reserved), 1)
+        svc.probe = Stub04A.probe.__get__(svc)
+        self.assertEqual(await promote_standby_once(svc, **args), "READY")
+        self.assertEqual(len(svc.reserved), 1)
+
+    async def test_postcommit_host_state_drift_is_never_ready(self):
+        class PartialCommit(Stub04A):
+            def _promote(self, opid, host, provider_id):
+                self.promoted.append((opid, host, provider_id))
+                self.state.update(active=True, standby=False)
+        svc = PartialCommit()
+        args = dict(actor=12, chat=34, host="8.8.8.8", provider_id="vps-1")
+        with self.assertRaisesRegex(QuickRelayHold, "STANDBY_POSTCOMMIT_STATE_UNVERIFIED"):
+            await promote_standby_once(svc, **args)
+        self.assertEqual(len(svc.reserved), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

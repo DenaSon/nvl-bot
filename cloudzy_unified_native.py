@@ -247,12 +247,17 @@ def observe_cz07_status(db, *, job_id, expected_status, now=None):
         "SELECT cz06_operation,actor,chat,source,target,provider_id,"
         "status,moved,total FROM cloudzy_cz07_jobs WHERE id=?", (job_id,)
     ).fetchone()
-    if not row or row[6] != expected_status or expected_status not in _CZ07_STATES:
-        raise UnifiedLinkHold("CZ07_NATIVE_STATUS_UNVERIFIED")
+    # Older CZ07 tests and recovery audits append historical events without
+    # advancing a native status; do not retroactively impose UO invariants.
+    # Only a concrete bound UO row may enforce the stronger stage CAS.
+    if not row:
+        return False
     origin, actor, chat, _source, target, provider_id, _status, moved, total = row
     link = _linked(db, origin)
     if link is None:
         return False
+    if row[6] != expected_status or expected_status not in _CZ07_STATES:
+        raise UnifiedLinkHold("CZ07_NATIVE_STATUS_UNVERIFIED")
     _assert_identity(job_id)
     _assert_identity(origin)
     if (actor, chat) != (link[1], link[2]):

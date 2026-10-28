@@ -62,7 +62,7 @@ class RouteSnapshotTests(unittest.TestCase):
         self.assertEqual(snap.active_assignments, ((DEFAULT, 2),))
         self.assertEqual(snap.default_hosts, (DEFAULT,))
         # Only candidate by ROLE, not verified network/provider healthy.
-        self.assertEqual(snap.eligible_candidates, (DEFAULT, OLD))
+        self.assertEqual(snap.eligible_candidates, (OLD, DEFAULT))
         self.assertFalse(snap.live_dns_verified)
 
     def test_production_2026_10_28_default_last_reproduction(self):

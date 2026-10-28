@@ -1,12 +1,11 @@
 """Phase 7 read-only Rich UI bridge for authenticated NVL Telegram admins.
 
-Source admission is deliberately OFF by default. This never executes
-Cloudzy/Cloudflare, CZ07 mutating callbacks, SSH writes, or migration workers.
+Directly available to currently authenticated, active admin sessions in
+private chats. Never executes infrastructure actions or migration workers.
 """
 from __future__ import annotations
 
 import logging
-import os
 import sqlite3
 
 from cloudzy_rich_admin import RichViewHold, parse_callback, OP_ID
@@ -19,32 +18,17 @@ ENTRY = "apps_cz_rich_home"
 PREFIX = "u7:"
 
 
-def rich_enabled(env=None):
-    source = os.environ if env is None else env
-    return source.get("NVL_CLOUDZY_RICH_UI_ENABLED", "0") == "1"
+def can_view(*, role, actor, chat, is_private, active_admin_ids):
+    """Only active NVL admins, in their own private chat, may access Rich UI.
 
-
-def configured_admin_ids(env=None):
-    """Explicitly allowlist 1–3 admins; never infer authorization from history."""
-    source = os.environ if env is None else env
-    raw = source.get("NVL_CLOUDZY_RICH_ADMIN_IDS", "")
-    values = [value.strip() for value in raw.split(",")]
-    if not values or len(values) > 3 or any(
-            not value.isascii() or not value.isdigit() or int(value) <= 0
-            for value in values):
-        return frozenset()
-    ids = frozenset(int(value) for value in values)
-    return ids if len(ids) == len(values) else frozenset()
-
-
-def can_view(*, role, actor, chat, is_private, env=None):
-    """Bot auth and exact private-chat/owner/allowlist checks are cumulative."""
-    if not rich_enabled(env):
-        return False
+    The caller must additionally enforce the existing authenticated session.
+    The active IDs are reloaded from NVL's admin registry, not historical
+    Telegram IDs or an environment Feature Flag.
+    """
     if (role != "admin" or type(actor) is not int or type(chat) is not int
             or actor <= 0 or actor != chat or is_private is not True):
         return False
-    return actor in configured_admin_ids(env)
+    return isinstance(active_admin_ids, (frozenset, set, tuple)) and actor in active_admin_ids
 
 
 def _table_exists(db, name):
@@ -112,8 +96,9 @@ def empty_card():
 
 async def handle_rich_admin_callback(
         *, data, query, context, db_factory,
-        role, actor, chat, is_private, api_factory=RichBotAPI, env=None):
-    """Opt-in read-only callback; no mutation API or HTML fallback.
+        role, actor, chat, is_private, active_admin_ids,
+        api_factory=RichBotAPI):
+    """Direct, admin-authenticated read-only callback; no HTML fallback.
 
     The central PTB handler has already acknowledged the Telegram callback.
     Failures stay within Rich UI; they never change the underlying operations.
@@ -122,8 +107,8 @@ async def handle_rich_admin_callback(
             data == ENTRY or data.startswith(PREFIX)):
         return "NOT_OURS"
     if not can_view(role=role, actor=actor, chat=chat,
-                    is_private=is_private, env=env):
-        log.warning("Phase7 Rich access rejected: role/allowlist/private guard")
+                    is_private=is_private, active_admin_ids=active_admin_ids):
+        log.warning("Phase7 Rich access rejected: role/active-admin/private guard")
         return "DENIED"
     try:
         with db_factory() as db:

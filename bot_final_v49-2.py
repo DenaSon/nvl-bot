@@ -3018,6 +3018,14 @@ def _db_set_host_standby(host, is_standby: bool):
     """🆕 علامت‌گذاریِ یک Edge به‌عنوانِ Standby (بدونِ مشتریِ فعال، آمادهٔ Failover)."""
     with db_conn() as conn:
         _db_assert_legacy_host_mutation_allowed(conn)
+        if is_standby:
+            listed = conn.execute(
+                "SELECT value FROM settings WHERE key='hosts'"
+            ).fetchone()
+            if host in [
+                    h.strip() for h in ((listed[0] if listed else "") or "").split(",")
+            ]:
+                raise RuntimeError("STANDBY_IS_STILL_IN_CUSTOMER_HOSTS")
         conn.execute("UPDATE host_pool SET is_standby=? WHERE host=?", (1 if is_standby else 0, host))
 
 def _db_get_standby_hosts():
@@ -13534,27 +13542,40 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_ip = text.strip().replace(" ", "")
         if not new_ip:
             await update.message.reply_text("❌ یک IP معتبر بفرستید:"); return
-        cur_hosts = [h.strip() for h in (await asyncio.to_thread(_db_get_setting, 'hosts', '')).split(',') if h.strip()]
+        cur_hosts = [
+            h.strip() for h in (
+                await asyncio.to_thread(_db_get_setting, 'hosts', '')
+            ).split(',') if h.strip()
+        ]
         if new_ip in cur_hosts:
-            await update.message.reply_text("ℹ️ این IP از قبل در لیست بود؛ چیزی تغییر نکرد.")
+            await update.message.reply_text("ℹ️ این IP از قبل در فهرست مشتریان ثبت شده است.")
         else:
-            cur_hosts.append(new_ip)
-            await asyncio.to_thread(_db_update_setting, 'hosts', ",".join(cur_hosts))
-            await asyncio.to_thread(_db_add_host_pool, new_ip)  # 🔧 هماهنگ‌سازی با استخر پایش سلامت
-            await update.message.reply_text(f"✅ IP جدید <code>{esc(new_ip)}</code> به لیست اضافه شد.\n🌐 لیست فعلی: <code>{esc(', '.join(cur_hosts))}</code>", parse_mode="HTML")
+            # Do not automatically activate unverified host_pool/Standby.
+            from legacy_route_compat import LegacyRouteHold
+            try:
+                await asyncio.to_thread(
+                    _db_update_setting, 'hosts', ",".join([*cur_hosts, new_ip])
+                )
+            except LegacyRouteHold:
+                await update.message.reply_text(
+                    "⛔️ IP جدید هنوز برای مسیر مشتری مجاز نیست. "
+                    "ابتدا Edge را از مسیر تأییدشده راه‌اندازی کنید."
+                )
+                return
+            await update.message.reply_text(
+                f"✅ IP تأییدشده <code>{esc(new_ip)}</code> به مسیر مشتری اضافه شد.",
+                parse_mode="HTML",
+            )
         safe_clear_context(context); await show_main_menu(update, context)
     elif state == 'HOSTPOOL_ADD_INPUT':
-        new_ip = text.strip().replace(" ", "")
-        if not new_ip:
-            await update.message.reply_text("❌ یک IP/دامنهٔ معتبر بفرستید:"); return
-        cur_hosts = [h.strip() for h in (await asyncio.to_thread(_db_get_setting, 'hosts', '')).split(',') if h.strip()]
-        if new_ip not in cur_hosts:
-            cur_hosts.append(new_ip)
-            await asyncio.to_thread(_db_update_setting, 'hosts', ",".join(cur_hosts))
-        await asyncio.to_thread(_db_add_host_pool, new_ip)
-        await asyncio.to_thread(_db_set_host_active, new_ip, True)
-        await update.message.reply_text(f"✅ IP <code>{esc(new_ip)}</code> به استخر پایش سلامت اضافه و فعال شد.", parse_mode="HTML")
-        safe_clear_context(context); await show_main_menu(update, context)
+        # An unknown VPS is inventory, NOT a customer route. Legacy text
+        # onboarding skipped SSH/WG/Cloudzy identity proof: deny stale flow.
+        await update.message.reply_text(
+            "⛔️ ثبت مستقیم IP به‌عنوان Relay فعال از این مسیر متوقف شده است. "
+            "از «افزودن Edge جدید» و بررسی مستقل SSH/WG استفاده کنید."
+        )
+        safe_clear_context(context)
+        return
 
     elif state == 'EDGE_NEW_IP':
         ip = text.strip()
@@ -25957,7 +25978,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        await asyncio.to_thread(_db_set_host_standby, host, True)
+        try:
+            await asyncio.to_thread(_db_set_host_standby, host, True)
+        except RuntimeError as exc:
+            if str(exc) != "STANDBY_IS_STILL_IN_CUSTOMER_HOSTS":
+                raise
+            await query.message.reply_text(
+                "⛔️ این IP هنوز در فهرست مسیر مشتریان است. "
+                "پیش از تبدیل به Standby، متادیتا را از مسیر تأییدشده اصلاح کنید."
+            )
+            return
         await query.answer("✅ سرور به‌عنوان جایگزین ثبت شد.", show_alert=False)
         await _render_host_pool_panel(query)
 

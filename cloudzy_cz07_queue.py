@@ -19,6 +19,7 @@ from cloudzy_unified_native import observe_cz07_status
 from cloudzy_cz04b import CutoverHold, _digest
 from cloudzy_service import CloudzyError
 from cloudzy_phase1_ui import cz07_issue
+from cloudzy_cz07_acceptance import AcceptanceReview
 
 log = logging.getLogger(__name__)
 BATCH_SIZE = 200
@@ -41,13 +42,14 @@ class DurableCutoverQueue:
     """One durable job at a time, one in-process async worker, explicit safe resume."""
 
     def __init__(self, *, db_conn, cz04b, enabled=lambda: False,
-                 now=time.time, pause=asyncio.sleep):
+                 now=time.time, pause=asyncio.sleep, acceptance_witness=None):
         self.db = db_conn
         self.cz04b = cz04b
         self.enabled = enabled
         self.now = now
         self.pause = pause
         self._running = set()
+        self.acceptance_witness = acceptance_witness
 
     @staticmethod
     def _init(db):
@@ -102,6 +104,15 @@ class DurableCutoverQueue:
             row = db.execute("SELECT * FROM cloudzy_cz07_jobs WHERE id=?",
                              (job,)).fetchone()
             return dict(row) if row else None
+
+    def review_acceptance(self, job_id):
+        """Read independently authenticated proof; no DB/provider writes."""
+        job = self.get(job_id)
+        if not job or job['status'] != 'VERIFYING':
+            return AcceptanceReview(False, 'EVIDENCE_JOB_NOT_ELIGIBLE')
+        if self.acceptance_witness is None:
+            return AcceptanceReview(False, 'TRUSTED_WITNESS_NOT_CONFIGURED')
+        return self.acceptance_witness.review(job)
 
     def candidate(self):
         """Latest CZ06 READY only; no implicit adoption of manual/foreign servers."""
@@ -855,6 +866,95 @@ class DurableCutoverQueue:
                     return
                 await self._show_readiness(query, markup, actor, chat)
                 return
+            if data.startswith("apps_cz7_accept_review_"):
+                job_id = data[len("apps_cz7_accept_review_"):]
+                item = await asyncio.to_thread(self.get, job_id)
+                if not item or (item["actor"], item["chat"]) != (actor, chat):
+                    raise CZ07Hold("BUSINESS_ACCEPT_OWNER_MISMATCH")
+                if item["status"] != "VERIFYING":
+                    raise CZ07Hold("BUSINESS_ACCEPT_NOT_READY")
+                proof = await asyncio.to_thread(self.review_acceptance, job_id)
+                if not proof.ready:
+                    messages = {
+                        "TRUSTED_WITNESS_NOT_CONFIGURED":
+                            "منبع مستقل شواهد اتصال هنوز به NVL متصل نشده است.",
+                        "TRUSTED_WITNESS_NOT_RECEIVED":
+                            "هنوز گواه معتبر ساخت، تمدید و اتصال از ناظر مستقل دریافت نشده است.",
+                        "TRUSTED_WITNESS_STALE":
+                            "گواه موجود منقضی یا مربوط به وضعیت قدیمی انتقال است.",
+                        "TRUSTED_WITNESS_SIGNATURE_INVALID":
+                            "امضای گواه مستقل معتبر نیست.",
+                        "TRUSTED_WITNESS_INCOMPLETE":
+                            "گواه دریافت شده، همه آزمون‌های ساخت، تمدید و اتصال مشتری را پاس نکرده است.",
+                    }
+                    await self._display(query,
+                        "🔍 <b>بررسی پذیرش نهایی انتقال</b>\n\n"
+                        f"شناسه: <code>{_short(job_id[:16])}</code>\n"
+                        f"مقصد: <code>{_short(item['target'])}</code>\n"
+                        f"انتقال ثبت‌شده: <b>{item['moved']}/{item['total']}</b>\n\n"
+                        f"⚠️ {escape(messages.get(proof.code, 'شواهد مستقل قابل پذیرش نیستند.'))}\n"
+                        f"کد بررسی: <code>{_short(proof.code)}</code>\n\n"
+                        "هیچ تغییری در وضعیت Job یا کاربران داده نشد. "
+                        "پس از دریافت شواهد معتبر، دوباره بررسی کنید.",
+                        [[("🔄 بررسی دوباره شواهد", "apps_cz7_accept_review_"+job_id)],
+                         [("↩️ وضعیت انتقال", "apps_cz7_status")]], markup)
+                    return
+                nonce = secrets.token_hex(8)
+                context.user_data["cz7_accept"] = {
+                    "actor": actor, "chat": chat, "job": job_id,
+                    "updated_at": item["updated_at"],
+                    "fingerprint": proof.fingerprint,
+                    "refs": proof.refs, "nonce": nonce,
+                    "expires": self.now() + APPROVAL_TTL,
+                }
+                await self._display(query,
+                    "✅ <b>شواهد مستقل تأیید شدند</b>\n\n"
+                    f"مقصد: <code>{_short(item['target'])}</code>\n"
+                    f"حساب‌ها: <b>{item['moved']}/{item['total']}</b>\n"
+                    "ساخت حساب، تمدید حساب و اتصال واقعی مشتری: تأییدشده در گواه امضاشده.\n\n"
+                    "مرحله بعد، بازبینی زنده DNS، مسیر، قفل 6G و شمارش حساب‌هاست. "
+                    "تنها در صورت موفقیت همه کنترل‌ها عملیات DONE می‌شود.",
+                    [[("✅ اجرای بررسی نهایی و ثبت پذیرش", "apps_cz7_accept_go_"+nonce)],
+                     [("❌ انصراف", "apps_cz7_status")]], markup)
+                return
+            if data.startswith("apps_cz7_accept_go_"):
+                session = context.user_data.pop("cz7_accept", None)
+                if (not isinstance(session, dict) or
+                        session.get("actor") != actor or session.get("chat") != chat
+                        or self.now() > session.get("expires", 0)
+                        or data != "apps_cz7_accept_go_"+session.get("nonce", "")):
+                    raise CZ07Hold("BUSINESS_ACCEPT_SESSION_EXPIRED")
+                item = await asyncio.to_thread(self.get, session["job"])
+                if (not item or item["status"] != "VERIFYING"
+                        or item["updated_at"] != session["updated_at"]
+                        or (item["actor"], item["chat"]) != (actor, chat)):
+                    raise CZ07Hold("BUSINESS_ACCEPT_SNAPSHOT_CHANGED")
+                proof = await asyncio.to_thread(self.review_acceptance, session["job"])
+                if (not proof.ready or proof.fingerprint != session["fingerprint"]
+                        or proof.refs != session["refs"]):
+                    raise CZ07Hold("BUSINESS_EVIDENCE_CHANGED")
+                if self.acceptance_witness is None:
+                    raise CZ07Hold("INDEPENDENT_BUSINESS_VERIFIER_REQUIRED")
+                create_ref, renew_ref, client_ref = proof.refs
+                def independently_confirm(**kwargs):
+                    latest = self.get(session["job"])
+                    return bool(latest and self.acceptance_witness.verify(
+                        latest, create_ref=kwargs["create_ref"],
+                        renew_ref=kwargs["renew_ref"],
+                        client_ref=kwargs["client_ref"],
+                        fingerprint=session["fingerprint"]))
+                await asyncio.to_thread(
+                    self.accept_business, session["job"], actor=actor,
+                    chat=chat, create_ref=create_ref,
+                    renew_ref=renew_ref, client_ref=client_ref,
+                    independent_verify=independently_confirm)
+                await self._display(query,
+                    "✅ <b>انتقال کاربران به‌صورت رسمی تأیید شد.</b>\n\n"
+                    "ثبت پذیرش و شواهد مستقل در Journal انجام شد. "
+                    "برای انتقال بعدی، ابتدا آمادگی Standby جدید بررسی می‌شود.",
+                    [[("🚀 بررسی انتقال بعدی", "apps_cz7_home")],
+                     [("📋 مشاهده نتیجه", "apps_cz7_status")]], markup)
+                return
             if data.startswith("apps_cz7_recover_"):
                 job = data[len("apps_cz7_recover_"):]
                 rec = await asyncio.to_thread(self.recovery_preview, job, actor, chat)
@@ -1036,6 +1136,12 @@ class DurableCutoverQueue:
                  for stage, code, moved, _remaining, _at in events[:5]]
         rows = [[("🔄 تازه‌سازی وضعیت", "apps_cz7_status")]]
         if ((actor, chat) == (job["actor"], job["chat"])
+                and status == "VERIFYING"):
+            rows.insert(0, [("🔎 بررسی پذیرش نهایی",
+                             "apps_cz7_accept_review_"+job["id"])])
+        if status == "DONE":
+            rows.insert(0, [("🚀 بررسی انتقال بعدی", "apps_cz7_home")])
+        if ((actor, chat) == (job["actor"], job["chat"])
                 and status in ("MIGRATING", "PAUSED_SAFE")
                 and not job.get("cancel_requested")
                 and job["id"] not in self._running):
@@ -1057,8 +1163,8 @@ class DurableCutoverQueue:
             if status == "HOLD" else
             "⏸ توقف در مرز Batch ثبت شده است. پیش از ادامه، مسیر و Journal را بررسی کنید."
             if status == "PAUSED_SAFE" else
-            "🧪 Host تمام حساب‌ها منتقل شده، اما ساخت، تمدید و اتصال واقعی "
-            "از اپراتور متأثر هنوز تأیید نشده‌اند. این وضعیت DONE نیست."
+            "✅ ثبت انتقال Host همه حساب‌ها کامل است. برای ثبت DONE، دکمه بررسی پذیرش نهایی "
+            "را بزنید؛ تأیید فقط با گواه مستقل ساخت، تمدید و اتصال و کنترل زنده مسیر مجاز است."
             if status == "VERIFYING" else
             "⏳ درخواست توقف ثبت شده؛ منتظر مرز Batch باشید."
             if status == "MIGRATING" and job.get("cancel_requested") else

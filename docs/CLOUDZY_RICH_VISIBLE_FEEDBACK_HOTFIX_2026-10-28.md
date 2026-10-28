@@ -18,16 +18,12 @@ The same Core contains a new CZ03/CZ06 receipt for `144.172.119.190` at `EDGE_RE
 Inspect Rich delivery outcomes in the actual database rather than filtering out SENT rows:
 
 ```sql
-SELECT kind, substr(operation_id,1,12) AS op, status, reason, method,
-       delivered_version, message_id
-FROM (
-  SELECT o.kind,o.operation_id,o.status,o.reason,o.method,
-         o.version AS delivered_version,o.message_id
-  FROM cloudzy_rich_delivery_outbox o
-)
-ORDER BY rowid DESC LIMIT 10;
+SELECT kind, substr(operation_id,1,12) AS op,
+       status, reason, method, version, message_id
+FROM cloudzy_rich_delivery_outbox
+ORDER BY updated_at DESC, attempt DESC LIMIT 10;
 ```
 
-Use actual compatible `SELECT ... FROM cloudzy_rich_delivery_outbox ORDER BY updated_at DESC LIMIT 10` if the temporary tool above is not supported. Do not log/paste Telegram bot tokens. Verify provider-safe business journal separately.
+Do not log/paste Telegram bot tokens. Verify provider-safe business journal separately.
 
 **Release:** CI green, then deploy only `cloudzy_rich_bridge.py` and associated tests if needed via pinned commit and backed-up file, restarting only `nvlbot`. After release, tap the dashboard and inspect visible Persian feedback; if a known Telegram Rich HTTP 400 is reported, compare the message payload with the official Bot API 10.3 schema in a separate transport/render patch.

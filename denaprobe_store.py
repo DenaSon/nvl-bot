@@ -89,7 +89,7 @@ def validate_report(doc: object, *, allowed_host: str, authenticated_device: str
         "device_id": device,
         "boot_id": boot.lower(),
         "seq": _int_field(doc, "sequence", MAX_SEQUENCE),
-        "uptime_ms": _int_field(doc, "uptime_ms", MAX_SEQUENCE),
+        "uptime_ms": _int_field(doc, "uptime_ms", 4294967295),
         "edge_host": host.rstrip(".").lower(),
         "edge_ipv4": ip,
         "edge_port": _int_field(doc, "edge_port", 65535, minimum=1),

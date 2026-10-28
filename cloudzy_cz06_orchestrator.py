@@ -15,6 +15,9 @@ STAGES = (
 )
 
 
+from cloudzy_unified_native import observe_cz06_status
+
+
 class QuickRelayHold(RuntimeError):
     pass
 
@@ -93,6 +96,8 @@ class QuickRelayJournal:
                 (stage, code, int(self.now()), opid, row[0])
             ).rowcount != 1:
                 raise QuickRelayHold("WORKFLOW_CAS_FAILED")
+            observe_cz06_status(conn, operation_id=opid, stage=stage,
+                                now=int(self.now()))
 
 
 def progress_html(run, receipt, *, now=None):

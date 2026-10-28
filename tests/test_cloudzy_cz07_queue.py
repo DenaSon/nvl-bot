@@ -483,6 +483,7 @@ class QueueTests(unittest.TestCase):
         for count in (0, 1, 50, 51, 200, 201, 493, 495):
             with self.subTest(count=count):
                 with self.factory() as db:
+                    self.q._init(db)
                     db.execute("DELETE FROM cloudzy_cz07_events")
                     db.execute("DELETE FROM cloudzy_cz07_jobs")
                     db.execute("DELETE FROM cloudzy_cz07_acceptance")

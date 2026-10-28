@@ -137,25 +137,25 @@ class CloudzyAdminPanel:
         try:
             if data == "apps_cz_home":
                 await self._display(query,
-                    "☁️ <b>مدیریت Cloudzy و Edge</b>\n\n"
-                    "🚀 Quick Relay: خرید VPS، نصب Edge و Standby با Journal پایدار.\n"
+                    "☁️ <b>مدیریت زیرساخت Edge</b>\n\n"
+                    "🚀 آماده‌سازی Edge: خرید، نصب و فعال‌سازی Standby با ثبت وضعیت پایدار.\n"
                     "🔐 نصب SSH فقط پس از تأیید مستقل اثر انگشت انجام می‌شود.\n"
-                    "🛡 انتقال DNS و کاربران فقط در CZ-07 پس از تست مستقل مشتری مجاز است.\n"
-                    "🔎 CZ-07 فقط Standby دارای CZ-06 READY را می‌پذیرد؛ ورود به آن ابتدا آمادگی را بررسی می‌کند.\n"
-                    "↪️ برای Edgeهای دستی یا آماده‌سازی ناقص، از وضعیت عملیات و مسیر امن CZ-04A / CZ-04B استفاده کنید.\n"
+                    "🛡 تغییر مسیر و انتقال حساب‌ها فقط پس از کنترل ایمنی و تأیید شواهد معتبر مجاز است.\n"
+                    "🔎 انتقال SSH فقط با Standby آماده و کنترل زنده مسیر آغاز می‌شود.\n"
+                    "↪️ برای Edgeهای دستی یا عملیات ناقص، وضعیت ثبت‌شده و مسیر بازیابی امن را بررسی کنید.\n"
                     "ℹ️ آماده‌سازی Relay به‌صورت Standby فعال است؛ تغییر مسیر و انتقال کاربران در CZ-04B است.",
                     [
-                        [("🚀 Quick Relay · خرید تا Standby", "apps_cz6_start")],
-                        [("🔎 CZ-07 · بررسی آمادگی انتقال", "apps_cz7_home")],
-                        [("⚡ ساخت Edge · مدیریت دستی", "apps_cz_wizard")],
-                        [("🌐 Edge و Relay · همه NVL", "apps_cz_edge")],
+                        [("🚀 خرید و آماده‌سازی Edge", "apps_cz6_start")],
+                        [("📦 انتقال کاربران SSH", "apps_cz7_home")],
+                        [("🛠 ساخت دستی Edge", "apps_cz_wizard")],
+                        [("🌐 مدیریت Edge و Relay", "apps_cz_edge")],
                         [("🖥 سرورهای Cloudzy · مدیریت و حذف", "apps_cz_servers_0")],
                         [("🛠 مدیریت VPS", "apps_cz4_vps")],
                         [("🌍 مناطق و پلن‌ها", "apps_cz_regions_0"),
                          ("💰 موجودی", "apps_cz_balance")],
                         [("👤 اطلاعات حساب", "apps_cz_account"),
                          ("🔑 کلیدهای SSH", "apps_cz_keys_0")],
-                        [("📋 وضعیت عملیات", "apps_cz_operations")],
+                        [("📋 سوابق و وضعیت عملیات", "apps_cz_operations")],
                         [("↩️ برنامه‌ها", "apps_home")],
                     ], markup)
             elif data.startswith("apps_cz_servers_"):

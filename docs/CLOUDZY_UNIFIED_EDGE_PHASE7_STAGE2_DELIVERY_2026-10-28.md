@@ -1,41 +1,38 @@
-# NVL — Unified Edge Phase 7 / Stage 2 — Admin Bot Rich integration
+# NVL — Unified Edge Phase 7 / Stage 2 — Direct Admin Rich UI
 
-Date: 2026-10-28. Status: code-ready; feature OFF until operator-controlled smoke.
+**Updated:** 2026-10-28. **Scope:** Read-only Rich view integrated directly in the existing admin Programs hub, without a Feature Flag. Production deployment and live Telegram client acceptance are separately verified.
 
-## Deployment scope and boundaries
+## Direct availability and operator identity
 
-This integrates the stage-one Rich-only operation viewer into the existing NVL admin Programs hub. It does **not** enable CZ07, CZ04B, DNS mutations, Cloudzy purchases, Linux SSH migration or protected K2 mutations. The new entry is conditional and inactive by default.
+The Rich dashboard entry appears directly for the current **logged-in NVL admin in their own Telegram private chat**. No `NVL_CLOUDZY_RICH_UI_ENABLED` flag or `NVL_CLOUDZY_RICH_ADMIN_IDS` environment list is required. The app uses the existing active NVL admin registry (`_db_get_admin_chat_ids()`, which includes the super-admin and non-logged-out administrator sessions). Every click re-reads that registry. **Historical** admin IDs do not authorize access.
 
-Files: \`cloudzy_rich_bridge.py\` (new), \`bot_final_v49-2.py\` (only feature import, optional Programs button, read-only callback dispatch), \`tests/test_cloudzy_rich_bridge_phase7.py\` (new). Previous Stage-1 \`cloudzy_rich_admin.py\` and \`cloudzy_rich_transport.py\` are reused unchanged.
+Security requirements are cumulative:
 
-## Feature gate and three admins
+- Existing `is_auth(context)` authenticated session and `context.user_data.role == 'admin'`.
+- Actor's positive Telegram user ID equals the private-chat ID.
+- Actor is in NVL's current active admin registry at the moment of the click.
+- The persisted CZ07/UO journal belongs to that exact actor/chat.
+- For Refresh/Details, the callback matches the same admin's **acknowledged Rich message pointer**. Forged, stale, forwarded or other-admin callbacks fail closed.
 
-**Two independent requirements:**
+No additional role, purchase permission or admin password is inferred from a Rich callback. A removed admin fails the next callback automatically. This is not a new backdoor into CZ07 or legacy infrastructure handlers.
 
-- \`NVL_CLOUDZY_RICH_UI_ENABLED=1\` (default \`0\`).
-- \`NVL_CLOUDZY_RICH_ADMIN_IDS=<id1>,<id2>,<id3>\` (explicit positive Telegram numeric IDs; unique; at most 3). No fallback to the historical \`admin_chat_ids\` setting. This must be configured out of source control. The actual three IDs must be approved independently; never guess, hardcode, infer or expose them.
+## Telegram Rich contract
 
-The handler also requires existing successful NVL login (\`is_auth\`), role \`admin\`, and Telegram private chat where \`actor_id == chat_id\`. Every refresh/details callback reopens the original journal and the *same admin's acknowledged Rich message pointer*. A forwarded/forged/stale button or unauthorized admin cannot display another admin's operation.
+- Navigation: Admin → «🧩 برنامه‌ها» → «🚀 Unified Edge | داشبورد Rich».
+- Render: `sendRichMessage` and `editMessageText.rich_message` with blocks, RTL, compact table and expandable details, consistent with official Telegram Bot API 10.3.
+- `u7:r:...` and `u7:d:...` are **read-only** Refresh and Details. No effectful callback is introduced.
+- Latest owned CZ07/UO operation is selected via SELECT-only reads; empty journal produces a neutral no-action card.
+- Rich delivery outbox/pointers are created only on first authorized use. Uncertain Telegram HTTP delivery is HELD rather than blindly replayed; there is no HTML fallback.
+- No CZ07, CZ04B, DNS, Cloudzy, SSH account, K2, or customer migration mutation is made by this UI.
 
-Only these operations are supported in Stage 2: most recent \`CZ07\` owned job or \`UO\` owned operation from current SQLite journals; no automatic import of manual/historical Cloudzy records and no sidebar list of other administrators' details. Absent journal tables produce a neutral, no-op Rich card.
+## Tests and release
 
-## Rendering/transport
+- Offline tests cover: direct entry for a logged-in active admin; revoked admin denial; role/chat/private guards; ownership isolation; pointer-binding; no effectful callbacks; single-card Rich send/edit; no journal changes.
+- Three repo CI suites: Python full unit and root release, Legacy Core Migration Safety and Edge egress Stage-only (3.11/3.12).
+- **A successful GitHub merge is not a Core deployment.** Before production rollout, deploy all relevant Python modules consistently, verify `nvlbot` startup and inspect Rich send logs, then test first on a real private admin Telegram client with a known owned journal. Validate compatibility, callback behavior and no duplicate sends.
+- Correctness of actual provider/cutover operations and independently verified SSH CREATE/RENEW/affected-ISP client acceptance remain separate gates before Phase 8.
+- Legacy menu remains available, and operator-side code rollback restores the previously deployed snapshot without touching the database, Cloudflare or customer routes. No flag-based disable path exists after this change; rollback is via a controlled code release.
 
-- Entry: Admin → «🧩 برنامه‌ها» → «🚀 Unified Edge | داشبورد Rich».
-- Server-owned Rich-only callbacks \`u7:r:<kind>:<hex-operation-id>\` and \`u7:d:<kind>:<hex-operation-id>\` respectively refresh or expand technical details. Only those two actions are accepted, and each must belong to the original pointer. Data length is <=64 bytes.
-- Selects latest owned operation via SELECT only. Read-only projection never writes or creates business journals. On first actual Rich render, the delivery outbox/pointer tables are lazily initialized. **This changes only Rich delivery metadata**.
-- Renders \`InputRichMessage.blocks\` in Persian RTL; sends via \`sendRichMessage\` and edits via \`editMessageText.rich_message\`, no HTML/Markdown fallback or streaming draft.
-- No message replay on ambiguous HTTP outcome: \`UNCERTAIN\` outbox holds the Rich display until manual reconciliation, **without marking the underlying operation failed**.
-- All operational controls such as Resume, Retry, Cancel or DNS Reconcile are unchanged in their original gated paths; none is bridged into Rich action callbacks.
+## Next Phase
 
-## Acceptance criteria and limitations
-
-- CI: Python syntax, full unit suite, extracted root release test.
-- New offline tests: disabled or malformed flag; wrong role, wrong chat, non-private chat, allowlist errors, per-admin owner isolation, read-only journal projection, no-op empty state, original Rich pointer integrity, Rich callback length and intent dedup, no effects on Cloudzy or CZ07 execution.
-- Production acceptance remains separate: deploy all corresponding files together, leave flags OFF by default, verify \`nvlbot\` healthy, then independently opt in a single private admin for a real Telegram 10.3 Rich card display test. Confirm title/table/details/edit in actual supported Telegram clients, no duplicated sends, and outbox. Continue only after explicit operator approval.
-- This completes **Stage 2 read-only wiring**, NOT the entire Phase-7 live acceptance. Mutable Rich controls remain blocked pending P4/P5 operational certification, independently verified CZ07 E2E and fenced operations.
-- Always keep the existing Legacy admin menu available for safe rollback. With \`NVL_CLOUDZY_RICH_UI_ENABLED=0\`, new button disappears and all new callbacks deny without business effects.
-
-## Rollback
-
-Switch \`NVL_CLOUDZY_RICH_UI_ENABLED=0\` and restart the admin bot after an authorized, planned config change. This disables the new UI without touching the original operations. Code rollback restores only exact previously deployed source/modules (not database or Cloudflare); new Rich delivery tables may remain inert for audit.
+**Phase 7 live acceptance:** actual Telegram client Rich card validation (including version and message-pointer behavior), then separately considered authenticated mutable control wiring after P4/P5 acceptance. **Phase 8:** end-to-end and failure-injection certification, evidence-based retirement of the legacy path.

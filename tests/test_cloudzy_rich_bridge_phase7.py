@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from cloudzy_rich_bridge import (
-    ENTRY, can_view, configured_admin_ids, empty_card,
+    ENTRY, can_view, empty_card,
     handle_rich_admin_callback, latest_owned_operation,
 )
 from cloudzy_rich_transport import RichDeliveryHold
@@ -15,10 +15,7 @@ from cloudzy_rich_transport import RichDeliveryHold
 A = "a"*32
 B = "b"*32
 C = "c"*32
-ENV = {
-    "NVL_CLOUDZY_RICH_UI_ENABLED": "1",
-    "NVL_CLOUDZY_RICH_ADMIN_IDS": "7,9,11",
-}
+ACTIVE = frozenset((7, 9, 11))
 
 
 class NoNetworkAPI:
@@ -96,34 +93,39 @@ class Phase7BridgeTests(unittest.TestCase):
                  "DNS_OR_DEFAULT_UNCERTAIN_LOCK_HELD",4,150))
 
     def open(self, data, actor=7, chat=7, role="admin", private=True,
-             message_id=None, env=ENV):
+             message_id=None, active_admin_ids=ACTIVE):
         return asyncio.run(handle_rich_admin_callback(
             data=data, query=FakeQuery(message_id),
             context=self.context, db_factory=self.db_conn, role=role,
             actor=actor, chat=chat, is_private=private,
-            api_factory=NoNetworkAPI, env=env))
+            api_factory=NoNetworkAPI, active_admin_ids=active_admin_ids))
 
-    def test_requires_private_real_admin_allowlist_and_optin(self):
-        self.assertEqual(configured_admin_ids(ENV), frozenset({7,9,11}))
-        for field in (
-            {"NVL_CLOUDZY_RICH_UI_ENABLED": "0", "NVL_CLOUDZY_RICH_ADMIN_IDS": "7,9,11"},
-            {"NVL_CLOUDZY_RICH_UI_ENABLED": "1", "NVL_CLOUDZY_RICH_ADMIN_IDS": "7,7"},
-            {"NVL_CLOUDZY_RICH_UI_ENABLED": "1", "NVL_CLOUDZY_RICH_ADMIN_IDS": "7,9,11,13"},
-        ):
+    def test_requires_private_active_admin_and_live_membership(self):
+        self.assertTrue(can_view(role="admin", actor=7, chat=7,
+                                 is_private=True, active_admin_ids=ACTIVE))
+        for members in (frozenset(), frozenset({9, 11}), (), set()):
             self.assertFalse(can_view(role="admin", actor=7, chat=7,
-                                      is_private=True, env=field))
-            self.assertEqual(self.open(ENTRY, env=field), "DENIED")
+                                      is_private=True, active_admin_ids=members))
+            self.assertEqual(self.open(ENTRY, active_admin_ids=members),
+                             "DENIED")
         for role, actor, chat, private in [
             ("agent",7,7,True), ("admin",8,8,True),
             ("admin",7,-100,False), ("admin",9,7,True),
             ("admin",7,7,False), ("accountant",7,7,True),
         ]:
             self.assertFalse(can_view(role=role,actor=actor,chat=chat,
-                                      is_private=private,env=ENV))
+                                      is_private=private,active_admin_ids=ACTIVE))
             self.assertEqual(self.open(
                 ENTRY, role=role, actor=actor, chat=chat,
                 private=private), "DENIED")
         self.assertEqual(NoNetworkAPI.calls, [])
+
+    def test_active_admin_revocation_blocks_old_rich_buttons(self):
+        self.assertEqual(self.open(ENTRY), "SENT")
+        calls = len(NoNetworkAPI.calls)
+        self.assertEqual(self.open("u7:d:uo:"+C, message_id=123,
+                                   active_admin_ids=frozenset({9, 11})), "DENIED")
+        self.assertEqual(len(NoNetworkAPI.calls), calls)
 
     def test_latest_owner_isolated_and_source_only(self):
         with self.db_conn() as db:
@@ -187,8 +189,10 @@ class Phase7BridgeTests(unittest.TestCase):
         existing=source.index('elif d.startswith("apps_cz7_")')
         self.assertLess(entry,existing)
         self.assertIn('await _cloudzy_rich_admin_callback(',source)
-        self.assertIn('actor in _cloudzy_rich_admin_ids()',source)
-        self.assertIn('_build_admin_programs_kb(actor=actor, chat=chat)',source)
+        self.assertIn('actor in active_admin_ids',source)
+        self.assertIn('active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)',source)
+        self.assertNotIn('_cloudzy_rich_enabled',source)
+        self.assertNotIn('_cloudzy_rich_admin_ids',source)
         self.assertNotIn("_cloudzy_07.handle_callback(",source[entry:existing])
 
 

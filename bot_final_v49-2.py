@@ -7307,8 +7307,6 @@ _cloudzy_07 = DurableCutoverQueue(
 # Cloudzy/CZ07 callback is forwarded through this bridge.
 from cloudzy_rich_bridge import (
     handle_rich_admin_callback as _cloudzy_rich_admin_callback,
-    rich_enabled as _cloudzy_rich_enabled,
-    configured_admin_ids as _cloudzy_rich_admin_ids,
 )
 
 
@@ -7319,7 +7317,7 @@ def _cloudzy_markup(rows):
     ])
 
 
-def _build_admin_programs_kb(*, actor=None, chat=None):
+def _build_admin_programs_kb(*, actor=None, chat=None, active_admin_ids=()):
     """Infrastructure and operational tools available only to NVL administrators."""
     rows = [
         [InlineKeyboardButton("☁️ Cloudzy | Edge و Relay", callback_data="apps_cz_home")],
@@ -7333,8 +7331,8 @@ def _build_admin_programs_kb(*, actor=None, chat=None):
         ],
         [InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")],
     ]
-    if (_cloudzy_rich_enabled() and actor in _cloudzy_rich_admin_ids()
-            and type(actor) is int and type(chat) is int and actor == chat):
+    if (type(actor) is int and type(chat) is int
+            and actor > 0 and actor == chat and actor in active_admin_ids):
         rows.insert(1, [InlineKeyboardButton(
             "🚀 Unified Edge | داشبورد Rich",
             callback_data="apps_cz_rich_home",
@@ -7368,7 +7366,9 @@ async def _show_admin_programs_hub(target, context):
         "🚚 <b>انتقال</b> — مهاجرت کنترل‌شده سرور اصلی Marzban\n"
         "🛰 <b>مانیتورینگ</b> — سلامت و وضعیت دارایی‌های Marzban"
     )
-    markup = InlineKeyboardMarkup(_build_admin_programs_kb(actor=actor, chat=chat))
+    active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
+    markup = InlineKeyboardMarkup(_build_admin_programs_kb(
+        actor=actor, chat=chat, active_admin_ids=active_admin_ids))
     if hasattr(target, 'edit_message_text'):
         await target.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
     else:
@@ -16442,15 +16442,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     # ---------------- Programs / operational tools ----------------
-    # Read-only Rich card entry/refresh/details. The bridge rechecks explicit
-    # feature flag, private admin allowlist, owner and original message pointer.
+    # Read-only Rich card entry/refresh/details. Recheck live active-admin
+    # membership, private chat, original journal owner and message pointer.
     # The input never reaches Cloudzy purchase/DNS, CZ07 mutation or K2.
     if d == "apps_cz_rich_home" or d.startswith("u7:"):
+        active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
         await _cloudzy_rich_admin_callback(
             data=d, query=query, context=context, db_factory=db_conn,
             role=role, actor=update.effective_user.id,
             chat=update.effective_chat.id,
             is_private=(getattr(update.effective_chat, "type", None) == "private"),
+            active_admin_ids=active_admin_ids,
         )
         return
     if d == 'apps_home':

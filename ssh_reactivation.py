@@ -1,8 +1,10 @@
 """Fail-closed SSH reactivation host reconciliation (SQLite transaction caller-owned).
 
 Only a configured active, non-standby customer Relay can be assigned to a
-reactivated SSH account. A completed CZ-07 source is retired for a cutover with
-the current single-host target, even if its host_pool row remains active.
+reactivated SSH account. A transport-complete CZ-07 source (MOVED or DONE)
+is retired when the live single-host route points at a verified default Relay,
+even if its host_pool row remains active. Customer CREATE/RENEW/ISP postchecks
+are not required to release the transfer lock.
 This module does not perform Linux operations, DNS changes or migrations.
 """
 
@@ -21,13 +23,13 @@ def resolve_ssh_reactivation_host(db, previous_host):
     """Return (approved_host, reason) using a caller-held BEGIN IMMEDIATE lease.
 
     A valid explicit customer Relay stays pinned unless an authoritative CZ-07
-    DONE cutover retired it. Unknown, inactive, standby, Core and unlisted hosts
+    MOVED/DONE cutover retired it. Unknown, inactive, standby, Core and unlisted hosts
     must be replaced only by a verifiably eligible current default.
     """
     if _table_exists(db, "cloudzy_cz07_jobs"):
         unresolved = db.execute(
             "SELECT 1 FROM cloudzy_cz07_jobs "
-            "WHERE status NOT IN ('DONE','ABORTED') LIMIT 1"
+            "WHERE status NOT IN ('DONE','ABORTED','MOVED') LIMIT 1"
         ).fetchone()
         if unresolved:
             raise SSHReactivationHold("SSH_REACTIVATION_CZ07_UNRESOLVED")
@@ -59,13 +61,13 @@ def resolve_ssh_reactivation_host(db, previous_host):
     ]
     default = defaults[0] if len(defaults) == 1 else None
 
-    # A completed all-users CZ-07 cutover is authoritative; the previous
+    # A verified transport-complete CZ-07 cutover is authoritative; the previous
     # source may still be powered on and even active in host_pool.
     retired = False
     if old and old != default and _table_exists(db, "cloudzy_cz07_jobs"):
         retired = db.execute(
             "SELECT 1 FROM cloudzy_cz07_jobs "
-            "WHERE source=? AND status='DONE' LIMIT 1", (old,)
+            "WHERE source=? AND status IN ('DONE','MOVED') LIMIT 1", (old,)
         ).fetchone() is not None
 
     if eligible(old) and not retired:

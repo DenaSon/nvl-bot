@@ -84,7 +84,7 @@ def register_native_purchase(db: sqlite3.Connection, *, operation_id,
         "SELECT actor_id,chat_id,status FROM cloudzy_edge_operations WHERE id=?",
         (operation_id,),
     ).fetchone()
-    if native != (actor, chat, "CREATING"):
+    if not native or tuple(native) != (actor, chat, "CREATING"):
         raise UnifiedLinkHold("NATIVE_RESERVATION_IDENTITY_CHANGED")
     DurableCoordinator.initialize(db)
     if _linked(db, operation_id) is not None:
@@ -115,7 +115,7 @@ def _record(db, operation_id, *, step, state, code, now=None,
         "SELECT actor_id,chat_id FROM cloudzy_edge_operations WHERE id=?",
         (operation_id,),
     ).fetchone()
-    if not native or native != (link[1], link[2]):
+    if not native or tuple(native) != (link[1], link[2]):
         raise UnifiedLinkHold("NATIVE_UNIFIED_OWNER_MISMATCH")
     if link[4] in ("COMPLETED", "CANCELLED_SAFE"):
         raise UnifiedLinkHold("UNIFIED_OPERATION_CLOSED")
@@ -144,7 +144,7 @@ def mark_paid_intent(db, *, operation_id, now=None):
         "SELECT status FROM cloudzy_edge_operations WHERE id=?",
         (operation_id,),
     ).fetchone()
-    if native != ("CREATING",):
+    if not native or tuple(native) != ("CREATING",):
         raise UnifiedLinkHold("NATIVE_PAID_INTENT_STAGE_CHANGED")
     linked = _linked(db, operation_id)
     if linked is None:

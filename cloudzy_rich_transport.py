@@ -129,7 +129,7 @@ class DurableRichDelivery:
                 (kind, operation_id, chat)
             ).fetchall())
 
-    def _intent(self, view, *, details):
+    def _intent(self, view, *, details, fresh=False, refresh=False):
         """Commit journal intent BEFORE attempting Telegram network effects."""
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -152,14 +152,15 @@ class DurableRichDelivery:
                 (view.kind, view.operation_id, view.chat)
             ).fetchone():
                 raise RichDeliveryHold("PRIOR_TELEGRAM_DELIVERY_UNCERTAIN")
-            if pointer and (
-                int(pointer[1]) > view.version or
-                (int(pointer[1]) == view.version and bool(pointer[2]) == details)
-            ):
+            if pointer and int(pointer[1]) > view.version:
+                return None  # Never overwrite a newer acknowledged snapshot.
+            if (pointer and not (fresh or refresh)
+                    and int(pointer[1]) == view.version
+                    and bool(pointer[2]) == details):
                 return None
             # A pointer can be edited after an event update; no silent resend
             # after missing/deleted Telegram message or prior ambiguous request.
-            method = "EDIT" if pointer else "SEND"
+            method = "SEND" if fresh or not pointer else "EDIT"
             message_id = int(pointer[0]) if pointer else None
             attempt = secrets.token_hex(16)
             db.execute(
@@ -213,7 +214,7 @@ class DurableRichDelivery:
                 raise RichDeliveryHold("DELIVERY_ACK_CAS_FAILED")
 
     async def render_once(self, *, kind, operation_id, actor, chat,
-                          details=False):
+                          details=False, fresh=False, refresh=False):
         """Explicit authorized rich send/edit; NEVER executes business actions.
 
         Recoverable Telegram ambiguity holds just this delivery, not CZ07/UO.
@@ -221,11 +222,15 @@ class DurableRichDelivery:
         with self.db() as db:
             view = read_operation(db, kind=kind, operation_id=operation_id,
                                   actor=actor, chat=chat)
-        message = render_card(view, details=details)
-        intent = self._intent(view, details=details)
+        intent = self._intent(view, details=details,
+                              fresh=fresh, refresh=refresh)
         if intent is None:
             return "UNCHANGED"
         attempt, method, message_id = intent
+        # Unique reference inside collapsed technical details prevents a
+        # same-version Telegram edit from being rejected as unmodified.
+        message = render_card(view, details=details,
+                              refresh_stamp=attempt[:8] if (fresh or refresh) else None)
         try:
             if method == "EDIT":
                 await self.api.edit(chat_id=chat, message_id=message_id,

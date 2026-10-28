@@ -512,6 +512,9 @@ class DurableCutoverQueue:
                 rec["source"], rec["target"], rec["provider_id"]):
             raise CZ07Hold("BUSINESS_ROUTE_CHANGED")
         self.cz04b._expect_dns(self.cz04b.dns.snapshot(), rec["target"])
+        # The existing CZ04B preflight rejects an unresolved original 6G
+        # lease or user journal; metadata-only final verification is weaker.
+        self.cz04b._migration_snapshot(rec["source"], rec["target"])
         self.complete_guard(job)
         with self.db() as db:
             self._init(db)
@@ -524,6 +527,18 @@ class DurableCutoverQueue:
                     "VERIFYING", rec["total"], rec["total"],
                     rec["source"], rec["target"]):
                 raise CZ07Hold("BUSINESS_ACCEPT_SNAPSHOT_CHANGED")
+            if self.cz04b._open(db) or db.execute(
+                "SELECT 1 FROM failover_operations WHERE status='RUNNING' LIMIT 1"
+            ).fetchone():
+                raise CZ07Hold("BUSINESS_ROUTE_LEASE_BUSY")
+            st = self.cz04b._settings(db)
+            defaults = db.execute(
+                "SELECT host FROM host_pool WHERE active=1 AND is_default=1"
+            ).fetchall()
+            if (st.get("hosts") != rec["target"]
+                    or st.get("dns_current_ip") != rec["target"]
+                    or defaults != [(rec["target"],)]):
+                raise CZ07Hold("BUSINESS_ROUTE_SNAPSHOT_CHANGED")
             if self.cz04b._source_accounts(db, rec["source"]):
                 raise CZ07Hold("BUSINESS_SOURCE_NOT_EMPTY")
             foreign = db.execute(

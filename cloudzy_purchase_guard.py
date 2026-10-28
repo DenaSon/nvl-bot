@@ -207,7 +207,8 @@ def main(argv=None):
     parser.add_argument("--db", default="/root/master_bot.db")
     parser.add_argument("--operation", help="Exact existing CZ03 id, else latest")
     parser.add_argument("--live-read", action="store_true",
-                        help="Use CLOUDZY_TOKEN from current environment for GET /services only")
+                        help="Use CLOUDZY_TOKEN from current environment for provider GET only")
+    parser.add_argument("--region", help="Optional live exact-region GET catalog and availability")
     args = parser.parse_args(argv)
     try:
         with _open_readonly(args.db) as db:
@@ -229,8 +230,10 @@ def main(argv=None):
         print("CLOUDZY_LIVE_READ=NO_TOKEN_IN_ENV")
         return 2
     from cloudzy_service import CloudzyService
+    from cloudzy_cz05_catalog import eligible_offers
     try:
-        inventory = CloudzyService().list_servers()
+        api = CloudzyService()
+        inventory = api.list_servers()
         if isinstance(inventory, list):
             items = inventory
         elif isinstance(inventory, dict):
@@ -244,6 +247,18 @@ def main(argv=None):
         if not isinstance(items, list):
             raise PurchaseHold("PROVIDER_INVENTORY_UNVERIFIED")
         print("CLOUDZY_LIST_SERVERS=PASS", "تعداد:", len(items))
+        if args.region:
+            from cloudzy_cz05_catalog import PREFERRED_REGIONS
+            if args.region not in PREFERRED_REGIONS:
+                raise PurchaseHold("REGION_NOT_APPROVED")
+            catalog = api.list_plans(region=args.region, billing_cycle="hourly")
+            availability = api.list_plan_availability(args.region)
+            offers = eligible_offers(catalog, availability, region=args.region)
+            print("CLOUDZY_REGION_GET=PASS", "منطقه:", args.region,
+                  "پلن‌های موجود و معتبر:", len(offers))
+        if rec["status"] == "REJECTED":
+            print("EXACT_PURCHASE_RECONCILE=NOT_APPLICABLE_REJECTED")
+            return 0
         try:
             sid = exact_existing_server(
                 items, hostname=rec["hostname"],
@@ -255,8 +270,8 @@ def main(argv=None):
         else:
             print("EXACT_PURCHASE_RECONCILE=MATCH", "شناسه VPS:", sid[:16])
             return 0
-    except (CloudzyError, PurchaseHold):
-        print("CLOUDZY_LIVE_READ=UNVERIFIED (provider GET failed)")
+    except (CloudzyError, PurchaseHold, CatalogHold):
+        print("CLOUDZY_LIVE_READ=UNVERIFIED (provider read/preflight failed)")
         return 2
 
 

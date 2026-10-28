@@ -60,6 +60,41 @@ OS_TEMPLATE = "ubuntu-24.04"
 ID_PATTERN = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,98}\Z")
 
 
+def _safe_read_selection_callback(data):
+    """Only these UI callbacks re-read provider catalog/region data.
+
+    Never suggest an operator retry for paid purchase, SSH-key registration,
+    Edge installs or journal-changing recovery callbacks.
+    """
+    return (
+        data in ("apps_cz_wizard", "apps_cz6_start", "apps_cz_qauto")
+        or data.startswith(("apps_cz_qr_", "apps_cz_qcy_", "apps_cz_qpg_"))
+    )
+
+
+def _cloudzy_http_hint(status, *, read_only):
+    """User-facing HTTP guidance, with no raw provider data or secrets."""
+    if status in (401, 403):
+        return ("🔐 دسترسی به API کلودزی تأیید نشد. "
+                "لطفاً اعتبار توکن و مجوزهای حساب را بررسی کنید.")
+    if status == 429:
+        if read_only:
+            return ("⏳ درخواست‌های Cloudzy موقتاً محدود شده‌اند. "
+                    "لطفاً کمی بعد دوباره بخش پلن‌ها را باز کنید.")
+        return ("⚠️ Cloudzy درخواست را به دلیل محدودیت تعداد درخواست‌ها نپذیرفت. "
+                "پیش از هر اقدام مجدد، وضعیت عملیات را بررسی کنید.")
+    if status >= 500:
+        if read_only:
+            return ("☁️ سرویس Cloudzy موقتاً پاسخ مناسبی نمی‌دهد. "
+                    "لطفاً چند ثانیه بعد دوباره تلاش کنید.")
+        return ("⚠️ پاسخ Cloudzy قابل اتکا نیست. "
+                "وضعیت عملیات را بررسی کنید و درخواست تغییردهنده را تکرار نکنید.")
+    return (f"⛔️ Cloudzy درخواست را نپذیرفت (HTTP {status}). "
+            + ("لطفاً تنظیمات و دسترسی API را بررسی کنید."
+               if read_only else
+               "پیش از اقدام مجدد، وضعیت عملیات را بررسی کنید."))
+
+
 class QuickEdgeHold(RuntimeError):
     """Safe failure: action cannot be repeated until explicit reconciliation."""
 
@@ -901,13 +936,26 @@ class QuickEdgeWizard:
                 "ابتدا وضعیت عملیات را بررسی کنید؛ خرید را تکرار نکنید.")
         except CloudzyAPIError as exc:
             ref = secrets.token_hex(4)
-            safe_code = re.sub(r"[^A-Za-z0-9_-]", "", str(exc.code or ""))[:60]
-            log.warning("CZ05_CALLBACK ref=%s http=%s provider_code=%s",
-                        ref, exc.status, safe_code)
-            await query.message.reply_text(
-                f"⛔️ Cloudzy HTTP {exc.status} ({_text(safe_code or 'API_REJECTED')}). "
-                f"پیگیری: CZ05-{ref}")
-        except (QuickEdgeHold, QuickRelayHold, RecoveryHold, CatalogHold, CloudzyError, ValueError, TypeError, KeyError) as exc:
+            read_only = _safe_read_selection_callback(data)
+            log.warning("CZ05_CALLBACK ref=%s stage=%s http=%s",
+                        ref, "provider_read" if read_only else "provider_action",
+                        exc.status)
+            hint = _cloudzy_http_hint(exc.status, read_only=read_only)
+            await query.message.reply_text(f"{hint}\nپیگیری: CZ05-{ref}")
+        except CloudzyError:
+            ref = secrets.token_hex(4)
+            read_only = _safe_read_selection_callback(data)
+            log.warning("CZ05_CALLBACK ref=%s stage=%s code=PROVIDER_RESPONSE_UNAVAILABLE",
+                        ref, "provider_read" if read_only else "provider_action")
+            if read_only:
+                hint = ("☁️ ارتباط با Cloudzy موقتاً برقرار نشد یا پاسخ معتبری دریافت نشد. "
+                        "لطفاً چند ثانیه بعد دوباره تلاش کنید. "
+                        "هیچ خریدی انجام نشده است.")
+            else:
+                hint = ("⚠️ پاسخ Cloudzy قابل تأیید نیست. "
+                        "وضعیت عملیات را بررسی کنید و درخواست را تکرار نکنید.")
+            await query.message.reply_text(f"{hint}\nپیگیری: CZ05-{ref}")
+        except (QuickEdgeHold, QuickRelayHold, RecoveryHold, CatalogHold, ValueError, TypeError, KeyError) as exc:
             ref = secrets.token_hex(4)
             code = str(exc) if isinstance(exc, (QuickEdgeHold, QuickRelayHold, RecoveryHold, CatalogHold)) else type(exc).__name__
             log.warning("CZ05_CALLBACK ref=%s stage=selection reason=%s", ref, code)

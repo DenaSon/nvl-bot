@@ -26,7 +26,7 @@ BATCH_SIZE = 200
 BATCH_PAUSE_SECONDS = 0.2
 APPROVAL_TTL = 180
 RECOVERY_STALE_SECONDS = 120
-FINAL = ("DONE", "ABORTED")
+FINAL = ("DONE", "ABORTED", "MOVED")  # MOVED is transport-complete, not business-accepted
 PENDING = ("QUEUED", "ROUTING", "MIGRATING", "PAUSED_SAFE", "VERIFYING", "HOLD")
 
 
@@ -68,8 +68,14 @@ class DurableCutoverQueue:
         if "cancel_requested" not in columns:
             db.execute("ALTER TABLE cloudzy_cz07_jobs "
                        "ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0")
-        db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS cloudzy_cz07_one_unresolved
-            ON cloudzy_cz07_jobs ((1)) WHERE status NOT IN ('DONE','ABORTED')""")
+        # Upgrade the durable one-inflight lock without ever dropping protection
+        # first: create the narrower index, then retire the older broad index.
+        # A MOVED job has a completed, independently rechecked transfer but
+        # explicitly PENDING CREATE/RENEW/client postchecks.
+        db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS cloudzy_cz07_one_inflight
+            ON cloudzy_cz07_jobs ((1))
+            WHERE status NOT IN ('DONE','ABORTED','MOVED')""")
+        db.execute("DROP INDEX IF EXISTS cloudzy_cz07_one_unresolved")
         db.execute("""CREATE TABLE IF NOT EXISTS cloudzy_cz07_acceptance (
             job_id TEXT PRIMARY KEY, actor INTEGER NOT NULL, at INTEGER NOT NULL,
             create_ref TEXT NOT NULL, renew_ref TEXT NOT NULL,
@@ -108,7 +114,7 @@ class DurableCutoverQueue:
     def review_acceptance(self, job_id):
         """Read independently authenticated proof; no DB/provider writes."""
         job = self.get(job_id)
-        if not job or job['status'] != 'VERIFYING':
+        if not job or job['status'] not in ('VERIFYING', 'MOVED'):
             return AcceptanceReview(False, 'EVIDENCE_JOB_NOT_ELIGIBLE')
         if self.acceptance_witness is None:
             return AcceptanceReview(False, 'TRUSTED_WITNESS_NOT_CONFIGURED')
@@ -218,7 +224,7 @@ class DurableCutoverQueue:
                 ).fetchone():
                     raise CZ07Hold("TARGET_PROVIDER_DELETE_UNRESOLVED")
 
-            if db.execute("SELECT 1 FROM cloudzy_cz07_jobs WHERE status NOT IN ('DONE','ABORTED')").fetchone():
+            if db.execute("SELECT 1 FROM cloudzy_cz07_jobs WHERE status NOT IN ('DONE','ABORTED','MOVED')").fetchone():
                 raise CZ07Hold("ANOTHER_CZ07_JOB_UNRESOLVED")
             if self.cz04b._open(db):
                 raise CZ07Hold("CZ04B_UNRESOLVED")
@@ -519,7 +525,7 @@ class DurableCutoverQueue:
         rec = self.get(job)
         if not rec or (actor, chat) != (rec["actor"], rec["chat"]):
             raise CZ07Hold("BUSINESS_ACCEPT_OWNER_MISMATCH")
-        if rec["status"] != "VERIFYING":
+        if rec["status"] not in ("VERIFYING", "MOVED"):
             raise CZ07Hold("BUSINESS_ACCEPT_NOT_READY")
         # The verifier must independently confirm real CREATE, RENEW and
         # affected-ISP client tests against this job/target; NEVER infer
@@ -544,7 +550,7 @@ class DurableCutoverQueue:
                 "WHERE id=?", (job,)
             ).fetchone()
             if not live or live != (
-                    "VERIFYING", rec["total"], rec["total"],
+                    rec["status"], rec["total"], rec["total"],
                     rec["source"], rec["target"]):
                 raise CZ07Hold("BUSINESS_ACCEPT_SNAPSHOT_CHANGED")
             if self.cz04b._open(db) or db.execute(
@@ -577,11 +583,89 @@ class DurableCutoverQueue:
             if db.execute(
                 "UPDATE cloudzy_cz07_jobs SET status='DONE',updated_at=?,"
                 "code='BUSINESS_E2E_ACCEPTED' "
-                "WHERE id=? AND status='VERIFYING'",
-                (int(self.now()), job)
+                "WHERE id=? AND status=?",
+                (int(self.now()), job, rec["status"])
             ).rowcount != 1:
                 raise CZ07Hold("BUSINESS_ACCEPT_CAS_FAILED")
             self._log(db, job, "DONE", "BUSINESS_E2E_ACCEPTED",
+                      rec["total"], 0)
+        return True
+
+    def complete_transport(self, job, *, actor, chat, expected_updated_at):
+        """Close ONLY the account-host transfer lock after verifying live route.
+
+        This does not mint CREATE, RENEW or affected-ISP evidence. The separate
+        business acceptance remains pending. It never changes DNS or accounts.
+        Caller must have just performed fresh provider/SSH/NAT and live DNS GET.
+        """
+        rec = self.get(job)
+        if not rec or (actor, chat) != (rec["actor"], rec["chat"]):
+            raise CZ07Hold("TRANSPORT_OWNER_MISMATCH")
+        if (rec["status"] != "VERIFYING" or rec["updated_at"] != expected_updated_at
+                or rec.get("cancel_requested") or rec["moved"] != rec["total"]):
+            raise CZ07Hold("TRANSPORT_NOT_READY")
+        if self.cz04b._route_ready() != (
+                rec["source"], rec["target"], rec["provider_id"]):
+            raise CZ07Hold("TRANSPORT_ROUTE_CHANGED")
+        self.cz04b._expect_dns(self.cz04b.dns.snapshot(), rec["target"])
+        self.cz04b._migration_snapshot(rec["source"], rec["target"])
+        self.complete_guard(job)
+        with self.db() as db:
+            self._init(db)
+            db.execute("BEGIN IMMEDIATE")
+            self.cz04b.guard(db)
+            self.cz04b._guard_settings(self.cz04b._settings(db))
+            row = db.execute(
+                "SELECT actor,chat,status,source,target,provider_id,total,moved,"
+                "updated_at,cancel_requested FROM cloudzy_cz07_jobs WHERE id=?",
+                (job,)
+            ).fetchone()
+            if row != (
+                    actor, chat, "VERIFYING", rec["source"], rec["target"],
+                    rec["provider_id"], rec["total"], rec["total"],
+                    expected_updated_at, 0):
+                raise CZ07Hold("TRANSPORT_SNAPSHOT_CHANGED")
+            if self.cz04b._open(db) or db.execute(
+                    "SELECT 1 FROM failover_operations WHERE status='RUNNING' LIMIT 1"
+            ).fetchone():
+                raise CZ07Hold("TRANSPORT_LOCK_BUSY")
+            if db.execute(
+                    "SELECT 1 FROM cloudzy_cz04a_actions "
+                    "WHERE status NOT IN ('DONE','REJECTED') LIMIT 1"
+            ).fetchone():
+                raise CZ07Hold("TRANSPORT_CZ04A_UNRESOLVED")
+            settings = self.cz04b._settings(db)
+            defaults = db.execute(
+                "SELECT host FROM host_pool WHERE active=1 AND is_default=1"
+            ).fetchall()
+            target_role = db.execute(
+                "SELECT provider,provider_instance_id,active,is_default,is_standby "
+                "FROM host_pool WHERE host=?", (rec["target"],)
+            ).fetchone()
+            if (settings.get("hosts") != rec["target"]
+                    or settings.get("dns_current_ip") != rec["target"]
+                    or defaults != [(rec["target"],)]
+                    or target_role != ("cloudzy", rec["provider_id"], 1, 1, 0)):
+                raise CZ07Hold("TRANSPORT_ROUTE_SNAPSHOT_CHANGED")
+            if self.cz04b._source_accounts(db, rec["source"]):
+                raise CZ07Hold("TRANSPORT_SOURCE_NOT_EMPTY")
+            foreign = db.execute(
+                "SELECT COUNT(*) FROM ssh_accounts WHERE service_type='ssh' "
+                "AND status LIKE '%فعال%' AND status NOT LIKE '%غیر%' "
+                "AND COALESCE(host,'') != ?", (rec["target"],)
+            ).fetchone()[0]
+            if foreign:
+                raise CZ07Hold("TRANSPORT_ACTIVE_ACCOUNT_OUTSIDE_TARGET")
+            updated = db.execute(
+                "UPDATE cloudzy_cz07_jobs SET status='MOVED',"
+                "code='TRANSPORT_VERIFIED_POSTCHECK_PENDING',updated_at=? "
+                "WHERE id=? AND status='VERIFYING' AND updated_at=? "
+                "AND moved=total AND cancel_requested=0",
+                (int(self.now()), job, expected_updated_at)
+            ).rowcount
+            if updated != 1:
+                raise CZ07Hold("TRANSPORT_CAS_FAILED")
+            self._log(db, job, "MOVED", "TRANSPORT_VERIFIED_POSTCHECK_PENDING",
                       rec["total"], 0)
         return True
 
@@ -866,12 +950,87 @@ class DurableCutoverQueue:
                     return
                 await self._show_readiness(query, markup, actor, chat)
                 return
+            if data.startswith("apps_cz7_transport_review_"):
+                job_id = data[len("apps_cz7_transport_review_"):]
+                rec = await asyncio.to_thread(self.get, job_id)
+                if not rec or (rec["actor"], rec["chat"]) != (actor, chat):
+                    raise CZ07Hold("TRANSPORT_OWNER_MISMATCH")
+                if rec["status"] != "VERIFYING" or rec["moved"] != rec["total"]:
+                    raise CZ07Hold("TRANSPORT_NOT_READY")
+                # Recheck the actual provider, customer/admin probe, pinned
+                # SSH/NAT/WireGuard, original route, DNS, 6G and account count.
+                route = await asyncio.to_thread(self.cz04b._route_ready)
+                if route != (rec["source"], rec["target"], rec["provider_id"]):
+                    raise CZ07Hold("TRANSPORT_ROUTE_CHANGED")
+                state = await asyncio.to_thread(
+                    self.cz04b._ready_probe_state,
+                    rec["source"], rec["target"], rec["provider_id"])
+                await self.cz04b._fresh(state)
+                dns = await asyncio.to_thread(self.cz04b.dns.snapshot)
+                self.cz04b._expect_dns(dns, rec["target"])
+                await asyncio.to_thread(
+                    self.cz04b._migration_snapshot, rec["source"], rec["target"])
+                await asyncio.to_thread(self.complete_guard, job_id)
+                nonce = secrets.token_hex(8)
+                context.user_data["cz7_transport_confirm"] = {
+                    "job": job_id, "actor": actor, "chat": chat,
+                    "updated_at": rec["updated_at"], "nonce": nonce,
+                    "expires": self.now() + APPROVAL_TTL,
+                }
+                await self._display(query,
+                    "✅ <b>کنترل فنی انتقال حساب‌ها موفق بود.</b>\n\n"
+                    f"از <code>{_short(rec['source'])}</code> "
+                    f"به <code>{_short(rec['target'])}</code>\n"
+                    f"حساب‌های منتقل‌شده: <b>{rec['moved']}/{rec['total']}</b>\n\n"
+                    "مسیر، DNS، وضعیت ارائه‌دهنده، SSH/NAT، قفل‌ها و حساب‌های فعال "
+                    "بررسی شدند.\n\n"
+                    "این تأیید فقط انتقال Host حساب‌ها را می‌بندد و نوبت انتقال "
+                    "بعدی را آزاد می‌کند. <b>سلامت CREATE/RENEW و اتصال مشتری "
+                    "هنوز تأیید نشده</b> و باید جداگانه آزمایش شود.",
+                    [[("✅ ثبت تکمیل انتقال حساب‌ها",
+                       "apps_cz7_transport_go_"+nonce)],
+                     [("❌ انصراف", "apps_cz7_status")]], markup)
+                return
+            if data.startswith("apps_cz7_transport_go_"):
+                session = context.user_data.pop("cz7_transport_confirm", None)
+                if (not isinstance(session, dict) or
+                        session.get("actor") != actor or session.get("chat") != chat
+                        or self.now() > session.get("expires", 0)
+                        or data != "apps_cz7_transport_go_"+session.get("nonce", "")):
+                    raise CZ07Hold("TRANSPORT_CONFIRMATION_EXPIRED")
+                job_id = session["job"]
+                rec = await asyncio.to_thread(self.get, job_id)
+                if (not rec or rec["status"] != "VERIFYING"
+                        or rec["updated_at"] != session["updated_at"]
+                        or rec["moved"] != rec["total"]
+                        or (rec["actor"], rec["chat"]) != (actor, chat)):
+                    raise CZ07Hold("TRANSPORT_SNAPSHOT_CHANGED")
+                route = await asyncio.to_thread(self.cz04b._route_ready)
+                if route != (rec["source"], rec["target"], rec["provider_id"]):
+                    raise CZ07Hold("TRANSPORT_ROUTE_CHANGED")
+                state = await asyncio.to_thread(
+                    self.cz04b._ready_probe_state,
+                    rec["source"], rec["target"], rec["provider_id"])
+                await self.cz04b._fresh(state)
+                await asyncio.to_thread(
+                    self.complete_transport, job_id, actor=actor, chat=chat,
+                    expected_updated_at=session["updated_at"])
+                await self._display(query,
+                    "✅ <b>انتقال حساب‌ها تکمیل و ثبت شد.</b>\n\n"
+                    "قفل انتقال قبلی پس از کنترل فنی آزاد شده است. "
+                    "آزمون ساخت، تمدید و اتصال مشتری در وضعیت <b>در انتظار بررسی</b> "
+                    "باقی می‌ماند.\n\n"
+                    "برای انتقال به Standby جدید، ابتدا آمادگی و مجوزهای انتقال "
+                    "دوباره بررسی می‌شوند.",
+                    [[("🚀 بررسی انتقال به Standby", "apps_cz7_home")],
+                     [("📋 وضعیت انتقال قبلی", "apps_cz7_status")]], markup)
+                return
             if data.startswith("apps_cz7_accept_review_"):
                 job_id = data[len("apps_cz7_accept_review_"):]
                 item = await asyncio.to_thread(self.get, job_id)
                 if not item or (item["actor"], item["chat"]) != (actor, chat):
                     raise CZ07Hold("BUSINESS_ACCEPT_OWNER_MISMATCH")
-                if item["status"] != "VERIFYING":
+                if item["status"] not in ("VERIFYING", "MOVED"):
                     raise CZ07Hold("BUSINESS_ACCEPT_NOT_READY")
                 proof = await asyncio.to_thread(self.review_acceptance, job_id)
                 if not proof.ready:
@@ -925,7 +1084,7 @@ class DurableCutoverQueue:
                         or data != "apps_cz7_accept_go_"+session.get("nonce", "")):
                     raise CZ07Hold("BUSINESS_ACCEPT_SESSION_EXPIRED")
                 item = await asyncio.to_thread(self.get, session["job"])
-                if (not item or item["status"] != "VERIFYING"
+                if (not item or item["status"] not in ("VERIFYING", "MOVED")
                         or item["updated_at"] != session["updated_at"]
                         or (item["actor"], item["chat"]) != (actor, chat)):
                     raise CZ07Hold("BUSINESS_ACCEPT_SNAPSHOT_CHANGED")
@@ -1125,7 +1284,8 @@ class DurableCutoverQueue:
             "ROUTING": "در حال بررسی و تنظیم مسیر",
             "MIGRATING": "در حال انتقال مرحله‌ای کاربران",
             "PAUSED_SAFE": "متوقف‌شده در مرز Batch؛ آماده بررسی و ادامه",
-            "VERIFYING": "انتقال متادیتا کامل؛ منتظر تأیید ساخت و تمدید SSH",
+            "VERIFYING": "انتقال ۱۰۰٪ ثبت شده؛ آماده بررسی فنی تکمیل",
+            "MOVED": "انتقال حساب‌ها تکمیل؛ تست ساخت/تمدید/اتصال باز است",
             "HOLD": "توقف امن؛ نیازمند بررسی",
             "DONE": "انتقال ثبت‌شده به پایان رسید",
             "ABORTED": "عملیات متوقف و بسته شده است",
@@ -1137,10 +1297,16 @@ class DurableCutoverQueue:
         rows = [[("🔄 تازه‌سازی وضعیت", "apps_cz7_status")]]
         if ((actor, chat) == (job["actor"], job["chat"])
                 and status == "VERIFYING"):
-            rows.insert(0, [("🔎 بررسی پذیرش نهایی",
+            rows.insert(0, [("✅ بررسی تکمیل انتقال حساب‌ها",
+                             "apps_cz7_transport_review_"+job["id"])])
+            rows.insert(1, [("🔎 بررسی پذیرش کامل سرویس",
                              "apps_cz7_accept_review_"+job["id"])])
-        if status == "DONE":
-            rows.insert(0, [("🚀 بررسی انتقال بعدی", "apps_cz7_home")])
+        if status in ("DONE", "MOVED"):
+            rows.insert(0, [("🚀 بررسی انتقال به Standby", "apps_cz7_home")])
+        if ((actor, chat) == (job["actor"], job["chat"])
+                and status == "MOVED"):
+            rows.insert(1, [("🧪 بررسی تست‌های پس از انتقال",
+                             "apps_cz7_accept_review_"+job["id"])])
         if ((actor, chat) == (job["actor"], job["chat"])
                 and status in ("MIGRATING", "PAUSED_SAFE")
                 and not job.get("cancel_requested")
@@ -1163,9 +1329,13 @@ class DurableCutoverQueue:
             if status == "HOLD" else
             "⏸ توقف در مرز Batch ثبت شده است. پیش از ادامه، مسیر و Journal را بررسی کنید."
             if status == "PAUSED_SAFE" else
-            "✅ ثبت انتقال Host همه حساب‌ها کامل است. برای ثبت DONE، دکمه بررسی پذیرش نهایی "
-            "را بزنید؛ تأیید فقط با گواه مستقل ساخت، تمدید و اتصال و کنترل زنده مسیر مجاز است."
+            "✅ انتقال Host حساب‌ها ثبت شده است. با «بررسی تکمیل انتقال حساب‌ها» "
+            "کنترل فنی انجام دهید و نوبت انتقال بعدی را آزاد کنید؛ "
+            "CREATE/RENEW و اتصال مشتری جداگانه بررسی می‌شوند."
             if status == "VERIFYING" else
+            "✅ انتقال Host حساب‌ها کنترل و تکمیل شده است؛ تست ساخت، تمدید و "
+            "اتصال مشتری هنوز در انتظار بررسی است. این وضعیت پذیرش کامل سرویس نیست."
+            if status == "MOVED" else
             "⏳ درخواست توقف ثبت شده؛ منتظر مرز Batch باشید."
             if status == "MIGRATING" and job.get("cancel_requested") else
             "⏳ این مرحله در جریان است؛ عملیات تازه یا انتقال دوم آغاز نکنید."

@@ -233,7 +233,7 @@ def observe_cz06_status(db, *, operation_id, stage, now=None):
 
 _CZ07_STATES = frozenset((
     "QUEUED", "ROUTING", "MIGRATING", "PAUSED_SAFE",
-    "VERIFYING", "HOLD", "ABORTED", "DONE",
+    "VERIFYING", "MOVED", "HOLD", "ABORTED", "DONE",
 ))
 
 
@@ -283,6 +283,12 @@ def observe_cz07_status(db, *, job_id, expected_status, now=None):
             raise UnifiedLinkHold("CZ07_INDEPENDENT_ACCEPTANCE_REQUIRED")
         step, state, code = (
             "FINAL_VERIFY", "COMPLETED", "CZ07_INDEPENDENT_E2E_ACCEPTED")
+    elif expected_status == "MOVED":
+        if moved != total:
+            raise UnifiedLinkHold("CZ07_TRANSPORT_COMPLETE_PREMATURE")
+        step, state, code = (
+            "FINAL_VERIFY", "NEEDS_ATTESTATION",
+            "CZ07_TRANSPORT_COMPLETE_POSTCHECK_PENDING")
     elif expected_status == "VERIFYING":
         if moved != total:
             raise UnifiedLinkHold("CZ07_FINAL_VERIFICATION_PREMATURE")
@@ -312,5 +318,5 @@ def observe_cz07_status(db, *, job_id, expected_status, now=None):
     return _record(
         db, origin, step=step, state=state, code=code,
         now=now, external_intent=expected_status in (
-            "ROUTING", "MIGRATING", "PAUSED_SAFE", "VERIFYING", "DONE"),
+            "ROUTING", "MIGRATING", "PAUSED_SAFE", "VERIFYING", "MOVED", "DONE"),
     )

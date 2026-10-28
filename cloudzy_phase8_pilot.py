@@ -149,7 +149,7 @@ def evaluate_pilot(db, *, phase, expected_target=None,
                 "status NOT IN ('READY','DONE','ABORTED')"):
         blocks.append("CZ04B_UNRESOLVED")
     if _running(db, "cloudzy_cz07_jobs",
-                "status NOT IN ('DONE','ABORTED')") and phase == "cutover":
+                "status NOT IN ('DONE','ABORTED','MOVED')") and phase == "cutover":
         blocks.append("CZ07_UNRESOLVED")
     if phase == "cutover" and cohort > max_accounts:
         blocks.append("PILOT_COHORT_EXCEEDS_EXPLICIT_LIMIT")

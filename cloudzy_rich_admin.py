@@ -41,14 +41,15 @@ STATE_LABELS = {
     "CANCELLED_SAFE": "لغو امن", "NEEDS_OPERATOR": "نیازمند بررسی مدیر",
     "QUEUED": "در صف انتقال", "ROUTING": "در حال تغییر مسیر",
     "MIGRATING": "در حال انتقال حساب‌ها",
-    "VERIFYING": "انتقال انجام شده؛ پذیرش نهایی باز است",
+    "VERIFYING": "انتقال ثبت شده؛ بررسی نهایی حساب‌ها باز است",
+    "MOVED": "انتقال تکمیل؛ تست ساخت و تمدید باقی است",
     "DONE": "تکمیل و تأییدشده", "HOLD": "متوقف برای بررسی",
     "ABORTED": "لغوشده",
 }
 
 CZ07_STEP = {
     "QUEUED": 4, "ROUTING": 5, "MIGRATING": 6, "PAUSED_SAFE": 6,
-    "VERIFYING": 7, "DONE": 7, "HOLD": 6, "ABORTED": 5,
+    "VERIFYING": 7, "MOVED": 7, "DONE": 7, "HOLD": 6, "ABORTED": 5,
 }
 
 # Typed action policy. Each error is explained but NEVER authorizes an effect.
@@ -85,6 +86,14 @@ ERRORS = {
         "سرور و Standby آماده‌اند",
         "آماده‌بودن زیرساخت تأیید شده؛ قبل از تغییر مسیر باید شواهد مستقل اتصال وجود داشته باشد.",
         "VERIFY_EVIDENCE"),
+    "CZ07_TRANSPORT_COMPLETE_POSTCHECK_PENDING": (
+        "انتقال Host حساب‌ها تکمیل شده",
+        "آزمون‌های ساخت حساب، تمدید و اتصال مشتری مستقل باقی مانده‌اند.",
+        "POST_TRANSFER_CHECKS"),
+    "TRANSPORT_VERIFIED_POSTCHECK_PENDING": (
+        "انتقال حساب‌ها کنترل و ثبت شد",
+        "وضعیت انتقال نهایی شده؛ آزمون‌های ساخت، تمدید و اتصال هنوز باقی‌اند.",
+        "POST_TRANSFER_CHECKS"),
     "CZ07_BUSINESS_E2E_REQUIRED": (
         "انتقال کامل؛ تأیید سرویس باقی است",
         "ساخت و تمدید حساب و اتصال مشتری باید با شواهد مستقل تأیید شوند.",
@@ -282,8 +291,8 @@ def render_card(view: OperationView, *, details=False, refresh_stamp=None):
             {"text": "🔎 جزئیات فنی", "callback_data": _callback(view, "d")},
         ]},
     ]
-    if view.state in ("VERIFYING", "RECONCILE_REQUIRED", "HOLD", "PAUSED_SAFE"):
+    if view.state in ("VERIFYING", "MOVED", "RECONCILE_REQUIRED", "HOLD", "PAUSED_SAFE"):
         blocks.insert(1, {"type": "paragraph", "text": [
-            {"type": "bold", "text": "⚠️ عملیات هنوز پذیرفته نشده است"}
+            {"type": "bold", "text": "⚠️ پذیرش کامل سرویس هنوز ثبت نشده است"}
         ]})
     return {"blocks": blocks, "is_rtl": True, "skip_entity_detection": True}

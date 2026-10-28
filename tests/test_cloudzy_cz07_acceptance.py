@@ -72,6 +72,12 @@ class TrustedWitnessTests(unittest.TestCase):
                          create_ref="forged-create", renew_ref=proof.renew_ref,
                          client_ref=proof.client_ref, fingerprint=proof.fingerprint))
 
+    def test_post_transfer_checks_can_be_recorded_after_moved(self):
+        self.write()
+        proof = self.witness.review({**self.job, "status": "MOVED"})
+        self.assertTrue(proof.ready)
+        self.assertEqual(proof.code, "TRUSTED_WITNESS_VERIFIED")
+
     def test_modified_and_wrong_target_or_stale_evidence_rejected(self):
         path = self.write()
         data = json.loads(path.read_text())

@@ -375,6 +375,134 @@ class QueueTests(unittest.TestCase):
                                         (dry.target,)).fetchone()[0],473)
 
 
+    def test_completed_transport_unlocks_new_standby_without_fake_e2e_done(self):
+        from cloudzy_cz04b import _digest
+        import asyncio
+        dry = DryRun04B(self.factory)
+        self.q.cz04b = dry
+        with self.factory() as db:
+            rows = dry._source_accounts(db, dry.source)
+        job = self.q.reserve(self.q.candidate(), dry.source, actor=7, chat=8,
+                             expected_fp=_digest(rows), expected_count=len(rows))
+        asyncio.run(self.q._work(job, OfflineApp(), resume=False))
+        old = self.q.get(job)
+        self.assertEqual(old["status"], "VERIFYING")
+        with self.factory() as db:
+            db.execute("INSERT INTO cloudzy_cz06_runs VALUES(?,?,?,?,?)",
+                       ("purchase-2",7,8,"READY",2))
+            db.execute("INSERT INTO cloudzy_edge_operations VALUES (?,?,?,?)",
+                       ("purchase-2","EDGE_READY","next.example","provider-2"))
+            db.execute("INSERT INTO host_pool VALUES(?,?,?,?,?,?)",
+                       ("next.example",1,0,1,"cloudzy","provider-2"))
+        # The next transfer stays blocked until the old transport is audited.
+        with self.factory() as db:
+            next_rows = dry._source_accounts(db, dry.target)
+        with self.assertRaisesRegex(CZ07Hold, "ANOTHER_CZ07_JOB_UNRESOLVED"):
+            self.q.reserve(self.q.candidate(), dry.target, actor=7, chat=8,
+                           expected_fp=_digest(next_rows),
+                           expected_count=len(next_rows))
+        self.assertTrue(self.q.complete_transport(
+            job, actor=7, chat=8, expected_updated_at=old["updated_at"]))
+        record = self.q.get(job)
+        self.assertEqual(record["status"], "MOVED")
+        self.assertEqual(record["code"], "TRANSPORT_VERIFIED_POSTCHECK_PENDING")
+        with self.factory() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM cloudzy_cz07_acceptance"
+            ).fetchone()[0], 0)
+        with self.assertRaisesRegex(CZ07Hold, "TRANSPORT_NOT_READY"):
+            self.q.complete_transport(
+                job, actor=7, chat=8, expected_updated_at=old["updated_at"])
+        # The original 485-style cohort is not transferred again.
+        self.assertEqual(dry.batch_sizes, [200, 200, 73])
+        new_job = self.q.reserve(self.q.candidate(), dry.target,
+                                 actor=7, chat=8,
+                                 expected_fp=_digest(next_rows),
+                                 expected_count=len(next_rows))
+        self.assertEqual(self.q.get(new_job)["status"], "QUEUED")
+        self.assertEqual(self.q.get(job)["status"], "MOVED")
+
+    def test_transfer_cannot_close_on_moved_count_alone_or_wrong_owner(self):
+        from cloudzy_cz04b import _digest
+        import asyncio
+        dry = DryRun04B(self.factory)
+        self.q.cz04b = dry
+        with self.factory() as db:
+            rows = dry._source_accounts(db, dry.source)
+        job = self.q.reserve(self.q.candidate(), dry.source, actor=7, chat=8,
+                             expected_fp=_digest(rows), expected_count=len(rows))
+        asyncio.run(self.q._work(job, OfflineApp(), resume=False))
+        version = self.q.get(job)["updated_at"]
+        with self.assertRaisesRegex(CZ07Hold, "TRANSPORT_OWNER_MISMATCH"):
+            self.q.complete_transport(
+                job, actor=99, chat=8, expected_updated_at=version)
+        dry.dns.current = dry.source
+        with self.assertRaisesRegex(CZ07Hold, "DNS_CHANGED"):
+            self.q.complete_transport(
+                job, actor=7, chat=8, expected_updated_at=version)
+        dry.dns.current = dry.target
+        with self.factory() as db:
+            db.execute("UPDATE ssh_accounts SET host=? WHERE username=?",
+                       (dry.source, "user0001"))
+        with self.assertRaisesRegex(CZ07Hold, "TRANSPORT_SOURCE_NOT_EMPTY|ACTIVE_SSH_OUTSIDE_TARGET"):
+            self.q.complete_transport(
+                job, actor=7, chat=8, expected_updated_at=version)
+        self.assertEqual(self.q.get(job)["status"], "VERIFYING")
+        with self.factory() as db:
+            db.execute("UPDATE ssh_accounts SET host=? WHERE username=?",
+                       (dry.target, "user0001"))
+        self.assertTrue(self.q.complete_transport(
+            job, actor=7, chat=8, expected_updated_at=version))
+
+    def test_verifying_to_moved_callback_requires_fresh_checks_and_one_time_approval(self):
+        from cloudzy_cz04b import _digest
+        import asyncio
+
+        class Query:
+            def __init__(self):
+                self.text = ""
+                self.callbacks = []
+            async def edit_message_text(self, text, **kwargs):
+                self.text = text
+                self.callbacks = [cb for row in kwargs["reply_markup"]
+                                  for _label, cb in row]
+
+        dry = DryRun04B(self.factory)
+        self.q.cz04b = dry
+        with self.factory() as db:
+            rows = dry._source_accounts(db, dry.source)
+        job = self.q.reserve(self.q.candidate(), dry.source, actor=7, chat=8,
+                             expected_fp=_digest(rows), expected_count=len(rows))
+        asyncio.run(self.q._work(job, OfflineApp(), resume=False))
+        query = Query()
+        ctx = type("Ctx", (), {"user_data": {}})()
+        async def click(data, actor=7, chat=8):
+            await self.q.handle_callback(query, ctx, data, role="admin",
+                                         actor=actor, chat=chat,
+                                         markup=lambda rows: rows, app=None)
+        asyncio.run(self.q._show_status(query, self.q.get(job),
+                                        lambda rows: rows, 7, 8))
+        self.assertIn("apps_cz7_transport_review_"+job, query.callbacks)
+        asyncio.run(click("apps_cz7_transport_review_"+job, actor=9, chat=9))
+        self.assertEqual(self.q.get(job)["status"], "VERIFYING")
+        asyncio.run(click("apps_cz7_transport_review_"+job))
+        confirm = next(x for x in query.callbacks
+                       if x.startswith("apps_cz7_transport_go_"))
+        self.assertEqual(self.q.get(job)["status"], "VERIFYING")
+        dry.dns.current = dry.source
+        asyncio.run(click(confirm))
+        self.assertEqual(self.q.get(job)["status"], "VERIFYING")
+        dry.dns.current = dry.target
+        asyncio.run(click("apps_cz7_transport_review_"+job))
+        confirm = next(x for x in query.callbacks
+                       if x.startswith("apps_cz7_transport_go_"))
+        asyncio.run(click(confirm))
+        self.assertEqual(self.q.get(job)["status"], "MOVED")
+        self.assertIn("apps_cz7_home", query.callbacks)
+        asyncio.run(click(confirm))
+        self.assertEqual(self.q.get(job)["status"], "MOVED")
+        self.assertEqual(dry.batch_sizes, [200, 200, 73])
+
     def test_200_batch_boundary_and_independent_business_acceptance(self):
         from cloudzy_cz04b import _digest
         import asyncio

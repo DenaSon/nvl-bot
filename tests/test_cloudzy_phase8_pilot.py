@@ -141,6 +141,23 @@ class PilotReadinessTests(unittest.TestCase):
         self.assertEqual(report.verdict,"FINAL_AUDIT_PASS")
         self.assertFalse(report.blockers)
 
+    def test_legacy_retirement_requires_final_acceptance_and_external_signoff(self):
+        from cloudzy_phase8_pilot import retirement_preview
+        early=self.inspect("purchase")
+        self.assertEqual(retirement_preview(early,
+                         independent_signoff=lambda *_:True),
+                         "KEEP_LEGACY_ACTIVE")
+        from cloudzy_phase8_pilot import PilotReport
+        approved=PilotReport(
+            "final","FINAL_AUDIT_PASS",DST,DST,4,(),(),())
+        self.assertEqual(retirement_preview(approved),"KEEP_LEGACY_ACTIVE")
+        self.assertEqual(retirement_preview(
+            approved,independent_signoff=lambda *_:"approved"),
+            "KEEP_LEGACY_ACTIVE")
+        self.assertEqual(retirement_preview(
+            approved,independent_signoff=lambda *_:True),
+            "ELIGIBLE_FOR_SEPARATE_REVERSIBLE_RETIREMENT_REVIEW")
+
     def test_readonly_cli_never_initializes_schema(self):
         self.db.commit()
         db=open_core_readonly(self.path)

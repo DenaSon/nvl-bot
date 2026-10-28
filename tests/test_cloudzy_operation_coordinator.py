@@ -311,6 +311,10 @@ class CoordinatorTests(unittest.TestCase):
         self.assertNotIn("secret", str(all_rows))
         self.assertNotIn("private", str(all_rows))
         self.assertNotIn("body", str(all_rows))
+        # Even a token without punctuation must never become a technical code.
+        with self.db() as db:
+            db.execute("UPDATE cloudzy_cz04b_operations SET note='SECRETKEYMATERIAL' WHERE id='d'")
+            self.assertEqual(read_legacy_receipts(db)[3].code, "UNSPECIFIED")
 
     def test_old_tables_not_updated_by_new_journal(self):
         with self.db() as db:

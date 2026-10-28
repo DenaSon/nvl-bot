@@ -12,7 +12,7 @@ Do **not** block the project just because staging and field evidence are incompl
 ## 8.1/8.2 — Execute repeatable offline failure matrix
 
 ```bash
-cd /root
+cd /path/to/isolated-nvl-bot-checkout  # full repo with tests/ available
 /root/venv/bin/python3 -m unittest tests.test_cloudzy_phase8_pilot tests.test_cloudzy_phase8_matrix -v
 /root/venv/bin/python3 cloudzy_phase8_matrix.py --list
 /root/venv/bin/python3 cloudzy_phase8_matrix.py
@@ -42,9 +42,9 @@ For optional **read-only** Cloudflare API GET, configure values privately in the
 export NVL_PHASE8_CF_ZONE='<zone id>'
 export NVL_PHASE8_CF_TOKEN='<read-capable token>'
 export NVL_PHASE8_CF_PUBLIC_DOMAIN='n1.nvlsup.com'
-# Set these only if the current setup expects a separate TLS A record:
-# export NVL_PHASE8_CF_TLS_PASSTHROUGH=1
-# export NVL_PHASE8_CF_TLS_DOMAIN='<actual configured domain>'
+# Set this explicitly to match the bot's actual current DNS configuration:
+export NVL_PHASE8_CF_TLS_PASSTHROUGH=1  # use 0 ONLY when TLS A record is not configured
+export NVL_PHASE8_CF_TLS_DOMAIN='<actual configured TLS A-record domain>'
 /root/venv/bin/python3 /root/cloudzy_phase8_pilot.py \
   --db /root/master_bot.db --phase cutover \
   --expected-target '<verified Cloudzy IPv4>' --max-accounts 5 --cloudflare-get

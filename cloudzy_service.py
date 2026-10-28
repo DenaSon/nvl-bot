@@ -186,7 +186,11 @@ class CloudzyService:
             code = str(raw_code)[:80] if isinstance(raw_code, str) else None
             message = str(raw_message)[:240] if isinstance(raw_message, str) else "request rejected"
             message = message.replace(self._token, "[REDACTED]")
-            if mutation and response.status_code >= 500:
+            # On a chargeable create, HTTP 409 may mean the provider already
+            # accepted the same idempotency key. Never authorize a new POST.
+            if mutation and (response.status_code >= 500
+                             or (method == "POST" and path == "/services"
+                                 and response.status_code == 409)):
                 raise CloudzyUncertainError(operation, idempotency_key=key)
             raise CloudzyAPIError(response.status_code, message, code)
         if response.status_code == 204 or not response.content:

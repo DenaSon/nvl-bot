@@ -1239,7 +1239,7 @@ class JournalTests(unittest.TestCase):
         source = (Path(__file__).resolve().parents[1] / "bot_final_v49-2.py").read_text()
         for old in ('elif d in ("hp_addedge", "hpeg_wizard")',
                     'elif d.startswith("srv_mkactive_")',
-                    'elif d.startswith("hpdefmig_yes_")',
+                    'elif d.startswith(("hpdef_migrate_", "hpdefmig_yes_", "hpdef_"))',
                     'elif d == "hpeg_status"'):
             self.assertIn(old, source)
         self.assertIn("pool_active=False", source)

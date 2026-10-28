@@ -11,6 +11,7 @@ import re
 import sqlite3
 import time
 from pathlib import Path
+from contextlib import contextmanager
 
 SCHEMA_VERSION = 1
 DEVICE_RE = re.compile(r"^[a-zA-Z0-9_-]{3,40}$")
@@ -101,8 +102,6 @@ def validate_report(doc: object, *, allowed_host: str, authenticated_device: str
         result[name] = _optional_duration(doc, name)
     if result["dns_ok"] is None:
         raise InvalidReport("missing_dns_result")
-    if result["dns_ok"] is False:  # ints from _optional_bool
-        pass
     if result["dns_ok"] == 0 and (result["tcp_ok"] is not None or result["ssh_id_ok"] is not None):
         raise InvalidReport("inconsistent_dns_failure")
     if result["tcp_ok"] == 0 and result["ssh_id_ok"] is not None:
@@ -158,14 +157,24 @@ ON denaprobe_reports(device_id, received_at DESC);
 """
 
 
-def open_db(db_path: str, *, readonly: bool = False) -> sqlite3.Connection:
+@contextmanager
+def open_db(db_path: str, *, readonly: bool = False):
     if readonly:
         connection = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=3)
     else:
         connection = sqlite3.connect(db_path, timeout=5)
         connection.execute("PRAGMA busy_timeout=5000")
     connection.row_factory = sqlite3.Row
-    return connection
+    try:
+        yield connection
+        if not readonly:
+            connection.commit()
+    except BaseException:
+        if not readonly:
+            connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def init_db(db_path: str) -> None:

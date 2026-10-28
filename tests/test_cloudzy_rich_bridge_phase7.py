@@ -1,4 +1,4 @@
-"""Phase 7 stage-2 opt-in bot callback integration tests. No Telegram network."""
+"""Phase 7 direct bot callback integration and visible feedback tests. Offline."""
 import asyncio
 from contextlib import contextmanager
 from pathlib import Path
@@ -40,6 +40,17 @@ class FakeQuery:
         self.message = type("Msg", (), {"message_id": message_id})()
 
 
+class FakeBot:
+    token = "test-token"
+
+    def __init__(self):
+        self.messages = []
+
+    async def send_message(self, *, chat_id, text, disable_notification=False):
+        self.messages.append((chat_id, text, disable_notification))
+        return {"message_id": len(self.messages) + 200}
+
+
 class Phase7BridgeTests(unittest.TestCase):
     def setUp(self):
         tmp = TemporaryDirectory()
@@ -59,8 +70,7 @@ class Phase7BridgeTests(unittest.TestCase):
                 conn.close()
 
         self.db_conn = db_conn
-        self.context = type(
-            "Ctx", (), {"bot": type("Bot", (), {"token": "test-token"})()})()
+        self.context = type("Ctx", (), {"bot": FakeBot()})()
         NoNetworkAPI.calls = []
         with db_conn() as db:
             db.executescript("""
@@ -148,6 +158,7 @@ class Phase7BridgeTests(unittest.TestCase):
         self.assertEqual(self.open("u7:d:uo:"+C, message_id=123), "SENT")
         self.assertEqual(self.open("u7:r:uo:"+C, message_id=123), "SENT")
         self.assertEqual(self.open("u7:r:uo:"+C, message_id=123), "UNCHANGED")
+        self.assertIn("قبلاً ارسال", self.context.bot.messages[-1][1])
         self.assertEqual([item[0] for item in NoNetworkAPI.calls],
                          ["SEND","EDIT","EDIT"])
         for forged in (
@@ -161,6 +172,37 @@ class Phase7BridgeTests(unittest.TestCase):
         self.assertEqual(self.open("u7:d:uo:"+C,actor=9,chat=9,
                                    message_id=123), "HOLD")
         self.assertEqual(len(NoNetworkAPI.calls),3)
+
+    def test_rich_holds_and_denials_have_safe_visible_feedback(self):
+        self.assertEqual(self.open(
+            ENTRY, active_admin_ids=frozenset({9, 11})), "DENIED")
+        self.assertTrue(self.context.bot.messages)
+        self.assertEqual(self.context.bot.messages[-1][0], 7)
+        self.assertIn("دسترسی", self.context.bot.messages[-1][1])
+        messages = len(self.context.bot.messages)
+        self.assertEqual(self.open(
+            ENTRY, actor=7, chat=-10077, private=False), "DENIED")
+        self.assertEqual(len(self.context.bot.messages), messages)
+        self.assertEqual(self.open("u7:x:uo:"+C, message_id=123), "HOLD")
+        self.assertIn("نمایش داده نشد", self.context.bot.messages[-1][1])
+        self.assertEqual(NoNetworkAPI.calls, [])
+
+    def test_delivery_uncertain_visible_without_duplicate_send(self):
+        class FailingAPI(NoNetworkAPI):
+            async def send(self, *, chat_id, rich_message):
+                self.calls.append(("FAIL_SEND", chat_id, rich_message))
+                raise RichDeliveryHold("TELEGRAM_MESSAGE_UNAVAILABLE")
+
+        self.assertEqual(asyncio.run(handle_rich_admin_callback(
+            data=ENTRY, query=FakeQuery(), context=self.context,
+            db_factory=self.db_conn, role="admin", actor=7, chat=7,
+            is_private=True, active_admin_ids=ACTIVE,
+            api_factory=FailingAPI)), "HOLD")
+        self.assertIn("TELEGRAM_MESSAGE_UNAVAILABLE",
+                      self.context.bot.messages[-1][1])
+        self.assertEqual(self.open(ENTRY), "HOLD")
+        self.assertIn("ارسال قبلی مشخص نیست", self.context.bot.messages[-1][1])
+        self.assertEqual(len(NoNetworkAPI.calls), 1)
 
     def test_new_journal_event_updates_one_card_and_not_business_state(self):
         self.assertEqual(self.open(ENTRY), "SENT")

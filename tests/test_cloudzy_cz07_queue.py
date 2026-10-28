@@ -416,6 +416,114 @@ class QueueTests(unittest.TestCase):
                 (job,)).fetchone(),
                 ("create-ref-001", "renew-ref-001", "client-ref-001"))
 
+    def test_verifying_has_safe_acceptance_action_and_missing_witness_never_closes(self):
+        from cloudzy_cz04b import _digest
+        import asyncio
+
+        class Query:
+            def __init__(self):
+                self.text = ""
+                self.callbacks = []
+
+            async def edit_message_text(self, text, **kwargs):
+                self.text = text
+                self.callbacks = [cb for row in kwargs["reply_markup"]
+                                  for _label, cb in row]
+
+        dry = DryRun04B(self.factory)
+        self.q.cz04b = dry
+        with self.factory() as db:
+            rows = dry._source_accounts(db, dry.source)
+        job = self.q.reserve(self.q.candidate(), dry.source, actor=7, chat=8,
+                             expected_fp=_digest(rows), expected_count=len(rows))
+        asyncio.run(self.q._work(job, OfflineApp(), resume=False))
+        self.assertEqual(self.q.get(job)["status"], "VERIFYING")
+        query = Query()
+        asyncio.run(self.q._show_status(query, self.q.get(job),
+                                        lambda rows: rows, 7, 8))
+        self.assertIn("apps_cz7_accept_review_" + job, query.callbacks)
+        ctx = type("Ctx", (), {"user_data": {}})()
+        asyncio.run(self.q.handle_callback(
+            query, ctx, "apps_cz7_accept_review_" + job,
+            role="admin", actor=7, chat=8,
+            markup=lambda rows: rows, app=None))
+        self.assertIn("منبع مستقل شواهد", query.text)
+        self.assertEqual(self.q.get(job)["status"], "VERIFYING")
+        self.assertNotIn("apps_cz7_accept_go_", str(query.callbacks))
+        # A different admin cannot access the signed evidence review.
+        asyncio.run(self.q.handle_callback(
+            query, ctx, "apps_cz7_accept_review_" + job,
+            role="admin", actor=9, chat=9,
+            markup=lambda rows: rows, app=None))
+        self.assertEqual(self.q.get(job)["status"], "VERIFYING")
+
+    def test_authenticated_witness_acceptance_requires_confirm_and_fresh_receipt(self):
+        from cloudzy_cz04b import _digest
+        from cloudzy_cz07_acceptance import AcceptanceReview
+        import asyncio
+
+        class Witness:
+            def __init__(self):
+                self.stale = False
+            def review(self, job):
+                return AcceptanceReview(True, "TRUSTED_WITNESS_VERIFIED",
+                    "create-proof-1001", "renew-proof-1002", "client-proof-1003",
+                    "b" * 64 if self.stale else "a" * 64)
+            def verify(self, job, *, create_ref, renew_ref, client_ref, fingerprint):
+                return (job["status"] == "VERIFYING" and not self.stale
+                        and fingerprint == "a" * 64
+                        and (create_ref, renew_ref, client_ref) ==
+                            ("create-proof-1001", "renew-proof-1002", "client-proof-1003"))
+
+        class Query:
+            def __init__(self):
+                self.text = ""
+                self.callbacks = []
+            async def edit_message_text(self, text, **kwargs):
+                self.text = text
+                self.callbacks = [cb for row in kwargs["reply_markup"]
+                                  for _label, cb in row]
+
+        dry = DryRun04B(self.factory)
+        self.q.cz04b = dry
+        with self.factory() as db:
+            rows = dry._source_accounts(db, dry.source)
+        job = self.q.reserve(self.q.candidate(), dry.source, actor=7, chat=8,
+                             expected_fp=_digest(rows), expected_count=len(rows))
+        asyncio.run(self.q._work(job, OfflineApp(), resume=False))
+        witness = Witness()
+        self.q.acceptance_witness = witness
+        ctx = type("Ctx", (), {"user_data": {}})()
+        query = Query()
+        async def press(action):
+            await self.q.handle_callback(query, ctx, action, role="admin",
+                                         actor=7, chat=8,
+                                         markup=lambda rows: rows, app=None)
+        asyncio.run(press("apps_cz7_accept_review_" + job))
+        self.assertIn("شواهد مستقل تأیید شدند", query.text)
+        confirm = next(cb for cb in query.callbacks
+                       if cb.startswith("apps_cz7_accept_go_"))
+        self.assertEqual(self.q.get(job)["status"], "VERIFYING")
+        witness.stale = True
+        asyncio.run(press(confirm))
+        self.assertEqual(self.q.get(job)["status"], "VERIFYING")
+        self.assertNotIn("DONE", query.text)
+        witness.stale = False
+        asyncio.run(press("apps_cz7_accept_review_" + job))
+        confirm = next(cb for cb in query.callbacks
+                       if cb.startswith("apps_cz7_accept_go_"))
+        asyncio.run(press(confirm))
+        self.assertEqual(self.q.get(job)["status"], "DONE")
+        self.assertIn("apps_cz7_home", query.callbacks)
+        with self.factory() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM cloudzy_cz07_acceptance WHERE job_id=?",
+                (job,)).fetchone()[0], 1)
+        asyncio.run(self.q._show_status(query, self.q.get(job),
+                                        lambda rows: rows, 7, 8))
+        self.assertIn("apps_cz7_home", query.callbacks)
+        self.assertNotIn("apps_cz7_accept_review_" + job, query.callbacks)
+
     def test_safe_cancel_after_batch_and_guarded_resume(self):
         from cloudzy_cz04b import _digest
         import asyncio

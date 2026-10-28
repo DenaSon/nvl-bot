@@ -7319,7 +7319,7 @@ def _cloudzy_markup(rows):
     ])
 
 
-def _build_admin_programs_kb():
+def _build_admin_programs_kb(*, actor=None, chat=None):
     """Infrastructure and operational tools available only to NVL administrators."""
     rows = [
         [InlineKeyboardButton("☁️ Cloudzy | Edge و Relay", callback_data="apps_cz_home")],
@@ -7333,7 +7333,8 @@ def _build_admin_programs_kb():
         ],
         [InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")],
     ]
-    if _cloudzy_rich_enabled() and _cloudzy_rich_admin_ids():
+    if (_cloudzy_rich_enabled() and actor in _cloudzy_rich_admin_ids()
+            and type(actor) is int and type(chat) is int and actor == chat):
         rows.insert(1, [InlineKeyboardButton(
             "🚀 Unified Edge | داشبورد Rich",
             callback_data="apps_cz_rich_home",
@@ -7367,7 +7368,7 @@ async def _show_admin_programs_hub(target, context):
         "🚚 <b>انتقال</b> — مهاجرت کنترل‌شده سرور اصلی Marzban\n"
         "🛰 <b>مانیتورینگ</b> — سلامت و وضعیت دارایی‌های Marzban"
     )
-    markup = InlineKeyboardMarkup(_build_admin_programs_kb())
+    markup = InlineKeyboardMarkup(_build_admin_programs_kb(actor=actor, chat=chat))
     if hasattr(target, 'edit_message_text'):
         await target.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
     else:

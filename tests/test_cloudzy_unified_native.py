@@ -179,6 +179,70 @@ class UnifiedNativeBridgeTests(unittest.TestCase):
                 mark_paid_intent(db, operation_id=job)
         self.assertEqual(self.store.get(job)["status"], "CREATING")
 
+    def test_cz07_mirror_requires_verified_provider_and_business_receipts(self):
+        from cloudzy_cz07_queue import DurableCutoverQueue
+        job = "f"*32
+        source = "192.0.2.3"
+        target = "192.0.2.15"
+        purchase = self.reserve()
+        self.store.mark_paid_intent(purchase)
+        self.store.change(purchase, "CREATING", "CREATED",
+                          provider_server_id="srv-1")
+        self.store.change(purchase, "CREATED", "WAITING")
+        self.store.change(purchase, "WAITING", "HOLD_SSH",
+                          public_ipv4=target)
+        self.store.change(purchase, "HOLD_SSH", "HOSTKEY_PENDING")
+        self.store.change(purchase, "HOSTKEY_PENDING", "PROVISIONING")
+        self.store.change(purchase, "PROVISIONING", "EDGE_READY")
+        with self.db() as db:
+            DurableCutoverQueue._init(db)
+            db.execute(
+                "INSERT INTO cloudzy_cz07_jobs "
+                "(id,cz06_operation,actor,chat,source,target,provider_id,"
+                "source_fingerprint,status,total,moved,evidence,started_at,"
+                "updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (job,purchase,17,17,source,target,"srv-1",
+                 "digest","QUEUED",473,0,"VERIFIED",100,100)
+            )
+            q = DurableCutoverQueue(db_conn=self.db, cz04b=None,
+                                    now=lambda:100)
+            q._log(db,job,"QUEUED","APPROVED",0,473)
+        self.assertEqual(self.read(purchase)["step"], "DNS_CUTOVER")
+        with self.db() as db:
+            db.execute("UPDATE cloudzy_cz07_jobs SET status='ROUTING' WHERE id=?",
+                       (job,))
+            q._log(db,job,"ROUTING","ROUTE_START",0,473)
+        self.assertEqual(self.read(purchase)["external_intent"], 1)
+        with self.db() as db:
+            db.execute("UPDATE cloudzy_cz07_jobs SET status='MIGRATING', moved=200 "
+                       "WHERE id=?", (job,))
+            q._log(db,job,"MIGRATING","BATCH_CAS_COMMITTED",200,273)
+        self.assertEqual((self.read(purchase)["step"],self.read(purchase)["code"]),
+                         ("CUSTOMER_MIGRATION","CZ07_BATCH_200_OF_473"))
+        with self.db() as db:
+            db.execute("UPDATE cloudzy_cz07_jobs SET status='VERIFYING',moved=473 "
+                       "WHERE id=?", (job,))
+            q._log(db,job,"VERIFYING","AWAITING_BUSINESS_E2E",473,0)
+        self.assertEqual(self.read(purchase)["state"], "NEEDS_ATTESTATION")
+        with self.assertRaisesRegex(UnifiedLinkHold,
+                                    "CZ07_INDEPENDENT_ACCEPTANCE_REQUIRED"):
+            with self.db() as db:
+                db.execute("UPDATE cloudzy_cz07_jobs SET status='DONE' WHERE id=?",
+                           (job,))
+                q._log(db,job,"DONE","BUSINESS_E2E_ACCEPTED",473,0)
+        self.assertEqual(self.read(purchase)["state"], "NEEDS_ATTESTATION")
+        with self.db() as db:
+            db.execute(
+                "INSERT INTO cloudzy_cz07_acceptance "
+                "(job_id,actor,at,create_ref,renew_ref,client_ref) "
+                "VALUES (?,?,?,?,?,?)",
+                (job,17,100,"create-test","renew-test","isp-test"))
+            db.execute("UPDATE cloudzy_cz07_jobs SET status='DONE' WHERE id=?",
+                       (job,))
+            q._log(db,job,"DONE","BUSINESS_E2E_ACCEPTED",473,0)
+        self.assertEqual((self.read(purchase)["state"],self.read(purchase)["step"]),
+                         ("COMPLETED","FINAL_VERIFY"))
+
     def test_guarded_phase5_is_the_route_executor_type(self):
         source=(Path(__file__).parent.parent/"bot_final_v49-2.py").read_text()
         self.assertIn("from cloudzy_cz04b_guarded import GuardedCloudzy04B",

@@ -338,10 +338,14 @@ class DurableCoordinator:
             self._worker(r, worker, fencing, self._now())
             if r["cancel_requested"] or r["state"] != "RUNNING":
                 raise OperationHold("CANCEL_OR_STAGE_CHANGED")
+            # An attestation pause must not retain an immortal worker lease.
+            # It remains non-claimable until a phase-specific proof adapter exists.
+            waiting_for_human = state == "NEEDS_ATTESTATION"
             return self._transition(
                 db, r, state=state, step=step, code=code,
                 event="EXTERNAL_INTENT" if external_intent else "CHECKPOINT",
-                worker=worker, deadline=r["deadline"],
+                worker=None if waiting_for_human else worker,
+                deadline=None if waiting_for_human else r["deadline"],
                 external_intent=bool(r["external_intent"] or external_intent)
             )
 
@@ -368,9 +372,9 @@ class DurableCoordinator:
             self._version(r, expected_version)
             if r["state"] in FINISHED or r["cancel_requested"]:
                 return r["state"]
-            if (r["state"] in ("PLANNED", "PAUSED_SAFE")
+            if (r["state"] in ("PLANNED", "PAUSED_SAFE", "NEEDS_ATTESTATION")
                     and not r["external_intent"] and not r["worker"]
-                    and r["step"] == "PREFLIGHT"):
+                    and (r["step"] == "PREFLIGHT" or r["state"] == "NEEDS_ATTESTATION")):
                 state, code = "CANCELLED_SAFE", "NO_EFFECT_CANCEL"
             elif r["state"] in WORKING:
                 state, code = "CANCELLATION_REQUESTED", "STOP_AT_SAFE_CHECKPOINT"

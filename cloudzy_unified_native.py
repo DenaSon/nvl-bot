@@ -227,3 +227,82 @@ def observe_cz06_status(db, *, operation_id, stage, now=None):
         db, operation_id, step=step[0], state=step[1],
         code=step[2], now=now,
     )
+
+
+_CZ07_STATES = frozenset((
+    "QUEUED", "ROUTING", "MIGRATING", "PAUSED_SAFE",
+    "VERIFYING", "HOLD", "ABORTED", "DONE",
+))
+
+
+def observe_cz07_status(db, *, job_id, expected_status, now=None):
+    """Mirror committed CZ07 transitions; never invent provider/user E2E proof.
+
+    This runs inside the *native CZ07 transaction*. For an old source receipt
+    lacking a new unified link, simply leave its historical journals alone.
+    """
+    _assert_identity(job_id)
+    row = db.execute(
+        "SELECT cz06_operation,actor,chat,source,target,provider_id,"
+        "status,moved,total FROM cloudzy_cz07_jobs WHERE id=?", (job_id,)
+    ).fetchone()
+    if not row or row[6] != expected_status or expected_status not in _CZ07_STATES:
+        raise UnifiedLinkHold("CZ07_NATIVE_STATUS_UNVERIFIED")
+    origin, actor, chat, _source, target, provider_id, _status, moved, total = row
+    link = _linked(db, origin)
+    if link is None:
+        return False
+    if (actor, chat) != (link[1], link[2]):
+        raise UnifiedLinkHold("CZ07_UNIFIED_OWNER_MISMATCH")
+    provider = db.execute(
+        "SELECT actor_id,chat_id,provider_server_id,public_ipv4 "
+        "FROM cloudzy_edge_operations WHERE id=?", (origin,)
+    ).fetchone()
+    if (not provider or tuple(provider) !=
+            (actor, chat, provider_id, target)):
+        raise UnifiedLinkHold("CZ07_UNIFIED_PROVIDER_MISMATCH")
+    if type(moved) is not int or type(total) is not int or not 0 <= moved <= total:
+        raise UnifiedLinkHold("CZ07_UNIFIED_COUNT_INVALID")
+    if expected_status == "DONE":
+        if moved != total:
+            raise UnifiedLinkHold("CZ07_UNIFIED_FINAL_COUNT_MISMATCH")
+        if not db.execute(
+            "SELECT 1 FROM cloudzy_cz07_acceptance "
+            "WHERE job_id=? AND actor=? AND create_ref!='' "
+            "AND renew_ref!='' AND client_ref!=''",
+            (job_id, actor),
+        ).fetchone():
+            raise UnifiedLinkHold("CZ07_INDEPENDENT_ACCEPTANCE_REQUIRED")
+        step, state, code = (
+            "FINAL_VERIFY", "COMPLETED", "CZ07_INDEPENDENT_E2E_ACCEPTED")
+    elif expected_status == "VERIFYING":
+        if moved != total:
+            raise UnifiedLinkHold("CZ07_FINAL_VERIFICATION_PREMATURE")
+        step, state, code = (
+            "FINAL_VERIFY", "NEEDS_ATTESTATION", "CZ07_BUSINESS_E2E_REQUIRED")
+    elif expected_status == "QUEUED":
+        step, state, code = (
+            "DNS_CUTOVER", "WAITING_EXTERNAL", "CZ07_ROUTE_APPROVAL_QUEUED")
+    elif expected_status == "ROUTING":
+        step, state, code = (
+            "DNS_CUTOVER", "WAITING_EXTERNAL", "CZ07_DNS_EFFECT_UNCERTAIN")
+    elif expected_status == "MIGRATING":
+        step, state, code = (
+            "CUSTOMER_MIGRATION", "WAITING_EXTERNAL",
+            f"CZ07_BATCH_{moved}_OF_{total}")
+    elif expected_status == "PAUSED_SAFE":
+        step, state, code = (
+            "CUSTOMER_MIGRATION", "NEEDS_OPERATOR",
+            "CZ07_PAUSED_AT_BATCH_BOUNDARY")
+    else:
+        step, state, code = (
+            "CUSTOMER_MIGRATION" if moved else "DNS_CUTOVER",
+            "NEEDS_OPERATOR",
+            "CZ07_ORIGINAL_JOURNAL_RECONCILE_REQUIRED")
+    # After a CZ07 job has started routing, the effect risk cannot be
+    # cleared by a UI event or by an unrelated administrative action.
+    return _record(
+        db, origin, step=step, state=state, code=code,
+        now=now, external_intent=expected_status in (
+            "ROUTING", "MIGRATING", "PAUSED_SAFE", "VERIFYING", "DONE"),
+    )

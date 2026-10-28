@@ -77,6 +77,46 @@ def assert_original_card(db, *, kind, operation_id, actor, chat, message_id):
         raise RichViewHold("RICH_CARD_NOT_ACKNOWLEDGED")
 
 
+_PUBLIC_FAILURES = {
+    "PRIOR_TELEGRAM_DELIVERY_UNCERTAIN":
+        "⚠️ نتیجه ارسال قبلی مشخص نیست. برای جلوگیری از پیام تکراری، "
+        "ارسال دوباره متوقف شده؛ وضعیت Outbox را بررسی کنید.",
+    "TELEGRAM_MESSAGE_UNAVAILABLE":
+        "⚠️ تلگرام پیام Rich را نپذیرفت. کد: TELEGRAM_MESSAGE_UNAVAILABLE",
+    "TELEGRAM_DELIVERY_UNCERTAIN":
+        "⚠️ پاسخ تلگرام نامشخص است. وضعیت ارسال را در Outbox بررسی کنید.",
+    "RICH_CARD_NOT_ACKNOWLEDGED":
+        "⚠️ این کارت دیگر معتبر نیست. داشبورد را از منوی برنامه‌ها باز کنید.",
+    "RICH_CALLBACK_ORIGIN_INVALID":
+        "⚠️ مبدأ دکمه تأیید نشد. داشبورد را دوباره از منو باز کنید.",
+    "RENDER_SNAPSHOT_STALE":
+        "⚠️ وضعیت عملیات تغییر کرده است. داشبورد را دوباره باز کنید.",
+}
+
+
+async def _admin_feedback(context, *, actor, chat, is_private, text):
+    """Visible diagnostics in the operator's private chat, never in groups.
+
+    This is a plain informational error notice, NOT an HTML Rich-card fallback
+    or a replay of the original Telegram delivery intent.
+    """
+    if is_private is not True or type(actor) is not int or actor != chat:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=chat, text=text, disable_notification=True)
+    except Exception:
+        # Errors in user feedback cannot change a business operation.
+        log.warning("Phase7 Rich feedback delivery unavailable")
+
+
+def _error_message(code):
+    return _PUBLIC_FAILURES.get(
+        code, "⚠️ داشبورد Rich در این درخواست نمایش داده نشد. "
+        "خطای ایمن در لاگ Phase7 ثبت شده است؛ عملیات زیرساخت تغییر نکرده."
+    )
+
+
 def empty_card():
     """No account or Cloudzy credentials exposed in this safe neutral card."""
     return {
@@ -109,6 +149,9 @@ async def handle_rich_admin_callback(
     if not can_view(role=role, actor=actor, chat=chat,
                     is_private=is_private, active_admin_ids=active_admin_ids):
         log.warning("Phase7 Rich access rejected: role/active-admin/private guard")
+        await _admin_feedback(
+            context, actor=actor, chat=chat, is_private=is_private,
+            text="⛔️ دسترسی به داشبورد Rich در این نشست تأیید نشد.")
         return "DENIED"
     try:
         with db_factory() as db:
@@ -131,16 +174,28 @@ async def handle_rich_admin_callback(
                     chat=chat, message_id=getattr(message, "message_id", None))
         api = api_factory(context.bot.token)
         delivery = DurableRichDelivery(db_conn=db_factory, api=api)
-        return await delivery.render_once(
+        result = await delivery.render_once(
             kind=kind, operation_id=reference, actor=actor, chat=chat,
             details=details,
         )
+        if result == "UNCHANGED":
+            await _admin_feedback(
+                context, actor=actor, chat=chat, is_private=is_private,
+                text="📋 کارت Rich این عملیات قبلاً ارسال شده و هنوز تغییری "
+                     "در وضعیت ثبت نشده است. کارت قبلی را در گفتگو ببینید.")
+        return result
     except (RichViewHold, RichDeliveryHold, sqlite3.Error, ValueError) as exc:
         code = str(exc) if isinstance(exc, (RichViewHold, RichDeliveryHold)) \
             else "RICH_DATABASE_UNAVAILABLE"
         # Never log user content, raw provider details, URLs, chat ids or token.
         log.warning("Phase7 Rich UI held: code=%s", code[:90])
+        await _admin_feedback(
+            context, actor=actor, chat=chat, is_private=is_private,
+            text=_error_message(code))
         return "HOLD"
     except Exception:
         log.exception("Phase7 Rich UI unexpected error (no business effects)")
+        await _admin_feedback(
+            context, actor=actor, chat=chat, is_private=is_private,
+            text=_error_message("RICH_UNEXPECTED_ERROR"))
         return "HOLD"

@@ -291,6 +291,76 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.wizard.store.latest()["status"], "REJECTED")
         self.assertFalse(any(isinstance(x, tuple) and x[0] == "create" for x in self.api.calls))
 
+    async def test_transient_cloudzy_read_error_is_friendly_and_safe_to_retry(self):
+        from cloudzy_service import CloudzyError
+        def interrupted_regions():
+            raise CloudzyError("Cloudzy read request failed: TimeoutError PRIVATE")
+        self.api.list_regions = interrupted_regions
+        await self.cb("apps_cz_wizard")
+        self.assertIn("چند ثانیه بعد دوباره تلاش کنید", self.query.text)
+        self.assertIn("هیچ خریدی انجام نشده است", self.query.text)
+        self.assertNotIn("CloudzyError", self.query.text)
+        self.assertNotIn("PRIVATE", self.query.text)
+        self.assertIn("پیگیری: CZ05-", self.query.text)
+        self.assertIsNone(self.wizard.store.latest())
+        self.assertFalse(any(isinstance(c, tuple) and c[0] == "create"
+                             for c in self.api.calls))
+
+    async def test_region_page_transient_get_failure_is_friendly(self):
+        from cloudzy_service import CloudzyError
+        await self.cb("apps_cz_wizard")
+        region = next(cb for cb in self.query.callbacks if cb.startswith("apps_cz_qr_"))
+        self.api.list_plan_availability = lambda x: (_ for _ in ()).throw(
+            CloudzyError("Cloudzy returned invalid JSON PRIVATE"))
+        await self.cb(region)
+        self.assertIn("چند ثانیه بعد دوباره تلاش کنید", self.query.text)
+        self.assertNotIn("CloudzyError", self.query.text)
+        self.assertNotIn("PRIVATE", self.query.text)
+        self.assertIsNone(self.wizard.store.latest())
+
+    async def test_read_http_429_503_are_friendly_and_401_is_not_retryable(self):
+        for status, expected in (
+                (429, "کمی بعد"),
+                (503, "چند ثانیه بعد"),
+                (401, "اعتبار توکن")):
+            with self.subTest(status=status):
+                def failed_regions():
+                    raise CloudzyAPIError(status, "provider PRIVATE data", "secret-code")
+                self.api.list_regions = failed_regions
+                await self.cb("apps_cz_wizard")
+                self.assertIn(expected, self.query.text)
+                self.assertNotIn("PRIVATE", self.query.text)
+                self.assertNotIn("secret-code", self.query.text)
+                self.assertNotIn("CloudzyAPIError", self.query.text)
+                if status == 401:
+                    self.assertNotIn("دوباره تلاش کنید", self.query.text)
+                self.assertIsNone(self.wizard.store.latest())
+
+    async def test_mutating_callback_never_suggests_blind_retry(self):
+        from cloudzy_service import CloudzyError
+        await self.cb("apps_cz_qsavekey")
+        callback = next(cb for cb in self.query.callbacks if cb.startswith("apps_cz_qkeyyes_"))
+        def failed_add(*args):
+            raise CloudzyError("PRIVATE write failure")
+        self.api.add_ssh_key = failed_add
+        await self.cb(callback)
+        self.assertIn("وضعیت عملیات را بررسی کنید", self.query.text)
+        self.assertIn("درخواست را تکرار نکنید", self.query.text)
+        self.assertNotIn("چند ثانیه بعد", self.query.text)
+        self.assertNotIn("PRIVATE", self.query.text)
+        self.assertEqual(self.api.calls.count("keys"), 1)
+
+    async def test_uncertain_provider_write_still_requires_reconciliation(self):
+        await self.cb("apps_cz_qsavekey")
+        cb = next(c for c in self.query.callbacks if c.startswith("apps_cz_qkeyyes_"))
+        self.api.add_ssh_key = lambda *args: (_ for _ in ()).throw(
+            CloudzyUncertainError("POST /ssh-keys", idempotency_key="PRIVATE"))
+        await self.cb(cb)
+        self.assertIn("خرید را تکرار نکنید", self.query.text)
+        self.assertIn("نتیجه درخواست Cloudzy نامشخص است", self.query.text)
+        self.assertNotIn("چند ثانیه بعد", self.query.text)
+        self.assertNotIn("PRIVATE", self.query.text)
+
     async def test_cz06_disabled_by_default_does_not_purchase(self):
         self.wizard.cz06_enabled = lambda: False
         self.wizard.standby_service = FakeStandby()

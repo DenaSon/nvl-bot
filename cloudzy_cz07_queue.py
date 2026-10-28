@@ -114,7 +114,7 @@ class DurableCutoverQueue:
     def review_acceptance(self, job_id):
         """Read independently authenticated proof; no DB/provider writes."""
         job = self.get(job_id)
-        if not job or job['status'] != 'VERIFYING':
+        if not job or job['status'] not in ('VERIFYING', 'MOVED'):
             return AcceptanceReview(False, 'EVIDENCE_JOB_NOT_ELIGIBLE')
         if self.acceptance_witness is None:
             return AcceptanceReview(False, 'TRUSTED_WITNESS_NOT_CONFIGURED')
@@ -1030,7 +1030,7 @@ class DurableCutoverQueue:
                 item = await asyncio.to_thread(self.get, job_id)
                 if not item or (item["actor"], item["chat"]) != (actor, chat):
                     raise CZ07Hold("BUSINESS_ACCEPT_OWNER_MISMATCH")
-                if item["status"] != "VERIFYING":
+                if item["status"] not in ("VERIFYING", "MOVED"):
                     raise CZ07Hold("BUSINESS_ACCEPT_NOT_READY")
                 proof = await asyncio.to_thread(self.review_acceptance, job_id)
                 if not proof.ready:
@@ -1084,7 +1084,7 @@ class DurableCutoverQueue:
                         or data != "apps_cz7_accept_go_"+session.get("nonce", "")):
                     raise CZ07Hold("BUSINESS_ACCEPT_SESSION_EXPIRED")
                 item = await asyncio.to_thread(self.get, session["job"])
-                if (not item or item["status"] != "VERIFYING"
+                if (not item or item["status"] not in ("VERIFYING", "MOVED")
                         or item["updated_at"] != session["updated_at"]
                         or (item["actor"], item["chat"]) != (actor, chat)):
                     raise CZ07Hold("BUSINESS_ACCEPT_SNAPSHOT_CHANGED")
@@ -1303,6 +1303,10 @@ class DurableCutoverQueue:
                              "apps_cz7_accept_review_"+job["id"])])
         if status in ("DONE", "MOVED"):
             rows.insert(0, [("🚀 بررسی انتقال به Standby", "apps_cz7_home")])
+        if ((actor, chat) == (job["actor"], job["chat"])
+                and status == "MOVED"):
+            rows.insert(1, [("🧪 بررسی تست‌های پس از انتقال",
+                             "apps_cz7_accept_review_"+job["id"])])
         if ((actor, chat) == (job["actor"], job["chat"])
                 and status in ("MIGRATING", "PAUSED_SAFE")
                 and not job.get("cancel_requested")

@@ -146,6 +146,43 @@ class RecoverySQLiteTests(unittest.TestCase):
         with self.assertRaises(RecoveryHold):
             commit_standby_resume(self.db, "purchase-1", actor=7, chat=8, now=170)
 
+    def test_completed_transport_does_not_block_existing_install_recovery(self):
+        with self.db() as db:
+            db.execute("INSERT INTO cloudzy_cz07_jobs VALUES ('MOVED')")
+            proof = inspect_inactive_install(db, self.receipt())
+            self.assertEqual(proof["ip"], "8.8.8.8")
+        with self.db() as db:
+            db.execute("UPDATE cloudzy_cz07_jobs SET status='VERIFYING'")
+            with self.assertRaisesRegex(
+                    RecoveryHold, "RECOVERY_OTHER_OPERATION_RUNNING"):
+                inspect_inactive_install(db, self.receipt())
+
+    def test_completed_transport_does_not_block_standby_resume(self):
+        with self.db() as db:
+            db.execute("UPDATE cloudzy_edge_operations SET status='EDGE_READY'")
+            db.execute("INSERT INTO cloudzy_cz07_jobs VALUES ('MOVED')")
+        self.assertEqual(
+            commit_standby_resume(
+                self.db, "purchase-1", actor=7, chat=8, now=150),
+            "STANDBY_VERIFYING")
+        with self.db() as db:
+            self.assertEqual(db.execute(
+                "SELECT stage FROM cloudzy_cz06_runs"
+            ).fetchone()[0], "STANDBY_VERIFYING")
+
+    def test_verifying_migration_still_blocks_standby_resume(self):
+        with self.db() as db:
+            db.execute("UPDATE cloudzy_edge_operations SET status='EDGE_READY'")
+            db.execute("INSERT INTO cloudzy_cz07_jobs VALUES ('VERIFYING')")
+        with self.assertRaisesRegex(
+                RecoveryHold, "RECOVERY_OTHER_OPERATION_RUNNING"):
+            commit_standby_resume(
+                self.db, "purchase-1", actor=7, chat=8, now=150)
+        with self.db() as db:
+            self.assertEqual(db.execute(
+                "SELECT stage FROM cloudzy_cz06_runs"
+            ).fetchone()[0], "HOLD")
+
     def test_standby_resume_blocks_other_leases_and_non_owner(self):
         with self.db() as db:
             db.execute("UPDATE cloudzy_edge_operations SET status='EDGE_READY'")

@@ -270,5 +270,18 @@ class CloudzyServiceTests(unittest.TestCase):
         self.assertIsNone(self.client.delete_server("id", confirm=True))
 
 
+    def test_create_http_409_requires_read_only_reconcile_not_new_post(self):
+        self.session.responses = [FakeResponse({"error": "existing order"}, status=409)]
+        with self.assertRaises(CloudzyUncertainError):
+            self.client.create_server(
+                hostname="nvl-edge-aabbccddeeff", plan_id="plan-1",
+                region="DE-Frankfurt", billing_cycle="hourly",
+                idempotency_key="nvl-cz03-test409", confirm=True)
+        calls = [x for x in self.session.calls if x[0] == "POST"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][2]["headers"]["Idempotency-Key"],
+                         "nvl-cz03-test409")
+
+
 if __name__ == "__main__":
     unittest.main()

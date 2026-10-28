@@ -283,6 +283,10 @@ class DurableCoordinator:
                 raise OperationHold("STATE_NOT_CLAIMABLE")
             if r["external_intent"] or r["cancel_requested"] or r["worker"]:
                 raise OperationHold("RECONCILIATION_REQUIRED")
+            # Until a phase-specific executor exists, resuming after a paid
+            # or DNS boundary is never authorized by the generic coordinator.
+            if r["step"] != "PREFLIGHT":
+                raise OperationHold("STEP_REQUIRES_GUARDED_EXECUTOR")
             generation = r["fencing"] + 1
             self._transition(db, r, state="RUNNING", code="WORKER_CLAIM",
                              event="CLAIM", worker=worker,
@@ -328,6 +332,20 @@ class DurableCoordinator:
                 external_intent=bool(r["external_intent"] or external_intent)
             )
 
+    def pause_no_effect(self, op, *, worker, fencing, expected_version):
+        """Worker yields a verified PRE-FLIGHT checkpoint without external write."""
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            r = self._row(db, op)
+            self._version(r, expected_version)
+            self._worker(r, worker, fencing, self._now())
+            if (r["state"] != "RUNNING" or r["step"] != "PREFLIGHT"
+                    or r["external_intent"] or r["cancel_requested"]):
+                raise OperationHold("PAUSE_REQUIRES_CLEAN_PREFLIGHT")
+            self._transition(db, r, state="PAUSED_SAFE", code="NO_EFFECT_PAUSED",
+                             event="PAUSE", worker=None, deadline=None)
+            return "PAUSED_SAFE"
+
     def request_cancel(self, op, *, actor, chat, expected_version):
         """Idempotent request; active/uncertain effects never force-unlocked."""
         with self.db() as db:
@@ -337,7 +355,9 @@ class DurableCoordinator:
             self._version(r, expected_version)
             if r["state"] in FINISHED or r["cancel_requested"]:
                 return r["state"]
-            if r["state"] == "PLANNED" and not r["external_intent"]:
+            if (r["state"] in ("PLANNED", "PAUSED_SAFE")
+                    and not r["external_intent"] and not r["worker"]
+                    and r["step"] == "PREFLIGHT"):
                 state, code = "CANCELLED_SAFE", "NO_EFFECT_CANCEL"
             elif r["state"] in WORKING:
                 state, code = "CANCELLATION_REQUESTED", "STOP_AT_SAFE_CHECKPOINT"
@@ -425,6 +445,9 @@ class DurableCoordinator:
         """
         if self.external_verified is None or self.external_verified(op) is not True:
             raise OperationHold("TRUSTED_EXTERNAL_EVIDENCE_REQUIRED")
+        # A *stale* lease is not proof that the original task stopped.
+        # This witness must identify the concrete old worker/process.
+        quiescent = self.worker_quiescent is not None and self.worker_quiescent(op) is True
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             r = self._row(db, op)
@@ -435,6 +458,8 @@ class DurableCoordinator:
                 raise OperationHold("STATE_NOT_RECONCILABLE")
             if r["worker"] and r["deadline"] and self._now() < r["deadline"]:
                 raise OperationHold("LIVE_WORKER_NOT_FENCED")
+            if r["worker"] and not quiescent:
+                raise OperationHold("TRUSTED_WORKER_QUIESCENCE_REQUIRED")
             state = "CANCELLED_SAFE" if r["cancel_requested"] else "PAUSED_SAFE"
             self._transition(db, r, state=state, code="EXTERNAL_VERIFIED",
                              event="RECONCILED", worker=None, deadline=None,

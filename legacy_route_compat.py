@@ -88,6 +88,19 @@ def repair_local_metadata(conn, *, expected_before, expected_default):
     plan = project_customer_hosts(conn)
     if plan.before != expected_before or plan.default != expected_default:
         raise LegacyRouteHold("OPERATOR_PREVIEW_STALE")
+    # Operator repair must not race any protected DNS/route/customer worker.
+    for table, predicate in (
+        ("failover_operations", "status='RUNNING'"),
+        ("cloudzy_cz04b_operations", "status NOT IN ('READY','DONE','ABORTED')"),
+        ("cloudzy_cz07_jobs", "status NOT IN ('DONE','ABORTED')"),
+    ):
+        if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,)
+        ).fetchone() and conn.execute(
+                f"SELECT 1 FROM {table} WHERE {predicate} LIMIT 1"
+        ).fetchone():
+            raise LegacyRouteHold("UNRESOLVED_ROUTE_OPERATION")
     if conn.execute(
         "UPDATE settings SET value=? WHERE key='hosts' AND value=?",
         (plan.after, expected_before)
@@ -110,16 +123,9 @@ def validate_customer_host_edit(conn, raw):
         raise LegacyRouteHold("LEGACY_HOSTS_MALFORMED")
     if hosts[0] != plan.default:
         raise LegacyRouteHold("LEGACY_DEFAULT_MUST_BE_FIRST")
-    valid = {
-        h for h, active, standby in conn.execute(
-            "SELECT host,active,is_standby FROM host_pool"
-        ) if active and not standby
-    }
-    core = conn.execute(
-        "SELECT value FROM settings WHERE key='core_wg_public_ip'"
-    ).fetchone()
-    if core:
-        valid.discard(core[0])
+    # A text editor cannot silently promote unlisted inventory to a customer
+    # endpoint; operator-reviewed hpact/Edge onboarding is the only admission.
+    valid = set(plan.after.split(","))
     if any(h not in valid for h in hosts):
         raise LegacyRouteHold("LEGACY_HOST_NOT_CUSTOMER_ELIGIBLE")
     return tuple(hosts)

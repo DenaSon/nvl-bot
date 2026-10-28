@@ -26,6 +26,12 @@ class GuardedRouteTests(unittest.IsolatedAsyncioTestCase):
     async def route(self):
         await self.fixture.confirmed_route()
 
+    async def preview_only(self):
+        await self.fixture.cb("apps_cz5_home")
+        chosen = next(c for c in self.fixture.q.callbacks
+                      if c.startswith("apps_cz5_target_"))
+        await self.fixture.cb(chosen)
+
     def state(self):
         with self.fixture.db() as db:
             route = db.execute(
@@ -81,7 +87,7 @@ class GuardedRouteTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_provider_read_veto_before_lease(self):
         self.fixture.provider_good = False
-        await self.route()
+        await self.preview_only()
         self.assertEqual(self.state(),(SRC,None,None))
         self.assertEqual(self.fixture.dns.calls, [])
 
@@ -116,7 +122,7 @@ class GuardedRouteTests(unittest.IsolatedAsyncioTestCase):
                 with self.fixture.db() as db:
                     db.execute("UPDATE settings SET value=? WHERE key='hosts'",
                                (new_hosts,))
-                await self.route()
+                await self.preview_only()
                 self.assertEqual(self.state(),(SRC,None,None))
                 self.assertEqual(self.fixture.dns.calls,[])
                 with self.fixture.db() as db:
@@ -129,7 +135,7 @@ class GuardedRouteTests(unittest.IsolatedAsyncioTestCase):
                 "INSERT INTO failover_operations "
                 "(mode,source_host,target_host,status) VALUES "
                 "('manual',?,?,'RUNNING')",(SRC,DST))
-        await self.route()
+        await self.preview_only()
         self.assertEqual(self.fixture.dns.calls, [])
         self.assertEqual(self.state(),(SRC,None,"RUNNING"))
 

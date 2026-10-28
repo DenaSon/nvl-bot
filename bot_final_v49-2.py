@@ -7303,6 +7303,14 @@ _cloudzy_07 = DurableCutoverQueue(
     enabled=lambda: os.environ.get("NVL_CZ07_ENABLE", "0") == "1",
 )
 
+# Phase 7 is opt-in and strictly a read-only Rich admin view. No effectful
+# Cloudzy/CZ07 callback is forwarded through this bridge.
+from cloudzy_rich_bridge import (
+    handle_rich_admin_callback as _cloudzy_rich_admin_callback,
+    rich_enabled as _cloudzy_rich_enabled,
+    configured_admin_ids as _cloudzy_rich_admin_ids,
+)
+
 
 def _cloudzy_markup(rows):
     return InlineKeyboardMarkup([
@@ -7313,7 +7321,7 @@ def _cloudzy_markup(rows):
 
 def _build_admin_programs_kb():
     """Infrastructure and operational tools available only to NVL administrators."""
-    return [
+    rows = [
         [InlineKeyboardButton("☁️ Cloudzy | Edge و Relay", callback_data="apps_cz_home")],
         [
             InlineKeyboardButton("🖥 نودها", callback_data="apps_marzban_nodes"),
@@ -7325,6 +7333,12 @@ def _build_admin_programs_kb():
         ],
         [InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")],
     ]
+    if _cloudzy_rich_enabled() and _cloudzy_rich_admin_ids():
+        rows.insert(1, [InlineKeyboardButton(
+            "🚀 Unified Edge | داشبورد Rich",
+            callback_data="apps_cz_rich_home",
+        )])
+    return rows
 
 
 async def _show_admin_programs_hub(target, context):
@@ -16427,6 +16441,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     # ---------------- Programs / operational tools ----------------
+    # Read-only Rich card entry/refresh/details. The bridge rechecks explicit
+    # feature flag, private admin allowlist, owner and original message pointer.
+    # The input never reaches Cloudzy purchase/DNS, CZ07 mutation or K2.
+    if d == "apps_cz_rich_home" or d.startswith("u7:"):
+        await _cloudzy_rich_admin_callback(
+            data=d, query=query, context=context, db_factory=db_conn,
+            role=role, actor=update.effective_user.id,
+            chat=update.effective_chat.id,
+            is_private=(getattr(update.effective_chat, "type", None) == "private"),
+        )
+        return
     if d == 'apps_home':
         context.user_data.pop("mza_nodes_origin", None)
         await _show_admin_programs_hub(query, context)

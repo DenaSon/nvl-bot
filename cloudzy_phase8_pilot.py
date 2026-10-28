@@ -130,14 +130,15 @@ def evaluate_pilot(db, *, phase, expected_target=None,
             tuple(next_checks), tuple(facts))
     # Only a CZ06 READY target with exact provider/host_pool match is a
     # candidate. No inferred manual standby and no IP-only correlation.
-    chosen = _candidate(db)
+    chosen = _candidate(db) if phase == "cutover" else None
     target = _ip(chosen[0]) if chosen else ""
-    if not target:
-        blocks.append("NO_VERIFIED_CZ06_STANDBY")
-    if expected_target is not None and target != expected_target:
-        blocks.append("TARGET_PROVIDER_IDENTITY_MISMATCH")
-    if chosen:
-        facts.append(f"PROVIDER_REFERENCE_PRESENT:{bool(chosen[1])}")
+    if phase == "cutover":
+        if not target:
+            blocks.append("NO_VERIFIED_CZ06_STANDBY")
+        if expected_target is not None and target != expected_target:
+            blocks.append("TARGET_PROVIDER_IDENTITY_MISMATCH")
+        if chosen:
+            facts.append(f"PROVIDER_REFERENCE_PRESENT:{bool(chosen[1])}")
     # These checks must not bypass the original 6G or CZ04A/CZ04B fences.
     if _running(db, "failover_operations", "status='RUNNING'"):
         blocks.append("ORIGINAL_6G_LEASE_BUSY")
@@ -200,6 +201,9 @@ def evaluate_pilot(db, *, phase, expected_target=None,
                 blocks.append("CZ07_JOB_MISSING")
             else:
                 _job, state, _old, final_target, moved, total, actor = row
+                target = _ip(final_target)
+                if expected_target is not None and target != expected_target:
+                    blocks.append("TARGET_PROVIDER_IDENTITY_MISMATCH")
                 facts.extend((f"CZ07_STATUS:{state}",f"CZ07_MOVED:{moved}",
                               f"CZ07_TOTAL:{total}"))
                 if state != "DONE" or moved != total:
@@ -268,6 +272,7 @@ def main(argv=None):
     db = None
     try:
         db = open_core_readonly(args.db)
+        db.execute("BEGIN")  # one stable read-only SQLite snapshot
         snapshot = live_cloudflare_get() if args.cloudflare_get else None
         report = evaluate_pilot(
             db, phase=args.phase, expected_target=args.expected_target,

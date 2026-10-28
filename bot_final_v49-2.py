@@ -4847,10 +4847,11 @@ def _db_insert_user(un, pw, exp, cr, lim, cnt, agid=0, conn_mode='direct'):
 # «⏳ درحال ساخت» انجام می‌شود؛ چون SQLite این INSERTها را به‌صورت سریالی و اتمیک پردازش
 # می‌کند، اگر دو درخواست همزمان یک یوزرنیم را امتحان کنند فقط یکی موفق می‌شود و دیگری
 # IntegrityError می‌گیرد و یوزرنیم بعدی را امتحان می‌کند.
-def _db_reserve_username(br: str, start_counter: int, max_attempts: int = 300):
+def _db_reserve_username(br: str, start_counter: int, max_attempts: int = 300, *, ssh=False):
     c = start_counter
     for _ in range(max_attempts):
-        candidate = f"{br}{c:04d}"
+        # Change only the main SSH brand; V2Ray and custom agent names stay unchanged.
+        candidate = f"{br}-{c:04d}" if ssh and br == "nevel" else f"{br}{c:04d}"
         with db_conn() as conn:
             try:
                 conn.execute(
@@ -4948,7 +4949,9 @@ def _db_get_prefix_start_counter(br: str) -> int:
     with db_conn() as conn:
         rows = conn.execute("SELECT username FROM ssh_accounts WHERE username LIKE ?", (f"{br}%",)).fetchall()
     max_n = 0
-    pat = re.compile(rf'^{re.escape(br)}(\d+)$')
+    # Recognize both legacy nevelNNNN and new nevel-NNNN account sequences.
+    pat = re.compile(rf'^{re.escape(br)}-?(\d+)$' if br == 'nevel'
+                     else rf'^{re.escape(br)}(\d+)$')
     for (un,) in rows:
         mtc = pat.match(un or "")
         if mtc:
@@ -11112,10 +11115,7 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
                     f"لطفاً از منوی اصلی ابتدا حساب خود را شارژ کنید.{extra}", parse_mode="HTML")
                 return
 
-        br = _resolve_username_prefix(role, ainf)
-        if br is None:
-            br = (await asyncio.to_thread(_db_get_setting, 'brand', 'NeVeL')).lower().strip()
-            br = re.sub(r'[^a-z0-9]', '', br) or "nevel"
+        br = _resolve_username_prefix(role, ainf) or 'nevel'  # default SSH brand
         c_start = await asyncio.to_thread(_db_get_prefix_start_counter, br)
 
         with contextlib.suppress(Exception):
@@ -11147,7 +11147,7 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
 
         for i in range(count):
             # گام ۱: رزرو اتمیک یوزرنیم
-            un, c = await asyncio.to_thread(_db_reserve_username, br, c + 1)
+            un, c = await asyncio.to_thread(_db_reserve_username, br, c + 1, ssh=True)
             if un is None:
                 failed_msg = "❌ خطا: امکان یافتن یوزرنیم آزاد وجود ندارد."
                 break
@@ -11155,7 +11155,7 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
             os_retries = 0
             while await _os_user_exists(un, target_host, target_port) and os_retries < MAX_OS_RETRIES:
                 await asyncio.to_thread(_db_cancel_reservation, un)
-                un, c = await asyncio.to_thread(_db_reserve_username, br, c + 1)
+                un, c = await asyncio.to_thread(_db_reserve_username, br, c + 1, ssh=True)
                 if un is None:
                     failed_msg = "❌ خطا: امکان یافتن یوزرنیم آزاد وجود ندارد."
                     break
@@ -11182,7 +11182,7 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
                 if is_duplicate and useradd_retries < MAX_OS_RETRIES:
                     log.warning("useradd (bulk) برای %s با «already exists» شکست خورد؛ تلاش با یوزرنیم بعدی...", un)
                     await asyncio.to_thread(_db_cancel_reservation, un)
-                    un, c = await asyncio.to_thread(_db_reserve_username, br, c + 1)
+                    un, c = await asyncio.to_thread(_db_reserve_username, br, c + 1, ssh=True)
                     if un is None:
                         failed_msg = "❌ خطا: امکان یافتن یوزرنیم آزاد وجود ندارد."
                         break
@@ -23881,14 +23881,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.edit_message_text(f"❌ <b>موجودی ناکافی!</b>\n\n💰 موجودی شما: {int(ainf[2]):,} تومان\n💳 هزینه این اکانت: {int(cost):,} تومان\n\nلطفاً از منوی اصلی ابتدا حساب خود را شارژ کنید.{extra}", parse_mode="HTML")
                     return
 
-            br = _resolve_username_prefix(role, ainf)
-            if br is None:
-                br = (await asyncio.to_thread(_db_get_setting, 'brand', 'NeVeL')).lower().strip()
-                br = re.sub(r'[^a-z0-9]', '', br) or "nevel"
+            br = _resolve_username_prefix(role, ainf) or 'nevel'  # default SSH brand
             c_start = await asyncio.to_thread(_db_get_prefix_start_counter, br)
 
             # گام ۱: رزرو اتمیک یوزرنیم (این خودش هم‌زمانی دو خرید را بدون تداخل مدیریت می‌کند)
-            un, c = await asyncio.to_thread(_db_reserve_username, br, c_start)
+            un, c = await asyncio.to_thread(_db_reserve_username, br, c_start, ssh=True)
             if un is None:
                 await query.message.reply_text("❌ خطا: امکان یافتن یوزرنیم آزاد وجود ندارد. لطفاً شمارنده را از «⚙️ تنظیمات سرور» بازبینی کنید.")
                 return
@@ -23917,7 +23914,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target_port = await asyncio.to_thread(_db_get_host_service_port, target_host, 22)
             while await _os_user_exists(un, target_host, target_port) and os_retries < MAX_OS_RETRIES:
                 await asyncio.to_thread(_db_cancel_reservation, un)
-                un, c = await asyncio.to_thread(_db_reserve_username, br, c + 1)
+                un, c = await asyncio.to_thread(_db_reserve_username, br, c + 1, ssh=True)
                 if un is None:
                     await query.message.reply_text("❌ خطا: امکان یافتن یوزرنیم آزاد وجود ندارد.")
                     return
@@ -23941,7 +23938,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if is_duplicate and useradd_retries < MAX_OS_RETRIES:
                     log.warning("useradd برای %s با «already exists» شکست خورد؛ تلاش خودکار با یوزرنیم بعدی...", un)
                     await asyncio.to_thread(_db_cancel_reservation, un)
-                    un, c = await asyncio.to_thread(_db_reserve_username, br, c + 1)
+                    un, c = await asyncio.to_thread(_db_reserve_username, br, c + 1, ssh=True)
                     if un is None:
                         await query.message.reply_text("❌ خطا: امکان یافتن یوزرنیم آزاد وجود ندارد.")
                         return

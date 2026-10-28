@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from cloudzy_rich_bridge import (
-    ENTRY, can_view, empty_card,
+    ENTRY, ENTRY_MIGRATION, can_view, empty_card,
     handle_rich_admin_callback, latest_owned_operation,
 )
 from cloudzy_rich_transport import RichDeliveryHold
@@ -27,11 +27,11 @@ class NoNetworkAPI:
 
     async def send(self, *, chat_id, rich_message):
         self.calls.append(("SEND", chat_id, rich_message))
-        return 123
+        return 122 + sum(call[0] == "SEND" for call in self.calls)
 
     async def edit(self, *, chat_id, message_id, rich_message):
         self.calls.append(("EDIT", chat_id, rich_message))
-        assert message_id == 123
+        assert message_id >= 123
         return True
 
 
@@ -157,10 +157,10 @@ class Phase7BridgeTests(unittest.TestCase):
         self.assertEqual(self.open(ENTRY), "SENT")
         self.assertEqual(self.open("u7:d:uo:"+C, message_id=123), "SENT")
         self.assertEqual(self.open("u7:r:uo:"+C, message_id=123), "SENT")
-        self.assertEqual(self.open("u7:r:uo:"+C, message_id=123), "UNCHANGED")
-        self.assertIn("قبلاً ارسال", self.context.bot.messages[-1][1])
+        self.assertEqual(self.open("u7:r:uo:"+C, message_id=123), "SENT")
+        self.assertEqual(self.context.bot.messages, [])
         self.assertEqual([item[0] for item in NoNetworkAPI.calls],
-                         ["SEND","EDIT","EDIT"])
+                         ["SEND","EDIT","EDIT","EDIT"])
         for forged in (
             "u7:d:uo:"+B,    # other owner's account / ID
             "u7:x:uo:"+C,    # mutation prefix forbidden
@@ -171,7 +171,35 @@ class Phase7BridgeTests(unittest.TestCase):
         self.assertEqual(self.open("u7:d:uo:"+C,message_id=999), "HOLD")
         self.assertEqual(self.open("u7:d:uo:"+C,actor=9,chat=9,
                                    message_id=123), "HOLD")
-        self.assertEqual(len(NoNetworkAPI.calls),3)
+        self.assertEqual(len(NoNetworkAPI.calls),4)
+
+    def test_repeat_open_creates_fresh_card_but_old_callbacks_fail_closed(self):
+        self.assertEqual(self.open(ENTRY), "SENT")
+        self.assertEqual(self.open(ENTRY), "SENT")
+        self.assertEqual([c[0] for c in NoNetworkAPI.calls], ["SEND", "SEND"])
+        self.assertNotEqual(NoNetworkAPI.calls[0][2], NoNetworkAPI.calls[1][2])
+        with self.db_conn() as db:
+            pointer = db.execute(
+                "SELECT message_id,delivered_version FROM "
+                "cloudzy_rich_message_pointers WHERE kind='UO'"
+            ).fetchone()
+            self.assertEqual(pointer, (124, 4))
+        self.assertEqual(self.open("u7:r:uo:"+C, message_id=123), "HOLD")
+        self.assertEqual(self.open("u7:r:uo:"+C, message_id=124), "SENT")
+        self.assertEqual([c[0] for c in NoNetworkAPI.calls],
+                         ["SEND", "SEND", "EDIT"])
+
+    def test_migration_view_shows_old_cz07_instead_of_latest_uo(self):
+        with self.db_conn() as db:
+            self.assertEqual(latest_owned_operation(
+                db, actor=7, chat=7, only_kind="CZ07"), ("CZ07", A))
+        self.assertEqual(self.open(ENTRY_MIGRATION), "SENT")
+        card = NoNetworkAPI.calls[-1][2]
+        text = str(card)
+        self.assertIn("200/488", text)
+        self.assertIn("پذیرش نهایی", text)
+        self.assertEqual(self.open("u7:r:cz07:"+A, message_id=123), "SENT")
+        self.assertEqual([c[0] for c in NoNetworkAPI.calls], ["SEND", "EDIT"])
 
     def test_rich_holds_and_denials_have_safe_visible_feedback(self):
         self.assertEqual(self.open(
@@ -227,7 +255,7 @@ class Phase7BridgeTests(unittest.TestCase):
     def test_business_callback_routes_still_unchanged_in_source(self):
         """Verify Rich branch occurs BEFORE original CZ07 and is read-only."""
         source=(Path(__file__).parent.parent/"bot_final_v49-2.py").read_text()
-        entry=source.index('if d == "apps_cz_rich_home" or d.startswith("u7:")')
+        entry=source.index('if d in ("apps_cz_rich_home", "apps_cz_rich_migration") or d.startswith("u7:")')
         existing=source.index('elif d.startswith("apps_cz7_")')
         self.assertLess(entry,existing)
         self.assertIn('await _cloudzy_rich_admin_callback(',source)

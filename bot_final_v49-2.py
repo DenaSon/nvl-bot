@@ -7334,8 +7334,12 @@ def _build_admin_programs_kb(*, actor=None, chat=None, active_admin_ids=()):
     if (type(actor) is int and type(chat) is int
             and actor > 0 and actor == chat and actor in active_admin_ids):
         rows.insert(1, [InlineKeyboardButton(
-            "🚀 Unified Edge | داشبورد Rich",
+            "📊 مرکز عملیات Edge",
             callback_data="apps_cz_rich_home",
+        )])
+        rows.insert(2, [InlineKeyboardButton(
+            "📦 گزارش انتقال کاربران SSH",
+            callback_data="apps_cz_rich_migration",
         )])
     return rows
 
@@ -16445,7 +16449,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Read-only Rich card entry/refresh/details. Recheck live active-admin
     # membership, private chat, original journal owner and message pointer.
     # The input never reaches Cloudzy purchase/DNS, CZ07 mutation or K2.
-    if d == "apps_cz_rich_home" or d.startswith("u7:"):
+    if d in ("apps_cz_rich_home", "apps_cz_rich_migration") or d.startswith("u7:"):
         active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
         await _cloudzy_rich_admin_callback(
             data=d, query=query, context=context, db_factory=db_conn,

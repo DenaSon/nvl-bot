@@ -15,6 +15,7 @@ from cloudzy_rich_transport import (
 
 log = logging.getLogger(__name__)
 ENTRY = "apps_cz_rich_home"
+ENTRY_MIGRATION = "apps_cz_rich_migration"
 PREFIX = "u7:"
 
 
@@ -37,10 +38,13 @@ def _table_exists(db, name):
     ).fetchone())
 
 
-def latest_owned_operation(db: sqlite3.Connection, *, actor, chat):
+def latest_owned_operation(db: sqlite3.Connection, *, actor, chat,
+                           only_kind=None):
     """SELECT-only; absent tables, invalid IDs and other owners stay invisible."""
     if type(actor) is not int or type(chat) is not int or actor != chat:
         raise RichViewHold("OPERATOR_IDENTITY_INVALID")
+    if only_kind not in (None, "CZ07"):
+        raise RichViewHold("OPERATION_KIND_INVALID")
     hits = []
     if _table_exists(db, "cloudzy_cz07_jobs"):
         for job_id, ts in db.execute(
@@ -49,7 +53,7 @@ def latest_owned_operation(db: sqlite3.Connection, *, actor, chat):
                 (actor, chat)).fetchall():
             if isinstance(job_id, str) and OP_ID.fullmatch(job_id):
                 hits.append((int(ts or 0), "CZ07", job_id))
-    if _table_exists(db, "cloudzy_uo_operations"):
+    if only_kind is None and _table_exists(db, "cloudzy_uo_operations"):
         for op_id, ts in db.execute(
                 "SELECT id,updated_at FROM cloudzy_uo_operations "
                 "WHERE actor=? AND chat=? ORDER BY updated_at DESC,id DESC LIMIT 3",
@@ -86,7 +90,7 @@ _PUBLIC_FAILURES = {
     "TELEGRAM_DELIVERY_UNCERTAIN":
         "⚠️ پاسخ تلگرام نامشخص است. وضعیت ارسال را در Outbox بررسی کنید.",
     "RICH_CARD_NOT_ACKNOWLEDGED":
-        "⚠️ این کارت دیگر معتبر نیست. داشبورد را از منوی برنامه‌ها باز کنید.",
+        "⚠️ این کارت قدیمی است؛ مرکز عملیات Edge را دوباره از منوی برنامه‌ها باز کنید.",
     "RICH_CALLBACK_ORIGIN_INVALID":
         "⚠️ مبدأ دکمه تأیید نشد. داشبورد را دوباره از منو باز کنید.",
     "RENDER_SNAPSHOT_STALE":
@@ -112,7 +116,7 @@ async def _admin_feedback(context, *, actor, chat, is_private, text):
 
 def _error_message(code):
     return _PUBLIC_FAILURES.get(
-        code, "⚠️ داشبورد Rich در این درخواست نمایش داده نشد. "
+        code, "⚠️ کارت وضعیت عملیات نمایش داده نشد. "
         "خطای ایمن در لاگ Phase7 ثبت شده است؛ عملیات زیرساخت تغییر نکرده."
     )
 
@@ -121,7 +125,7 @@ def empty_card():
     """No account or Cloudzy credentials exposed in this safe neutral card."""
     return {
         "blocks": [
-            {"type": "heading", "size": 3, "text": "☁️ داشبورد Unified Edge"},
+            {"type": "heading", "size": 3, "text": "📊 مرکز عملیات Edge"},
             {"type": "paragraph", "text": (
                 "فعلاً پرونده‌ای متعلق به این مدیر در Journal جدید ثبت نشده است."
             )},
@@ -144,19 +148,21 @@ async def handle_rich_admin_callback(
     Failures stay within Rich UI; they never change the underlying operations.
     """
     if not isinstance(data, str) or not (
-            data == ENTRY or data.startswith(PREFIX)):
+            data in (ENTRY, ENTRY_MIGRATION) or data.startswith(PREFIX)):
         return "NOT_OURS"
     if not can_view(role=role, actor=actor, chat=chat,
                     is_private=is_private, active_admin_ids=active_admin_ids):
         log.warning("Phase7 Rich access rejected: role/active-admin/private guard")
         await _admin_feedback(
             context, actor=actor, chat=chat, is_private=is_private,
-            text="⛔️ دسترسی به داشبورد Rich در این نشست تأیید نشد.")
+            text="⛔️ دسترسی به مرکز عملیات Edge در این نشست تأیید نشد.")
         return "DENIED"
     try:
         with db_factory() as db:
-            if data == ENTRY:
-                target = latest_owned_operation(db, actor=actor, chat=chat)
+            if data in (ENTRY, ENTRY_MIGRATION):
+                target = latest_owned_operation(
+                    db, actor=actor, chat=chat,
+                    only_kind="CZ07" if data == ENTRY_MIGRATION else None)
                 if target is None:
                     # The no-op empty-state card is send-only; no business
                     # identity, timer, or action callback is created.
@@ -177,12 +183,9 @@ async def handle_rich_admin_callback(
         result = await delivery.render_once(
             kind=kind, operation_id=reference, actor=actor, chat=chat,
             details=details,
+            fresh=data in (ENTRY, ENTRY_MIGRATION),
+            refresh=data not in (ENTRY, ENTRY_MIGRATION),
         )
-        if result == "UNCHANGED":
-            await _admin_feedback(
-                context, actor=actor, chat=chat, is_private=is_private,
-                text="📋 کارت Rich این عملیات قبلاً ارسال شده و هنوز تغییری "
-                     "در وضعیت ثبت نشده است. کارت قبلی را در گفتگو ببینید.")
         return result
     except (RichViewHold, RichDeliveryHold, sqlite3.Error, ValueError) as exc:
         code = str(exc) if isinstance(exc, (RichViewHold, RichDeliveryHold)) \

@@ -210,6 +210,39 @@ class RichPhase7Tests(unittest.TestCase):
                 "SELECT COUNT(*) FROM cloudzy_rich_delivery_outbox "
                 "WHERE status != 'SENT'").fetchone()[0], 0)
 
+    def test_explicit_live_refresh_and_fresh_entry_keep_safe_outbox(self):
+        api = FakeAPI()
+        delivery = DurableRichDelivery(db_conn=self.factory, api=api,
+                                       now=lambda: 100)
+        kwargs = dict(kind="CZ07", operation_id=OP, actor=7, chat=8)
+        self.assertEqual(asyncio.run(delivery.render_once(
+            **kwargs, fresh=True)), "SENT")
+        self.assertEqual(asyncio.run(delivery.render_once(
+            **kwargs, fresh=True)), "SENT")
+        self.assertEqual(asyncio.run(delivery.render_once(
+            **kwargs, refresh=True)), "SENT")
+        self.assertEqual([x[0] for x in api.calls],
+                         ["send", "send", "edit"])
+        assert api.calls[0][1]["rich_message"] != api.calls[1][1]["rich_message"]
+        assert api.calls[1][1]["rich_message"] != api.calls[2][1]["rich_message"]
+        with self.factory() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM cloudzy_rich_delivery_outbox "
+                "WHERE status='SENT'").fetchone()[0], 3)
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM cloudzy_rich_delivery_outbox "
+                "WHERE status!='SENT'").fetchone()[0], 0)
+        self.assertEqual(self.view().state, "VERIFYING")
+
+    def test_visible_timeline_has_no_manual_client_test_milestone(self):
+        payload = render_card(self.view())
+        text = str(payload)
+        self.assertNotIn("تست اتصال واقعی مشتری", text)
+        self.assertIn("بازبینی آمادگی تغییر مسیر", text)
+        self.assertIn("پذیرش نهایی", text)
+        with self.assertRaisesRegex(RichViewHold, "INVALID_REFRESH_REFERENCE"):
+            render_card(self.view(), refresh_stamp="wrong-stamp")
+
     def test_uncertain_delivery_is_not_replayed_or_business_failure(self):
         api = FakeAPI()
         api.fail = True

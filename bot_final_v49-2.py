@@ -7297,10 +7297,15 @@ _cloudzy_04b = GuardedCloudzy04B(
     enabled=lambda: os.environ.get("NVL_CZ04B_ENABLE", "0") == "1",
 )
 
+# Acceptance proof comes ONLY from a separate authenticated collector.
+# No admin callback can mint or bypass an independent ISP witness.
+from cloudzy_cz07_acceptance import IndependentCZ07Witness
+
 _cloudzy_07 = DurableCutoverQueue(
     db_conn=db_conn,
     cz04b=_cloudzy_04b,
     enabled=lambda: os.environ.get("NVL_CZ07_ENABLE", "0") == "1",
+    acceptance_witness=IndependentCZ07Witness.from_environment(),
 )
 
 # Phase 7 is opt-in and strictly a read-only Rich admin view. No effectful

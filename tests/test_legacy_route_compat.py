@@ -140,6 +140,17 @@ class LegacyHostProjectionTests(unittest.TestCase):
         self.assertEqual(roles,self.db.execute(
             "SELECT * FROM host_pool ORDER BY host").fetchall())
 
+    def test_old_srv_mkactive_does_not_write_default_before_cloudflare(self):
+        source=(Path(__file__).resolve().parents[1] /
+                "bot_final_v49-2.py").read_text()
+        block=source.split('elif d.startswith("srv_mkactive_")')[1]
+        block=block.split('elif d == "srv_wiz_promote_start"')[0]
+        self.assertIn("k2_native_operations_registered()",block)
+        self.assertIn("CZ04B",block)
+        for unsafe in ("_db_set_default_host", "_cf_update_dns_record_sync",
+                       "_update_cloudflare_dns", "spawn_bg_task(_make_edge_active())"):
+            self.assertNotIn(unsafe,block)
+
     def test_existing_telegram_callbacks_no_longer_perform_unjournaled_cutover(self):
         source=(Path(__file__).resolve().parents[1]/
                 "bot_final_v49-2.py").read_text()

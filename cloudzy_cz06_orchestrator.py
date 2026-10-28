@@ -158,36 +158,49 @@ def progress_html(run, receipt, *, now=None):
     )
 
 
-async def promote_standby_once(service, *, actor, chat, host, provider_id):
-    """Re-use CZ-04A protected gates/lease, without its redundant UI approval.
+async def _attest_standby_live(service, host, provider_id, state):
+    """Read-only postcheck; trust no stale host_pool/old promotion alone."""
+    if (state["default"] or state["listed"] or state["users"]
+            or state["auto"] or state["k2_onboard"]):
+        raise QuickRelayHold("STANDBY_ROUTE_OR_AUTOMATION_CHANGED")
+    if await service._provider(provider_id, host) != "active":
+        raise QuickRelayHold("PROVIDER_NOT_ACTIVE")
+    # The existing CZ04A probe is the authoritative fresh SSH/WG/Core-path
+    # preflight. No new install, DNS write, worker or provider POST is allowed.
+    if await service.probe(host, state["port"], state["admin_port"]) is not True:
+        raise QuickRelayHold("FRESH_SSH_WG_PREFLIGHT_FAILED")
 
-    A pre-existing active standby is accepted only after the exact CZ-04A
-    ownership, route-isolation and live provider state checks still pass.
+
+async def promote_standby_once(service, *, actor, chat, host, provider_id):
+    """Adopt/promote one existing Cloudzy Edge with fresh fenced postchecks.
+
+    An already-committed Standby is never accepted from the SQLite flags alone:
+    protected CZ04A/6G gates, exact provider identity, and fresh SSH/WG must
+    pass again, even following bot crashes or ambiguous Telegram delivery.
     """
     if service is None:
         raise QuickRelayHold("STANDBY_ADAPTER_UNAVAILABLE")
     import asyncio
-    state = await asyncio.to_thread(service._state, host, provider_id, mutation=False)
-    if (state["active"] and state["standby"] and not state["default"]
-            and not state["listed"] and state["users"] == 0):
-        status = await service._provider(provider_id, host)
-        if status != "active":
-            raise QuickRelayHold("PROVIDER_NOT_ACTIVE")
-        return "READY"  # Possible restart after committed promotion.
     state = await asyncio.to_thread(service._state, host, provider_id, mutation=True)
+    if state["active"] and state["standby"]:
+        await _attest_standby_live(service, host, provider_id, state)
+        return "READY"  # Reconcile an existing committed Standby; no write.
     service._isolated(state)
-    if state["auto"] or state["k2_onboard"]:
-        raise QuickRelayHold("AUTO_FAILOVER_OR_K2_ENABLED")
-    status = await service._provider(provider_id, host)
-    if status != "active":
-        raise QuickRelayHold("PROVIDER_NOT_ACTIVE")
-    if await service.probe(host, state["port"], state["admin_port"]) is not True:
-        raise QuickRelayHold("FRESH_SSH_WG_PREFLIGHT_FAILED")
-    opid = await asyncio.to_thread(service._reserve, actor, chat, host, provider_id, "relay")
+    await _attest_standby_live(service, host, provider_id, state)
+    opid = await asyncio.to_thread(
+        service._reserve, actor, chat, host, provider_id, "relay")
     try:
         await asyncio.to_thread(service._promote, opid, host, provider_id)
     except Exception:
         await asyncio.to_thread(service._finish, opid, "HOLD",
                                 "CZ06_STANDBY_COMMIT_REQUIRES_REVIEW")
         raise
+    # The DB mutation may have committed even if the following remote
+    # observation fails: HOLD and recover this SAME provider ID; never
+    # re-promote without a fresh verified read.
+    committed = await asyncio.to_thread(
+        service._state, host, provider_id, mutation=True)
+    if not (committed["active"] and committed["standby"]):
+        raise QuickRelayHold("STANDBY_POSTCOMMIT_STATE_UNVERIFIED")
+    await _attest_standby_live(service, host, provider_id, committed)
     return "READY"

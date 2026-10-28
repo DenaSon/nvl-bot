@@ -705,6 +705,38 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         await self.cb("apps_cz_qrecover_" + op["id"])
         self.assertEqual(len(self.provisions), 1)
 
+    async def test_p4_host_key_changes_after_install_must_hold_receipt(self):
+        async def mutates_key(*args):
+            self.provisions.append(args)
+            self.fingerprint[1] = "DIFFERENT-AFTER-INSTALL"
+            return True, "8.8.8.8", {"tunnel_ok": True}
+        self.wizard.provision = mutates_key
+        await self.purchase()
+        await self.cb("apps_cz_operations")
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_")))
+        await self.app.drain()
+        self.assertEqual(self.wizard.store.latest()["status"], "HOLD_PROVISION")
+        self.assertEqual(len(self.provisions), 1)
+        self.assertTrue(any("HOST_KEY_CHANGED_AFTER_INSTALL" in t
+                            for _, t, _ in self.app.bot.messages))
+
+    async def test_p4_core_key_changes_after_install_must_hold_receipt(self):
+        async def changes_core_key(*args):
+            self.provisions.append(args)
+            self.pub = "ssh-ed25519 AAAAChangedUserKey"
+            return True, "8.8.8.8", {"tunnel_ok": True}
+        self.wizard.provision = changes_core_key
+        await self.purchase()
+        await self.cb("apps_cz_operations")
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_")))
+        await self.app.drain()
+        self.assertEqual(self.wizard.store.latest()["status"], "HOLD_PROVISION")
+        self.assertEqual(len(self.provisions), 1)
+        self.assertTrue(any("CORE_IDENTITY_CHANGED_AFTER_INSTALL" in t
+                            for _, t, _ in self.app.bot.messages))
+
     async def test_p4_apt_lock_does_not_retry_or_accept(self):
         async def apt_lock(*args):
             self.provisions.append(args)

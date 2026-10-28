@@ -85,3 +85,53 @@ def classify_db_route(conn, *, source, target):
     if all(v == dst for v in triple):
         return "TARGET"
     return "MIXED_OR_OTHER"
+
+
+def classify_dns_records(records, *, source, target):
+    """Strict exact-record snapshot; missing IDs/TTL or duplicates deny proof."""
+    src, dst = _ip(source), _ip(target)
+    if not isinstance(records, list) or not records:
+        return "UNVERIFIED"
+    names, ids, ips = set(), set(), set()
+    for record in records:
+        if not isinstance(record, dict):
+            return "UNVERIFIED"
+        name, rid, ttl = record.get("name"), record.get("id"), record.get("ttl")
+        if (not isinstance(name, str) or not name
+                or not isinstance(rid, str) or not rid
+                or type(ttl) is not int or ttl < 1
+                or name in names or rid in ids
+                or record.get("proxied") is True):
+            return "UNVERIFIED"
+        names.add(name)
+        ids.add(rid)
+        try:
+            ips.add(_ip(record.get("ip")))
+        except RouteProjectionHold:
+            return "UNVERIFIED"
+    if ips == {src}:
+        return "SOURCE"
+    if ips == {dst}:
+        return "TARGET"
+    return "MIXED_OR_OTHER"
+
+def reconcile_evidence(*, db_route, dns_route, shared_lock_running):
+    """Classification only: even both SOURCE requires proof old worker stopped."""
+    permitted = ("SOURCE", "TARGET", "MIXED_OR_OTHER", "UNVERIFIED")
+    if db_route not in permitted or dns_route not in permitted:
+        raise RouteProjectionHold("ROUTE_CLASSIFICATION_INVALID")
+    if type(shared_lock_running) is not bool:
+        raise RouteProjectionHold("SHARED_LOCK_EVIDENCE_INVALID")
+    if not shared_lock_running:
+        code = "SHARED_6G_OWNERSHIP_UNVERIFIED"
+        action = "INSPECT_ORIGINAL_6G_JOURNAL"
+    elif db_route == dns_route == "SOURCE":
+        code = "SOURCE_CONSISTENT_UNRELEASED"
+        action = "VERIFY_WORKER_QUIESCENT_BEFORE_MANUAL_CLOSE"
+    elif db_route == dns_route == "TARGET":
+        code = "TARGET_CONSISTENT_UNACCEPTED"
+        action = "VERIFY_PROVIDER_SSH_WG_AND_6G_BEFORE_ACCEPTANCE"
+    else:
+        code = "RECONCILE_REQUIRED"
+        action = "DO_NOT_REPLAY_DNS_OR_REVERSE_DEFAULT"
+    return RouteEvidence(db_route, dns_route, code, action)

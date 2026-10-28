@@ -202,7 +202,8 @@ class CoordinatorTests(unittest.TestCase):
             c.reconcile_external(op, actor=self.actor, chat=self.chat,
                                  expected_version=3)
         c = DurableCoordinator(self.db, now=lambda: self.clock,
-                               external_verified=lambda job: job == op)
+                               external_verified=lambda job: job == op,
+                               worker_quiescent=lambda job: job == op)
         self.assertEqual(c.reconcile_external(
             op, actor=self.actor, chat=self.chat, expected_version=3),
             "CANCELLED_SAFE")
@@ -222,6 +223,56 @@ class CoordinatorTests(unittest.TestCase):
         with self.assertRaisesRegex(OperationHold, "LIVE_WORKER_NOT_FENCED"):
             c.reconcile_external(op, actor=self.actor, chat=self.chat,
                                  expected_version=3)
+
+    def test_safe_preflight_pause_and_no_effect_cancel(self):
+        op = self.new()
+        self.claim(op)
+        self.assertEqual(self.c.pause_no_effect(
+            op, worker="worker_123456", fencing=1, expected_version=1
+        ), "PAUSED_SAFE")
+        self.assertEqual(self.c.request_cancel(
+            op, actor=self.actor, chat=self.chat, expected_version=2
+        ), "CANCELLED_SAFE")
+
+    def test_generic_claim_refuses_post_purchase_even_after_reconciliation(self):
+        op = self.new()
+        self.claim(op)
+        self.c.checkpoint(
+            op, worker="worker_123456", fencing=1, expected_version=1,
+            step="PURCHASE", state="WAITING_EXTERNAL", external_intent=True
+        )
+        self.c.request_cancel(op, actor=self.actor, chat=self.chat,
+                              expected_version=2)
+        self.clock = 1061
+        # Cancelling an ambiguous purchase may be closed, but never resumed.
+        c = DurableCoordinator(
+            self.db, now=lambda: self.clock,
+            external_verified=lambda _: True,
+            worker_quiescent=lambda _: True
+        )
+        self.assertEqual(c.reconcile_external(
+            op, actor=self.actor, chat=self.chat, expected_version=3
+        ), "CANCELLED_SAFE")
+        with self.assertRaisesRegex(OperationHold, "STATE_NOT_CLAIMABLE"):
+            c.claim(op, actor=self.actor, chat=self.chat,
+                    worker="worker_second", expected_version=4)
+
+    def test_expired_external_lease_cannot_reconcile_without_quiescence(self):
+        op = self.new()
+        self.claim(op)
+        self.c.checkpoint(
+            op, worker="worker_123456", fencing=1, expected_version=1,
+            step="PURCHASE", state="WAITING_EXTERNAL", external_intent=True
+        )
+        self.clock = 1061
+        c = DurableCoordinator(
+            self.db, now=lambda: self.clock,
+            external_verified=lambda _: True
+        )
+        with self.assertRaisesRegex(OperationHold, "TRUSTED_WORKER_QUIESCENCE_REQUIRED"):
+            c.reconcile_external(
+                op, actor=self.actor, chat=self.chat, expected_version=2
+            )
 
     def test_adversarial_codes_never_enter_journal(self):
         op = self.new()

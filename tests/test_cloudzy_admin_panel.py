@@ -242,8 +242,8 @@ class Phase1PanelTests(unittest.TestCase):
         self.assertNotIn('callback_data="hpeg_status"', menu)
         for original in ('elif d in ("hp_addedge", "hpeg_wizard")',
                          'elif d.startswith("srv_mkactive_")',
-                         'elif d.startswith("hpdefmig_yes_")',
-                         'elif d.startswith("hpdef_")',
+                         'elif d.startswith(("hpdef_migrate_", "hpdefmig_yes_", "hpdef_"))',
+                         'elif d.startswith(("hpdef_migrate_", "hpdefmig_yes_", "hpdef_"))',
                          'elif d == "hpeg_status"'):
             self.assertIn(original, source)
         self.assertIn('elif d.startswith("apps_cz_")', source)

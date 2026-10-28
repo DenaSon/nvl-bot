@@ -13535,9 +13535,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await asyncio.to_thread(_db_update_setting, 'brand', text.strip()); await update.message.reply_text("✅ برند تغییر یافت."); safe_clear_context(context); await show_main_menu(update, context)
     elif state == 'HOSTS_INPUT':
         new_hosts = [h.strip() for h in text.replace(" ", "").split(',') if h.strip()]
-        await asyncio.to_thread(_db_update_setting, 'hosts', ",".join(new_hosts))
-        await asyncio.to_thread(_db_resync_host_pool_from_full_list, new_hosts)  # 🔧 هماهنگ‌سازی با استخر پایش سلامت
-        await update.message.reply_text("✅ هاست‌ها آپدیت شدند."); safe_clear_context(context); await show_main_menu(update, context)
+        from legacy_route_compat import LegacyRouteHold
+        try:
+            await asyncio.to_thread(
+                _db_update_setting, 'hosts', ",".join(new_hosts))
+        except LegacyRouteHold as exc:
+            await update.message.reply_text(
+                "⛔️ فهرست مسیر مشتریان معتبر نیست یا شامل Standby/سرور تأییدنشده است. "
+                "ابتدا Default و سلامت مسیر را بررسی کنید؛ تغییری انجام نشد."
+            )
+            return
+        await update.message.reply_text(
+            "✅ فهرست مشتریان به‌روزرسانی شد؛ Inventory و نقش Relayها تغییر نکرد."
+        )
+        safe_clear_context(context); await show_main_menu(update, context)
     elif state == 'HOSTS_APPEND_INPUT':
         new_ip = text.strip().replace(" ", "")
         if not new_ip:
@@ -21860,61 +21871,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 await query.message.reply_text(k2_m4_failure_html(),parse_mode='HTML')
             return
-        await query.edit_message_text(f"⏳ در حال انتقال دامنه و ترافیک به سرور <code>{esc(target_ip)}</code>...\nلطفاً چند لحظه صبر کنید.", parse_mode="HTML")
-        
-        async def _make_edge_active():
-            # ۱. آپدیت دیتابیس (روشن کردن فلگ و ست کردن دیفالت)
-            await asyncio.to_thread(_db_set_default_host, target_ip)
-            await asyncio.to_thread(_db_update_setting, 'tls_passthrough', '1')
-            
-            # ۲. آپدیت کلودفلر (انتقال دامنه)
-            cf_ok, cf_msg = await asyncio.to_thread(_cf_update_dns_record_sync, target_ip)
-            if not cf_ok:
-                with contextlib.suppress(Exception):
-                    await context.bot.send_message(query.message.chat_id, f"❌ خطا در انتقال دامنه روی کلودفلر:\n<code>{esc(cf_msg)}</code>", parse_mode="HTML")
-                return
-            await asyncio.to_thread(_db_update_setting, "dns_current_ip", target_ip)
-            
-            # ۳. آپدیت پورت‌ها (NAT) روی سرور Edge انتخاب شده
-            tls_port = await asyncio.to_thread(_db_get_setting, 'tls_port', '2088')
-            port_map = await asyncio.to_thread(_db_get_host_admin_ssh_port_map)
-            ssh_port = port_map.get(target_ip, 22)
-            
-            try:
-                def _run_iptables():
-                    ssh = None
-                    try:
-                        ssh = paramiko.SSHClient()
-                        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                        pkey = paramiko.Ed25519Key.from_private_key_file(DO_SSH_KEY_PATH)
-                        ssh.connect(target_ip, port=ssh_port, username='root', pkey=pkey, timeout=15)
-                        cmd = (
-                            f"iptables -t nat -C PREROUTING -p tcp --dport {tls_port} -j DNAT --to-destination 10.77.0.1:{tls_port} 2>/dev/null || "
-                            f"iptables -t nat -A PREROUTING -p tcp --dport {tls_port} -j DNAT --to-destination 10.77.0.1:{tls_port} ; "
-                            "(command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1) || iptables-save > /etc/iptables/rules.v4"
-                        )
-                        ssh.exec_command(cmd, timeout=20)
-                    finally:
-                        if ssh is not None:
-                            try:
-                                ssh.close()
-                            except Exception:
-                                pass
-                await asyncio.to_thread(_run_iptables)
-                
-                # ۴. پایان و موفقیت
-                with contextlib.suppress(Exception):
-                    await context.bot.send_message(
-                        query.message.chat_id, 
-                        f"✅ <b>سرور {esc(target_ip)} با موفقیت به عنوان رله فعال تنظیم شد!</b>\n"
-                        f"ترافیک دامنه هم‌اکنون به این سرور منتقل گردید.", 
-                        parse_mode="HTML"
-                    )
-            except Exception as e:
-                with contextlib.suppress(Exception):
-                    await context.bot.send_message(query.message.chat_id, f"⚠️ دامنه به {target_ip} منتقل شد اما تنظیم NAT با خطای SSH روبرو شد:\n<code>{esc(str(e))}</code>", parse_mode="HTML")
-
-        spawn_bg_task(_make_edge_active())
+        # Guard the old Legacy path: it wrote is_default BEFORE DNS and
+        # never aligned settings.hosts, making customers/default disagree.
+        # The native protected K2 branch above remains a separate guarded path.
+        await query.message.reply_text(
+            "⛔️ فعال‌سازی Relay از این مسیر قدیمی متوقف است. "
+            "برای تغییر DNS و Default از مسیر Journalدار Cloudzy/CZ04B استفاده کنید. "
+            "هیچ Default، DNS، NAT یا حسابی تغییر نکرد."
+        )
         return
 
     elif d == "srv_wiz_promote_start" and role == 'admin':

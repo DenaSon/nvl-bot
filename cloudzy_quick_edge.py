@@ -1523,6 +1523,18 @@ class QuickEdgeWizard:
             # holds the existing VPS; setup_edge_relay.sh is never replayed.
             stage = "PROVIDER_POSTCHECK"
             await self._attest_install_provider_identity(op)
+            stage = "HOST_KEY_POSTCHECK"
+            latest_type, latest_b64, _ = await asyncio.to_thread(
+                self.fingerprint, op["public_ipv4"])
+            if (latest_type, latest_b64) != (
+                    op["host_key_type"], op["host_key_base64"]):
+                raise QuickEdgeHold("HOST_KEY_CHANGED_AFTER_INSTALL")
+            stage = "CORE_IDENTITY_POSTCHECK"
+            port_again, public_again = await self._preflight()
+            if (port_again != op["customer_port"]
+                    or hashlib.sha256(public_again.encode()).hexdigest()
+                    != op["public_key_sha"]):
+                raise QuickEdgeHold("CORE_IDENTITY_CHANGED_AFTER_INSTALL")
             stage = "RECEIPT_COMMIT"
             await asyncio.to_thread(self.store.change, opid, "PROVISIONING", "EDGE_READY")
             run = await asyncio.to_thread(self.quick_runs.get, opid)

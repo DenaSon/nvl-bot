@@ -144,7 +144,7 @@ class QueueTests(unittest.TestCase):
                                    enabled=lambda:True,now=lambda:100)
 
     def test_capacity_bound_and_exact_candidate(self):
-        self.assertEqual(BATCH_SIZE, 50)
+        self.assertEqual(BATCH_SIZE, 200)
         self.assertEqual(self.q.candidate()[:3],
                          ("purchase-1","target.example","provider-1"))
 
@@ -364,16 +364,155 @@ class QueueTests(unittest.TestCase):
                            expected_fp=_digest(rows),expected_count=len(rows))
         asyncio.run(self.q._work(job,OfflineApp(),resume=False))
         final=self.q.get(job)
-        self.assertEqual(final["status"],"DONE")
+        self.assertEqual(final["status"],"VERIFYING")
         self.assertEqual((final["moved"],final["total"]),(473,473))
         self.assertEqual(dry.route_calls,1)
-        self.assertEqual(dry.batch_sizes,[50]*9+[23])
+        self.assertEqual(dry.batch_sizes,[200,200,73])
         with self.factory() as db:
             self.assertEqual(db.execute("SELECT value FROM settings WHERE key='hosts'").fetchone()[0],
                              dry.target)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM ssh_accounts WHERE host=?",
                                         (dry.target,)).fetchone()[0],473)
 
+
+    def test_200_batch_boundary_and_independent_business_acceptance(self):
+        from cloudzy_cz04b import _digest
+        import asyncio
+
+        dry = DryRun04B(self.factory)
+        self.q.cz04b = dry
+        with self.factory() as db:
+            rows = dry._source_accounts(db, dry.source)
+        job = self.q.reserve(self.q.candidate(), dry.source, actor=7, chat=8,
+                             expected_fp=_digest(rows), expected_count=len(rows))
+        asyncio.run(self.q._work(job, OfflineApp(), resume=False))
+        self.assertEqual(self.q.get(job)["status"], "VERIFYING")
+        self.assertEqual(dry.batch_sizes, [200, 200, 73])
+        with self.assertRaisesRegex(CZ07Hold, "INDEPENDENT_BUSINESS_VERIFIER_REQUIRED"):
+            self.q.accept_business(
+                job, actor=7, chat=8, create_ref="create-ref-001",
+                renew_ref="renew-ref-001", client_ref="client-ref-001")
+        with self.assertRaisesRegex(CZ07Hold, "BUSINESS_E2E_NOT_VERIFIED"):
+            self.q.accept_business(
+                job, actor=7, chat=8, create_ref="create-ref-001",
+                renew_ref="renew-ref-001", client_ref="client-ref-001",
+                independent_verify=lambda **kw: False)
+        self.assertEqual(self.q.get(job)["status"], "VERIFYING")
+        captured = []
+        def independently_confirm(**kwargs):
+            captured.append(kwargs)
+            return kwargs["target"] == dry.target
+        self.assertTrue(self.q.accept_business(
+            job, actor=7, chat=8, create_ref="create-ref-001",
+            renew_ref="renew-ref-001", client_ref="client-ref-001",
+            independent_verify=independently_confirm))
+        self.assertEqual(self.q.get(job)["status"], "DONE")
+        self.assertEqual(self.q.get(job)["code"], "BUSINESS_E2E_ACCEPTED")
+        self.assertEqual(len(captured), 1)
+        with self.factory() as db:
+            self.assertEqual(db.execute(
+                "SELECT create_ref,renew_ref,client_ref "
+                "FROM cloudzy_cz07_acceptance WHERE job_id=?",
+                (job,)).fetchone(),
+                ("create-ref-001", "renew-ref-001", "client-ref-001"))
+
+    def test_safe_cancel_after_batch_and_guarded_resume(self):
+        from cloudzy_cz04b import _digest
+        import asyncio
+        dry = DryRun04B(self.factory)
+        self.q.cz04b = dry
+        with self.factory() as db:
+            rows = dry._source_accounts(db, dry.source)
+        job = self.q.reserve(self.q.candidate(), dry.source, actor=7, chat=8,
+                             expected_fp=_digest(rows), expected_count=len(rows))
+        async def ask_stop(_seconds):
+            self.assertTrue(self.q.request_cancel(job, actor=7, chat=8))
+            self.assertFalse(self.q.request_cancel(job, actor=7, chat=8))
+        self.q.pause = ask_stop
+        asyncio.run(self.q._work(job, OfflineApp(), resume=False))
+        self.assertEqual(self.q.get(job)["status"], "PAUSED_SAFE")
+        self.assertEqual(self.q.get(job)["moved"], 200)
+        self.assertEqual(dry.batch_sizes, [200])
+        with self.assertRaisesRegex(CZ07Hold, "RESUME_OWNER_MISMATCH"):
+            self.q.resume_paused(job, actor=99, chat=8)
+        self.q.resume_paused(job, actor=7, chat=8)
+        async def no_delay(_seconds):
+            return None
+        self.q.pause = no_delay
+        asyncio.run(self.q._work(job, OfflineApp(), resume=True))
+        self.assertEqual(self.q.get(job)["status"], "VERIFYING")
+        self.assertEqual(dry.batch_sizes, [200, 200, 73])
+
+    def test_crash_after_committed_batch_reconstructs_remaining_from_sqlite(self):
+        from cloudzy_cz04b import _digest
+        import asyncio
+        class CrashOnce(DryRun04B):
+            crashed = False
+            async def _run_users(self, actor, chat, names, fp):
+                result = await super()._run_users(actor, chat, names, fp)
+                if not self.crashed:
+                    self.crashed = True
+                    raise SystemExit("SIMULATED_PROCESS_DEATH_AFTER_CAS")
+                return result
+        dry = CrashOnce(self.factory)
+        self.q.cz04b = dry
+        with self.factory() as db:
+            rows = dry._source_accounts(db, dry.source)
+        job = self.q.reserve(self.q.candidate(), dry.source, actor=7, chat=8,
+                             expected_fp=_digest(rows), expected_count=len(rows))
+        with self.assertRaisesRegex(SystemExit, "SIMULATED_PROCESS_DEATH_AFTER_CAS"):
+            asyncio.run(self.q._work(job, OfflineApp(), resume=False))
+        self.assertEqual(self.q.get(job)["status"], "MIGRATING")
+        self.assertEqual(self.q.get(job)["moved"], 0)
+        remaining, derived_moved = self.q.remaining(job)
+        self.assertEqual((len(remaining), derived_moved), (273, 200))
+        # A restarted process replays no DNS PUT and recovers DB counts.
+        fresh = DurableCutoverQueue(db_conn=self.factory, cz04b=dry,
+                                    enabled=lambda: True, now=lambda: 120)
+        async def no_delay(_seconds):
+            return None
+        fresh.pause = no_delay
+        asyncio.run(fresh._work(job, OfflineApp(), resume=True))
+        self.assertEqual(fresh.get(job)["status"], "VERIFYING")
+        self.assertEqual(dry.batch_sizes, [200, 200, 73])
+        self.assertEqual(dry.route_calls, 1)
+
+    def test_batch_boundaries_do_not_limit_total_job_size(self):
+        from cloudzy_cz04b import _digest
+        import asyncio
+        for count in (0, 1, 50, 51, 200, 201, 493, 495):
+            with self.subTest(count=count):
+                with self.factory() as db:
+                    db.execute("DELETE FROM cloudzy_cz07_events")
+                    db.execute("DELETE FROM cloudzy_cz07_jobs")
+                    db.execute("DELETE FROM cloudzy_cz07_acceptance")
+                    db.execute("DELETE FROM ssh_accounts")
+                    db.executemany("INSERT INTO ssh_accounts VALUES(?,?,?,?)", [
+                        (f"case{idx:04}", "source.example", "active", "ssh")
+                        for idx in range(count)])
+                    db.execute("UPDATE host_pool SET is_default=CASE "
+                               "WHEN host='source.example' THEN 1 ELSE 0 END, "
+                               "is_standby=CASE WHEN host='target.example' "
+                               "THEN 1 ELSE 0 END")
+                    db.execute("UPDATE settings SET value='source.example' "
+                               "WHERE key IN ('hosts','dns_current_ip')")
+                dry = DryRun04B(self.factory)
+                self.q.cz04b = dry
+                with self.factory() as db:
+                    rows = dry._source_accounts(db, dry.source)
+                job = self.q.reserve(self.q.candidate(), dry.source,
+                                     actor=7, chat=8,
+                                     expected_fp=_digest(rows),
+                                     expected_count=count)
+                async def no_delay(_seconds):
+                    return None
+                self.q.pause = no_delay
+                asyncio.run(self.q._work(job, OfflineApp(), resume=False))
+                self.assertEqual(self.q.get(job)["status"], "VERIFYING")
+                self.assertEqual(self.q.get(job)["moved"], count)
+                expected = ([200] * (count // 200)
+                            + ([count % 200] if count % 200 else []))
+                self.assertEqual(dry.batch_sizes, expected)
 
     def _stale_route(self):
         from cloudzy_cz04b import _digest

@@ -67,6 +67,13 @@ def _assert_identity(operation_id, actor=None, chat=None):
 
 def _linked(db, operation_id):
     """No implicit repair/adoption of preexisting unrelated native records."""
+    # Upgraded Core may still have only historical CZ03 journals; their
+    # recovery must work before any first new UO purchase initializes schema.
+    if not db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='cloudzy_uo_operations'"
+    ).fetchone():
+        return None
     row = db.execute(
         "SELECT id,actor,chat,version,state,external_intent "
         "FROM cloudzy_uo_operations "

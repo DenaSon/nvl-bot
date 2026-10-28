@@ -15,6 +15,7 @@ import secrets
 import sqlite3
 import time
 
+from cloudzy_unified_native import observe_cz07_status
 from cloudzy_cz04b import CutoverHold, _digest
 from cloudzy_service import CloudzyError
 from cloudzy_phase1_ui import cz07_issue
@@ -82,6 +83,10 @@ class DurableCutoverQueue:
         db.execute("INSERT INTO cloudzy_cz07_events "
                    "(job_id,at,stage,code,moved,remaining) VALUES (?,?,?,?,?,?)",
                    (job, int(self.now()), stage, code, moved, remaining))
+        # Native status and UO timeline MUST commit in the same SQLite TX.
+        # Old CZ07 jobs without a UO purchase link remain legacy read-only.
+        observe_cz07_status(db, job_id=job, expected_status=stage,
+                            now=int(self.now()))
 
     def latest(self):
         with self.db() as db:

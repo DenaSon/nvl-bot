@@ -117,7 +117,7 @@ class DefaultOnlyLegacyDB(unittest.TestCase):
             db.execute("UPDATE host_pool SET is_default=0")
             db.execute("UPDATE host_pool SET is_default=1 WHERE host=?", (CORE,))
             db.execute("UPDATE settings SET value=? WHERE key='dns_current_ip'", (CORE,))
-        with self.assertRaisesRegex(RuntimeError, "DEFAULT_NOT_CUSTOMER_ELIGIBLE"):
+        with self.assertRaisesRegex(RuntimeError, "CACHED_DNS_OR_CORE_MISMATCH"):
             self.ns["_db_rebuild_hosts_from_pool"]()
         with self.db() as db:
             with self.assertRaisesRegex(RuntimeError, "DEFAULT_CUSTOMER_RELAY_NOT_ELIGIBLE"):

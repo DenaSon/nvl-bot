@@ -96,7 +96,7 @@ class WizardCallbackRoutingTests(unittest.TestCase):
         self.assertIn("and not k2_isolated_wizard_input",body)
         self.assertNotIn("_db_set_all_accounts_host",body[body.index(
             'elif d in ("hp_addedge", "hpeg_wizard"):'):body.index(
-            'elif d.startswith("hpdef_migrate_")')])
+            'elif d.startswith(("hpdef_migrate_", "hpdefmig_yes_", "hpdef_"))')])
 
 @unittest.skipIf(sys.version_info < (3,12), "NVL bot requires Python 3.12")
 class IntegratedWizardFunctionTests(unittest.TestCase):

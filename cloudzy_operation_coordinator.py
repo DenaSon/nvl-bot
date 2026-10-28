@@ -68,9 +68,22 @@ class RecoveryPreview:
     external_intent: bool
 
 
+# Never echo an arbitrary legacy note, token-looking string or provider body.
+# Unknown codes still have a safe state-specific action recommendation.
+KNOWN_LEGACY_CODES = frozenset((
+    "PREPURCHASE_STOCK_UNVERIFIED", "PROVIDER_RESULT_UNCERTAIN",
+    "CREATE_RESULT_UNCERTAIN", "EDGE_APT_LOCK_BUSY",
+    "PARTIAL_OR_UNVERIFIED_LEGACY_INSTALL",
+    "CLOUDZY_PROVIDER_UNAVAILABLE", "CZ05_STOCK_OR_PRICE_UNVERIFIED",
+    "ALL_CUSTOMERS_ON_TARGET", "SAFE_STALE_ROUTING_CLOSED",
+    "BATCH_CAS_COMMITTED", "SSH_HOST_CAS_COMMITTED",
+    "DNS_DEFAULT_READY_NO_USER_MOVE",
+))
+
+
 def _safe_code(value):
     code = str(value or "").upper()
-    return code if CODE.fullmatch(code) else "UNSPECIFIED"
+    return code if CODE.fullmatch(code) and code in KNOWN_LEGACY_CODES else "UNSPECIFIED"
 
 
 def legacy_action(system, status):

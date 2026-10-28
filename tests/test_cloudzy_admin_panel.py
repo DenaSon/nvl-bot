@@ -119,9 +119,9 @@ class Phase1PanelTests(unittest.TestCase):
 
     def test_home_shows_available_cz03_actions_and_only_phase3_is_pending(self):
         self.cb("apps_cz_home")
-        self.assertIn("مدیریت Cloudzy", self.query.text)
-        self.assertIn("Quick Relay: خرید VPS، نصب Edge و Standby", self.query.text)
-        self.assertIn("انتقال DNS و کاربران فقط در CZ-07", self.query.text)
+        self.assertIn("مدیریت زیرساخت Edge", self.query.text)
+        self.assertIn("آماده‌سازی Edge: خرید، نصب", self.query.text)
+        self.assertIn("تغییر مسیر و انتقال حساب‌ها فقط پس از کنترل ایمنی", self.query.text)
         self.assertNotIn("ساخت سریع Edge در فاز بعد", self.query.text)
         labels = {cb: label for row in self.query.edits[-1][1]["reply_markup"]
                   for label, cb in row}
@@ -129,11 +129,11 @@ class Phase1PanelTests(unittest.TestCase):
                    "apps_cz_wizard", "apps_cz6_start", "apps_cz_edge", "apps_cz_operations",
                    "apps_cz_account", "apps_cz_balance"):
             self.assertIn(cb, labels)
-        self.assertEqual(labels["apps_cz_wizard"], "⚡ ساخت Edge · مدیریت دستی")
-        self.assertIn("Quick Relay", labels["apps_cz6_start"])
+        self.assertEqual(labels["apps_cz_wizard"], "🛠 ساخت دستی Edge")
+        self.assertIn("خرید و آماده‌سازی Edge", labels["apps_cz6_start"])
         self.assertIn("apps_cz7_home", labels)
-        self.assertEqual(labels["apps_cz_operations"], "📋 وضعیت عملیات")
-        self.assertIn("همه NVL", labels["apps_cz_edge"])
+        self.assertEqual(labels["apps_cz_operations"], "📋 سوابق و وضعیت عملیات")
+        self.assertIn("مدیریت Edge و Relay", labels["apps_cz_edge"])
         self.assertIn("apps_cz4_vps", labels)
         self.assertNotIn("hpeg_status", self.query.callbacks)
         self.assertEqual(self.api.calls, [])

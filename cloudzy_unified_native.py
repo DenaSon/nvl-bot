@@ -165,6 +165,10 @@ def observe_native_status(db, *, operation_id, status, now=None):
     ).fetchone()
     if not native or native[0] != status:
         raise UnifiedLinkHold("NATIVE_STATUS_CAS_NOT_COMMITTED")
+    # Existing pre-upgrade receipts must never acquire an invented UO link
+    # or new provider-receipt restrictions while being recovered.
+    if _linked(db, operation_id) is None:
+        return False
     if status == "REJECTED":
         linked = _linked(db, operation_id)
         if linked is None:

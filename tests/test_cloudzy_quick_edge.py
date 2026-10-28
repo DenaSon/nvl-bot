@@ -650,6 +650,74 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["public_key_sha"].__len__(), 64)
         self.assertEqual(self.provisions, [])
 
+    async def test_p4_provider_id_drift_prevents_legacy_install(self):
+        await self.purchase()
+        op = self.wizard.store.latest()
+        await self.cb("apps_cz_operations")
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_")))
+        self.api.server["id"] = "replaced-vps"
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_")))
+        await self.app.drain()
+        self.assertEqual(self.wizard.store.latest()["status"], "HOLD_PROVISION")
+        self.assertEqual(self.provisions, [])
+        self.assertEqual(self.verifications, [])
+        self.assertTrue(any("INSTALL_PROVIDER_ID_CHANGED" in x
+                            for _, x, _ in self.app.bot.messages))
+
+    async def test_p4_provider_ipv4_reuse_prevents_legacy_install(self):
+        await self.purchase()
+        await self.cb("apps_cz_operations")
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_")))
+        self.api.server["primaryIpv4"] = "9.9.9.9"
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_")))
+        await self.app.drain()
+        self.assertEqual(self.wizard.store.latest()["status"], "HOLD_PROVISION")
+        self.assertEqual(self.provisions, [])
+
+    async def test_p4_provider_name_drift_prevents_legacy_install(self):
+        await self.purchase()
+        await self.cb("apps_cz_operations")
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_")))
+        self.api.server["hostname"] = "someone-elses-vps"
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_")))
+        await self.app.drain()
+        self.assertEqual(self.wizard.store.latest()["status"], "HOLD_PROVISION")
+        self.assertEqual(self.provisions, [])
+
+    async def test_p4_provider_drift_after_installer_never_accepts_receipt(self):
+        async def changes_ownership_after_legacy(*args):
+            self.provisions.append(args)
+            self.api.server["id"] = "new-owner-vps"
+            return True, "8.8.8.8", {"tunnel_ok": True}
+        self.wizard.provision = changes_ownership_after_legacy
+        await self.purchase()
+        op = self.wizard.store.latest()
+        await self.cb("apps_cz_operations")
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_")))
+        await self.app.drain()
+        self.assertEqual(self.wizard.store.latest()["status"], "HOLD_PROVISION")
+        self.assertEqual(len(self.provisions), 1)
+        self.assertEqual(len(self.verifications), 1)
+        self.assertNotIn("EDGE_READY", self.wizard.store.latest()["status"])
+        # Bot never repeats the effects of setup_edge_relay.sh after HOLD.
+        await self.cb("apps_cz_operations")
+        await self.cb("apps_cz_qrecover_" + op["id"])
+        self.assertEqual(len(self.provisions), 1)
+
+    async def test_p4_apt_lock_does_not_retry_or_accept(self):
+        async def apt_lock(*args):
+            self.provisions.append(args)
+            return False, None, {"error_code": "APT_LOCK_BUSY"}
+        self.wizard.provision = apt_lock
+        await self.purchase()
+        await self.cb("apps_cz_operations")
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qreview_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qaccept_")))
+        await self.app.drain()
+        self.assertEqual(len(self.provisions), 1)
+        self.assertEqual(self.wizard.store.latest()["hold_reason"], "EDGE_APT_LOCK_BUSY")
+
     async def test_reviewed_pinned_key_reuses_inactive_legacy_install(self):
         record = await self.purchase()
         await self.cb("apps_cz_operations")

@@ -187,7 +187,8 @@ class Phase7BridgeTests(unittest.TestCase):
         existing=source.index('elif d.startswith("apps_cz7_")')
         self.assertLess(entry,existing)
         self.assertIn('await _cloudzy_rich_admin_callback(',source)
-        self.assertIn('if _cloudzy_rich_enabled() and _cloudzy_rich_admin_ids()',source)
+        self.assertIn('actor in _cloudzy_rich_admin_ids()',source)
+        self.assertIn('_build_admin_programs_kb(actor=actor, chat=chat)',source)
         self.assertNotIn("_cloudzy_07.handle_callback(",source[entry:existing])
 
 

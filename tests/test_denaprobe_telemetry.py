@@ -7,9 +7,11 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from denaprobe_ingest import LocalHTTPServer, load_config, make_handler
 from denaprobe_store import InvalidReport, init_db, latest_reports, save_report, validate_report
+from denaprobe_telegram import _is_authorized, render_dashboard
 
 DEVICE = "probe_01"
 TOKEN = "local-test-token-" + "d" * 40
@@ -96,6 +98,36 @@ class ReportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_config({"DENAPROBE_EDGE_HOST": HOST,
                          "DENAPROBE_DEVICE_TOKENS_JSON": json.dumps({DEVICE: "weak"})})
+
+
+class TelegramDashboardTests(unittest.TestCase):
+    def test_private_active_admin_only(self):
+        actor = SimpleNamespace(id=123)
+        private = SimpleNamespace(id=123, type="private")
+        update = SimpleNamespace(effective_user=actor, effective_chat=private)
+        context = SimpleNamespace(user_data={"logged_in": True, "role": "admin"})
+        self.assertTrue(_is_authorized(update, context, {123}))
+        self.assertFalse(_is_authorized(update, context, set()))
+        self.assertFalse(_is_authorized(update,
+                                       SimpleNamespace(user_data={"logged_in": True, "role": "agent"}),
+                                       {123}))
+        self.assertFalse(_is_authorized(
+            SimpleNamespace(effective_user=actor,
+                            effective_chat=SimpleNamespace(id=456, type="group")),
+            context, {123}
+        ))
+
+    def test_stale_data_is_not_presented_as_healthy(self):
+        report = validate_report(example_report(),
+                                 allowed_host=HOST, authenticated_device=DEVICE)
+        # DB-facing render includes server time and statuses.
+        row = {
+            **report, "received_at": 1000,
+            "dns_ok": 1, "tcp_ok": 1, "ssh_id_ok": 1, "control_ok": None,
+        }
+        self.assertIn("DNS/TCP/SSH Banner", render_dashboard([row], now=1010))
+        self.assertIn("گزارش قدیمی", render_dashboard([row], now=1200))
+        self.assertIn("هنوز گزارشی", render_dashboard([], now=1010))
 
 
 class APITests(unittest.TestCase):

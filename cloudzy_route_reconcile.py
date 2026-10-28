@@ -87,8 +87,12 @@ def classify_db_route(conn, *, source, target):
     return "MIXED_OR_OTHER"
 
 
-def classify_dns_records(records, *, source, target):
-    """Strict exact-record snapshot; missing IDs/TTL or duplicates deny proof."""
+def classify_dns_records(records, *, source, target, expected=None):
+    """Strict exact-record snapshot; missing/changed identity denies proof.
+
+    Pass expected original exact records for any in-flight DNS intent.
+    """
+
     src, dst = _ip(source), _ip(target)
     if not isinstance(records, list) or not records:
         return "UNVERIFIED"
@@ -108,6 +112,17 @@ def classify_dns_records(records, *, source, target):
         try:
             ips.add(_ip(record.get("ip")))
         except RouteProjectionHold:
+            return "UNVERIFIED"
+    if expected is not None:
+        if not isinstance(expected, list) or len(expected) != len(records):
+            return "UNVERIFIED"
+        identifiers = lambda items: {
+            (r.get("name"), r.get("id"), r.get("ttl"))
+            for r in items if isinstance(r, dict)
+        }
+        if len(identifiers(expected)) != len(records):
+            return "UNVERIFIED"
+        if identifiers(expected) != identifiers(records):
             return "UNVERIFIED"
     if ips == {src}:
         return "SOURCE"

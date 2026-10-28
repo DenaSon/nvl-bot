@@ -224,6 +224,35 @@ class CoordinatorTests(unittest.TestCase):
             c.reconcile_external(op, actor=self.actor, chat=self.chat,
                                  expected_version=3)
 
+    def test_attestation_wait_releases_worker_lease_and_allows_safe_cancel(self):
+        op = self.new()
+        self.claim(op)
+        self.c.checkpoint(
+            op, worker="worker_123456", fencing=1, expected_version=1,
+            step="SSH_IDENTITY", state="NEEDS_ATTESTATION",
+            code="HOSTKEY_ATTESTATION_REQUIRED"
+        )
+        record = self.c.get(op)
+        self.assertEqual(record["state"], "NEEDS_ATTESTATION")
+        self.assertIsNone(record["worker"])
+        self.assertIsNone(record["deadline"])
+        self.assertEqual(self.c.request_cancel(
+            op, actor=self.actor, chat=self.chat, expected_version=2
+        ), "CANCELLED_SAFE")
+
+    def test_attestation_after_external_intent_requires_reconciliation(self):
+        op = self.new()
+        self.claim(op)
+        self.c.checkpoint(
+            op, worker="worker_123456", fencing=1, expected_version=1,
+            step="SSH_IDENTITY", state="NEEDS_ATTESTATION",
+            external_intent=True, code="HOSTKEY_ATTESTATION_REQUIRED"
+        )
+        self.assertEqual(self.c.request_cancel(
+            op, actor=self.actor, chat=self.chat, expected_version=2
+        ), "RECONCILE_REQUIRED")
+        self.assertEqual(self.c.get(op)["external_intent"], 1)
+
     def test_safe_preflight_pause_and_no_effect_cancel(self):
         op = self.new()
         self.claim(op)

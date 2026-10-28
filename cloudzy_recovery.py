@@ -202,7 +202,7 @@ def commit_standby_resume(db_factory, opid, *, actor, chat, now):
         for table, where in (
             ("cloudzy_cz04a_actions", "status NOT IN ('DONE','REJECTED')"),
             ("cloudzy_cz04b_operations", "status NOT IN ('READY','DONE','ABORTED')"),
-            ("cloudzy_cz07_jobs", "status NOT IN ('DONE','ABORTED')"),
+            ("cloudzy_cz07_jobs", "status NOT IN ('DONE','ABORTED','MOVED')"),
             ("failover_operations", "status='RUNNING'"),
         ):
             exists = db.execute(

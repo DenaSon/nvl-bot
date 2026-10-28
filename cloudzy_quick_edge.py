@@ -1458,6 +1458,25 @@ class QuickEdgeWizard:
                 chat, "⚠️ بررسی بدون خرید انجام شد، اما وضعیت VPS/SSH هنوز قابل تأیید نیست. "
                 "بدون بررسی دستی، درخواست خرید یا نصب جدید ثبت نکنید.")
 
+    async def _attest_install_provider_identity(self, op):
+        """Fail closed on recycled IP or replaced VPS; GET only, no mutation.
+
+        The provider ID is the primary identity; the public IPv4 and optional
+        hostname must still match the original purchase receipt.
+        """
+        if not op.get("provider_server_id") or not op.get("public_ipv4"):
+            raise QuickEdgeHold("INSTALL_PROVIDER_IDENTITY_MISSING")
+        live = _obj(await self._cloudzy("get_server", op["provider_server_id"]))
+        if _server_id(live) != op["provider_server_id"]:
+            raise QuickEdgeHold("INSTALL_PROVIDER_ID_CHANGED")
+        if _public_ipv4(live) != op["public_ipv4"]:
+            raise QuickEdgeHold("INSTALL_PROVIDER_IP_CHANGED")
+        live_name = _val(live, "hostname", "name")
+        if live_name and str(live_name) != op.get("hostname"):
+            raise QuickEdgeHold("INSTALL_PROVIDER_HOSTNAME_CHANGED")
+        if str(_val(live, "state", "status") or "").lower() != "active":
+            raise QuickEdgeHold("INSTALL_PROVIDER_NOT_ACTIVE")
+
     async def _install(self, opid, chat, app):
         stage = "CORE_PREFLIGHT"
         ip = "UNKNOWN"
@@ -1472,6 +1491,10 @@ class QuickEdgeWizard:
                 self.fingerprint, op["public_ipv4"])
             if latest_type != op["host_key_type"] or latest_b64 != op["host_key_base64"]:
                 raise QuickEdgeHold("HOST_KEY_CHANGED")
+            # A stable receipt and SSH host key do not prove Cloudzy still
+            # owns this exact VPS/IP. Never run legacy setup on recycled IPs.
+            stage = "PROVIDER_IDENTITY"
+            await self._attest_install_provider_identity(op)
             # The Legacy adapter rejects an already registered IP before
             # touching the provider or WireGuard. Make it an explicit, audited
             # early HOLD code instead of reporting an opaque RuntimeError.
@@ -1495,6 +1518,11 @@ class QuickEdgeWizard:
                 op["public_ipv4"], port, op["provider_server_id"])
             if verified is not True:
                 raise QuickEdgeHold("LEGACY_EDGE_POSTCHECK_FAILED")
+            # Re-read live provider ownership AFTER a potentially effectful
+            # installer and BEFORE accepting the receipt. A failed check
+            # holds the existing VPS; setup_edge_relay.sh is never replayed.
+            stage = "PROVIDER_POSTCHECK"
+            await self._attest_install_provider_identity(op)
             stage = "RECEIPT_COMMIT"
             await asyncio.to_thread(self.store.change, opid, "PROVISIONING", "EDGE_READY")
             run = await asyncio.to_thread(self.quick_runs.get, opid)

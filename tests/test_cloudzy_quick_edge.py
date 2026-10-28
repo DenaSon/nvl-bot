@@ -938,6 +938,91 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.wizard.store.get(op["id"])["status"], "HOSTKEY_PENDING")
 
 
+    async def test_p3_provider_get_401_after_reservation_has_distinct_reason(self):
+        confirm = await self.start_selection()
+        original = self.wizard._launch
+        def switch_to_unauthorized_get(app, opid, task):
+            def forbidden(region):
+                raise CloudzyAPIError(401, "private provider payload")
+            self.api.list_plan_availability = forbidden
+            return original(app, opid, task)
+        self.wizard._launch = switch_to_unauthorized_get
+        await self.cb(confirm)
+        await self.app.drain()
+        op = self.wizard.store.latest()
+        self.assertEqual(op["status"], "REJECTED")
+        self.assertEqual(op["hold_reason"], "CLOUDZY_PREFLIGHT_HTTP_401")
+        self.assertFalse(any(isinstance(x, tuple) and x[0] == "create"
+                             for x in self.api.calls))
+        self.assertTrue(any("دسترسی" in text and "401" in text
+                            for _, text, _ in self.app.bot.messages))
+
+    async def test_p3_get_timeout_is_bounded_and_never_repeats_paid_post(self):
+        from cloudzy_service import CloudzyError
+        confirm = await self.start_selection()
+        original = self.wizard._launch
+        attempts = []
+        def switch_to_network_failure(app, opid, task):
+            def unavailable(region):
+                attempts.append(region)
+                raise CloudzyError("read timeout private secret")
+            self.api.list_plan_availability = unavailable
+            return original(app, opid, task)
+        self.wizard._launch = switch_to_network_failure
+        await self.cb(confirm)
+        await self.app.drain()
+        op = self.wizard.store.latest()
+        self.assertEqual(op["hold_reason"], "CLOUDZY_PREFLIGHT_READ_FAILED")
+        self.assertEqual(op["status"], "REJECTED")
+        self.assertEqual(len(attempts), 2)
+        self.assertFalse(any(isinstance(x, tuple) and x[0] == "create"
+                             for x in self.api.calls))
+        self.assertNotIn("secret", str(self.app.bot.messages))
+
+    async def test_p3_hourly_base_ceiling_blocks_before_reservation(self):
+        from unittest.mock import patch
+        confirm = await self.start_selection()
+        with patch.dict("os.environ", {"NVL_CLOUDZY_MAX_BASE_HOURLY_CENTS": "0"}):
+            await self.cb(confirm)
+        self.assertIsNone(self.wizard.store.latest())
+        self.assertFalse(any(isinstance(x, tuple) and x[0] == "create"
+                             for x in self.api.calls))
+
+    async def test_p3_duplicate_provider_hostname_cannot_reconcile(self):
+        opid = self.wizard.store.reserve(
+            actor=112, chat=334, region="DE-Frankfurt", plan="plan-1",
+            cycle="hourly", price=1, port=2252, pubkey=self.pub)
+        self.wizard.store.change(
+            opid, "CREATING", "CREATE_UNCERTAIN",
+            hold_reason="CREATE_RESULT_UNCERTAIN")
+        self.api.server["hostname"] = self.wizard.store.get(opid)["hostname"]
+        self.api.list_servers = lambda: [dict(self.api.server), dict(self.api.server)]
+        await self.cb("apps_cz_qcheck_" + opid)
+        await self.app.drain()
+        self.assertEqual(self.wizard.store.get(opid)["status"], "CREATE_UNCERTAIN")
+        self.assertFalse(any(isinstance(x, tuple) and x[0] == "create"
+                             for x in self.api.calls))
+
+    async def test_p3_failed_preflight_telegram_delivery_does_not_create(self):
+        confirm = await self.start_selection()
+        original = self.wizard._launch
+        def switch_to_unauthorized_get(app, opid, task):
+            self.api.list_plan_availability = lambda region: (_ for _ in ()).throw(
+                CloudzyAPIError(403, "unauthorized"))
+            return original(app, opid, task)
+        self.wizard._launch = switch_to_unauthorized_get
+        async def delivery_failure(*args, **kwargs):
+            raise TimeoutError("telegram timeout")
+        self.app.bot.send_message = delivery_failure
+        await self.cb(confirm)
+        await self.app.drain()
+        op = self.wizard.store.latest()
+        self.assertEqual(op["status"], "REJECTED")
+        self.assertEqual(op["hold_reason"], "CLOUDZY_PREFLIGHT_HTTP_403")
+        self.assertFalse(any(isinstance(x, tuple) and x[0] == "create"
+                             for x in self.api.calls))
+
+
 class JournalTests(unittest.TestCase):
     def setUp(self):
         self.temp = TemporaryDirectory()

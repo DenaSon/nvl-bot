@@ -26,6 +26,10 @@ from cloudzy_service import (
     CloudzyTimeout,
 )
 from cloudzy_cz05_catalog import CatalogHold, eligible_offers, preferred_regions
+from cloudzy_purchase_guard import (
+    PurchaseHold, classify_preflight, classify_create,
+    exact_existing_server, require_base_hourly_ceiling,
+)
 from cloudzy_cz06_orchestrator import (
     QuickRelayHold, QuickRelayJournal, progress_html, promote_standby_once,
 )
@@ -978,15 +982,32 @@ class QuickEdgeWizard:
 
     async def _eligible_for_region(self, region):
         # Two independently fetched, exact-region reads; no generic price fallback.
-        catalog = await self._cloudzy(
+        # Only read-only GET calls may be repeated, at most once, on transient
+        # transport errors. HTTP 401/403/429 and charged POST are never retried.
+        async def read_once(method, *args, **kwargs):
+            for attempt in range(2):
+                try:
+                    return await self._cloudzy(method, *args, **kwargs)
+                except CloudzyAPIError:
+                    raise
+                except CloudzyError:
+                    if attempt:
+                        raise
+                    await asyncio.sleep(0.25)
+        catalog = await read_once(
             "list_plans", region=region, billing_cycle="hourly")
-        availability = await self._cloudzy("list_plan_availability", region)
+        availability = await read_once("list_plan_availability", region)
         return eligible_offers(catalog, availability, region=region)
 
     async def _check_offer_current(self, region, plan_id, cents):
         offers = await self._eligible_for_region(region)
         if not any(pid == plan_id and amount == cents for pid, _name, amount, _scope, _basis in offers):
             raise CatalogHold("PLAN_STOCK_OR_HOURLY_PRICE_CHANGED")
+        try:
+            require_base_hourly_ceiling(
+                cents, os.environ.get("NVL_CLOUDZY_MAX_BASE_HOURLY_CENTS"))
+        except PurchaseHold as exc:
+            raise CatalogHold(str(exc)) from None
 
     async def _plans(self, query, session, markup, page=0, *, offers=None):
         if session.get("cycle") != "hourly":
@@ -1206,18 +1227,28 @@ class QuickEdgeWizard:
                 raise CatalogHold("HOURLY_ONLY")
             await self._check_offer_current(op["region"], op["plan_id"], op["price_cents"])
         except (CatalogHold, CloudzyAPIError, CloudzyError, QuickEdgeHold) as exc:
-            code = str(exc) if isinstance(exc, CatalogHold) else type(exc).__name__
-            log.warning("CZ05_PRE_PURCHASE_BLOCK op=%s stage=stock code=%s", opid[:16], code)
+            issue = classify_preflight(exc)
+            # No POST happened. Keep the historic CZ05 reason for catalog
+            # rejection and use distinct stable codes for provider GET errors.
+            reason = ("CZ05_STOCK_OR_PRICE_UNVERIFIED"
+                      if isinstance(exc, CatalogHold) else issue.code)
+            stage_code = ("PREPURCHASE_STOCK_UNVERIFIED"
+                          if isinstance(exc, CatalogHold) else "PREPURCHASE_API_READ_FAILED")
+            log.warning("CZ05_PRE_PURCHASE_BLOCK op=%s stage=preflight code=%s",
+                        opid[:16], reason)
             try:
-                await asyncio.to_thread(self.store.change, opid, "CREATING", "REJECTED",
-                                        hold_reason="CZ05_STOCK_OR_PRICE_UNVERIFIED")
+                await asyncio.to_thread(
+                    self.store.change, opid, "CREATING", "REJECTED",
+                    hold_reason=reason)
             except QuickEdgeHold:
                 log.exception("CZ05_PRE_PURCHASE_JOURNAL_FAILED op=%s", opid[:16])
-            await self._quick_stage(opid, "HOLD", "PURCHASING", app,
-                                    code="PREPURCHASE_STOCK_UNVERIFIED")
-            await app.bot.send_message(
-                chat, f"⛔️ خرید انجام نشد؛ موجودی یا قیمت ساعتی تأیید نشد. "
-                      f"کد: CZ05_STOCK_OR_PRICE_UNVERIFIED | عملیات: {opid[:16]}")
+            await self._quick_stage(opid, "HOLD", "PURCHASING", app, code=stage_code)
+            try:
+                await app.bot.send_message(
+                    chat, f"⛔️ {issue.title_fa}. {issue.next_action_fa} "
+                          f"کد: {reason} | عملیات: {opid[:16]}")
+            except Exception:
+                log.warning("CZ05_PREPURCHASE_DELIVERY_FAILED op=%s", opid[:16])
             return
         except Exception:
             log.exception("CZ05_PRE_PURCHASE_UNEXPECTED op=%s", opid[:16])
@@ -1242,7 +1273,8 @@ class QuickEdgeWizard:
             await asyncio.to_thread(
                 self.store.change, opid, "CREATING", "CREATED", provider_server_id=server_id)
         except CloudzyAPIError as exc:
-            # API definitively rejected POST (4xx); no uncertain provider charge.
+            issue = classify_create(exc)
+            # Definite 4xx rejections are not confused with read failures.
             try:
                 await asyncio.to_thread(self.store.change, opid, "CREATING", "REJECTED",
                                         hold_reason="CLOUDZY_HTTP_REJECTED_" + str(exc.status))
@@ -1250,17 +1282,19 @@ class QuickEdgeWizard:
                 pass
             await self._quick_stage(opid, "HOLD", ("PURCHASING", "WAITING_PROVIDER"),
                                     app, code="PROVIDER_REJECTED")
-            log.warning("CZ05_PURCHASE_REJECTED op=%s http=%s code=%s",
-                        opid[:16], exc.status, re.sub(r"[^A-Za-z0-9_-]", "", str(exc.code or ""))[:60])
-            await app.bot.send_message(
-                chat, f"⛔️ خرید توسط Cloudzy رد شد (HTTP {exc.status}). "
-                "هیچ نصب Edge انجام نشد؛ پس از اصلاح شرایط می‌توانید درخواست جدید ثبت کنید.")
+            log.warning("CZ05_PURCHASE_REJECTED op=%s http=%s",
+                        opid[:16], exc.status)
+            try:
+                await app.bot.send_message(
+                    chat, f"⛔️ {issue.title_fa}. {issue.next_action_fa} "
+                          f"HTTP {exc.status} | عملیات: {opid[:16]}")
+            except Exception:
+                log.warning("CZ05_CREATE_REJECTION_DELIVERY_FAILED op=%s", opid[:16])
             return
         except (CloudzyUncertainError, QuickEdgeHold, CloudzyError, Exception) as exc:
-            # No second create. Even HTTP 4xx is left for manual review rather
-            # than allowing another chargeable attempt on an ambiguous deployment.
-            reason = ("CREATE_RESULT_UNCERTAIN" if isinstance(exc, CloudzyUncertainError)
-                      else "CREATE_OR_RECEIPT_FAILED")
+            # An ambiguous charged POST or failed receipt remains held. This
+            # failure handler does not perform any second provider POST.
+            reason = classify_create(exc).code
             log.error("CZ05_PURCHASE_UNCERTAIN op=%s reason=%s exception=%s",
                       opid[:16], reason, type(exc).__name__)
             await self._quick_stage(opid, "HOLD", ("PURCHASING", "WAITING_PROVIDER"),
@@ -1270,8 +1304,11 @@ class QuickEdgeWizard:
                     "CREATE_UNCERTAIN", hold_reason=reason)
             except QuickEdgeHold:
                 pass
-            await app.bot.send_message(chat, "⚠️ وضعیت خرید Cloudzy نامشخص است؛ خرید را تکرار نکنید. "
-                                           "از «وضعیت عملیات» بررسی کنید.")
+            try:
+                await app.bot.send_message(chat, "⚠️ وضعیت خرید Cloudzy نامشخص است؛ خرید را تکرار نکنید. "
+                                               "از «وضعیت عملیات» بررسی کنید.")
+            except Exception:
+                log.warning("CZ05_CREATE_UNCERTAIN_DELIVERY_FAILED op=%s", opid[:16])
             return
         # The provider POST and its receipt are already committed. Never
         # misclassify a progress-journal error as an uncertain charged POST.
@@ -1341,13 +1378,15 @@ class QuickEdgeWizard:
                     hold_reason="INTERRUPTED_WAIT_RECHECK")
                 current = "HOLD_WAIT"
             if current == "CREATE_UNCERTAIN":
-                matches = [
-                    _obj(entry) for entry in _items(await self._cloudzy("list_servers"))
-                    if str(_val(entry, "hostname", "name") or "") == op["hostname"]
-                ]
-                if len(matches) != 1:
-                    raise QuickEdgeHold("PROVIDER_CREATION_UNPROVEN")
-                server_id = _server_id(matches[0])
+                # Exact, unique hostname and provider ID are mandatory.
+                # Missing VPS remains uncertain; never authorize re-purchase.
+                inventory = _items(await self._cloudzy("list_servers"))
+                try:
+                    server_id = exact_existing_server(
+                        inventory, hostname=op["hostname"],
+                        provider_id=op.get("provider_server_id"))
+                except PurchaseHold as exc:
+                    raise QuickEdgeHold(str(exc)) from None
                 await asyncio.to_thread(
                     self.store.change, opid, "CREATE_UNCERTAIN", "CREATED",
                     provider_server_id=server_id, hold_reason=None)

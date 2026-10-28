@@ -7,7 +7,6 @@ import os
 import time
 from datetime import datetime, timezone
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from denaprobe_store import latest_reports
 
@@ -75,7 +74,8 @@ def render_dashboard(rows: list[dict], *, now: int | None = None) -> str:
     return "\n".join(parts)
 
 
-def dashboard_markup() -> InlineKeyboardMarkup:
+def dashboard_markup():
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 بروزرسانی گزارش", callback_data="apps_denaprobe_refresh")],
         [InlineKeyboardButton("↩️ برنامه‌ها", callback_data="apps_home")],

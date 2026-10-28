@@ -33,28 +33,27 @@ class LegacyRelayContractTests(unittest.TestCase):
         for mutator in ('useradd ', 'adduser ', 'passwd ', 'CREATE TABLE ', 'ssh_accounts'):
             self.assertNotIn(mutator,src)
 
-    def test_legacy_default_and_manual_confirmed_migration_are_preserved(self):
+    def test_legacy_default_and_bulk_migration_are_fenced_to_journals(self):
         src=BOT.read_text(encoding="utf-8")
+        # Historical Telegram messages may still contain these callback IDs,
+        # but the old handlers must not carry out default/DNS/user mutations.
         self.assertIn('callback_data=f"hpdef_{edge_ip}"',src)
-        start=src.index('    elif d.startswith("hpdef_")')
+        start=src.index('    elif d.startswith(("hpdef_migrate_", "hpdefmig_yes_", "hpdef_"))')
         end=src.index('    # 🗑 حذف‌شده: خریدِ خودکارِ VPS',start)
         block=src[start:end]
-        # Admin callback requires a live customer SSH service before changing
-        # the default, and offers a separate confirmation for moving customers.
-        self.assertLess(block.index("_check_ssh_reachable"),
-                        block.index("_db_set_default_host"))
-        self.assertIn('callback_data=f"hpdef_migrate_{host}"',block)
-        confirm_start=src.index('    elif d.startswith("hpdefmig_yes_")')
-        confirm_end=src.index('    elif d.startswith("hpdef_")',confirm_start)
-        confirmed=src[confirm_start:confirm_end]
-        self.assertLess(confirmed.index("_check_ssh_reachable"),
-                        confirmed.index("_db_set_all_accounts_host"))
-        self.assertIn("_update_cloudflare_dns(host)",confirmed)
-        # Provisioning still uses the same installer + optional Egress stage.
+        self.assertIn("CZ04B/CZ07",block)
+        self.assertIn("return",block)
+        self.assertNotIn("_db_set_default_host",block)
+        self.assertNotIn("_db_set_all_accounts_host",block)
+        self.assertNotIn("_update_cloudflare_dns",block)
+        bulk_start=src.index('    elif d.startswith("ipallconf_yes_")')
+        bulk_end=src.index('    elif d == "ipsvc_auto"',bulk_start)
+        bulk=src[bulk_start:bulk_end]
+        self.assertIn("CZ07",bulk)
+        self.assertNotIn("_db_set_all_accounts_host",bulk)
+        # Existing Legacy Edge installation itself is deliberately preserved.
         self.assertIn("_provision_new_edge_sync, edge_ip",src)
         self.assertIn("_db_add_host_pool, edge_ip",src)
-        self.assertIn('callback_data=f"hpdef_{edge_ip}"',src)
-        self.assertNotIn('useradd ',confirmed)
 
     def test_failover_rebuild_is_distinct_emergency_flow(self):
         src=BOT.read_text(encoding="utf-8")

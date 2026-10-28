@@ -277,11 +277,16 @@ def live_cloudflare_get():
     values = [os.environ.get(name, "") for name in names]
     if any(not v for v in values):
         raise PilotAuditError("PHASE8_CLOUDFLARE_GET_CONFIG_MISSING")
+    tls = os.environ.get("NVL_PHASE8_CF_TLS_PASSTHROUGH")
+    if tls not in ("0", "1"):
+        raise PilotAuditError("PHASE8_DNS_RECORD_SCOPE_NOT_EXPLICIT")
+    if tls == "1" and not os.environ.get("NVL_PHASE8_CF_TLS_DOMAIN"):
+        raise PilotAuditError("PHASE8_TLS_DOMAIN_REQUIRED")
     from cloudzy_cz04b_dns import CloudflareExactDNS
     cfg = {
         "zone": values[0], "token": values[1], "public_domain": values[2],
         "tls_domain": os.environ.get("NVL_PHASE8_CF_TLS_DOMAIN", ""),
-        "tls_passthrough": os.environ.get("NVL_PHASE8_CF_TLS_PASSTHROUGH", "0"),
+        "tls_passthrough": tls,
         "email": os.environ.get("NVL_PHASE8_CF_EMAIL", ""),
     }
     # This call invokes only snapshot(); set_all/PUT is never referenced.

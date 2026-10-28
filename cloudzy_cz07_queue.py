@@ -286,10 +286,14 @@ class DurableCutoverQueue:
         with self.db() as db:
             self._init(db)
             db.execute("BEGIN IMMEDIATE")
-            rec = db.execute("SELECT status,moved,total FROM cloudzy_cz07_jobs WHERE id=?",
-                             (job,)).fetchone()
+            rec = db.execute(
+                "SELECT status,moved,total,cancel_requested "
+                "FROM cloudzy_cz07_jobs WHERE id=?", (job,)
+            ).fetchone()
             if not rec or rec[0] not in before:
                 raise CZ07Hold("JOB_STAGE_CHANGED")
+            if next_status in ("VERIFYING", "DONE") and rec[3]:
+                raise CZ07Hold("CANCEL_PENDING_AT_FINAL_BOUNDARY")
             moved = rec[1] if moved is None else moved
             remaining = max(0, rec[2]-moved) if remaining is None else remaining
             if moved < rec[1] or moved > rec[2] or remaining != rec[2]-moved:
@@ -713,6 +717,11 @@ class DurableCutoverQueue:
                     dns = await asyncio.to_thread(self.cz04b.dns.snapshot)
                     self.cz04b._expect_dns(dns, rec["target"])
                     await asyncio.to_thread(self.complete_guard, job)
+                    if await asyncio.to_thread(self.pause_at_boundary, job):
+                        await self._notify(app, chat,
+                            f"⏸ CZ-07 در مرز Batch متوقف شد: {job[:16]}. "
+                            "تأیید نهایی پس از Resume انجام می‌شود.")
+                        break
                     self.transition(job, "MIGRATING", "VERIFYING",
                                     code="AWAITING_BUSINESS_E2E",
                                     moved=rec["total"], remaining=0)

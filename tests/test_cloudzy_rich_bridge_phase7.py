@@ -255,7 +255,7 @@ class Phase7BridgeTests(unittest.TestCase):
     def test_business_callback_routes_still_unchanged_in_source(self):
         """Verify Rich branch occurs BEFORE original CZ07 and is read-only."""
         source=(Path(__file__).parent.parent/"bot_final_v49-2.py").read_text()
-        entry=source.index('if d == "apps_cz_rich_home" or d.startswith("u7:")')
+        entry=source.index('if d in ("apps_cz_rich_home", "apps_cz_rich_migration") or d.startswith("u7:")')
         existing=source.index('elif d.startswith("apps_cz7_")')
         self.assertLess(entry,existing)
         self.assertIn('await _cloudzy_rich_admin_callback(',source)

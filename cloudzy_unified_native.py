@@ -1,0 +1,218 @@
+"""Atomic native Cloudzy CZ03/CZ06 -> Unified Edge coordinator checkpoints.
+
+Native receipts remain the authority for external effects. This module NEVER
+calls a provider, installer, DNS adapter or customer migration worker.
+
+For *new* purchases, creating the native receipt and coordinator registration
+is one SQLite transaction. Every later observed checkpoint is committed in the
+same transaction as its native receipt transition. Existing historic receipts
+are not retroactively modified or adopted without explicit reconciliation.
+"""
+from __future__ import annotations
+
+import re
+import sqlite3
+import time
+
+from cloudzy_operation_coordinator import DurableCoordinator, OperationHold
+
+_REF = re.compile(r"[0-9a-f]{32}\Z")
+
+# Safe, bounded, static status mapping: no untrusted provider body or reason
+# reaches the coordinator's public code or Telegram Rich card.
+_NATIVE_STEPS = {
+    "CREATED": ("PROVIDER_WAIT", "WAITING_EXTERNAL", "PROVIDER_RECEIPT_COMMITTED"),
+    "WAITING": ("PROVIDER_WAIT", "WAITING_EXTERNAL", "WAITING_FOR_SERVER"),
+    "HOLD_WAIT": ("PROVIDER_WAIT", "NEEDS_OPERATOR", "PROVIDER_READ_HOLD"),
+    "HOLD_IP": ("PROVIDER_WAIT", "NEEDS_OPERATOR", "PROVIDER_IP_HOLD"),
+    "HOLD_SSH": ("SSH_IDENTITY", "NEEDS_ATTESTATION", "SSH_HOST_KEY_REQUIRED"),
+    "HOSTKEY_PENDING": ("SSH_IDENTITY", "NEEDS_ATTESTATION", "SSH_HOST_KEY_PENDING"),
+    "PROVISIONING": ("EDGE_INSTALL", "WAITING_EXTERNAL", "EDGE_INSTALL_INTENT"),
+    "EDGE_READY": ("STANDBY", "NEEDS_ATTESTATION", "EDGE_READY_STANDBY_UNPROVEN"),
+    "HOLD_PROVISION": ("EDGE_INSTALL", "NEEDS_OPERATOR", "EDGE_INSTALL_UNCERTAIN"),
+    "CREATE_UNCERTAIN": ("PURCHASE", "RECONCILE_REQUIRED", "CREATE_RESULT_UNCERTAIN"),
+}
+
+_CZ06_STEPS = {
+    "PURCHASING": None,  # native CZ03 receipt is the purchasing authority
+    "WAITING_PROVIDER": ("PROVIDER_WAIT", "WAITING_EXTERNAL",
+                         "CZ06_WAITING_PROVIDER"),
+    "HOSTKEY_PENDING": ("SSH_IDENTITY", "NEEDS_ATTESTATION",
+                        "CZ06_SSH_HOST_KEY_PENDING"),
+    "INSTALLING": ("EDGE_INSTALL", "WAITING_EXTERNAL",
+                   "CZ06_INSTALL_IN_PROGRESS"),
+    "EDGE_READY": ("STANDBY", "NEEDS_ATTESTATION",
+                   "CZ06_EDGE_READY_STANDBY_UNPROVEN"),
+    "STANDBY_VERIFYING": ("STANDBY", "WAITING_EXTERNAL",
+                          "CZ06_STANDBY_VERIFYING"),
+    "READY": ("CLIENT_E2E", "NEEDS_ATTESTATION",
+              "CZ06_STANDBY_READY_AWAITING_CLIENT_E2E"),
+    "HOLD": ("STANDBY", "NEEDS_OPERATOR", "CZ06_RECONCILIATION_REQUIRED"),
+    "CANCELLED": ("STANDBY", "NEEDS_OPERATOR", "CZ06_CANCELLED_RECONCILE"),
+}
+
+
+class UnifiedLinkHold(RuntimeError):
+    pass
+
+
+def _assert_identity(operation_id, actor=None, chat=None):
+    if not isinstance(operation_id, str) or not _REF.fullmatch(operation_id):
+        raise UnifiedLinkHold("INVALID_NATIVE_RECEIPT_ID")
+    if actor is not None and (
+            type(actor) is not int or type(chat) is not int
+            or actor <= 0 or chat <= 0):
+        raise UnifiedLinkHold("INVALID_NATIVE_OPERATOR_ID")
+
+
+def _linked(db, operation_id):
+    """No implicit repair/adoption of preexisting unrelated native records."""
+    row = db.execute(
+        "SELECT id,actor,chat,version,state,external_intent "
+        "FROM cloudzy_uo_operations "
+        "WHERE kind='CLOUDZY_NEW' AND source_ref=?",
+        ("CZ03:" + operation_id,),
+    ).fetchone()
+    return row
+
+
+def register_native_purchase(db: sqlite3.Connection, *, operation_id,
+                             actor, chat, now=None):
+    """Insert both journals inside caller's BEGIN IMMEDIATE purchase reserve."""
+    _assert_identity(operation_id, actor, chat)
+    native = db.execute(
+        "SELECT actor_id,chat_id,status FROM cloudzy_edge_operations WHERE id=?",
+        (operation_id,),
+    ).fetchone()
+    if native != (actor, chat, "CREATING"):
+        raise UnifiedLinkHold("NATIVE_RESERVATION_IDENTITY_CHANGED")
+    DurableCoordinator.initialize(db)
+    if _linked(db, operation_id) is not None:
+        raise UnifiedLinkHold("UNIFIED_PURCHASE_ALREADY_LINKED")
+    ts = int(time.time() if now is None else now)
+    db.execute(
+        "INSERT INTO cloudzy_uo_operations "
+        "(id,kind,source_ref,actor,chat,step,state,version,created_at,updated_at) "
+        "VALUES (?,'CLOUDZY_NEW',?, ?,?,'PREFLIGHT','PLANNED',0,?,?)",
+        (operation_id, "CZ03:" + operation_id, actor, chat, ts, ts),
+    )
+    db.execute(
+        "INSERT INTO cloudzy_uo_events "
+        "(operation_id,version,at,event,state,step,code) "
+        "VALUES (?,0,?,'LINK_NATIVE_RECEIPT','PLANNED','PREFLIGHT',"
+        "'NATIVE_CZ03_RESERVED')",
+        (operation_id, ts),
+    )
+    return operation_id
+
+
+def _record(db, operation_id, *, step, state, code, now=None,
+            external_intent=False):
+    link = _linked(db, operation_id)
+    if link is None:
+        return False  # historical CZ03 is preserved as-is
+    native = db.execute(
+        "SELECT actor_id,chat_id FROM cloudzy_edge_operations WHERE id=?",
+        (operation_id,),
+    ).fetchone()
+    if not native or native != (link[1], link[2]):
+        raise UnifiedLinkHold("NATIVE_UNIFIED_OWNER_MISMATCH")
+    if link[4] in ("COMPLETED", "CANCELLED_SAFE"):
+        raise UnifiedLinkHold("UNIFIED_OPERATION_CLOSED")
+    if state == "WAITING_EXTERNAL" and step == "PURCHASE" and not external_intent:
+        raise UnifiedLinkHold("PAID_INTENT_MISSING")
+    # Duplicate checkpoints are not new events. External intent remains sticky.
+    row = DurableCoordinator._row(db, link[0])
+    if (row["step"], row["state"], row["code"]) == (step, state, code):
+        return False
+    coordinator = DurableCoordinator(lambda: None, now=(
+        lambda: int(time.time() if now is None else now)
+    ))
+    coordinator._transition(
+        db, row, state=state, step=step, code=code,
+        event="NATIVE_RECEIPT_OBSERVED",
+        worker=None, deadline=None,
+        external_intent=bool(row["external_intent"] or external_intent),
+    )
+    return True
+
+
+def mark_paid_intent(db, *, operation_id, now=None):
+    """Durable UO intent BEFORE Cloudzy paid POST. No fallback to blind POST."""
+    _assert_identity(operation_id)
+    native = db.execute(
+        "SELECT status FROM cloudzy_edge_operations WHERE id=?",
+        (operation_id,),
+    ).fetchone()
+    if native != ("CREATING",):
+        raise UnifiedLinkHold("NATIVE_PAID_INTENT_STAGE_CHANGED")
+    linked = _linked(db, operation_id)
+    if linked is None:
+        raise UnifiedLinkHold("UNIFIED_PURCHASE_LINK_MISSING")
+    if linked[5] or linked[4] != "PLANNED":
+        raise UnifiedLinkHold("PAID_INTENT_ALREADY_PENDING")
+    return _record(
+        db, operation_id, step="PURCHASE", state="WAITING_EXTERNAL",
+        code="CLOUDZY_PAID_POST_INTENT", now=now, external_intent=True)
+
+
+def observe_native_status(db, *, operation_id, status, now=None):
+    """Call AFTER native status CAS, BEFORE transaction commit."""
+    _assert_identity(operation_id)
+    native = db.execute(
+        "SELECT status,provider_server_id FROM cloudzy_edge_operations WHERE id=?",
+        (operation_id,),
+    ).fetchone()
+    if not native or native[0] != status:
+        raise UnifiedLinkHold("NATIVE_STATUS_CAS_NOT_COMMITTED")
+    if status == "REJECTED":
+        linked = _linked(db, operation_id)
+        if linked is None:
+            return False
+        # A definitive preflight rejection without a paid intent is a safe
+        # no-charge end; an intended POST needs independent reconciliation.
+        stage = "NEEDS_OPERATOR" if linked[5] else "CANCELLED_SAFE"
+        return _record(
+            db, operation_id, step="PURCHASE", state=stage,
+            code="PROVIDER_POST_REJECTED_REVIEW" if linked[5]
+                 else "PURCHASE_PREFLIGHT_REJECTED",
+            now=now,
+        )
+    selected = _NATIVE_STEPS.get(status)
+    if selected is None:
+        return False
+    if status in ("CREATED", "WAITING", "HOLD_SSH", "HOSTKEY_PENDING",
+                  "PROVISIONING", "EDGE_READY", "HOLD_PROVISION") and not native[1]:
+        raise UnifiedLinkHold("NATIVE_PROVIDER_RECEIPT_UNVERIFIED")
+    return _record(db, operation_id, step=selected[0], state=selected[1],
+                   code=selected[2], now=now)
+
+
+def observe_cz06_status(db, *, operation_id, stage, now=None):
+    """CZ06 continuation is not proof of the client's ISP or cutover success."""
+    _assert_identity(operation_id)
+    row = db.execute(
+        "SELECT stage,actor_id,chat_id FROM cloudzy_cz06_runs WHERE operation_id=?",
+        (operation_id,),
+    ).fetchone()
+    if not row or row[0] != stage:
+        raise UnifiedLinkHold("NATIVE_CZ06_STATUS_CHANGED")
+    linked = _linked(db, operation_id)
+    if linked is None:
+        return False
+    if (linked[1], linked[2]) != (row[1], row[2]):
+        raise UnifiedLinkHold("NATIVE_CZ06_OWNER_MISMATCH")
+    step = _CZ06_STEPS.get(stage)
+    if step is None:
+        return False
+    if stage in ("READY", "STANDBY_VERIFYING", "EDGE_READY"):
+        provider = db.execute(
+            "SELECT status,provider_server_id,public_ipv4 "
+            "FROM cloudzy_edge_operations WHERE id=?", (operation_id,)
+        ).fetchone()
+        if not provider or provider[0] != "EDGE_READY" or not provider[1] or not provider[2]:
+            raise UnifiedLinkHold("CZ06_EDGE_RECEIPT_NOT_READY")
+    return _record(
+        db, operation_id, step=step[0], state=step[1],
+        code=step[2], now=now,
+    )

@@ -88,36 +88,37 @@ class DefaultOnlyLegacyDB(unittest.TestCase):
         with self.db() as db:
             return db.execute("SELECT host FROM ssh_accounts WHERE username='nvl-test'").fetchone()[0]
 
-    def test_four_active_hosts_remain_available_to_manual_legacy_picker(self):
-        # PR #208 had reduced the manual picker to Default only, breaking
-        # existing Edge onboarding and the legacy rescue/transfer controls.
+    def test_manual_legacy_rebuild_never_promotes_unlisted_inventory(self):
+        # The *inventory* still contains four active hosts, including Core.
+        # Customer-facing settings.hosts must NOT advertise all four.
         self.ns["_db_rebuild_hosts_from_pool"]()
-        self.assertEqual(
-            self.setting("hosts"),
-            f"{DEFAULT},{OTHER},144.172.68.62,{CORE}",
-        )
+        self.assertEqual(self.setting("hosts"), DEFAULT)
         self.assertEqual(self.account_host(), DEFAULT)
-        # New customers still never load-balance from this inventory list.
         with self.db() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM host_pool WHERE active=1"
+            ).fetchone()[0], 4)
             self.assertEqual(self.ns["_default_customer_relay_checked"](db), DEFAULT)
 
-    def test_manual_rebuild_does_not_auto_change_dns_or_customer_host(self):
+    def test_manual_rebuild_holds_on_dns_drift_without_other_writes(self):
         with self.db() as db:
-            db.execute("UPDATE settings SET value='previous-value' WHERE key='hosts'")
             db.execute("UPDATE settings SET value=? WHERE key='dns_current_ip'", (OTHER,))
-        self.ns["_db_rebuild_hosts_from_pool"]()
+        with self.assertRaisesRegex(RuntimeError, "CACHED_DNS_OR_CORE_MISMATCH"):
+            self.ns["_db_rebuild_hosts_from_pool"]()
         self.assertEqual(self.setting("dns_current_ip"), OTHER)
+        self.assertEqual(self.setting("hosts"), DEFAULT)
         self.assertEqual(self.account_host(), DEFAULT)
         with self.db() as db:
             with self.assertRaisesRegex(RuntimeError, "DEFAULT_CUSTOMER_RELAY_ROUTE_MISMATCH"):
                 self.ns["_default_customer_relay_checked"](db)
 
-    def test_core_or_standby_may_be_visible_to_operator_but_never_sold_to(self):
+    def test_core_or_standby_may_be_visible_but_never_default_customer(self):
         with self.db() as db:
             db.execute("UPDATE host_pool SET is_default=0")
             db.execute("UPDATE host_pool SET is_default=1 WHERE host=?", (CORE,))
             db.execute("UPDATE settings SET value=? WHERE key='dns_current_ip'", (CORE,))
-        self.ns["_db_rebuild_hosts_from_pool"]()
+        with self.assertRaisesRegex(RuntimeError, "DEFAULT_NOT_CUSTOMER_ELIGIBLE"):
+            self.ns["_db_rebuild_hosts_from_pool"]()
         with self.db() as db:
             with self.assertRaisesRegex(RuntimeError, "DEFAULT_CUSTOMER_RELAY_NOT_ELIGIBLE"):
                 self.ns["_default_customer_relay_checked"](db)
@@ -125,7 +126,8 @@ class DefaultOnlyLegacyDB(unittest.TestCase):
             db.execute("UPDATE host_pool SET is_default=0 WHERE host=?", (CORE,))
             db.execute("UPDATE host_pool SET is_default=1,is_standby=1 WHERE host=?", (OTHER,))
             db.execute("UPDATE settings SET value=? WHERE key='dns_current_ip'", (OTHER,))
-        self.ns["_db_rebuild_hosts_from_pool"]()
+        with self.assertRaisesRegex(RuntimeError, "DEFAULT_NOT_CUSTOMER_ELIGIBLE"):
+            self.ns["_db_rebuild_hosts_from_pool"]()
         with self.db() as db:
             with self.assertRaisesRegex(RuntimeError, "DEFAULT_CUSTOMER_RELAY_NOT_ELIGIBLE"):
                 self.ns["_default_customer_relay_checked"](db)
@@ -219,18 +221,17 @@ class BackgroundMutationFreeze(unittest.TestCase):
         self.assertNotIn("UPDATE ssh_accounts", sec)
         self.assertNotIn("_apply_distribution", sec)
         self.assertIn("return", sec)
-        default_callback = region("elif d.startswith(\"hpdef_\")",
-                                  "# 🗑 حذف‌شده: خریدِ خودکارِ VPS")
-        self.assertIn("_check_ssh_reachable", default_callback)
-        self.assertIn("_db_set_default_host", default_callback)
-        self.assertIn("_db_rebuild_hosts_from_pool", default_callback)
-        self.assertIn('callback_data=f"hpdef_migrate_{host}"', default_callback)
-        confirm = region('elif d.startswith("hpdefmig_yes_")',
-                         'elif d.startswith("hpdef_")')
-        self.assertLess(confirm.index("_check_ssh_reachable"),
-                        confirm.index("_db_set_all_accounts_host"))
-        self.assertLess(confirm.index("_db_set_all_accounts_host"),
-                        confirm.index("_update_cloudflare_dns"))
+        default_callback = region(
+            'elif d.startswith(("hpdef_migrate_", "hpdefmig_yes_", "hpdef_"))',
+            "# 🗑 حذف‌شده: خریدِ خودکارِ VPS")
+        self.assertIn("CZ04B/CZ07", default_callback)
+        for forbidden in ("_db_set_default_host", "_db_set_all_accounts_host",
+                          "_update_cloudflare_dns"):
+            self.assertNotIn(forbidden, default_callback)
+        mass = region('elif d.startswith("ipallconf_yes_")',
+                      'elif d == "ipsvc_auto"')
+        self.assertIn("CZ07", mass)
+        self.assertNotIn("_db_set_all_accounts_host", mass)
         self.assertIn('elif d == "ipsvc_distribute_confirm"', SOURCE)
 
 

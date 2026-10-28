@@ -26,6 +26,10 @@ from cloudzy_service import (
     CloudzyTimeout,
 )
 from cloudzy_cz05_catalog import CatalogHold, eligible_offers, preferred_regions
+from cloudzy_unified_native import (
+    register_native_purchase, mark_paid_intent, observe_native_status,
+    UnifiedLinkHold,
+)
 from cloudzy_purchase_guard import (
     PurchaseHold, classify_preflight, classify_create,
     exact_existing_server, require_base_hourly_ceiling,
@@ -276,6 +280,12 @@ class ReceiptStore:
                     QuickRelayJournal(self.db, now=self.now).create_in_receipt_transaction(
                         db, opid=operation_id, actor=actor, chat=chat, message_id=message_id
                     )
+                # The purchase receipt and UO owner must become durable in
+                # the SAME transaction, before any paid Cloudzy POST.
+                register_native_purchase(
+                    db, operation_id=operation_id, actor=actor, chat=chat,
+                    now=timestamp,
+                )
         except Exception as exc:
             if isinstance(exc, QuickEdgeHold):
                 raise
@@ -312,7 +322,19 @@ class ReceiptStore:
             )
             if cur.rowcount != 1:
                 raise QuickEdgeHold("STATE_CHANGED_OR_OPERATION_UNSETTLED")
+            # Source CZ03 CAS and coordinator checkpoint commit together.
+            # Historical receipts without a UO link remain untouched.
+            observe_native_status(db, operation_id=operation_id,
+                                  status=new, now=int(self.now()))
 
+
+    def mark_paid_intent(self, operation_id):
+        """Hold paid request unless the coordinator intent is persisted first."""
+        self.initialize()
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            return mark_paid_intent(
+                db, operation_id=operation_id, now=int(self.now()))
 
     def existing_host(self, ip):
         """Read-only Legacy host identity check before remote provisioning."""
@@ -1309,6 +1331,19 @@ class QuickEdgeWizard:
                                     code="PREPURCHASE_PREFLIGHT_FAILED")
             await app.bot.send_message(chat,
                 f"⛔️ بررسی پیش از خرید ناموفق بود. کد: CZ05_PREFLIGHT_ERROR | عملیات: {opid[:16]}")
+            return
+        # The coordinator records an external-effect intent BEFORE entering
+        # the paid POST. On journal failure we never contact Cloudzy.
+        try:
+            await asyncio.to_thread(self.store.mark_paid_intent, opid)
+        except (UnifiedLinkHold, QuickEdgeHold, sqlite3.Error):
+            log.error("UNIFIED_PRECHARGE_INTENT_HOLD op=%s", opid[:16])
+            try:
+                await app.bot.send_message(
+                    chat, "⛔️ ثبت ایمن قصد خرید در دفتر عملیات ناموفق بود؛ "
+                          "هیچ سفارش جدیدی ارسال نشد. Journal را بررسی کنید.")
+            except Exception:
+                pass
             return
         try:
             data = await self._cloudzy(

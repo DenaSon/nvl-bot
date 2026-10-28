@@ -87,7 +87,7 @@ class IndependentCZ07Witness:
 
     def review(self, job):
         if (not isinstance(job, dict) or not JOB_RE.fullmatch(str(job.get("id", "")))
-                or job.get("status") != "VERIFYING"
+                or job.get("status") not in ("VERIFYING", "MOVED")
                 or type(job.get("total")) is not int
                 or type(job.get("moved")) is not int
                 or job["total"] != job["moved"]

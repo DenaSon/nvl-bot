@@ -403,7 +403,7 @@ from edge_egress_k2_m4_status import (
 import edge_egress_k2_root_direct as k2_root_direct_flags
 from cloudzy_quick_edge import QuickEdgeWizard
 from cloudzy_cz04a import Cloudzy04A
-from cloudzy_cz04b import Cloudzy04B
+from cloudzy_cz04b_guarded import GuardedCloudzy04B
 from cloudzy_cz07_queue import DurableCutoverQueue
 from cloudzy_cz04b_dns import CloudflareExactDNS
 from cloudzy_admin_panel import CloudzyAdminPanel
@@ -7287,7 +7287,7 @@ async def _cloudzy_04b_nat(host, admin_port, service_port, tls_port, trusted_key
     )
 
 
-_cloudzy_04b = Cloudzy04B(
+_cloudzy_04b = GuardedCloudzy04B(
     db_conn=db_conn,
     guard=_cloudzy_04b_guard,
     provider=_cloudzy_04b_provider_verified,

@@ -15,6 +15,7 @@ import time
 
 from safe_failover import FAILOVER_STATUS_RUNNING
 from edge_egress_k2_a_6g_shared import acquire_original_6g, update_original_6g
+from cloudzy_route_reconcile import require_customer_route_projection
 
 REF_TTL = 600
 CONFIRM_TTL = 180

@@ -1922,6 +1922,9 @@ def _db_update_setting(k, v):
     with db_conn() as conn:
         if k in {"hosts", "dns_current_ip", "tls_passthrough"}:
             _db_assert_legacy_host_mutation_allowed(conn)
+        if k == "hosts":
+            from legacy_route_compat import validate_customer_host_edit
+            validate_customer_host_edit(conn, v)
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, v))
 
 
@@ -3015,6 +3018,14 @@ def _db_set_host_standby(host, is_standby: bool):
     """🆕 علامت‌گذاریِ یک Edge به‌عنوانِ Standby (بدونِ مشتریِ فعال، آمادهٔ Failover)."""
     with db_conn() as conn:
         _db_assert_legacy_host_mutation_allowed(conn)
+        if is_standby:
+            listed = conn.execute(
+                "SELECT value FROM settings WHERE key='hosts'"
+            ).fetchone()
+            if host in [
+                    h.strip() for h in ((listed[0] if listed else "") or "").split(",")
+            ]:
+                raise RuntimeError("STANDBY_IS_STILL_IN_CUSTOMER_HOSTS")
         conn.execute("UPDATE host_pool SET is_standby=? WHERE host=?", (1 if is_standby else 0, host))
 
 def _db_get_standby_hosts():
@@ -4262,44 +4273,38 @@ def _install_local_pubkey_on_open_ssh(ssh):
 # و خریدِ دستیِ VPS). طبقِ معماریِ جدید، Failover فقط با سرورهایِ Standbyِ از‌قبل‌ثبت‌شده در
 # host_pool کار می‌کند (نگاه کنید به _activate_standby_for_filtered_edge پایین‌تر در همین فایل).
 
-def _db_rebuild_hosts_from_pool():
-    """تنظیم «hosts» (که همه‌جای ربات برای ساخت فاکتور/کد اتصال استفاده می‌شود) را از روی
-    IPهای فعالِ host_pool بازسازی می‌کند. سایر بخش‌های کد بدون هیچ تغییری همچنان از همان
-    تنظیم قدیمی «hosts» می‌خوانند؛ فقط منبع تولیدش عوض شده.
-    🆕 اگر یک IP به‌عنوان «پیش‌فرض کل سیستم» ست شده باشد، همیشه اول لیست قرار می‌گیرد — چون
-    تمام جاهای کد قدیمی که fallback را با hl[0] می‌گرفتند، دقیقاً همین رفتار را انتظار دارند."""
+def _db_rebuild_hosts_from_pool(*, activated_host=None):
+    """Customer-facing list, not full active host_pool (which includes Standby).
+
+    No DNS, default, SSH account or host_pool role writes. Legacy projection
+    only; live Cloudflare ownership must be independently checked for cutover.
+    """
+    from legacy_route_compat import project_customer_hosts
     with db_conn() as conn:
-        # Only invoked by explicitly approved/manual legacy host operations.
-        # Preserve the original complete active inventory (Default first)
-        # for the legacy manual picker; never call this from health/pressure.
         conn.execute("BEGIN IMMEDIATE")
         _db_assert_legacy_host_mutation_allowed(conn)
         _db_assert_account_write_allowed(conn)
-        active = [r[0] for r in conn.execute("SELECT host FROM host_pool WHERE active=1 ORDER BY is_default DESC, host").fetchall()]
-        if active:  # هرگز لیست را کامل خالی نمی‌کنیم تا فاکتورسازی از کار نیفتد
-            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('hosts', ?)", (",".join(active),))
+        plan = project_customer_hosts(conn, add_host=activated_host)
+        if plan.after != plan.before:
+            if conn.execute(
+                "UPDATE settings SET value=? WHERE key='hosts' AND value=?",
+                (plan.after, plan.before)
+            ).rowcount != 1:
+                raise RuntimeError("LEGACY_HOSTS_CAS_FAILED")
+
 def _db_resync_host_pool_from_full_list(hosts_list):
-    """وقتی ادمین از مسیر قدیمیِ متنیِ «تنظیمات هاست» کل لیست را یک‌جا جایگزین می‌کند، این تابع
-    host_pool را با همان لیست هماهنگ می‌کند: مواردی که در لیست جدید هستند فعال می‌شوند، مواردی
-    که حذف شده‌اند غیرفعال می‌شوند (نه پاک) تا تاریخچه/آمار پایش از بین نرود."""
+    """Legacy customer-host text edits must NOT deactivate unrelated inventory.
+
+    Validation happens before the settings write. Existing host_pool, Standby,
+    DNS, and customer assignments are unchanged by a text-list operation.
+    """
+    from legacy_route_compat import validate_customer_host_edit
     with db_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         _db_assert_legacy_host_mutation_allowed(conn)
-        existing = {r[0] for r in conn.execute("SELECT host FROM host_pool").fetchall()}
-        wanted = set(hosts_list)
-        for h in hosts_list:
-            if h in existing:
-                conn.execute("UPDATE host_pool SET active=1, consecutive_fails=0, disabled_reason=NULL, disabled_at=NULL WHERE host=?", (h,))
-            else:
-                default_row = conn.execute("SELECT value FROM settings WHERE key='port'").fetchone()
-                service_port = _normalize_ssh_port(default_row[0] if default_row else 22, 22)
-                conn.execute(
-                    "INSERT INTO host_pool "
-                    "(host, active, ssh_port, service_port, admin_ssh_port) "
-                    "VALUES (?, 1, ?, ?, 22)",
-                    (h, service_port, service_port),
-                )
-        for h in existing - wanted:
-            conn.execute("UPDATE host_pool SET active=0 WHERE host=?", (h,))
+        _db_assert_account_write_allowed(conn)
+        validate_customer_host_edit(conn, ",".join(hosts_list))
+        # No host_pool activation/deactivation. Membership is in settings.hosts.
 
 # 🆕 دامنهٔ ثابت عمومی (سراسری) که در تمام کدهای نپسترنت/فاکتورهای حالت مستقیم به‌جای IP خام
 # نمایش داده می‌شود. کاربر همیشه همین دامنه را در اپش دارد؛ IP واقعی پشتش با Cloudflare API عوض
@@ -13530,34 +13535,58 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await asyncio.to_thread(_db_update_setting, 'brand', text.strip()); await update.message.reply_text("✅ برند تغییر یافت."); safe_clear_context(context); await show_main_menu(update, context)
     elif state == 'HOSTS_INPUT':
         new_hosts = [h.strip() for h in text.replace(" ", "").split(',') if h.strip()]
-        await asyncio.to_thread(_db_update_setting, 'hosts', ",".join(new_hosts))
-        await asyncio.to_thread(_db_resync_host_pool_from_full_list, new_hosts)  # 🔧 هماهنگ‌سازی با استخر پایش سلامت
-        await update.message.reply_text("✅ هاست‌ها آپدیت شدند."); safe_clear_context(context); await show_main_menu(update, context)
+        from legacy_route_compat import LegacyRouteHold
+        try:
+            await asyncio.to_thread(
+                _db_update_setting, 'hosts', ",".join(new_hosts))
+        except LegacyRouteHold as exc:
+            await update.message.reply_text(
+                "⛔️ فهرست مسیر مشتریان معتبر نیست یا شامل Standby/سرور تأییدنشده است. "
+                "ابتدا Default و سلامت مسیر را بررسی کنید؛ تغییری انجام نشد."
+            )
+            return
+        await update.message.reply_text(
+            "✅ فهرست مشتریان به‌روزرسانی شد؛ Inventory و نقش Relayها تغییر نکرد."
+        )
+        safe_clear_context(context); await show_main_menu(update, context)
     elif state == 'HOSTS_APPEND_INPUT':
         new_ip = text.strip().replace(" ", "")
         if not new_ip:
             await update.message.reply_text("❌ یک IP معتبر بفرستید:"); return
-        cur_hosts = [h.strip() for h in (await asyncio.to_thread(_db_get_setting, 'hosts', '')).split(',') if h.strip()]
+        cur_hosts = [
+            h.strip() for h in (
+                await asyncio.to_thread(_db_get_setting, 'hosts', '')
+            ).split(',') if h.strip()
+        ]
         if new_ip in cur_hosts:
-            await update.message.reply_text("ℹ️ این IP از قبل در لیست بود؛ چیزی تغییر نکرد.")
+            await update.message.reply_text("ℹ️ این IP از قبل در فهرست مشتریان ثبت شده است.")
         else:
-            cur_hosts.append(new_ip)
-            await asyncio.to_thread(_db_update_setting, 'hosts', ",".join(cur_hosts))
-            await asyncio.to_thread(_db_add_host_pool, new_ip)  # 🔧 هماهنگ‌سازی با استخر پایش سلامت
-            await update.message.reply_text(f"✅ IP جدید <code>{esc(new_ip)}</code> به لیست اضافه شد.\n🌐 لیست فعلی: <code>{esc(', '.join(cur_hosts))}</code>", parse_mode="HTML")
+            # Do not automatically activate unverified host_pool/Standby.
+            from legacy_route_compat import LegacyRouteHold
+            try:
+                await asyncio.to_thread(
+                    _db_update_setting, 'hosts', ",".join([*cur_hosts, new_ip])
+                )
+            except LegacyRouteHold:
+                await update.message.reply_text(
+                    "⛔️ IP جدید هنوز برای مسیر مشتری مجاز نیست. "
+                    "ابتدا Edge را از مسیر تأییدشده راه‌اندازی کنید."
+                )
+                return
+            await update.message.reply_text(
+                f"✅ IP تأییدشده <code>{esc(new_ip)}</code> به مسیر مشتری اضافه شد.",
+                parse_mode="HTML",
+            )
         safe_clear_context(context); await show_main_menu(update, context)
     elif state == 'HOSTPOOL_ADD_INPUT':
-        new_ip = text.strip().replace(" ", "")
-        if not new_ip:
-            await update.message.reply_text("❌ یک IP/دامنهٔ معتبر بفرستید:"); return
-        cur_hosts = [h.strip() for h in (await asyncio.to_thread(_db_get_setting, 'hosts', '')).split(',') if h.strip()]
-        if new_ip not in cur_hosts:
-            cur_hosts.append(new_ip)
-            await asyncio.to_thread(_db_update_setting, 'hosts', ",".join(cur_hosts))
-        await asyncio.to_thread(_db_add_host_pool, new_ip)
-        await asyncio.to_thread(_db_set_host_active, new_ip, True)
-        await update.message.reply_text(f"✅ IP <code>{esc(new_ip)}</code> به استخر پایش سلامت اضافه و فعال شد.", parse_mode="HTML")
-        safe_clear_context(context); await show_main_menu(update, context)
+        # An unknown VPS is inventory, NOT a customer route. Legacy text
+        # onboarding skipped SSH/WG/Cloudzy identity proof: deny stale flow.
+        await update.message.reply_text(
+            "⛔️ ثبت مستقیم IP به‌عنوان Relay فعال از این مسیر متوقف شده است. "
+            "از «افزودن Edge جدید» و بررسی مستقل SSH/WG استفاده کنید."
+        )
+        safe_clear_context(context)
+        return
 
     elif state == 'EDGE_NEW_IP':
         ip = text.strip()
@@ -21842,61 +21871,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 await query.message.reply_text(k2_m4_failure_html(),parse_mode='HTML')
             return
-        await query.edit_message_text(f"⏳ در حال انتقال دامنه و ترافیک به سرور <code>{esc(target_ip)}</code>...\nلطفاً چند لحظه صبر کنید.", parse_mode="HTML")
-        
-        async def _make_edge_active():
-            # ۱. آپدیت دیتابیس (روشن کردن فلگ و ست کردن دیفالت)
-            await asyncio.to_thread(_db_set_default_host, target_ip)
-            await asyncio.to_thread(_db_update_setting, 'tls_passthrough', '1')
-            
-            # ۲. آپدیت کلودفلر (انتقال دامنه)
-            cf_ok, cf_msg = await asyncio.to_thread(_cf_update_dns_record_sync, target_ip)
-            if not cf_ok:
-                with contextlib.suppress(Exception):
-                    await context.bot.send_message(query.message.chat_id, f"❌ خطا در انتقال دامنه روی کلودفلر:\n<code>{esc(cf_msg)}</code>", parse_mode="HTML")
-                return
-            await asyncio.to_thread(_db_update_setting, "dns_current_ip", target_ip)
-            
-            # ۳. آپدیت پورت‌ها (NAT) روی سرور Edge انتخاب شده
-            tls_port = await asyncio.to_thread(_db_get_setting, 'tls_port', '2088')
-            port_map = await asyncio.to_thread(_db_get_host_admin_ssh_port_map)
-            ssh_port = port_map.get(target_ip, 22)
-            
-            try:
-                def _run_iptables():
-                    ssh = None
-                    try:
-                        ssh = paramiko.SSHClient()
-                        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                        pkey = paramiko.Ed25519Key.from_private_key_file(DO_SSH_KEY_PATH)
-                        ssh.connect(target_ip, port=ssh_port, username='root', pkey=pkey, timeout=15)
-                        cmd = (
-                            f"iptables -t nat -C PREROUTING -p tcp --dport {tls_port} -j DNAT --to-destination 10.77.0.1:{tls_port} 2>/dev/null || "
-                            f"iptables -t nat -A PREROUTING -p tcp --dport {tls_port} -j DNAT --to-destination 10.77.0.1:{tls_port} ; "
-                            "(command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1) || iptables-save > /etc/iptables/rules.v4"
-                        )
-                        ssh.exec_command(cmd, timeout=20)
-                    finally:
-                        if ssh is not None:
-                            try:
-                                ssh.close()
-                            except Exception:
-                                pass
-                await asyncio.to_thread(_run_iptables)
-                
-                # ۴. پایان و موفقیت
-                with contextlib.suppress(Exception):
-                    await context.bot.send_message(
-                        query.message.chat_id, 
-                        f"✅ <b>سرور {esc(target_ip)} با موفقیت به عنوان رله فعال تنظیم شد!</b>\n"
-                        f"ترافیک دامنه هم‌اکنون به این سرور منتقل گردید.", 
-                        parse_mode="HTML"
-                    )
-            except Exception as e:
-                with contextlib.suppress(Exception):
-                    await context.bot.send_message(query.message.chat_id, f"⚠️ دامنه به {target_ip} منتقل شد اما تنظیم NAT با خطای SSH روبرو شد:\n<code>{esc(str(e))}</code>", parse_mode="HTML")
-
-        spawn_bg_task(_make_edge_active())
+        # Guard the old Legacy path: it wrote is_default BEFORE DNS and
+        # never aligned settings.hosts, making customers/default disagree.
+        # The native protected K2 branch above remains a separate guarded path.
+        await query.message.reply_text(
+            "⛔️ فعال‌سازی Relay از این مسیر قدیمی متوقف است. "
+            "برای تغییر DNS و Default از مسیر Journalدار Cloudzy/CZ04B استفاده کنید. "
+            "هیچ Default، DNS، NAT یا حسابی تغییر نکرد."
+        )
         return
 
     elif d == "srv_wiz_promote_start" and role == 'admin':
@@ -25755,7 +25737,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if service_ok:
             await asyncio.to_thread(_db_set_host_active, host, True)
-            await asyncio.to_thread(_db_rebuild_hosts_from_pool)
+            await asyncio.to_thread(_db_rebuild_hosts_from_pool, activated_host=host)
             admin_txt = (
                 f"✅ Admin SSH <code>{admin_port}</code> سالم است."
                 if admin_ok else
@@ -25907,76 +25889,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("⛔️ راه‌اندازی باز نشد؛ کمی بعد دوباره تلاش کنید.")
         return
 
-    elif d.startswith("hpdef_migrate_") and role == 'admin':
-        host = d[len("hpdef_migrate_"):]
-        active_now = await asyncio.to_thread(_db_get_active_hosts_from_pool)
-        if host not in active_now:
-            await query.message.reply_text("⛔️ این IP دیگر در لیست فعال نیست؛ عملیات لغو شد."); return
-        kb = [[InlineKeyboardButton("✅ بله، همهٔ کاربران فعلی هم منتقل شوند", callback_data=f"hpdefmig_yes_{host}"),
-               InlineKeyboardButton("↩️ نه، فقط پیش‌فرض جدید کافیه", callback_data="hp_menu")]]
-        await query.edit_message_text(
-            f"⚠️ آیا مطمئنید می‌خواهید هاستِ <b>همهٔ</b> اکانت‌های موجود (نه فقط تازه‌ساخته‌ها) هم به "
-            f"<code>{esc(host)}</code> تغییر کند؟\nاین کار روی فاکتور/کد اتصالی که هر کاربر قبلاً دریافت کرده هم اثر می‌گذارد.",
-            reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
-
-    elif d.startswith("hpdefmig_yes_") and role == 'admin':
-        host = d[len("hpdefmig_yes_"):]
-        # 🐛🔧 همان گاردِ بالا اینجا هم لازم است — این دکمه دقیقاً همان قدمی است که در عمل باعث
-        # قطع‌شدن کاربران واقعی می‌شود (چون host همهٔ اکانت‌های موجود را عوض می‌کند)، پس حتی اگر
-        # مرحلهٔ «پیش‌فرض‌کردن» زودتر رد شده باشد، اینجا هم دوباره و مستقل چک می‌کنیم — چون ممکن
-        # است بین آن مرحله و این تایید نهایی، فاصله زمانی افتاده و وضعیت IP عوض شده باشد.
-        port_to_check = await asyncio.to_thread(_db_get_host_service_port, host, 22)
-        reachable, reach_detail = await _check_ssh_reachable(host, port_to_check)
-        if not reachable:
-            await query.message.reply_text(
-                f"⛔️ <b>انتقال انجام نشد.</b>\n\n"
-                f"دوباره سرویس مشتری روی <code>{esc(host)}:{port_to_check}</code> امتحان شد و جواب نداد:\n"
-                f"<code>{esc(reach_detail)}</code>\n\n"
-                f"اگر همهٔ کاربران به این IP منتقل می‌شدند، دقیقاً همه قطع می‌شدند — برای همین این عملیات متوقف شد.",
-                parse_mode="HTML")
-            return
-        await asyncio.to_thread(_db_set_all_accounts_host, host)
-        await asyncio.to_thread(_db_mark_ip_switch_now)  # 🆕 شروع دورهٔ خنک‌شدن برای پایش خودکار
-        cf_ok, cf_msg = await _update_cloudflare_dns(host)
-        cf_suffix = f"\n\n☁️ <b>وضعیت کلودفلر:</b> {cf_msg}" if cf_ok else f"\n\n⚠️ <b>هشدار کلودفلر:</b> {cf_msg}"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به سرویس IP", callback_data="ipsvc_menu")]])
-        await query.edit_message_text(f"✅ سرویس مشتری زنده تأیید شد و هاستِ همهٔ اکانت‌های موجود به <code>{esc(host)}</code> منتقل شد." + cf_suffix, reply_markup=kb, parse_mode="HTML")
-
-    elif d.startswith("hpdef_") and role == 'admin':
-        host = d[len("hpdef_"):]
-        active_now = await asyncio.to_thread(_db_get_active_hosts_from_pool)
-        if host not in active_now:
-            await query.message.reply_text("⛔️ فقط یک IP فعال می‌تواند پیش‌فرض شود؛ اول آن را فعال کنید."); return
-
-        # 🐛🔧 رفع باگ واقعی: قبلاً اینجا بدون هیچ چکی، IP به‌عنوان پیش‌فرض ثبت و آمادهٔ انتقال
-        # همهٔ کاربران می‌شد، حتی اگر سرویس SSH واقعی رویش هنوز درست بالا نیامده باشد (مثلاً درست
-        # همان مشکلی که با ssh.socket پیش آمد: پورت توی دیتابیس یک چیز بود، پورت واقعی گوش‌داده‌شده
-        # چیز دیگر). نتیجه: انتقال کور به یک IP که واقعاً آماده نیست و قطعی کامل کاربران. الان قبل
-        # از هرچیز، با یک چک سبک (بدون نیاز به رمز) مطمئن می‌شویم واقعاً یک SSH زنده آن‌جا هست.
-        port_to_check = await asyncio.to_thread(_db_get_host_service_port, host, 22)
-        reachable, reach_detail = await _check_ssh_reachable(host, port_to_check)
-        if not reachable:
-            await query.message.reply_text(
-                f"⛔️ <b>پیش‌فرض نشد.</b>\n\n"
-                f"قبل از پیش‌فرض‌کردن، سرویس مشتری روی <code>{esc(host)}:{port_to_check}</code> امتحان شد و جواب نداد:\n"
-                f"<code>{esc(reach_detail)}</code>\n\n"
-                f"اگر این IP تازه اضافه شده، اول مطمئن شوید SSH رویش کامل بالا آمده (و پورت ثبت‌شده در "
-                f"«سرویس IP» با پورت واقعی سرور یکی است)، بعد دوباره امتحان کنید.",
-                parse_mode="HTML")
-            return
-
-        await asyncio.to_thread(_db_set_default_host, host)
-        await asyncio.to_thread(_db_rebuild_hosts_from_pool)
-        await asyncio.to_thread(_db_mark_ip_switch_now)  # 🆕 شروع دورهٔ خنک‌شدن برای پایش خودکار
-        # 🆕 قبلاً فقط اکانت‌های تازه/فاکتورهای بدون هاست مشخص را تحت‌تاثیر قرار می‌داد؛ حالا صراحتاً
-        # می‌پرسد آیا اکانت‌های موجود هم به همین IP جدید منتقل شوند («کل کاربران منتقل شوند»).
-        kb = [[InlineKeyboardButton("👥 بله، اکانت‌های موجود هم به این IP منتقل شوند", callback_data=f"hpdef_migrate_{host}")],
-              [InlineKeyboardButton("🔙 بازگشت به سرویس IP", callback_data="ipsvc_menu")]]
-        await query.edit_message_text(
-            f"⭐ <code>{esc(host)}</code> به‌عنوان پیش‌فرض کل سیستم ثبت شد (سرویس مشتری هم تأیید شد ✅)؛ از این پس اکانت‌های جدید و هر "
-            f"فاکتور بدون هاست مشخص، اول همین IP را نشان می‌دهند.\n\n"
-            f"می‌خواهید هاستِ اکانت‌های <b>از قبل ساخته‌شده</b> هم به همین IP جدید منتقل شود؟",
-            reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+    elif d.startswith(("hpdef_migrate_", "hpdefmig_yes_", "hpdef_")) and role == 'admin':
+        # Old default and bulk-migration callbacks are unsafe: they did not
+        # share the CZ04B/CZ07 durable DNS/6G/account journal. Keep callbacks
+        # recognizable, but deny mutation (including stale Telegram buttons).
+        await query.message.reply_text(
+            "⛔️ تغییر Relay پیش‌فرض یا انتقال کاربران از این منوی قدیمی متوقف است. "
+            "از «Cloudzy | Edge و Relay» و مسیر تأییدشده CZ04B/CZ07 استفاده کنید. "
+            "هیچ DNS، Default یا حسابی تغییر نکرد."
+        )
+        return
 
     # 🗑 حذف‌شده: خریدِ خودکارِ VPS از DigitalOcean + خریدِ دستی/مدیریتِ سرورهای Cloudzy.
     # طبقِ معماریِ جدید، افزودنِ Edge فقط دستی (🚀 افزودن Edge جدید) و Failover فقط با
@@ -26020,7 +25942,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        await asyncio.to_thread(_db_set_host_standby, host, True)
+        try:
+            await asyncio.to_thread(_db_set_host_standby, host, True)
+        except RuntimeError as exc:
+            if str(exc) != "STANDBY_IS_STILL_IN_CUSTOMER_HOSTS":
+                raise
+            await query.message.reply_text(
+                "⛔️ این IP هنوز در فهرست مسیر مشتریان است. "
+                "پیش از تبدیل به Standby، متادیتا را از مسیر تأییدشده اصلاح کنید."
+            )
+            return
         await query.answer("✅ سرور به‌عنوان جایگزین ثبت شد.", show_alert=False)
         await _render_host_pool_panel(query)
 
@@ -26174,17 +26105,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"⚠️ آیا مطمئنید می‌خواهید هاستِ <b>همهٔ</b> کاربران سرور به <code>{esc(new_host)}</code> تغییر کند؟", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
     elif d.startswith("ipallconf_yes_") and role == 'admin':
-        hl = context.user_data.get('ipsvc_hosts', [])
-        idx_str = d[len("ipallconf_yes_"):]
-        if not idx_str.isdigit() or int(idx_str) >= len(hl):
-            await query.message.reply_text("❌ درخواست منقضی‌شده؛ دوباره تلاش کنید."); return
-        new_host = hl[int(idx_str)]
-        await asyncio.to_thread(_db_set_all_accounts_host, new_host)
-        cf_ok, cf_msg = await _update_cloudflare_dns(new_host)
-        cf_suffix = f"\n\n☁️ <b>وضعیت کلودفلر:</b> {cf_msg}" if cf_ok else f"\n\n⚠️ <b>هشدار کلودفلر:</b> {cf_msg}"
-        context.user_data.pop('ipsvc_hosts', None)
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به سرویس IP", callback_data="ipsvc_menu")]])
-        await query.edit_message_text(f"✅ هاست همهٔ کاربران به <code>{esc(new_host)}</code> تغییر کرد." + cf_suffix, reply_markup=kb, parse_mode="HTML")
+        # Never move every SSH account ahead of an unjournaled Cloudflare PUT.
+        await query.message.reply_text(
+            "⛔️ انتقال گروهی Legacy از این مسیر غیرفعال است. "
+            "از انتقال Journalدار CZ07 استفاده کنید؛ هیچ حساب یا DNS تغییر نکرد."
+        )
+        return
 
     elif d == "ipsvc_auto" and role == 'admin':
         await query.edit_message_text("⏳ در حال بررسی فشار سرور (بدون انتقال خودکار کاربران)...")

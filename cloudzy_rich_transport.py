@@ -222,15 +222,17 @@ class DurableRichDelivery:
         with self.db() as db:
             view = read_operation(db, kind=kind, operation_id=operation_id,
                                   actor=actor, chat=chat)
+        # Render and validate before committing a delivery intent. A malformed
+        # card must NEVER leave an unfulfillable INTENT in the durable outbox.
+        # Unique reference prevents identical-content edits on repeated clicks.
+        message = render_card(
+            view, details=details,
+            refresh_stamp=secrets.token_hex(4) if (fresh or refresh) else None)
         intent = self._intent(view, details=details,
                               fresh=fresh, refresh=refresh)
         if intent is None:
             return "UNCHANGED"
         attempt, method, message_id = intent
-        # Unique reference inside collapsed technical details prevents a
-        # same-version Telegram edit from being rejected as unmodified.
-        message = render_card(view, details=details,
-                              refresh_stamp=attempt[:8] if (fresh or refresh) else None)
         try:
             if method == "EDIT":
                 await self.api.edit(chat_id=chat, message_id=message_id,

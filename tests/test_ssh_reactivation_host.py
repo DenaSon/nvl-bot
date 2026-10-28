@@ -162,6 +162,70 @@ class SSHReactivationTests(unittest.TestCase):
             self.ns["_db_toggle_status"]("nevel0879", "🔴 غیرفعال")
         self.assertEqual(self.row()[:2], ("old.example", "🔴 غیرفعال"))
 
+    def test_moved_transport_allows_inactive_renewal_without_fake_acceptance(self):
+        # CZ07 MOVED is transport-complete; CREATE/RENEW and ISP proof are
+        # separate subsequent workflows. Do not require DONE for renewal.
+        with sqlite3.connect(self.path) as db:
+            db.execute("UPDATE cloudzy_cz07_jobs SET status='MOVED'")
+        with self.ns["db_conn"]() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.ns["_db_activate_ssh_account_tx"](
+                db, "nevel0879", expected_status="🔴 غیرفعال",
+                expire_date="2026-12-01", actor="renewal:post-moved",
+            )
+        self.assertEqual(
+            self.row(), ("new.example", "🟢 فعال", "2026-12-01", 0))
+        self.assertEqual(
+            self.audit(), [("old.example", "new.example",
+                            "CZ07_RETIRED_SOURCE", "renewal:post-moved")])
+        with sqlite3.connect(self.path) as db:
+            self.assertEqual(
+                db.execute("SELECT status FROM cloudzy_cz07_jobs").fetchone()[0],
+                "MOVED")
+
+    def test_multiple_moved_jobs_do_not_block_reactivation(self):
+        with sqlite3.connect(self.path) as db:
+            db.execute("UPDATE cloudzy_cz07_jobs SET status='MOVED'")
+            db.execute("INSERT INTO cloudzy_cz07_jobs VALUES (?,?,?)",
+                       ("other.example", "new.example", "MOVED"))
+        self.assertEqual(
+            self.ns["_db_preflight_ssh_reactivation"]("nevel0879"),
+            "new.example")
+
+    def test_verifying_paused_and_hold_still_block_renewal(self):
+        for status in ("VERIFYING", "MIGRATING", "PAUSED_SAFE", "HOLD",
+                       "ROUTING", "QUEUED"):
+            with self.subTest(status=status):
+                with sqlite3.connect(self.path) as db:
+                    db.execute("UPDATE cloudzy_cz07_jobs SET status=?", (status,))
+                with self.assertRaisesRegex(
+                        SSHReactivationHold, "CZ07_UNRESOLVED"):
+                    with self.ns["db_conn"]() as db:
+                        db.execute("BEGIN IMMEDIATE")
+                        self.ns["_db_activate_ssh_account_tx"](
+                            db, "nevel0879", expected_status="🔴 غیرفعال",
+                            expire_date="2026-12-01", actor="renewal:blocked",
+                        )
+                self.assertEqual(
+                    self.row(),
+                    ("old.example", "🔴 غیرفعال", "2026-10-01", 1))
+                self.assertEqual(self.audit(), [])
+
+    def test_moved_renewal_rejects_route_drift_without_partial_update(self):
+        with sqlite3.connect(self.path) as db:
+            db.execute("UPDATE cloudzy_cz07_jobs SET status='MOVED'")
+            db.execute("UPDATE settings SET value='wrong.example' "
+                       "WHERE key='dns_current_ip'")
+        with self.assertRaisesRegex(SSHReactivationHold, "CZ07_ROUTE_CHANGED"):
+            with self.ns["db_conn"]() as db:
+                db.execute("BEGIN IMMEDIATE")
+                self.ns["_db_activate_ssh_account_tx"](
+                    db, "nevel0879", expected_status="🔴 غیرفعال",
+                    expire_date="2026-12-01", actor="renewal:blocked")
+        self.assertEqual(
+            self.row(), ("old.example", "🔴 غیرفعال", "2026-10-01", 1))
+        self.assertEqual(self.audit(), [])
+
     def test_no_safe_default_fails_closed(self):
         with sqlite3.connect(self.path) as db:
             db.execute("UPDATE host_pool SET active=0 WHERE host='new.example'")

@@ -94,3 +94,32 @@ def repair_local_metadata(conn, *, expected_before, expected_default):
     ).rowcount != 1:
         raise LegacyRouteHold("HOSTS_CAS_FAILED")
     return plan
+
+
+def validate_customer_host_edit(conn, raw):
+    """Protect legacy textual settings editor from malformed/customer-unsafe IPs.
+
+    Use only already known active, non-Standby hosts. New candidate onboarding
+    must happen in its guarded inventory path; never from a raw text setting.
+    """
+    plan = project_customer_hosts(conn)
+    if not isinstance(raw, str):
+        raise LegacyRouteHold("LEGACY_HOSTS_MALFORMED")
+    hosts = [x.strip() for x in raw.split(",")]
+    if not hosts or any(not x for x in hosts) or len(set(hosts)) != len(hosts):
+        raise LegacyRouteHold("LEGACY_HOSTS_MALFORMED")
+    if hosts[0] != plan.default:
+        raise LegacyRouteHold("LEGACY_DEFAULT_MUST_BE_FIRST")
+    valid = {
+        h for h, active, standby in conn.execute(
+            "SELECT host,active,is_standby FROM host_pool"
+        ) if active and not standby
+    }
+    core = conn.execute(
+        "SELECT value FROM settings WHERE key='core_wg_public_ip'"
+    ).fetchone()
+    if core:
+        valid.discard(core[0])
+    if any(h not in valid for h in hosts):
+        raise LegacyRouteHold("LEGACY_HOST_NOT_CUSTOMER_ELIGIBLE")
+    return tuple(hosts)

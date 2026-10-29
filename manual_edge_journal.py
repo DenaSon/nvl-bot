@@ -174,6 +174,33 @@ class ManualEdgeJournal:
                        "pin_fingerprint":fingerprint})
 
     def begin_install(self,op_id,actor,chat):
+        # A stale Cloudzy HOLD is not proof of a *live* worker. Coordinate
+        # against the very same flock used by all real Legacy installers.
+        # Any still-running old worker holds it and must stop this new one.
+        import fcntl, os, stat
+        from legacy_wg_install_lease import LOCK_PATH
+        flags=os.O_RDWR|os.O_CREAT|getattr(os,"O_CLOEXEC",0)
+        flags |= getattr(os,"O_NOFOLLOW",0)
+        try:
+            fd=os.open(LOCK_PATH,flags,0o600)
+        except OSError as exc:
+            raise ManualEdgeHold("CORE_WG_INSTALL_LOCK_UNAVAILABLE") from exc
+        try:
+            st=os.fstat(fd)
+            if (not stat.S_ISREG(st.st_mode) or st.st_uid!=os.geteuid()
+                    or stat.S_IMODE(st.st_mode)&0o077):
+                raise ManualEdgeHold("CORE_WG_INSTALL_LOCK_UNTRUSTED")
+            try:
+                fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise ManualEdgeHold("CORE_WG_INSTALL_BUSY") from exc
+            finally:
+                # The sync installer itself reacquires this lock and holds it
+                # through its entire remote/Core WG mutation. If a competing
+                # worker starts meanwhile it will fail closed on that mutex.
+                fcntl.flock(fd,fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
         with self.db() as db:
             self.initialize(db);db.execute("BEGIN IMMEDIATE")
             # This is an isolated, inactive installation (no route or customer

@@ -4053,9 +4053,9 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
                 "⛔️ سرور جدید قابل آماده‌سازی نیست؛ نشانی، وضعیت عملیات و سرورها را بررسی کنید.",
             )
             return False, None, None
-    else:
-        # D1-C1: legacy installer builds ingress-only Relay and immediately activates
-        # it in host_pool. Protected mode must deny that before remote side effects.
+    elif not manual_safe_bootstrap:
+        # Ordinary Legacy data-plane writes retain their K2 protections.
+        # Pinned manual emergency installer stages ONLY an inactive Edge.
         egress_gate = legacy_new_edge_gate(await asyncio.to_thread(
             _db_get_setting, PROTECTED_SETTING_KEY, PROTECTED_SETTING_DEFAULT
         ))
@@ -4112,11 +4112,11 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
     # Default OFF: preserve legacy behavior. STAGED never means READY.
     # A partial stage/H registry is held for operator reconciliation, never
     # advertised as protected Egress or used to rebind customer UID routes.
-    _i_enabled = (
+    _i_enabled = (not manual_safe_bootstrap and (
         egress_stage_requested or (await asyncio.to_thread(
             _db_get_setting, 'edge_egress_v1_onboard_enabled', '0'
         )) == '1'
-    )
+    ))
     if _i_enabled:
         try:
             from edge_egress_v1_onboarding import onboard_after_ingress
@@ -7171,6 +7171,26 @@ def _cloudzy_quick_preflight():
     return _normalize_ssh_port(_db_get_setting('port', '22'), 22), pubkey
 
 
+def _manual_edge_preflight():
+    """Read-only Core identity and SSH/WG checks; never queries Cloudzy.
+
+    An independently pinned manual Edge is staged as inactive. Customer routes
+    stay unchanged until Standby and guarded migration acceptance.
+    """
+    if paramiko is None or os.geteuid()!=0:
+        raise RuntimeError("CORE_ROOT_PARAMIKO_REQUIRED")
+    if not os.path.isfile(EDGE_SETUP_SCRIPT_LOCAL_PATH) or not os.path.isfile(WG_CONF_PATH):
+        raise RuntimeError("LEGACY_WG_INSTALLER_NOT_AVAILABLE")
+    if not all(_get_core_wg_identity()) or not _get_core_public_ip_cached():
+        raise RuntimeError("CORE_WG_IDENTITY_NOT_READY")
+    ok,err,pubkey=_ensure_local_ssh_keypair_sync()
+    if not ok or not pubkey or not os.path.isfile(DO_SSH_KEY_PATH):
+        raise RuntimeError("LEGACY_ED25519_KEY_MISSING")
+    if os.stat(DO_SSH_KEY_PATH).st_mode & 0o077:
+        raise RuntimeError("LEGACY_ED25519_KEY_INSECURE_PERMISSIONS")
+    return _normalize_ssh_port(_db_get_setting('port','2252'),2252),pubkey
+
+
 async def _cloudzy_quick_provision(ip, port, hostname, chat, app, server_id, trusted_host_key):
     if await asyncio.to_thread(_db_host_exists, ip):
         raise RuntimeError("CLOUDZY_IP_ALREADY_REGISTERED")
@@ -7351,7 +7371,7 @@ _manual_form_ready = False
 async def _manual_edge_provision(ip, ssh_port, password, trusted_key, chat, app):
     if await asyncio.to_thread(_db_host_exists,ip):
         raise RuntimeError("MANUAL_EDGE_ALREADY_REGISTERED")
-    customer_port,_pub = await asyncio.to_thread(_cloudzy_quick_preflight)
+    customer_port,_pub = await asyncio.to_thread(_manual_edge_preflight)
     label = "edge-"+ip.replace(".","-")
     return await _provision_new_edge(
         ip,password,customer_port,label,chat,app,
@@ -7419,7 +7439,7 @@ def _manual_edge_verify_ubuntu(ip, admin_port, password, pinned):
 
 
 _manual_edge = ManualEdgeWizard(
-    db=db_conn,preflight=_cloudzy_quick_preflight,
+    db=db_conn,preflight=_manual_edge_preflight,
     provision=_manual_edge_provision,verify=_manual_edge_verify,
     probe=_cloudzy_04a_probe,nat=_cloudzy_04b_nat,queue=_cloudzy_07,
     form_store=_manual_form_store,

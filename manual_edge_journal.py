@@ -22,8 +22,13 @@ ACTIVE = ("DRAFT", "IDENTITY_PENDING", "HOSTKEY_PENDING",
 
 
 class ManualEdgeJournal:
-    def __init__(self, factory, *, now=time.time, guard=None):
+    def __init__(self, factory, *, now=time.time, guard=None,
+                 install_lock_path=None):
         self.db, self.now, self.guard = factory, now, guard
+        # Production always uses the shared installer lock. A private test
+        # fixture can supply an isolated path without touching /run/lock.
+        from legacy_wg_install_lease import LOCK_PATH
+        self.install_lock_path = install_lock_path or LOCK_PATH
 
     def _protected(self, db):
         # Reuse original protected Core 6G/Legacy safety fence in the SAME
@@ -174,15 +179,44 @@ class ManualEdgeJournal:
                        "pin_fingerprint":fingerprint})
 
     def begin_install(self,op_id,actor,chat):
+        # A stale Cloudzy HOLD is not proof of a *live* worker. Coordinate
+        # against the very same flock used by all real Legacy installers.
+        # Any still-running old worker holds it and must stop this new one.
+        import fcntl, os, stat
+        flags=os.O_RDWR|os.O_CREAT|getattr(os,"O_CLOEXEC",0)
+        flags |= getattr(os,"O_NOFOLLOW",0)
+        try:
+            fd=os.open(self.install_lock_path,flags,0o600)
+        except OSError as exc:
+            raise ManualEdgeHold("CORE_WG_INSTALL_LOCK_UNAVAILABLE") from exc
+        try:
+            st=os.fstat(fd)
+            if (not stat.S_ISREG(st.st_mode) or st.st_uid!=os.geteuid()
+                    or stat.S_IMODE(st.st_mode)&0o077):
+                raise ManualEdgeHold("CORE_WG_INSTALL_LOCK_UNTRUSTED")
+            try:
+                fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise ManualEdgeHold("CORE_WG_INSTALL_BUSY") from exc
+            finally:
+                # The sync installer itself reacquires this lock and holds it
+                # through its entire remote/Core WG mutation. If a competing
+                # worker starts meanwhile it will fail closed on that mutex.
+                fcntl.flock(fd,fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
         with self.db() as db:
             self.initialize(db);db.execute("BEGIN IMMEDIATE")
-            self._protected(db)
+            # This is an isolated, inactive installation (no route or customer
+            # mutation). The protected-route gate applies at mark_standby and
+            # transfer, not before a new VPS can be prepared. The shared WG
+            # installer mutex still prevents concurrent peer writes.
             # Legacy installer allocates Core WG peer IPs and appends Core WG
             # config. That is a truly shared resource across both pathways.
             # Do not admit concurrent/uncertain installers until reconciled.
             if db.execute(
                 "SELECT 1 FROM manual_edge_operations "
-                "WHERE id!=? AND status IN ('INSTALLING','INSTALL_HOLD') LIMIT 1",
+                "WHERE id!=? AND status='INSTALLING' LIMIT 1",
                 (op_id,),
             ).fetchone():
                 raise ManualEdgeHold("CORE_WG_INSTALL_LEASE_BUSY")
@@ -191,7 +225,7 @@ class ManualEdgeJournal:
                 "AND name='cloudzy_edge_operations'"
             ).fetchone() and db.execute(
                 "SELECT 1 FROM cloudzy_edge_operations "
-                "WHERE status IN ('PROVISIONING','HOLD_PROVISION') LIMIT 1"
+                "WHERE status='PROVISIONING' LIMIT 1"
             ).fetchone():
                 raise ManualEdgeHold("CORE_WG_INSTALL_LEASE_BUSY")
             self._cas(db,op_id,actor,chat,"READY_INSTALL","INSTALLING",

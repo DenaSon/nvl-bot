@@ -4053,9 +4053,9 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
                 "⛔️ سرور جدید قابل آماده‌سازی نیست؛ نشانی، وضعیت عملیات و سرورها را بررسی کنید.",
             )
             return False, None, None
-    else:
-        # D1-C1: legacy installer builds ingress-only Relay and immediately activates
-        # it in host_pool. Protected mode must deny that before remote side effects.
+    elif not manual_safe_bootstrap:
+        # Ordinary Legacy data-plane writes retain their K2 protections.
+        # Pinned manual emergency installer stages ONLY an inactive Edge.
         egress_gate = legacy_new_edge_gate(await asyncio.to_thread(
             _db_get_setting, PROTECTED_SETTING_KEY, PROTECTED_SETTING_DEFAULT
         ))
@@ -4112,11 +4112,11 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
     # Default OFF: preserve legacy behavior. STAGED never means READY.
     # A partial stage/H registry is held for operator reconciliation, never
     # advertised as protected Egress or used to rebind customer UID routes.
-    _i_enabled = (
+    _i_enabled = (not manual_safe_bootstrap and (
         egress_stage_requested or (await asyncio.to_thread(
             _db_get_setting, 'edge_egress_v1_onboard_enabled', '0'
         )) == '1'
-    )
+    ))
     if _i_enabled:
         try:
             from edge_egress_v1_onboarding import onboard_after_ingress
@@ -4158,26 +4158,20 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
             )
             return False, edge_ip, result
     else:
-        if pool_active:
-            await asyncio.to_thread(_db_add_host_pool, edge_ip)
-        else:
-            await asyncio.to_thread(_db_add_host_pool, edge_ip, active=False)
-        if provider:
-            await asyncio.to_thread(_db_set_host_provider_meta, edge_ip, provider, provider_instance_id)
-        if provider == "manual":
-            if provider_instance_id is not None or admin_ssh_port is None or pool_active:
+        if manual_safe_bootstrap:
+            if (provider!="manual" or provider_instance_id is not None
+                    or pool_active or admin_ssh_port is None):
                 raise ValueError("MANUAL_EDGE_REGISTRATION_INVALID")
-            def _manual_save_management_port():
-                with db_conn() as conn:
-                    _db_assert_legacy_host_mutation_allowed(conn)
-                    if conn.execute(
-                        "UPDATE host_pool SET admin_ssh_port=? "
-                        "WHERE host=? AND provider='manual' AND provider_instance_id IS NULL "
-                        "AND active=0 AND is_default=0",
-                        (int(admin_ssh_port),edge_ip),
-                    ).rowcount != 1:
-                        raise RuntimeError("MANUAL_SSH_PORT_REGISTRATION_FAILED")
-            await asyncio.to_thread(_manual_save_management_port)
+            await asyncio.to_thread(_manual_register_inactive_host,
+                                    edge_ip,customer_port,admin_ssh_port)
+        else:
+            if pool_active:
+                await asyncio.to_thread(_db_add_host_pool, edge_ip)
+            else:
+                await asyncio.to_thread(_db_add_host_pool, edge_ip, active=False)
+            if provider:
+                await asyncio.to_thread(_db_set_host_provider_meta,
+                                        edge_ip, provider, provider_instance_id)
         if pool_active:
             cur_hosts = [h.strip() for h in (await asyncio.to_thread(_db_get_setting, 'hosts', '')).split(',') if h.strip()]
             if edge_ip not in cur_hosts:
@@ -4224,7 +4218,9 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
         kb = (InlineKeyboardMarkup([[InlineKeyboardButton("⭐ این IP را پیش‌فرض کل سیستم کن", callback_data=f"hpdef_{edge_ip}")],
                                     [InlineKeyboardButton("🛡 وضعیت و مسدودسازی IPها", callback_data="hp_menu")]])
               if pool_active else InlineKeyboardMarkup(
-                  [[InlineKeyboardButton("📋 وضعیت خرید Cloudzy", callback_data="apps_cz_operations")]]))
+                  [[InlineKeyboardButton(
+                      "🛟 ادامه نصب دستی و بررسی Standby" if manual_safe_bootstrap else "📋 وضعیت خرید Cloudzy",
+                      callback_data="apps_edge_manual_home" if manual_safe_bootstrap else "apps_cz_operations")]]))
         await app.bot.send_message(
             chat_id,
             f"{'🎉 <b>Edge جدید با موفقیت راه‌اندازی شد</b>' if pool_active else '🛠 <b>ثبت اولیه Edge — در انتظار تأیید نهایی</b>'}\n\n"
@@ -7171,6 +7167,26 @@ def _cloudzy_quick_preflight():
     return _normalize_ssh_port(_db_get_setting('port', '22'), 22), pubkey
 
 
+def _manual_edge_preflight():
+    """Read-only Core identity and SSH/WG checks; never queries Cloudzy.
+
+    An independently pinned manual Edge is staged as inactive. Customer routes
+    stay unchanged until Standby and guarded migration acceptance.
+    """
+    if paramiko is None or os.geteuid()!=0:
+        raise RuntimeError("CORE_ROOT_PARAMIKO_REQUIRED")
+    if not os.path.isfile(EDGE_SETUP_SCRIPT_LOCAL_PATH) or not os.path.isfile(WG_CONF_PATH):
+        raise RuntimeError("LEGACY_WG_INSTALLER_NOT_AVAILABLE")
+    if not all(_get_core_wg_identity()) or not _get_core_public_ip_cached():
+        raise RuntimeError("CORE_WG_IDENTITY_NOT_READY")
+    ok,err,pubkey=_ensure_local_ssh_keypair_sync()
+    if not ok or not pubkey or not os.path.isfile(DO_SSH_KEY_PATH):
+        raise RuntimeError("LEGACY_ED25519_KEY_MISSING")
+    if os.stat(DO_SSH_KEY_PATH).st_mode & 0o077:
+        raise RuntimeError("LEGACY_ED25519_KEY_INSECURE_PERMISSIONS")
+    return _normalize_ssh_port(_db_get_setting('port','2252'),2252),pubkey
+
+
 async def _cloudzy_quick_provision(ip, port, hostname, chat, app, server_id, trusted_host_key):
     if await asyncio.to_thread(_db_host_exists, ip):
         raise RuntimeError("CLOUDZY_IP_ALREADY_REGISTERED")
@@ -7348,10 +7364,56 @@ _cloudzy_07 = DurableCutoverQueue(
 _manual_form_store = ManualFormStore()
 _manual_form_ready = False
 
+def _manual_register_inactive_host(ip, customer_port, admin_port):
+    """Atomic, provider-free registration of the independently pinned Edge.
+
+    No Legacy route guard is needed: no customers, DNS, default or active
+    role are modified. The journal INSTALLING receipt is mandatory.
+    """
+    from ipaddress import IPv4Address
+    if str(IPv4Address(ip)) != ip or not IPv4Address(ip).is_global:
+        raise RuntimeError("MANUAL_IP_INVALID")
+    customer_port=int(customer_port)
+    admin_port=int(admin_port)
+    if not 1<=customer_port<=65535 or not 1<=admin_port<=65535:
+        raise RuntimeError("MANUAL_PORT_INVALID")
+    now=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with db_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows=conn.execute(
+            "SELECT id,admin_port FROM manual_edge_operations "
+            "WHERE ip=? AND status='INSTALLING'",(ip,)
+        ).fetchall()
+        if len(rows)!=1 or int(rows[0][1])!=admin_port:
+            raise RuntimeError("MANUAL_INSTALL_INTENT_NOT_FOUND")
+        if conn.execute("SELECT 1 FROM host_pool WHERE host=?",(ip,)).fetchone():
+            raise RuntimeError("MANUAL_EDGE_ALREADY_REGISTERED")
+        st=dict(conn.execute(
+            "SELECT key,value FROM settings WHERE key IN "
+            "('hosts','dns_current_ip','core_wg_public_ip')"
+        ).fetchall())
+        if not st.get("core_wg_public_ip") or ip in (
+                st.get("core_wg_public_ip"),st.get("dns_current_ip")):
+            raise RuntimeError("MANUAL_ACTIVE_OR_CORE_IP_COLLISION")
+        if ip in [x.strip() for x in (st.get("hosts") or "").split(",")]:
+            raise RuntimeError("MANUAL_ROUTED_IP_COLLISION")
+        if conn.execute(
+            "SELECT 1 FROM ssh_accounts WHERE host=? LIMIT 1",(ip,)
+        ).fetchone():
+            raise RuntimeError("MANUAL_ACCOUNT_COLLISION")
+        conn.execute(
+            "INSERT INTO host_pool "
+            "(host,active,is_default,is_standby,provider,provider_instance_id,"
+            "added_at,ssh_port,service_port,admin_ssh_port) "
+            "VALUES (?,0,0,0,'manual',NULL,?,?,?,?)",
+            (ip,now,customer_port,customer_port,admin_port)
+        )
+
+
 async def _manual_edge_provision(ip, ssh_port, password, trusted_key, chat, app):
     if await asyncio.to_thread(_db_host_exists,ip):
         raise RuntimeError("MANUAL_EDGE_ALREADY_REGISTERED")
-    customer_port,_pub = await asyncio.to_thread(_cloudzy_quick_preflight)
+    customer_port,_pub = await asyncio.to_thread(_manual_edge_preflight)
     label = "edge-"+ip.replace(".","-")
     return await _provision_new_edge(
         ip,password,customer_port,label,chat,app,
@@ -7419,12 +7481,12 @@ def _manual_edge_verify_ubuntu(ip, admin_port, password, pinned):
 
 
 _manual_edge = ManualEdgeWizard(
-    db=db_conn,preflight=_cloudzy_quick_preflight,
+    db=db_conn,preflight=_manual_edge_preflight,
     provision=_manual_edge_provision,verify=_manual_edge_verify,
     probe=_cloudzy_04a_probe,nat=_cloudzy_04b_nat,queue=_cloudzy_07,
     form_store=_manual_form_store,
-    enabled=lambda: os.environ.get("NVL_EDGE_MANUAL_ENABLED")=="1"
-                     and _manual_form_ready,
+    # No Cloudzy API, HTTPS WebApp or new opt-in flag for native manual path.
+    enabled=lambda: True,
     guard=_cloudzy_04a_guard,
     is_core_host=_manual_edge_is_core_ip,
     os_check=_manual_edge_verify_ubuntu,
@@ -8121,6 +8183,23 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Emergency escape hatch for persisted/stateful bot workflows."""
     chat_id = update.effective_chat.id if hasattr(update, 'effective_chat') else 0
 
+    if context.user_data.get("state") in (
+            "MANUAL_EDGE_IP","MANUAL_EDGE_PORT","MANUAL_EDGE_PASSWORD"):
+        sess=context.user_data.get("manual_edge_session")
+        actor=update.effective_user.id
+        if (isinstance(sess,dict) and context.user_data.get("role")=="admin"
+                and actor==chat_id and
+                (sess.get("actor"),sess.get("chat"))==(actor,chat_id)):
+            try:
+                await asyncio.to_thread(
+                    _manual_edge.journal.cancel_draft,sess["op"],actor,chat_id)
+            except Exception:
+                # Clearing input does not remove an effectful journal entry.
+                safe_clear_context(context)
+                await update.message.reply_text(
+                    "⚠️ ورودی متوقف شد ولی پروندهٔ نصب همچنان باز است. "
+                    "از وضعیت Edge آن را بررسی کنید.")
+                return
     # Cancel non-persistent in-memory wizard sessions as well as persisted
     # user_data so /cancel is safe even after a navigation/state mismatch.
     with contextlib.suppress(Exception):
@@ -11419,6 +11498,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = context.user_data.get('state')
     role = context.user_data.get('role')
     chat_id = update.effective_chat.id
+
+    # Native manual Edge intake: IP -> management SSH port -> root password.
+    # Never store the password in context.user_data or Telegram persistence.
+    if state in ('MANUAL_EDGE_IP','MANUAL_EDGE_PORT','MANUAL_EDGE_PASSWORD'):
+        await _manual_edge.receive_text(
+            update,context,state,text,actor=update.effective_user.id,
+            chat=chat_id,role=role,app=context.application)
+        return
 
     if role == 'admin' and state in ('K2_M4_SINGLE','K2_M4_BATCH','EDGE_NEW_IP','EDGE_NEW_ROOTPASS','EDGE_NEW_PORT') and text in (
         '🧩 برنامه‌ها','🧩 برنامه ها','🏠 منوی اصلی'):

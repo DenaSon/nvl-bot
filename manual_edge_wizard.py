@@ -260,80 +260,25 @@ class ManualEdgeWizard:
         if role!="admin" or actor!=chat:
             return await self._view(query,"⛔️ فقط مدیر در گفتگوی خصوصی مجاز است.",
                                     [[("↩️ برنامه‌ها","apps_home")]])
-        if not self.enabled():
-            # Existing Legacy host-pool IP management is operational without
-            # the *optional* fresh-VPS HTTPS credential intake.  Do not
-            # advertise it as disabled, and never invoke the installer here.
-            # All actual host mutations remain behind the existing bot's
-            # admin/protected-mode guards and Cloudflare confirmation steps.
-            return await self._view(query,
-                "🌍 <b>مدیریت دستی Edge</b>\n\n"
-                "برای سروری که قبلاً آماده و تست شده، IP را ثبت یا "
-                "فهرست سرورها را مدیریت کنید.\n"
-                "تغییر Relay پیش‌فرض و انتقال کاربران مسیر تأیید جدا دارد؛ "
-                "دکمه‌های قدیمی انتقال در نسخه فعلی غیرفعال‌اند.",
-                [[("➕ ثبت IP سرور آماده", "hp_add")],
-                 [("🌐 فهرست و مدیریت IPها", "hp_menu")],
-                 [("↩️ مدیریت Edge","apps_cz_home")]])
         try:
             if data=="apps_edge_manual_home":
                 return await self._show(query,actor,chat)
             if data=="apps_edge_manual_new":
-                if not self.form_url().startswith("https://"):
-                    raise ManualWizardHold("SECURE_WEB_FORM_NOT_CONFIGURED")
                 await asyncio.to_thread(self.preflight)
                 op=await asyncio.to_thread(self.journal.start,actor,chat)
-                nonce=self.form.issue(actor=actor,chat=chat,stage="server",op_id=op)
                 context.user_data["manual_edge_session"]={
-                    "actor":actor,"chat":chat,"op":op,"nonce":nonce,
-                    "stage":"server","expires":self.now()+180,
+                    "actor":actor,"chat":chat,"op":op,
+                    "stage":"server_ip","expires":self.now()+600,
                 }
-                return await self._form_button(query,text=
-                    "۱/۴ · <b>مشخصات سرور</b>\n\n"
-                    "IP عمومی و پورت مدیریت SSH را وارد کنید. "
-                    "رمز فقط پس از تأیید هویت سرور دریافت می‌شود.",
-                    notice="📝 مشخصات سرور",nonce=nonce)
-            if data.startswith("apps_edge_manual_form_done_"):
-                sess=self._session(context,actor,chat)
-                nonce=data[len("apps_edge_manual_form_done_"):]
-                if nonce!=sess["nonce"]:
-                    raise ManualWizardHold("FORM_CHANGED")
-                value=self.form.consume(
-                    nonce,actor=actor,chat=chat,stage=sess["stage"],
-                    op_id=sess["op"])
-                context.user_data.pop("manual_edge_session",None)
-                if sess["stage"]=="server":
-                    if self.is_core_host is None or await asyncio.to_thread(
-                            self.is_core_host,value["ip"]):
-                        raise ManualWizardHold("CORE_IP_CANNOT_BE_EDGE")
-                    customer_port,_ = await asyncio.to_thread(self.preflight)
-                    tls_port = await asyncio.to_thread(self._tls_port)
-                    self._assert_management_port_safe(
-                        value["port"],customer_port,tls_port)
-                    await asyncio.to_thread(self.journal.set_server,sess["op"],
-                                            actor,chat,value["ip"],value["port"])
-                    return await self._view(query,
-                        "✅ مشخصات سرور ثبت شد.\n"
-                        "در مرحله بعد، هویت SSH را از کنسول معتبر سرور مقایسه کنید.",
-                        [[("🔐 بررسی هویت سرور",
-                           "apps_edge_manual_key_"+sess["op"])],
-                         [("↩️ وضعیت سرور","apps_edge_manual_home")]])
-                if sess["stage"]!="password":
-                    raise ManualWizardHold("FORM_STAGE_INVALID")
-                op=await asyncio.to_thread(self.journal.get,sess["op"])
-                if op["status"]!="READY_INSTALL" or sess["op"] in self.running:
-                    raise ManualWizardHold("INSTALL_NOT_READY")
-                self.running.add(sess["op"])
-                coro=self._install_task(app,sess["op"],actor,chat,value["password"])
-                try:
-                    app.create_task(coro)
-                except Exception:
-                    self.running.discard(sess["op"]);coro.close()
-                    raise
+                context.user_data["state"]="MANUAL_EDGE_IP"
                 return await self._view(query,
-                    "⏳ <b>آماده‌سازی آغاز شد.</b>\n"
-                    "نتیجه از دفتر عملیات اعلام می‌شود؛ نصب را دوباره اجرا نکنید.",
-                    [[("🔄 وضعیت","apps_edge_manual_home")]])
+                    "۱/۴ · <b>سرور جدید</b>\n\n"
+                    "IP عمومی VPS خام (Ubuntu 24.04) را در همین گفتگوی خصوصی "
+                    "ارسال کنید. این مسیر هیچ API کلودزی یا HTTPS جداگانه‌ای ندارد. "
+                    "برای لغو /cancel بفرستید.",
+                    [[("↩️ وضعیت","apps_edge_manual_home")]])
+            if data.startswith("apps_edge_manual_form_done_"):
+                raise ManualWizardHold("OLD_WEBAPP_CALLBACK_DISABLED")
             if data.startswith("apps_edge_manual_key_"):
                 opid=data[len("apps_edge_manual_key_"):]
                 op=await asyncio.to_thread(self.journal.get,opid)
@@ -370,23 +315,29 @@ class ManualEdgeWizard:
                 await asyncio.to_thread(self.journal.pin,opid,actor,chat,*proof["key"])
                 return await self._view(query,
                     "✅ هویت سرور تأیید شد.\n"
-                    "اکنون رمز ورود SSH را در فرم امن ثبت کنید.",
+                    "اکنون رمز Root را فقط در گفتگوی خصوصی بات ارسال کنید. "
+                    "بات پیام رمز را پیش از نصب حذف می‌کند؛ تلگرام جایگزین "
+                    "یک کانال محرمانهٔ مستقل نیست.",
                     [[("🔐 ورود رمز و ادامه",
                        "apps_edge_manual_password_"+opid)]])
             if data.startswith("apps_edge_manual_password_"):
                 opid=data[len("apps_edge_manual_password_"):]
                 op=await asyncio.to_thread(self.journal.get,opid)
-                if not op or (op["actor"],op["chat"])!=(actor,chat) or op["status"]!="READY_INSTALL":
+                if (not op or (op["actor"],op["chat"])!=(actor,chat)
+                        or op["status"]!="READY_INSTALL" or opid in self.running):
                     raise ManualWizardHold("INSTALL_NOT_READY")
-                nonce=self.form.issue(actor=actor,chat=chat,stage="password",op_id=opid)
                 context.user_data["manual_edge_session"]={
-                    "actor":actor,"chat":chat,"op":opid,"nonce":nonce,
+                    "actor":actor,"chat":chat,"op":opid,
                     "stage":"password","expires":self.now()+180,
                 }
-                return await self._form_button(query,text=
-                    "۳/۴ · <b>ورود امن رمز</b>\n"
-                    "رمز در پیام‌های تلگرام یا دیتابیس ذخیره نمی‌شود.",
-                    notice="🔐 ورود رمز SSH",nonce=nonce)
+                context.user_data["state"]="MANUAL_EDGE_PASSWORD"
+                return await self._view(query,
+                    "۳/۴ · <b>رمز Root</b>\n\n"
+                    "رمز SSH را فقط در چت خصوصی همین بات ارسال کنید. "
+                    "پیش از استفاده، پیام حذف می‌شود؛ رمز در دیتابیس یا "
+                    "user_data ذخیره نمی‌شود. اگر امکان حذف پیام نباشد "
+                    "نصب انجام نمی‌شود. این روش به اندازه فرم HTTPS امن نیست.",
+                    [[("↩️ وضعیت","apps_edge_manual_home")]])
             if data.startswith("apps_edge_manual_standby_"):
                 opid=data[len("apps_edge_manual_standby_"):]
                 op=await asyncio.to_thread(self.journal.get,opid)
@@ -543,6 +494,115 @@ class ManualEdgeWizard:
                        "از انجام دوباره نصب یا تغییر DNS خودداری کنید.")),
                 [[("🔄 وضعیت سرور دستی","apps_edge_manual_home")],
                  [("↩️ مدیریت Edge","apps_cz_home")]])
+
+
+    async def receive_text(self,update,context,state,text,*,actor,chat,app,role):
+        """Private Telegram emergency intake; never persist SSH password.
+
+        Admin must explicitly approve the observed SSH host fingerprint BEFORE
+        entering any password. The password message must be deleted before
+        dispatch. No form server, Cloudzy API or runtime feature flag is used.
+        """
+        _RICH_SCOPE.set((app.bot.token,context,chat))
+        # Delete ANY password-state message BEFORE checking owner/session/TTL.
+        # An expired or missing session must not strand a raw root password
+        # in Telegram history.
+        if state=="MANUAL_EDGE_PASSWORD":
+            try:
+                await update.message.delete()
+            except Exception:
+                context.user_data.pop("state",None)
+                context.user_data.pop("manual_edge_session",None)
+                return await update.effective_chat.send_message(
+                    "⛔️ حذف پیام رمز ممکن نبود؛ نصب متوقف شد. "
+                    "این پیام را از تاریخچه چت حذف کنید.")
+        if role!="admin" or actor!=chat or actor<=0:
+            context.user_data.pop("manual_edge_session",None)
+            context.user_data.pop("state",None)
+            return await update.message.reply_text("⛔️ فقط مدیر در گفتگوی خصوصی مجاز است.")
+        if text.strip() in ("/cancel","لغو","انصراف"):
+            session=context.user_data.pop("manual_edge_session",None)
+            context.user_data.pop("state",None)
+            context.user_data.pop("manual_edge_candidate_ip",None)
+            if isinstance(session,dict) and session.get("op"):
+                try:
+                    await asyncio.to_thread(self.journal.cancel_draft,
+                                            session["op"],actor,chat)
+                except ManualEdgeHold:
+                    pass  # A started installer is never blindly cancelled.
+            return await update.message.reply_text(
+                "ورود اطلاعات لغو شد. اگر نصب شروع شده باشد، "
+                "پرونده آن برای بررسی حفظ می‌شود.")
+        try:
+            try:
+                sess=self._session(context,actor,chat)
+            except ManualWizardHold:
+                context.user_data.pop("state",None)
+                context.user_data.pop("manual_edge_session",None)
+                context.user_data.pop("manual_edge_candidate_ip",None)
+                raise
+            opid=sess["op"]
+            if state=="MANUAL_EDGE_IP" and sess["stage"]=="server_ip":
+                from manual_edge_secure_form import public_ip
+                ip=public_ip(text.strip())
+                if self.is_core_host is None or await asyncio.to_thread(
+                        self.is_core_host,ip):
+                    raise ManualWizardHold("CORE_IP_CANNOT_BE_EDGE")
+                context.user_data["manual_edge_candidate_ip"]=ip
+                sess["stage"]="server_port"
+                context.user_data["state"]="MANUAL_EDGE_PORT"
+                return await update.message.reply_text(
+                    "✅ IP ثبت شد. پورت مدیریت SSH سرور را وارد کنید "
+                    "(معمولاً 22؛ این پورت با پورت مشتری متفاوت است).")
+            if state=="MANUAL_EDGE_PORT" and sess["stage"]=="server_port":
+                from manual_edge_secure_form import ssh_port
+                admin_port=ssh_port(text.strip())
+                ip=context.user_data["manual_edge_candidate_ip"]
+                customer_port,_=await asyncio.to_thread(self.preflight)
+                tls_port=await asyncio.to_thread(self._tls_port)
+                self._assert_management_port_safe(
+                    admin_port,customer_port,tls_port)
+                await asyncio.to_thread(self.journal.set_server,opid,
+                                        actor,chat,ip,admin_port)
+                context.user_data.pop("state",None)
+                context.user_data.pop("manual_edge_candidate_ip",None)
+                context.user_data.pop("manual_edge_session",None)
+                return await self._view(None,
+                    "✅ IP و پورت مدیریت ثبت شدند. پیش از دریافت رمز، "
+                    "اثر انگشت SSH سرور را مستقلاً تأیید کنید.",
+                    [[("🔐 بررسی اثر انگشت SSH",
+                       "apps_edge_manual_key_"+opid)],
+                     [("↩️ وضعیت Edge","apps_edge_manual_home")]])
+            if state=="MANUAL_EDGE_PASSWORD" and sess["stage"]=="password":
+                # Password was already deleted before session/TTL validation.
+                # NEVER put it in context.user_data (persistent) or any log.
+                context.user_data.pop("state",None)
+                context.user_data.pop("manual_edge_session",None)
+                op=await asyncio.to_thread(self.journal.get,opid)
+                if (not op or op["status"]!="READY_INSTALL"
+                        or (op["actor"],op["chat"])!=(actor,chat)
+                        or opid in self.running):
+                    raise ManualWizardHold("INSTALL_NOT_READY")
+                if not text or len(text)>2048:
+                    raise ManualWizardHold("PASSWORD_INVALID")
+                self.running.add(opid)
+                coro=self._install_task(app,opid,actor,chat,text)
+                try:
+                    app.create_task(coro)
+                except Exception:
+                    self.running.discard(opid)
+                    coro.close()
+                    raise
+                return await self._view(None,
+                    "⏳ <b>راه‌اندازی Edge آغاز شد.</b>\n"
+                    "نتیجه در همین چت اعلام می‌شود. نصب را دوباره اجرا نکنید.",
+                    [[("🔄 وضعیت Edge","apps_edge_manual_home")]])
+            raise ManualWizardHold("TEXT_STAGE_CHANGED")
+        except (ManualEdgeHold,ManualWizardHold,IntakeHold,ValueError) as exc:
+            code=str(exc)
+            return await update.message.reply_text(
+                "⛔️ "+FA.get(code,"اطلاعات یا وضعیت این مرحله معتبر نیست. "
+                      "برای لغو /cancel بفرستید."))
 
     def _tls_port(self):
         with self.db() as db:

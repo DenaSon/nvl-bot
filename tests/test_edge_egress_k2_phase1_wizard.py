@@ -135,7 +135,9 @@ class IsolatedWizardGateTests(unittest.TestCase):
         self.assertIn("protected_wizard=egress_stage_requested", block)
         # Legacy callers continue using the original no-kwargs signature; CZ-03
         # uses a separate inactive registration branch that cannot serve users.
-        self.assertIn("if pool_active:\n            await asyncio.to_thread(_db_add_host_pool, edge_ip)", block)
+        self.assertIn("if manual_safe_bootstrap:", block)
+        self.assertIn("_manual_register_inactive_host,", block)
+        self.assertIn("await asyncio.to_thread(_db_add_host_pool, edge_ip)", block)
         self.assertIn("await asyncio.to_thread(_db_add_host_pool, edge_ip, active=False)", block)
         self.assertIn("_db_add_host_pool, edge_ip", block)
         self.assertIn("legacy_new_edge_gate(", block)

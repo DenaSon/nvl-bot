@@ -201,7 +201,9 @@ class CZ04BTests(unittest.IsolatedAsyncioTestCase):
         self.manager.provider=forbidden_cloudzy
         state=self.manager._state("203.0.113.12")
         self.assertEqual(state["provider_id"],"manual:manual-op")
-        self.assertEqual(self.manager._targets(),[("203.0.113.12","manual:manual-op")])
+        # The legacy Cloudzy picker must NOT expose manual Standby; it is
+        # operated only through the dedicated wizard.
+        self.assertEqual(self.manager._targets(),[])
         result=await self.manager._run_route(7,8,"203.0.113.12")
         self.assertEqual(result,"READY")
         self.assertEqual(self.manager._route_ready(),

@@ -75,6 +75,13 @@ FA = {
     "STANDBY_PROBE_ERROR":"بررسی اتصال سرور با خطای اجرایی روبه‌رو شد؛ لاگ فنی سرور را بررسی کنید.",
     "STANDBY_NAT_ERROR":"بررسی قوانین NAT با خطای اجرایی روبه‌رو شد؛ لاگ فنی سرور را بررسی کنید.",
     "INVALID_PAGE":"شماره صفحه سرورها معتبر نیست.",
+    "ALREADY_ARCHIVED":"این سابقه قبلاً از فهرست حذف شده است.",
+    "ARCHIVE_STATUS_UNSAFE":"این پرونده هنوز در مرحله عملیاتی یا آماده‌به‌کار است؛ حذف از فهرست مجاز نیست.",
+    "ARCHIVE_HOST_IS_ROUTED_OR_STANDBY":"سرور هنوز رله اصلی یا آماده‌به‌کار است، یا در تنظیمات مسیر حضور دارد؛ حذف از فهرست ممنوع است.",
+    "ARCHIVE_ROLE_UNVERIFIED":"وضعیت واقعی ثبت‌شده سرور با پرونده قبلی سازگار نیست؛ پیش از حذف بررسی کنید.",
+    "ARCHIVE_USERS_STILL_ASSIGNED":"هنوز حساب‌هایی روی این Edge ثبت شده‌اند؛ ابتدا وضعیت همه حساب‌ها را بررسی و اصلاح کنید.",
+    "ARCHIVE_ROUTE_JOB_UNRESOLVED":"یک انتقال یا عملیات مسیر مرتبط ناتمام است؛ ابتدا وضعیت آن را بررسی کنید.",
+
     "SSH_HOSTKEY_MISSING":"کلید هویت SSH از سرور دریافت نشد.",
     "RICH_OPERATOR_UNAVAILABLE":"ارسال صفحه مدیریتی ممکن نیست؛ گفتگو را از منوی برنامه‌ها باز کنید.",
     "SECURE_WEB_FORM_NOT_CONFIGURED":"آدرس فرم امن تنظیم نشده است.",
@@ -193,6 +200,20 @@ class ManualEdgeWizard:
             "HOLD":"نیازمند بررسی", "IDENTITY_PENDING":"تأیید هویت",
         }.get(status,"نیازمند بررسی")
 
+    @staticmethod
+    def _visible_status(stage, role):
+        if role=="DEFAULT":
+            return "🟢 رله اصلی"
+        if role=="FORMER":
+            return "⚪ رله سابق"
+        if role=="STANDBY":
+            return "🟡 آماده‌به‌کار"
+        if role=="POOL_MISSING":
+            return "🔴 ثبت سرور ناقص"
+        if role in ("POOL_REVIEW","ROUTE_REVIEW"):
+            return "🔴 ناسازگاری مسیر؛ بررسی لازم"
+        return ManualEdgeWizard._status_label(stage)
+
     async def _show(self,query,actor,chat,page=0):
         # All manual Edges belong to their own IP and journal. Never bind the
         # administrator's new-edge workflow to whichever operation is latest.
@@ -213,8 +234,10 @@ class ManualEdgeWizard:
             label=str(op.get("ip") or "در انتظار IP")
             if len(label)>25:
                 label=label[:25]
+            role=await asyncio.to_thread(
+                self.journal.display_state,op["id"],actor,chat)
             rows.append([(
-                label+" · "+self._status_label(op["status"]),
+                label+" · "+self._visible_status(op["status"],role),
                 "apps_edge_manual_detail_"+op["id"],
             )])
         pager=[]
@@ -237,7 +260,11 @@ class ManualEdgeWizard:
         op=await asyncio.to_thread(self.journal.get,opid)
         if not op or (op["actor"],op["chat"])!=(actor,chat):
             raise ManualWizardHold("OPERATOR_MISMATCH")
+        if op.get("archived_at") is not None:
+            raise ManualWizardHold("ALREADY_ARCHIVED")
         stage=op["status"]
+        role=await asyncio.to_thread(
+            self.journal.display_state,opid,actor,chat)
         rows=[]
         if stage=="HOSTKEY_PENDING":
             rows.append([("🔐 بررسی هویت SSH","apps_edge_manual_key_"+opid)])
@@ -254,6 +281,10 @@ class ManualEdgeWizard:
                          "apps_edge_manual_progress_"+opid)])
         if stage in ("DRAFT","HOSTKEY_PENDING","READY_INSTALL"):
             rows.append([("❌ لغو درخواست","apps_edge_manual_cancel_"+opid)])
+        if stage in ("ACTIVE","EDGE_READY") and role in (
+                "FORMER","EDGE_READY","POOL_MISSING"):
+            rows.append([("🗂 حذف از فهرست (بایگانی)",
+                         "apps_edge_manual_archive_"+opid)])
         rows.extend([
             [("➕ افزودن سرور جدید","apps_edge_manual_new")],
             [("↩️ همه سرورها","apps_edge_manual_home")],
@@ -262,7 +293,8 @@ class ManualEdgeWizard:
         warning=("\n⚠️ نصب قبلی را تکرار نکنید؛ وضعیت سرور باید مستقل بررسی شود."
                  if stage in ("INSTALL_HOLD","HOLD") else "")
         return await self._view(query,self._summary(op)+
-            "وضعیت: <b>"+escape(self._status_label(stage))+"</b>"+warning,rows)
+            "وضعیت فعلی: <b>"+escape(self._visible_status(stage,role))+"</b>\n"+
+            "مرحله پرونده: <code>"+escape(stage)+"</code>"+warning,rows)
 
     @staticmethod
     def _assert_management_port_safe(admin_port, customer_port, tls_port):
@@ -375,6 +407,33 @@ class ManualEdgeWizard:
             if data.startswith("apps_edge_manual_detail_"):
                 opid=data[len("apps_edge_manual_detail_"):]
                 return await self._detail(query,actor,chat,opid)
+            if data.startswith("apps_edge_manual_archive_yes_"):
+                opid=data[len("apps_edge_manual_archive_yes_"):]
+                archived=await asyncio.to_thread(
+                    self.journal.archive_inactive,opid,actor,chat)
+                log.info("Manual Edge entry removed from list op=%s ip=%s",
+                         opid,archived["ip"])
+                return await self._view(query,
+                    "✅ <b>سابقه از فهرست سرورها حذف شد.</b>\n\n"
+                    "IP: <code>"+escape(archived["ip"])+"</code>\n"
+                    "پرونده و گزارش‌ها در دیتابیس محفوظ‌اند. هیچ VPS، "
+                    "WireGuard، DNS، رکورد host_pool یا حسابی حذف نشده است.",
+                    [[("↩️ سرورهای دستی","apps_edge_manual_home")]])
+            if data.startswith("apps_edge_manual_archive_"):
+                opid=data[len("apps_edge_manual_archive_"):]
+                proof=await asyncio.to_thread(
+                    self.journal.archive_preview,opid,actor,chat)
+                return await self._view(query,
+                    "🗂 <b>تأیید حذف از فهرست</b>\n\n"
+                    "سرور: <code>"+escape(proof["ip"])+"</code>\n"
+                    "فقط کارت سرور از فهرست عادی مخفی می‌شود و "
+                    "سابقه با ثبت رویداد باقی می‌ماند.\n"
+                    "این اقدام VPS، Peer، DNS، حساب‌ها یا فهرست فنی "
+                    "host_pool را حذف نمی‌کند. برای جمع‌آوری واقعی سرور "
+                    "فرایند جداگانه لازم است.",
+                    [[("✅ حذف فقط از فهرست",
+                       "apps_edge_manual_archive_yes_"+opid)],
+                     [("انصراف","apps_edge_manual_detail_"+opid)]])
             if data=="apps_edge_manual_new":
                 await asyncio.to_thread(self.preflight)
                 op=await asyncio.to_thread(self.journal.start,actor,chat)

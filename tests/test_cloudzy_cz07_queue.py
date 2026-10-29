@@ -286,6 +286,8 @@ class QueueTests(unittest.TestCase):
             "extra_target":1, "historical_identity_verified":True,
             "historical_proof_sha256":"a"*64,
             "historical_snapshots_sha256":["b"*64,"c"*64,"d"*64],
+            "one_absent_acknowledged":True,
+            "one_absent_sha256":"f"*64,
         }
         with patch.dict(os.environ,{OPT_IN_ENV:"1"}), patch(
             "cloudzy_cz07_queue.verify_historical_job",return_value=proof,
@@ -312,6 +314,14 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(db.execute(
                 "SELECT status FROM cloudzy_cz07_jobs WHERE id=?",
                 (HISTORICAL_JOB_ID,)).fetchone()[0], "VERIFYING")
+            self.assertEqual(db.execute(
+                "SELECT username_sha256,proof_sha256,actor,chat,reason "
+                "FROM cloudzy_cz07_absent_attestations WHERE job_id=?",
+                (HISTORICAL_JOB_ID,)).fetchone(),
+                ("f"*64,"a"*64,7,8,
+                 "MISSING_AFTER_VERIFIED_BATCH_TRANSFER_"
+                 "DELETION_CAUSE_UNVERIFIED"))
+
 
     def test_persian_hold_recovery_button_is_owner_bound_and_one_use(self):
         from asyncio import run

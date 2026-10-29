@@ -117,27 +117,24 @@ class Phase1PanelTests(unittest.TestCase):
         asyncio.run(self.panel.handle_callback(self.query, self.context, data,
             role=role, actor=actor, chat=chat, markup=markup))
 
-    def test_home_shows_available_cz03_actions_and_only_phase3_is_pending(self):
+    def test_home_has_distinct_manual_and_cloudzy_entries_without_api_reads(self):
         self.cb("apps_cz_home")
-        self.assertIn("مدیریت زیرساخت Edge", self.query.text)
-        self.assertIn("آماده‌سازی Edge: خرید، نصب", self.query.text)
-        self.assertIn("تغییر مسیر و انتقال حساب‌ها فقط پس از کنترل ایمنی", self.query.text)
-        self.assertNotIn("ساخت سریع Edge در فاز بعد", self.query.text)
+        self.assertIn("مدیریت Edge", self.query.text)
+        self.assertIn("Cloudflare", self.query.text)
+        self.assertNotIn("CZ-04B", self.query.text)
         labels = {cb: label for row in self.query.edits[-1][1]["reply_markup"]
                   for label, cb in row}
-        for cb in ("apps_cz_servers_0", "apps_cz_regions_0", "apps_cz_keys_0",
-                   "apps_cz_wizard", "apps_cz6_start", "apps_cz_edge", "apps_cz_operations",
-                   "apps_cz_account", "apps_cz_balance"):
-            self.assertIn(cb, labels)
-        self.assertEqual(labels["apps_cz_wizard"], "🛠 ساخت دستی Edge")
-        self.assertIn("خرید و آماده‌سازی Edge", labels["apps_cz6_start"])
-        self.assertIn("apps_cz7_home", labels)
-        self.assertEqual(labels["apps_cz_operations"], "📋 سوابق و وضعیت عملیات")
-        self.assertIn("مدیریت Edge و Relay", labels["apps_cz_edge"])
-        self.assertIn("apps_cz4_vps", labels)
-        self.assertNotIn("hpeg_status", self.query.callbacks)
-        self.assertEqual(self.api.calls, [])
-        self.assertEqual(self.api.calls, [])
+        for cb in ("apps_cz_servers_0", "apps_cz_regions_0",
+                   "apps_cz_keys_0", "apps_cz6_start", "apps_cz_edge",
+                   "apps_cz_operations", "apps_cz_account", "apps_cz_balance",
+                   "apps_edge_manual_home"):
+            self.assertIn(cb,labels)
+        self.assertIn("Cloudzy",labels["apps_cz6_start"])
+        self.assertIn("دستی",labels["apps_edge_manual_home"])
+        self.assertNotEqual(labels["apps_cz6_start"],labels["apps_edge_manual_home"])
+        self.assertIn("apps_cz7_home",labels)
+        self.assertNotIn("hpeg_status",self.query.callbacks)
+        self.assertEqual(self.api.calls,[])
 
     def test_cz03_wizard_operations_and_key_add_dispatched_first(self):
         # The read-only presentation module should never intercept CZ-03 actions.

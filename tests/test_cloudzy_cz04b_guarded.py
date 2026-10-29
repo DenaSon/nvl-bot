@@ -44,6 +44,61 @@ class GuardedRouteTests(unittest.IsolatedAsyncioTestCase):
             ).fetchone()
             return route, status[0] if status else None, lease[0] if lease else None
 
+    def manualize(self):
+        with self.fixture.db() as db:
+            db.execute("""CREATE TABLE manual_edge_operations(
+                id TEXT,ip TEXT,pin_type TEXT,pin_base64 TEXT,status TEXT)""")
+            db.execute(
+                "INSERT INTO manual_edge_operations VALUES "
+                "('manual-one',?,'ssh-ed25519','YWJjZA==','STANDBY')",
+                (DST,))
+            db.execute(
+                "UPDATE host_pool SET provider='manual',provider_instance_id=NULL "
+                "WHERE host=?", (DST,))
+            db.execute("DELETE FROM cloudzy_edge_operations")
+        async def forbidden(*_args):
+            raise AssertionError("MANUAL_PATH_MUST_NEVER_CALL_CLOUDZY")
+        self.fixture.manager.provider=forbidden
+
+    async def test_manual_standby_shares_guarded_cloudflare_and_6g_route(self):
+        self.manualize()
+        # Legacy picker stays Cloudzy-only; the manual wizard/CZ07 invokes
+        # this SAME guarded engine after explicit confirmed handoff.
+        self.assertEqual(self.fixture.manager._targets(), [])
+        self.assertEqual(
+            await self.fixture.manager._run_route(7,8,DST),"READY")
+        self.assertEqual(self.state(),(DST,"READY","SUCCEEDED"))
+        self.assertEqual({r["ip"] for r in self.fixture.dns.records},{DST})
+        self.assertEqual(self.fixture.manager._route_ready(),
+                         (SRC,DST,"manual:manual-one"))
+        rows,fp=self.fixture.manager._migration_snapshot(SRC,DST)
+        moved=await self.fixture.manager._run_users(
+            7,8,["alice","bob"],fp,check_provider=False)
+        self.assertEqual(moved,2)
+        self.assertNotIn("provider",self.fixture.net_calls)
+        with self.fixture.db() as db:
+            self.assertEqual(db.execute(
+                "SELECT provider,provider_instance_id,is_default "
+                "FROM host_pool WHERE host=?", (DST,)).fetchone(),
+                ("manual",None,1))
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM ssh_accounts WHERE host=? "
+                "AND service_type='ssh' AND status='🟢 فعال'",
+                (DST,)).fetchone()[0],2)
+
+    async def test_manual_cloudflare_partial_write_preserves_shared_6g_hold(self):
+        self.manualize()
+        self.fixture.dns.fail_after=0
+        with self.assertRaises(CutoverHold):
+            await self.fixture.manager._run_route(7,8,DST)
+        self.assertEqual(self.state(),(SRC,"HOLD","RUNNING"))
+        self.assertEqual([r["ip"] for r in self.fixture.dns.records],[DST,SRC])
+        self.assertEqual(self.fixture.dns.calls,[("write",DST,0)])
+        with self.fixture.db() as db:
+            self.assertEqual(db.execute(
+                "SELECT host FROM ssh_accounts WHERE username='alice'"
+            ).fetchone()[0],SRC)
+
     async def test_success_route_uses_original_6g_and_preserves_customers(self):
         await self.route()
         self.assertEqual(self.state(), (DST,"READY","SUCCEEDED"))

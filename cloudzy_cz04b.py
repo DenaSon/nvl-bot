@@ -5,6 +5,8 @@ egress, no bulk helper/SSH password rebuild, no old srv_mkactive callbacks.
 A pinned CZ03 Cloudzy Standby is eligible; old/default Edge stays online.
 """
 from __future__ import annotations
+from manual_edge_identity import resolve as resolve_edge, assert_ref as assert_edge_ref
+
 import asyncio
 import hashlib
 from html import escape
@@ -53,6 +55,16 @@ class Cloudzy04B:
         self.now = now
 
     def _init(self, db):
+        # A fresh manual installation may never have entered Cloudzy/CZ04A.
+        # Create the *same* provider standby guard table before any cutover
+        # read. Existing schemas, including legacy test fixtures, are left
+        # untouched and retain their unresolved-action protections.
+        if not db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='cloudzy_cz04a_actions'"
+        ).fetchone():
+            from cloudzy_cz04a import ensure_cz04a_schema
+            ensure_cz04a_schema(db)
         db.execute("""CREATE TABLE IF NOT EXISTS cloudzy_cz04b_operations (
             id TEXT PRIMARY KEY,
             kind TEXT NOT NULL, status TEXT NOT NULL,
@@ -150,15 +162,7 @@ class Cloudzy04B:
             ).fetchone()
             if not tr or not sr or not tr[0] or tr[1] or not tr[2]:
                 raise CutoverHold("TARGET_NOT_READY_STANDBY")
-            if tr[5] != "cloudzy" or not tr[6]:
-                raise CutoverHold("TARGET_NOT_MANAGED_CLOUDZY")
-            receipt = db.execute(
-                "SELECT host_key_type,host_key_base64 FROM cloudzy_edge_operations "
-                "WHERE status='EDGE_READY' AND provider_server_id=? AND public_ipv4=?",
-                (str(tr[6]), target)
-            ).fetchall()
-            if len(receipt) != 1 or not all(receipt[0]):
-                raise CutoverHold("CZ03_VERIFIED_PIN_MISSING")
+            identity = resolve_edge(db, target, require_standby=True)
             if int(tr[3] or 0) != int(sr[1] or 0):
                 raise CutoverHold("SOURCE_TARGET_SERVICE_PORT_MISMATCH")
             if not 1 <= int(tr[3] or 0) <= 65535:
@@ -187,11 +191,13 @@ class Cloudzy04B:
             if not 1 <= tls_port <= 65535:
                 raise CutoverHold("TLS_PORT_INVALID")
             return {
-                "source": current, "target": target, "provider_id": str(tr[6]),
+                "source": current, "target": target,
+                "provider_id": identity["identity_ref"],
+                "identity_kind": identity["provider"],
                 "customer_port": int(tr[3]), "admin_port": int(tr[4] or 22),
                 "tls_port": tls_port, "hosts": st["hosts"],
                 "dns": current, "users": self._source_accounts(db, current),
-                "pinned_key": tuple(receipt[0]),
+                "pinned_key": identity["pinned_key"],
             }
 
     def _targets(self):
@@ -208,7 +214,10 @@ class Cloudzy04B:
             except sqlite3.OperationalError:
                 # No CZ03 order placed yet. Never create fake provider ownership.
                 rows = []
-            return [(str(ip), str(pid)) for ip, pid in rows]
+            # The old CZ04B UI exposes only verified Cloudzy targets.
+            # Manual adoption/transfer must enter through its own guarded
+            # wizard and durable CZ07 operator approval; never bypass it here.
+            return [(str(ip),str(pid)) for ip,pid in rows]
 
     def _latest(self):
         with self.db() as db:
@@ -240,12 +249,7 @@ class Cloudzy04B:
             hosts = [h.strip() for h in (settings.get("hosts") or "").split(",") if h.strip()]
             if not hosts or hosts[0] != target:
                 raise CutoverHold("HOST_ORDER_CHANGED")
-            tr = db.execute(
-                "SELECT provider,provider_instance_id,active,is_default,is_standby "
-                "FROM host_pool WHERE host=?", (target,)
-            ).fetchone()
-            if not tr or tr != ("cloudzy", pid, 1, 1, 0):
-                raise CutoverHold("TARGET_ROLE_CHANGED")
+            assert_edge_ref(db,target,pid,require_default=True)
             return source, target, pid
 
     def _ready_probe_state(self, source, target, provider_id):
@@ -258,16 +262,10 @@ class Cloudzy04B:
                 "provider,provider_instance_id FROM host_pool WHERE host=?",
                 (target,)
             ).fetchone()
-            if (not row or row[0:3] != (1, 1, 0)
-                or row[5:] != ("cloudzy", provider_id)):
+            if not row or row[0:3] != (1,1,0):
                 raise CutoverHold("ROUTE_TARGET_CHANGED")
-            pinned = db.execute(
-                "SELECT host_key_type,host_key_base64 FROM cloudzy_edge_operations "
-                "WHERE status='EDGE_READY' AND provider_server_id=? AND public_ipv4=?",
-                (provider_id, target)
-            ).fetchall()
-            if len(pinned) != 1 or not all(pinned[0]):
-                raise CutoverHold("CZ03_PIN_CHANGED")
+            identity = assert_edge_ref(
+                db,target,provider_id,require_default=True)
             tls = int(st.get("tls_port") or "2088")
             if not (1 <= int(row[3] or 0) <= 65535 and
                     1 <= int(row[4] or 0) <= 65535 and 1 <= tls <= 65535):
@@ -275,7 +273,8 @@ class Cloudzy04B:
             return {
                 "source": source, "target": target, "provider_id": provider_id,
                 "customer_port": int(row[3]), "admin_port": int(row[4]),
-                "tls_port": tls, "pinned_key": tuple(pinned[0]),
+                "tls_port": tls, "pinned_key": identity["pinned_key"],
+                "identity_kind": identity["provider"],
             }
 
     def _migration_snapshot(self, source, target):
@@ -321,16 +320,16 @@ class Cloudzy04B:
                     "FROM host_pool WHERE host=?", (state["target"],)
                 ).fetchone()
                 st = self._settings(db)
-                receipt = db.execute(
-                    "SELECT COUNT(*) FROM cloudzy_edge_operations "
-                    "WHERE status='EDGE_READY' AND provider_server_id=? AND public_ipv4=?",
-                    (state["provider_id"], state["target"])
-                ).fetchone()[0]
+                identity = assert_edge_ref(
+                    db,state["target"],state["provider_id"],require_standby=True)
                 if (len(current) != 1 or current[0][0] != state["source"]
-                    or tr != (1, 0, 1, "cloudzy", state["provider_id"])
+                    or tr[:3] != (1,0,1)
+                    or ((identity["provider"]=="cloudzy" and
+                         tr[3:] != ("cloudzy",state["provider_id"])) or
+                        (identity["provider"]=="manual" and
+                         tr[3:] != ("manual",None)))
                     or st.get("dns_current_ip") != state.get("dns")
                     or st.get("hosts") != state.get("hosts")
-                    or receipt != 1
                     or _digest(self._source_accounts(db, state["source"]))
                     != state.get("fingerprint")):
                     raise CutoverHold("ROUTE_RESERVATION_SNAPSHOT_CHANGED")
@@ -374,7 +373,7 @@ class Cloudzy04B:
         # every accepted CZ07 migration batch. The source of truth here is
         # the locally pinned signed SSH host identity plus live transport.
         # Other management/cutover callers keep their original provider check.
-        if check_provider and await self.provider(
+        if check_provider and state.get("identity_kind") != "manual" and await self.provider(
                 state["target"], state["provider_id"]) is not True:
             raise CutoverHold("CLOUDZY_PROVIDER_ID_STATUS_IP_UNVERIFIED")
         if await self.probe(state["target"], state["customer_port"],
@@ -417,7 +416,13 @@ class Cloudzy04B:
                 "SELECT active,is_default,is_standby,provider,provider_instance_id "
                 "FROM host_pool WHERE host=?", (dst,)
             ).fetchone()
-            if row != (1, 0, 1, "cloudzy", state["provider_id"]):
+            identity=assert_edge_ref(
+                db,dst,state["provider_id"],require_standby=True)
+            if (row[:3] != (1,0,1) or
+                    (identity["provider"]=="cloudzy"
+                     and row[3:] != ("cloudzy",state["provider_id"])) or
+                    (identity["provider"]=="manual"
+                     and row[3:] != ("manual",None))):
                 raise CutoverHold("TARGET_CHANGED")
             st = self._settings(db)
             if st.get("dns_current_ip") != src or st.get("hosts") != state["hosts"]:
@@ -431,12 +436,20 @@ class Cloudzy04B:
             if other or _digest(self._source_accounts(db, src)) != state["fingerprint"]:
                 raise CutoverHold("ACCOUNTS_CHANGED_AFTER_PREVIEW")
             db.execute("UPDATE host_pool SET is_default=0 WHERE host=?", (src,))
-            updated = db.execute(
-                "UPDATE host_pool SET is_default=1,is_standby=0 "
-                "WHERE host=? AND provider='cloudzy' AND provider_instance_id=? "
-                "AND active=1 AND is_standby=1 AND is_default=0",
-                (dst, state["provider_id"])
-            ).rowcount
+            if identity["provider"]=="cloudzy":
+                updated = db.execute(
+                    "UPDATE host_pool SET is_default=1,is_standby=0 "
+                    "WHERE host=? AND provider='cloudzy' AND provider_instance_id=? "
+                    "AND active=1 AND is_standby=1 AND is_default=0",
+                    (dst,state["provider_id"]),
+                ).rowcount
+            else:
+                updated = db.execute(
+                    "UPDATE host_pool SET is_default=1,is_standby=0 "
+                    "WHERE host=? AND provider='manual' AND provider_instance_id IS NULL "
+                    "AND active=1 AND is_standby=1 AND is_default=0",
+                    (dst,),
+                ).rowcount
             if updated != 1:
                 raise CutoverHold("TARGET_CAS_MISMATCH")
             hosts = [h.strip() for h in state["hosts"].split(",") if h.strip()]

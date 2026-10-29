@@ -1691,6 +1691,26 @@ class QuickEdgeWizard:
                 self.fingerprint, op["public_ipv4"])
             if latest_type != op["host_key_type"] or latest_b64 != op["host_key_base64"]:
                 raise QuickEdgeHold("HOST_KEY_CHANGED")
+            # Manual and Cloudzy install share the Core's WireGuard peer
+            # namespace. A manual adoption of this IP, or unresolved manual
+            # install with possible WG effects, must block this installer.
+            # This check is read-only and never calls Cloudzy.
+            with self.store.db() as db:
+                if db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='manual_edge_operations'"
+                ).fetchone():
+                    if db.execute(
+                        "SELECT 1 FROM manual_edge_operations WHERE ip=? "
+                        "AND status!='CANCELLED' LIMIT 1",
+                        (ip,),
+                    ).fetchone():
+                        raise QuickEdgeHold("MANUAL_EDGE_IP_ALREADY_RESERVED")
+                    if db.execute(
+                        "SELECT 1 FROM manual_edge_operations "
+                        "WHERE status IN ('INSTALLING','INSTALL_HOLD') LIMIT 1"
+                    ).fetchone():
+                        raise QuickEdgeHold("CORE_WG_INSTALL_LEASE_BUSY")
             # A stable receipt and SSH host key do not prove Cloudzy still
             # owns this exact VPS/IP. Never run legacy setup on recycled IPs.
             stage = "PROVIDER_IDENTITY"

@@ -183,6 +183,111 @@ class CZ04BTests(unittest.IsolatedAsyncioTestCase):
         await self.cb(confirm)
         return confirm
 
+    async def test_manual_edge_routes_and_moves_without_any_cloudzy_calls(self):
+        # One existing manual standby, pinned SSH identity, no provider VPS
+        # ownership is forged. Keep Cloudflare/6G/CAS exactly the same.
+        with self.db() as db:
+            db.execute("""CREATE TABLE manual_edge_operations(
+                id TEXT,ip TEXT, pin_type TEXT,pin_base64 TEXT,status TEXT)""")
+            db.execute(
+                "INSERT INTO manual_edge_operations VALUES "
+                "('manual-op','203.0.113.12','ssh-ed25519','YWJjZA==','STANDBY')")
+            db.execute(
+                "UPDATE host_pool SET provider='manual',provider_instance_id=NULL "
+                "WHERE host='203.0.113.12'")
+            db.execute("DELETE FROM cloudzy_edge_operations")
+        async def forbidden_cloudzy(_ip,_provider):
+            raise AssertionError("CLOUDZY_API_MUST_NOT_RUN")
+        self.manager.provider=forbidden_cloudzy
+        state=self.manager._state("203.0.113.12")
+        self.assertEqual(state["provider_id"],"manual:manual-op")
+        # The legacy Cloudzy picker must NOT expose manual Standby; it is
+        # operated only through the dedicated wizard.
+        self.assertEqual(self.manager._targets(),[])
+        result=await self.manager._run_route(7,8,"203.0.113.12")
+        self.assertEqual(result,"READY")
+        self.assertEqual(self.manager._route_ready(),
+                         ("203.0.113.11","203.0.113.12","manual:manual-op"))
+        self.assertEqual({r["ip"] for r in self.dns.records},{"203.0.113.12"})
+        rows,fp=self.manager._migration_snapshot("203.0.113.11","203.0.113.12")
+        self.assertEqual(len(rows),2)
+        moved=await self.manager._run_users(
+            7,8,["alice","bob"],fp,check_provider=False)
+        self.assertEqual(moved,2)
+        self.assertNotIn("provider",self.net_calls)
+        self.assertTrue({"probe","nat"}.issubset(self.net_calls))
+        with self.db() as db:
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM cloudzy_edge_operations").fetchone()[0],0)
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM ssh_accounts "
+                           "WHERE host='203.0.113.12' AND service_type='ssh' "
+                           "AND status='🟢 فعال'").fetchone()[0],2)
+            self.assertEqual(
+                db.execute("SELECT provider,provider_instance_id,is_default "
+                           "FROM host_pool WHERE host='203.0.113.12'").fetchone(),
+                ("manual",None,1))
+            self.assertEqual(
+                db.execute("SELECT value FROM settings WHERE key='dns_current_ip'"
+                           ).fetchone()[0],"203.0.113.12")
+
+    async def test_fresh_manual_core_initializes_standby_guard_without_cloudzy_use(self):
+        # A manual operator has never opened the Cloudzy Standby menu.
+        # The shared route must create its guard schema locally, without
+        # querying the provider or silently skipping unsettled-action checks.
+        with self.db() as db:
+            db.execute("DROP TABLE cloudzy_cz04a_actions")
+            db.execute("""CREATE TABLE manual_edge_operations(
+                id TEXT,ip TEXT,pin_type TEXT,pin_base64 TEXT,status TEXT)""")
+            db.execute(
+                "INSERT INTO manual_edge_operations VALUES "
+                "('fresh-manual','203.0.113.12','ssh-ed25519','YWJjZA==','STANDBY')")
+            db.execute(
+                "UPDATE host_pool SET provider='manual',provider_instance_id=NULL "
+                "WHERE host='203.0.113.12'")
+            db.execute("DELETE FROM cloudzy_edge_operations")
+        async def provider_disabled(*_):
+            raise AssertionError("NO_CLOUDZY_API_ALLOWED")
+        self.manager.provider=provider_disabled
+        state=self.manager._state("203.0.113.12")
+        self.assertEqual(state["provider_id"],"manual:fresh-manual")
+        with self.db() as db:
+            cols={row[1] for row in db.execute(
+                "PRAGMA table_info(cloudzy_cz04a_actions)")}
+            self.assertTrue({"id","provider_id","host","status"}.issubset(cols))
+        self.assertEqual(await self.manager._run_route(
+            7,8,"203.0.113.12"),"READY")
+        self.assertEqual(self.manager._route_ready(),
+                         ("203.0.113.11","203.0.113.12","manual:fresh-manual"))
+        with self.db() as db:
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM cloudzy_edge_operations").fetchone()[0],0)
+
+    async def test_manual_route_rejects_partial_cloudflare_write_without_user_move(self):
+        with self.db() as db:
+            db.execute("""CREATE TABLE manual_edge_operations(
+                id TEXT,ip TEXT,pin_type TEXT,pin_base64 TEXT,status TEXT)""")
+            db.execute(
+                "INSERT INTO manual_edge_operations VALUES "
+                "('m1','203.0.113.12','ssh-ed25519','YWJjZA==','STANDBY')")
+            db.execute(
+                "UPDATE host_pool SET provider='manual',provider_instance_id=NULL "
+                "WHERE host='203.0.113.12'")
+            db.execute("DELETE FROM cloudzy_edge_operations")
+        async def forbidden(*_):
+            raise AssertionError("CLOUDZY_SHOULD_NOT_BE_QUERIED")
+        self.manager.provider=forbidden
+        self.dns.fail_after=0
+        from cloudzy_cz04b import CutoverHold
+        with self.assertRaises(CutoverHold):
+            await self.manager._run_route(7,8,"203.0.113.12")
+        with self.db() as db:
+            self.assertEqual(db.execute("SELECT host FROM host_pool "
+                            "WHERE is_default=1").fetchall(),[("203.0.113.11",)])
+            self.assertEqual(db.execute("SELECT host FROM ssh_accounts WHERE "
+                            "username='alice'").fetchone()[0],"203.0.113.11")
+        self.assertEqual({r["ip"] for r in self.dns.records},{"203.0.113.11"})
+
     async def test_successful_route_keeps_users_and_source_unchanged(self):
         await self.confirmed_route()
         self.assertIn("Relay پیش‌فرض", self.q.edits[-1][0])

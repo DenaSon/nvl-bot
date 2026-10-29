@@ -7,6 +7,8 @@ No host deletion, account rebuild, K2 mutation, paid Cloudzy action or blind
 route retry is implemented here.
 """
 from __future__ import annotations
+from manual_edge_identity import assert_ref as assert_edge_ref, assert_role_ref
+
 
 import asyncio
 from html import escape
@@ -205,6 +207,20 @@ class DurableCutoverQueue:
                 "last_quick_ip": ip, "last_quick_stage": stage,
                 "manual_standby": manual_standby}
 
+    def manual_candidate(self, actor, chat):
+        """Explicitly adopted manual Standby; no Cloudzy purchase/GET."""
+        with self.db() as db:
+            self._init(db)
+            row=db.execute(
+                "SELECT id,ip,actor,chat FROM manual_edge_operations "
+                "WHERE status='STANDBY' AND actor=? AND chat=? "
+                "ORDER BY updated_at DESC LIMIT 1",(actor,chat),
+            ).fetchone()
+            if not row:
+                raise CZ07Hold("NO_MANUAL_STANDBY")
+            assert_edge_ref(db,row[1],"manual:"+row[0],require_standby=True)
+            return (row[0],row[1],"manual:"+row[0],row[2],row[3])
+
     def reserve(self, candidate, source, *, actor, chat, expected_fp, expected_count):
         opid, target, pid, original_actor, original_chat = candidate
         if actor != original_actor or chat != original_chat:
@@ -234,16 +250,27 @@ class DurableCutoverQueue:
                           "WHERE status NOT IN ('DONE','REJECTED') "
                           "AND host IN (?,?)", (source, target)).fetchone():
                 raise CZ07Hold("CZ04A_UNRESOLVED")
-            row = db.execute(
-                "SELECT h.active,h.is_standby,h.is_default,e.status,c.stage "
-                "FROM host_pool h JOIN cloudzy_edge_operations e "
-                "ON h.host=e.public_ipv4 AND h.provider_instance_id=e.provider_server_id "
-                "JOIN cloudzy_cz06_runs c ON c.operation_id=e.id "
-                "WHERE h.host=? AND h.provider='cloudzy' AND e.id=? AND "
-                "e.provider_server_id=?",
-                (target, opid, pid)).fetchone()
-            if row != (1, 1, 0, "EDGE_READY", "READY"):
-                raise CZ07Hold("CZ06_STANDBY_CHANGED")
+            if pid.startswith("manual:"):
+                if pid != "manual:"+opid:
+                    raise CZ07Hold("MANUAL_IDENTITY_MISMATCH")
+                assert_edge_ref(db,target,pid,require_standby=True)
+                manual=db.execute(
+                    "SELECT actor,chat,status FROM manual_edge_operations "
+                    "WHERE id=? AND ip=?",(opid,target),
+                ).fetchone()
+                if manual != (actor,chat,"STANDBY"):
+                    raise CZ07Hold("MANUAL_STANDBY_CHANGED")
+            else:
+                row = db.execute(
+                    "SELECT h.active,h.is_standby,h.is_default,e.status,c.stage "
+                    "FROM host_pool h JOIN cloudzy_edge_operations e "
+                    "ON h.host=e.public_ipv4 AND h.provider_instance_id=e.provider_server_id "
+                    "JOIN cloudzy_cz06_runs c ON c.operation_id=e.id "
+                    "WHERE h.host=? AND h.provider='cloudzy' AND e.id=? AND "
+                    "e.provider_server_id=?",
+                    (target, opid, pid)).fetchone()
+                if row != (1, 1, 0, "EDGE_READY", "READY"):
+                    raise CZ07Hold("CZ06_STANDBY_CHANGED")
             defaults = db.execute(
                 "SELECT host FROM host_pool WHERE active=1 AND is_default=1"
             ).fetchall()
@@ -388,8 +415,8 @@ class DurableCutoverQueue:
             "SELECT active,is_default,is_standby,provider,provider_instance_id "
             "FROM host_pool WHERE host=?", (rec["target"],)
         ).fetchone()
-        if target != (1, 0, 1, "cloudzy", rec["provider_id"]):
-            raise CZ07Hold("RECOVERY_STANDBY_CHANGED")
+        assert_role_ref(db,rec["target"],rec["provider_id"],
+                        require_standby=True)
         if db.execute(
             "SELECT 1 FROM ssh_accounts WHERE host=? LIMIT 1",
             (rec["target"],)
@@ -570,8 +597,9 @@ class DurableCutoverQueue:
                 "SELECT host,active,is_default,is_standby,provider,provider_instance_id "
                 "FROM host_pool WHERE is_default=1"
             ).fetchall()
-            if [tuple(item) for item in defaults] != [
-                    (row["target"], 1, 1, 0, "cloudzy", row["provider_id"])]:
+            assert_role_ref(
+                db,row["target"],row["provider_id"],require_default=True)
+            if len(defaults)!=1 or defaults[0][0]!=row["target"]:
                 raise CZ07Hold("RECOVERY_DEFAULT_CHANGED")
             proof = self._hold_evidence(db, row)
             if ((proof["moved"], proof["remaining"]) !=
@@ -751,6 +779,12 @@ class DurableCutoverQueue:
                       rec["total"], 0)
         return True
 
+    @staticmethod
+    def _expected_target_role(row, ref):
+        if ref.startswith("manual:"):
+            return row==("manual",None,1,1,0)
+        return row==("cloudzy",ref,1,1,0)
+
     def complete_transport(self, job, *, actor, chat, expected_updated_at):
         """Close ONLY the account-host transfer lock after verifying live route.
 
@@ -807,7 +841,7 @@ class DurableCutoverQueue:
             if (settings.get("hosts") != rec["target"]
                     or settings.get("dns_current_ip") != rec["target"]
                     or defaults != [(rec["target"],)]
-                    or target_role != ("cloudzy", rec["provider_id"], 1, 1, 0)):
+                    or not self._expected_target_role(target_role,rec["provider_id"])):
                 raise CZ07Hold("TRANSPORT_ROUTE_SNAPSHOT_CHANGED")
             if self.cz04b._source_accounts(db, rec["source"]):
                 raise CZ07Hold("TRANSPORT_SOURCE_NOT_EMPTY")
@@ -950,7 +984,10 @@ class DurableCutoverQueue:
                 self.transition(job, "QUEUED", "ROUTING", code="ROUTE_START")
                 log.info("CZ07 job=%s stage=ROUTING code=CZ04B_GUARDED_CUTOVER_START source=%s target=%s",
                          job[:16], rec["source"], rec["target"])
-                result = await self.cz04b._run_route(rec["actor"], chat, rec["target"])
+                # Same route/CAS/Cloudflare engine; manual identity performs
+                # no Cloudzy ownership lookup anywhere on this path.
+                result = await self.cz04b._run_route(
+                    rec["actor"],chat,rec["target"])
                 if result != "READY":
                     raise CZ07Hold("CZ04B_ROUTE_NOT_READY")
                 self.transition(job, "ROUTING", "MIGRATING", code="ROUTE_READY")

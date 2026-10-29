@@ -7369,6 +7369,19 @@ async def _manual_edge_verify(ip, details, ssh_port):
         return False
     return await _cloudzy_04a_probe(ip,row[5],ssh_port)
 
+def _manual_edge_is_core_ip(ip):
+    # Fail closed if the current Core identity cannot be resolved. Never
+    # SSH-install a relay over the live Core's own public interface.
+    settings_ip = str(_db_get_setting("core_wg_public_ip", "") or "").strip()
+    try:
+        cached_ip = str(_get_core_public_ip_cached() or "").strip()
+    except Exception:
+        cached_ip = ""
+    if not settings_ip and not cached_ip:
+        return True
+    return str(ip) in {settings_ip, cached_ip}
+
+
 _manual_edge = ManualEdgeWizard(
     db=db_conn,preflight=_cloudzy_quick_preflight,
     provision=_manual_edge_provision,verify=_manual_edge_verify,
@@ -7377,7 +7390,7 @@ _manual_edge = ManualEdgeWizard(
     enabled=lambda: os.environ.get("NVL_EDGE_MANUAL_ENABLED")=="1"
                      and _manual_form_ready,
     guard=_cloudzy_04a_guard,
-    is_core_host=_is_current_core_host,
+    is_core_host=_manual_edge_is_core_ip,
 )
 
 # Phase 7 is opt-in and strictly a read-only Rich admin view. No effectful

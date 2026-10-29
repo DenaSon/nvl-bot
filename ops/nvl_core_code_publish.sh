@@ -17,7 +17,7 @@ BEFORE_QUEUE_SHA=bf14760d84b50ca89ea96ab375641888cd84b5278605ffc288e29fd64b82ad3
 fail() { echo "STOP: $*" >&2; return 1; }
 [[ "$EUID" -eq 0 ]] || fail "root required"
 [[ "$PIN_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "set NVL_PIN_SHA to an exact 40-char Git SHA"
-for cmd in git sqlite3 python3 systemctl sha256sum cmp readlink stat cp install mktemp; do
+for cmd in git sqlite3 python3 systemctl sha256sum cmp readlink stat cp install mktemp find realpath dirname; do
   command -v "$cmd" >/dev/null || fail "missing command: $cmd"
 done
 [[ -f "$DB" && ! -L "$DB" ]] || fail "live database missing or symlink"
@@ -80,8 +80,8 @@ python3 - "$SRC" <<'PY'
 import pathlib, py_compile, sys
 root = pathlib.Path(sys.argv[1])
 count = 0
-for file in root.glob('*.py'):
-    py_compile.compile(str(file), cfile=str(root/(file.name+'.preflight.pyc')), doraise=True)
+for file in root.rglob('*.py'):
+    py_compile.compile(str(file), cfile=str(file.with_suffix('.preflight.pyc')), doraise=True)
     count += 1
 print("STAGED_PYTHON_COMPILE=OK", count)
 PY
@@ -105,28 +105,36 @@ PY
 mkdir -m 700 "$RELEASE/previous"
 : > "$RELEASE/manifest.txt"
 : > "$RELEASE/new-files.txt"
+# Complete runtime Python graph: root modules plus imported package modules.
+# Existing /root/ops and /root/server_migration are versioned and backed up.
+[[ -d "$SRC/ops" && -d "$SRC/server_migration" ]] ||
+  fail "runtime Python package directories missing"
+find "$SRC" -maxdepth 1 -type f \( -name '*.py' -o -name '*.sh' \) -print0 > "$RELEASE/source-list0"
+find "$SRC/ops" "$SRC/server_migration" -type f -name '*.py' -print0 >> "$RELEASE/source-list0"
 COUNT=0
 CHANGED=0
 NEW=0
-for file in "$SRC"/*.py "$SRC"/*.sh; do
-  [[ -f "$file" && ! -L "$file" ]] || continue
-  name="$(basename "$file")"
+while IFS= read -r -d '' file; do
+  rel="$(realpath --relative-to="$SRC" "$file")"
+  [[ -n "$rel" && "$rel" != ../* && "$rel" != /* ]] ||
+    fail "source outside release"
+  [[ ! -L "$ROOT/$rel" ]] || fail "symlink target: /root/$rel"
   COUNT=$((COUNT+1))
-  printf '%s\n' "$name" >> "$RELEASE/manifest.txt"
-  [[ ! -L "$ROOT/$name" ]] || fail "symlink target: /root/$name"
-  if [[ -f "$ROOT/$name" ]]; then
-    cp -p "$ROOT/$name" "$RELEASE/previous/$name"
-    if ! cmp -s "$ROOT/$name" "$file"; then
+  printf '%s\n' "$rel" >> "$RELEASE/manifest.txt"
+  if [[ -f "$ROOT/$rel" ]]; then
+    mkdir -p "$RELEASE/previous/$(dirname "$rel")"
+    cp -p "$ROOT/$rel" "$RELEASE/previous/$rel"
+    if ! cmp -s "$ROOT/$rel" "$file"; then
       CHANGED=$((CHANGED+1))
     fi
-  elif [[ ! -e "$ROOT/$name" ]]; then
+  elif [[ ! -e "$ROOT/$rel" ]]; then
     NEW=$((NEW+1))
-    printf '%s\n' "$name" >> "$RELEASE/new-files.txt"
+    printf '%s\n' "$rel" >> "$RELEASE/new-files.txt"
   else
-    fail "non-regular target: /root/$name"
+    fail "non-regular target: /root/$rel"
   fi
-done
-[[ "$COUNT" -ge 50 ]] || fail "unexpectedly small release package"
+done < "$RELEASE/source-list0"
+[[ "$COUNT" -ge 200 ]] || fail "unexpectedly small source+package release"
 sha256sum "$RELEASE/master_bot-online-backup.db" > "$RELEASE/backup.sha256"
 echo "PINNED_COMMIT=$PIN_SHA"
 echo "SOURCE_FILES=$COUNT CHANGED=$CHANGED NEW=$NEW"
@@ -150,12 +158,13 @@ on_failure() {
   if [[ "$publishing" == 1 ]]; then
     echo "PUBLISH_FAILED: reverting files, leaving nvlbot stopped" >&2
     systemctl stop "$SERVICE" || true
-    for prior in "$RELEASE"/previous/*; do
-      [[ -f "$prior" ]] || continue
-      cp -p "$prior" "$ROOT/$(basename "$prior")" || true
-    done
-    while IFS= read -r name; do
-      [[ -n "$name" ]] && rm -f -- "$ROOT/$name"
+    while IFS= read -r rel; do
+      [[ -f "$RELEASE/previous/$rel" ]] || continue
+      mkdir -p "$ROOT/$(dirname "$rel")" || true
+      cp -p "$RELEASE/previous/$rel" "$ROOT/$rel" || true
+    done < "$RELEASE/manifest.txt"
+    while IFS= read -r rel; do
+      [[ -n "$rel" ]] && rm -f -- "$ROOT/$rel"
     done < "$RELEASE/new-files.txt"
     echo "CODE_RESTORED; SERVICE_STOPPED_FOR_COMPATIBILITY_REVIEW" >&2
   fi
@@ -166,19 +175,19 @@ trap on_failure ERR
 
 systemctl stop "$SERVICE"
 publishing=1
-for file in "$SRC"/*.py "$SRC"/*.sh; do
-  [[ -f "$file" && ! -L "$file" ]] || continue
-  name="$(basename "$file")"
-  if [[ -f "$ROOT/$name" ]]; then
-    mode="$(stat -c %a "$ROOT/$name")"
-  elif [[ "$name" == *.sh ]]; then
+while IFS= read -r rel; do
+  [[ -f "$SRC/$rel" && ! -L "$SRC/$rel" ]] ||
+    fail "staged source changed: $rel"
+  if [[ -f "$ROOT/$rel" ]]; then
+    mode="$(stat -c %a "$ROOT/$rel")"
+  elif [[ "$rel" == *.sh ]]; then
     mode=700
   else
     mode=600
   fi
-  install -m "$mode" "$file" "$ROOT/$name"
-  cmp -s "$file" "$ROOT/$name" || fail "copy mismatch: $name"
-done
+  install -D -m "$mode" "$SRC/$rel" "$ROOT/$rel"
+  cmp -s "$SRC/$rel" "$ROOT/$rel" || fail "copy mismatch: $rel"
+done < "$RELEASE/manifest.txt"
 systemctl start "$SERVICE"
 sleep 4
 [[ "$(systemctl is-active "$SERVICE")" == active ]] ||

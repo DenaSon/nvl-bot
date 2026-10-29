@@ -7532,6 +7532,11 @@ def _build_admin_programs_kb(*, actor=None, chat=None, active_admin_ids=()):
         ],
         [InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")],
     ]
+    if (type(actor) is int and type(chat) is int
+            and actor > 0 and actor == chat and actor in active_admin_ids):
+        rows.insert(1, [InlineKeyboardButton(
+            "🔁 تغییر IP کاربران", callback_data="apps_edge_quick_home",
+        )])
     return rows
 
 

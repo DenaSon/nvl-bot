@@ -117,23 +117,21 @@ class Phase1PanelTests(unittest.TestCase):
         asyncio.run(self.panel.handle_callback(self.query, self.context, data,
             role=role, actor=actor, chat=chat, markup=markup))
 
-    def test_home_has_distinct_manual_and_cloudzy_entries_without_api_reads(self):
+    def test_home_hides_cloudzy_buttons_but_retains_manual_route(self):
         self.cb("apps_cz_home")
         self.assertIn("مدیریت Edge", self.query.text)
-        self.assertIn("Cloudflare", self.query.text)
-        self.assertNotIn("CZ-04B", self.query.text)
+        self.assertNotIn("Cloudzy", self.query.text)
         labels = {cb: label for row in self.query.edits[-1][1]["reply_markup"]
                   for label, cb in row}
-        for cb in ("apps_cz_servers_0", "apps_cz_regions_0",
-                   "apps_cz_keys_0", "apps_cz6_start", "apps_cz_edge",
-                   "apps_cz_operations", "apps_cz_account", "apps_cz_balance",
-                   "apps_edge_manual_home"):
-            self.assertIn(cb,labels)
-        self.assertIn("Cloudzy",labels["apps_cz6_start"])
-        self.assertIn("دستی",labels["apps_edge_manual_home"])
-        self.assertNotEqual(labels["apps_cz6_start"],labels["apps_edge_manual_home"])
-        self.assertIn("apps_cz7_home",labels)
-        self.assertNotIn("hpeg_status",self.query.callbacks)
+        self.assertIn("apps_edge_manual_home",labels)
+        self.assertIn("apps_edge_quick_home",labels)
+        self.assertIn("hp_menu",labels)
+        for legacy in ("apps_cz6_start","apps_cz7_home",
+                       "apps_cz_servers_0","apps_cz_regions_0",
+                       "apps_cz_keys_0","apps_cz_balance",
+                       "apps_cz_account","apps_cz_operations",
+                       "apps_cz_edge","apps_cz4_vps"):
+            self.assertNotIn(legacy,labels)
         self.assertEqual(self.api.calls,[])
 
     def test_cz03_wizard_operations_and_key_add_dispatched_first(self):

@@ -1135,9 +1135,16 @@ class QuickEdgeWizard:
             ref = secrets.token_hex(4)
             code = str(exc) if isinstance(exc, (QuickEdgeHold, QuickRelayHold, RecoveryHold, CatalogHold)) else type(exc).__name__
             log.warning("CZ05_CALLBACK ref=%s stage=selection reason=%s", ref, code)
-            await query.message.reply_text(
-                f"⛔️ بررسی Cloudzy متوقف شد. کد: {_text(code)} | پیگیری: CZ05-{ref}. "
-                "هیچ خریدی انجام ندهید تا علت بررسی شود.")
+            if code == "CANCEL_CONFIRMATION_EXPIRED":
+                await self._display(
+                    query, "⌛️ <b>تأیید لغو منقضی یا جایگزین شده است.</b>\n"
+                    "این خطا مربوط به Cloudzy نیست؛ پرونده را دوباره باز کنید "
+                    "و یک تأیید لغو جدید بگیرید. هیچ خرید یا حذفی انجام نشد.",
+                    [[("📋 سوابق و وضعیت عملیات", "apps_cz_operations")]], markup)
+            else:
+                await query.message.reply_text(
+                    f"⛔️ بررسی Cloudzy متوقف شد. کد: {_text(code)} | پیگیری: CZ05-{ref}. "
+                    "هیچ خریدی انجام ندهید تا علت بررسی شود.")
         except Exception:
             ref = secrets.token_hex(4)
             log.exception("CZ05_CALLBACK ref=%s stage=unexpected", ref)

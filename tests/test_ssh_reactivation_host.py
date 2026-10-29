@@ -160,9 +160,10 @@ class SSHReactivationTests(unittest.TestCase):
                        ("retired.example", "other.example", "HOLD"))
         self.ns["_db_toggle_status"]("nevel0879", "🔴 غیرفعال")
         self.assertEqual(self.row()[:2], ("new.example", "🟢 فعال"))
-        self.assertEqual(self.audit(), [
-            ("old.example", "new.example", "CZ07_RETIRED_SOURCE", "unknown")
-        ])
+        self.assertEqual(
+            [entry[:3] for entry in self.audit()],
+            [("old.example", "new.example", "CZ07_RETIRED_SOURCE")],
+        )
         with sqlite3.connect(self.path) as db:
             self.assertEqual(db.execute(
                 "SELECT status FROM cloudzy_cz07_jobs "

@@ -30,12 +30,12 @@ class JournalTests(unittest.TestCase):
         self.connection = connection
         self.journal = QuickRelayJournal(connection, now=lambda: 1000)
 
-    def create(self, key):
+    def create(self, key, *, actor=12, chat=34):
         with self.connection() as db:
             db.execute("CREATE TABLE IF NOT EXISTS cloudzy_edge_operations(id TEXT PRIMARY KEY)")
             db.execute("INSERT INTO cloudzy_edge_operations VALUES(?)", (key,))
             self.journal.create_in_receipt_transaction(
-                db, opid=key, actor=12, chat=34, message_id=56)
+                db, opid=key, actor=actor, chat=chat, message_id=56)
 
     def test_stage_cas_journal_and_progress(self):
         self.create("a")
@@ -59,7 +59,9 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(self.journal.get("a")["detail_code"], "PROVIDER_UNCERTAIN")
         self.create("b")  # HOLD does not leave a global wizard lease.
         with self.assertRaises(sqlite3.IntegrityError):
-            self.create("c")  # One in-flight quick workflow at a time.
+            self.create("c")  # Same owner has an in-flight Quick Relay.
+        self.create("d", actor=99, chat=98)  # Another owner can proceed.
+        self.assertEqual(self.journal.get("d")["stage"], "PURCHASING")
 
 
     def test_cancelled_stage_is_terminal_and_new_quick_run_can_begin(self):

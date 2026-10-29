@@ -38,7 +38,8 @@ def audit(db_path, *, resolve_dns=False, resolver=None):
             raise ValueError("SQLITE_QUICK_CHECK_FAILED")
         settings = dict(db.execute(
             "SELECT key,value FROM settings WHERE key IN "
-            "('hosts','dns_current_ip','public_domain','tls_domain','tls_passthrough')"
+            "('hosts','dns_current_ip','public_domain','tls_domain','tls_passthrough'," 
+            "'core_wg_public_ip')"
         ).fetchall())
         defaults = db.execute(
             "SELECT host,active,is_standby,service_port "
@@ -54,6 +55,11 @@ def audit(db_path, *, resolve_dns=False, resolver=None):
               not 1 <= int(default[3] or 0) <= 65535):
             failures.append("DEFAULT_RELAY_NOT_ELIGIBLE")
         host = default[0] if default else None
+        core = _ipv4(settings.get("core_wg_public_ip"))
+        if core is None:
+            failures.append("CORE_IDENTITY_MISSING")
+        if host and host == core:
+            failures.append("DEFAULT_RELAY_IS_CORE")
         actual_dns = settings.get("dns_current_ip")
         if host and actual_dns != host:
             failures.append("CACHED_DNS_DEFAULT_MISMATCH")
@@ -87,7 +93,7 @@ def audit(db_path, *, resolve_dns=False, resolver=None):
         if resolve_dns:
             resolve = resolver or socket.getaddrinfo
             names = [settings.get("public_domain")]
-            if settings.get("tls_passthrough") == "1":
+            if settings.get("tls_passthrough", "1") == "1":
                 names.append(settings.get("tls_domain"))
             for name in dict.fromkeys(n for n in names if n):
                 try:

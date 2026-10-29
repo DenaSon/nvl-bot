@@ -268,6 +268,51 @@ class QueueTests(unittest.TestCase):
         with self.factory() as db:
             self.assertFalse(db.execute("SELECT 1 FROM cloudzy_cz07_acceptance").fetchone())
 
+    def test_scoped_historical_proof_is_journaled_with_recovery_cas(self):
+        import asyncio
+        import os
+        from unittest.mock import patch
+        from cloudzy_cz07_legacy_proof import HISTORICAL_JOB_ID, OPT_IN_ENV
+        job=self._prepared_holding_job(fully_moved=True)
+        with self.factory() as db:
+            db.execute("UPDATE cloudzy_cz07_jobs SET id=? WHERE id=?",
+                       (HISTORICAL_JOB_ID,job))
+            db.execute("UPDATE cloudzy_cz07_events SET job_id=? WHERE job_id=?",
+                       (HISTORICAL_JOB_ID,job))
+            db.execute("UPDATE nvl_emergency_migration_audit SET job_id=? "
+                       "WHERE job_id=?", (HISTORICAL_JOB_ID,job))
+        proof = {
+            "moved":468, "remaining":0, "batches":400, "emergency":68,
+            "extra_target":1, "historical_identity_verified":True,
+            "historical_proof_sha256":"a"*64,
+            "historical_snapshots_sha256":["b"*64,"c"*64,"d"*64],
+        }
+        with patch.dict(os.environ,{OPT_IN_ENV:"1"}), patch(
+            "cloudzy_cz07_queue.verify_historical_job",return_value=proof,
+        ) as verifier:
+            rec, observed = asyncio.run(
+                self.q.review_hold(HISTORICAL_JOB_ID,actor=7,chat=8))
+            self.assertEqual(observed,proof)
+            self.assertEqual(self.q.reconcile_hold(
+                HISTORICAL_JOB_ID,actor=7,chat=8,
+                updated_at=rec["updated_at"],
+                expected_moved=468,expected_remaining=0), "VERIFYING")
+            with self.assertRaisesRegex(CZ07Hold,"RECOVERY_SNAPSHOT_CHANGED"):
+                self.q.reconcile_hold(
+                    HISTORICAL_JOB_ID,actor=7,chat=8,
+                    updated_at=rec["updated_at"],
+                    expected_moved=468,expected_remaining=0)
+            self.assertGreaterEqual(verifier.call_count,2)
+        with self.factory() as db:
+            self.assertEqual(db.execute(
+                "SELECT proof_sha256,snapshots_sha256_json "
+                "FROM cloudzy_cz07_legacy_proofs WHERE job_id=?",
+                (HISTORICAL_JOB_ID,)).fetchone(),
+                ("a"*64,'["'+"b"*64+'", "'+"c"*64+'", "'+"d"*64+'"]'))
+            self.assertEqual(db.execute(
+                "SELECT status FROM cloudzy_cz07_jobs WHERE id=?",
+                (HISTORICAL_JOB_ID,)).fetchone()[0], "VERIFYING")
+
     def test_persian_hold_recovery_button_is_owner_bound_and_one_use(self):
         from asyncio import run
         job = self._prepared_holding_job(fully_moved=True)

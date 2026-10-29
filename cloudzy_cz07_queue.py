@@ -13,6 +13,8 @@ from manual_edge_identity import assert_ref as assert_edge_ref, assert_role_ref
 import asyncio
 from html import escape
 import logging
+import os
+import json
 import secrets
 import sqlite3
 import time
@@ -22,6 +24,10 @@ from cloudzy_cz04b import CutoverHold, _digest
 from cloudzy_service import CloudzyError
 from cloudzy_phase1_ui import cz07_issue
 from cloudzy_cz07_acceptance import AcceptanceReview
+from cloudzy_cz07_legacy_proof import (
+    HISTORICAL_JOB_ID, OPT_IN_ENV, HistoricalProofHold,
+    verify_historical_job,
+)
 
 log = logging.getLogger(__name__)
 BATCH_SIZE = 200
@@ -467,6 +473,19 @@ class DurableCutoverQueue:
         operator-approved emergency CAS has its own immutable one-job audit.
         Counts of new users on the target are NOT proof of old job moves.
         """
+        # Opt-in, ONE-JOB forensic override: never weaken normal CZ07 gates.
+        # Historical identities are verified with the original job fingerprint,
+        # two exact batch payloads, both 68-user snapshots and the live roster.
+        if (rec["id"] == HISTORICAL_JOB_ID and
+                rec["status"] == "HOLD" and
+                rec["code"] == "EMERGENCY_LOCAL_CAS_E2E_PENDING" and
+                os.environ.get(OPT_IN_ENV) == "1"):
+            try:
+                return verify_historical_job(db, rec)
+            except HistoricalProofHold as exc:
+                log.warning("CZ07 historical evidence rejected job=%s reason=%s",
+                            rec["id"][:16], str(exc))
+                raise CZ07Hold("RECOVERY_HISTORICAL_IDENTITY_UNVERIFIED") from exc
         total = rec["total"]
         source, target = rec["source"], rec["target"]
         remaining = len(self.cz04b._source_accounts(db, source))
@@ -615,6 +634,25 @@ class DurableCutoverQueue:
                 (status, expected_moved, code, int(self.now()), job, updated_at),
             ).rowcount != 1:
                 raise CZ07Hold("RECOVERY_CAS_FAILED")
+            if proof.get("historical_identity_verified"):
+                # Same BEGIN IMMEDIATE as the approved CAS and CZ07 event.
+                # Store hashes only; never usernames or passwords.
+                db.execute("""
+                    CREATE TABLE IF NOT EXISTS cloudzy_cz07_legacy_proofs (
+                        job_id TEXT PRIMARY KEY,
+                        proof_sha256 TEXT NOT NULL,
+                        snapshots_sha256_json TEXT NOT NULL,
+                        source_fingerprint TEXT NOT NULL,
+                        reconciled_at INTEGER NOT NULL
+                    )""")
+                db.execute(
+                    "INSERT INTO cloudzy_cz07_legacy_proofs "
+                    "(job_id,proof_sha256,snapshots_sha256_json,"
+                    "source_fingerprint,reconciled_at) VALUES (?,?,?,?,?)",
+                    (job, proof["historical_proof_sha256"],
+                     json.dumps(proof["historical_snapshots_sha256"]),
+                     row["source_fingerprint"], int(self.now())),
+                )
             self._log(db, job, status, code,
                       expected_moved, expected_remaining)
         return status

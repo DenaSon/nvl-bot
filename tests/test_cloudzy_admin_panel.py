@@ -235,7 +235,8 @@ class Phase1PanelTests(unittest.TestCase):
     def test_zero_provider_mutation_and_old_manual_paths_present(self):
         source = (Path(__file__).resolve().parents[1] / "bot_final_v49-2.py").read_text("utf-8")
         menu = source[source.index("def _build_admin_programs_kb"):source.index("_MIGRATION_INPUT_STATES =")]
-        self.assertIn('callback_data="apps_cz_home"', menu)
+        self.assertIn('callback_data="apps_edge_quick_home"', menu)
+        self.assertNotIn('callback_data="apps_cz_home"', menu)
         self.assertNotIn('callback_data="hpeg_status"', menu)
         for original in ('elif d in ("hp_addedge", "hpeg_wizard")',
                          'elif d.startswith("srv_mkactive_")',

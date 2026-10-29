@@ -244,7 +244,9 @@ class ManualQuickSwitch:
                 (plan["source"], plan["target"],
                  time.strftime("%Y-%m-%d %H:%M:%S"),
                  time.strftime("%Y-%m-%d %H:%M:%S"),
-                 json.dumps({"phase": "QUICK_SWITCH_DNS_INTENT", "job": job})),
+                 json.dumps({"phase": "EGRESS_RECOVERY_REQUIRED",
+                             "component": "MANUAL_QUICK_SWITCH",
+                             "stage": "DNS_INTENT", "job": job})),
             ).lastrowid
             db.execute(
                 "INSERT INTO manual_quick_switch_jobs "

@@ -44,6 +44,7 @@ def fingerprint_ssh(ip, port, *, timeout=10):
 
 FA = {
     "PUBLIC_IPV4_REQUIRED":"IP عمومی معتبر نیست.",
+    "CORE_IP_CANNOT_BE_EDGE":"این نشانی متعلق به خود Core است یا هویت آن قابل بررسی نیست.",
     "SSH_PORT_INVALID":"پورت مدیریت SSH معتبر نیست.",
     "EDGE_IP_ALREADY_REGISTERED":"این IP قبلاً در فهرست سرورها وجود دارد.",
     "EDGE_IP_HAS_CLOUDZY_RECEIPT":"این IP متعلق به پرونده Cloudzy موجود است.",
@@ -65,8 +66,11 @@ FA = {
 class ManualEdgeWizard:
     def __init__(self, *, db, preflight, provision, verify, probe, nat, queue,
                  form_store=None, now=time.time, key_reader=fingerprint_ssh,
-                 enabled=None, form_url=None, guard=None):
+                 enabled=None, form_url=None, guard=None, is_core_host=None):
         self.journal=ManualEdgeJournal(db,now=now,guard=guard)
+        # Production wires the authoritative Core-host validator. Without
+        # this callback the mutating wizard must fail closed, not guess.
+        self.is_core_host=is_core_host
         self.db=db
         self.preflight=preflight
         self.provision=provision
@@ -168,6 +172,9 @@ class ManualEdgeWizard:
     async def _install_task(self,app,op_id,actor,chat,password):
         try:
             op=await asyncio.to_thread(self.journal.get,op_id)
+            if self.is_core_host is None or await asyncio.to_thread(
+                    self.is_core_host,op["ip"]):
+                raise ManualWizardHold("CORE_IP_CANNOT_BE_EDGE")
             await asyncio.to_thread(self.preflight)
             observed=await asyncio.to_thread(
                 self.key_reader,op["ip"],op["admin_port"])
@@ -254,6 +261,9 @@ class ManualEdgeWizard:
                     op_id=sess["op"])
                 context.user_data.pop("manual_edge_session",None)
                 if sess["stage"]=="server":
+                    if self.is_core_host is None or await asyncio.to_thread(
+                            self.is_core_host,value["ip"]):
+                        raise ManualWizardHold("CORE_IP_CANNOT_BE_EDGE")
                     await asyncio.to_thread(self.journal.set_server,sess["op"],
                                             actor,chat,value["ip"],value["port"])
                     return await self._view(query,

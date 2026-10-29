@@ -139,6 +139,22 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("فقط مدیر",FakeRich.cards[-1][0])
         self.assertEqual(self.engine.events,[])
 
+    async def test_disabled_release_blocks_resume_and_dns_retry(self):
+        self.ui.enabled=lambda:False
+        self.engine.rec={
+            "id":"deadbeef","kind":"QUICK","status":"HOLD",
+            "actor":"7","source":"old","target":"new","account_count":446,
+            "error_code":"DNS_WRITE_RESULT_UNCERTAIN",
+        }
+        await self.cb("apps_edge_quick_resume_deadbeef")
+        self.assertIn("فعال نشده",FakeRich.cards[-1][0])
+        await self.cb("apps_edge_quick_retry_review_deadbeef")
+        yes=next(d for row in FakeRich.cards[-1][1] for _,d in row
+                 if d.startswith("apps_edge_quick_retry_yes_"))
+        await self.cb(yes)
+        self.assertIn("فعال نشده",FakeRich.cards[-1][0])
+        self.assertEqual(self.engine.events,[])
+
     async def test_preview_and_one_use_confirm_never_persist_roster(self):
         await self.cb("apps_edge_quick_select_45.59.126.73")
         text,rows=FakeRich.cards[-1]

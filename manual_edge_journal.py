@@ -165,6 +165,23 @@ class ManualEdgeJournal:
     def begin_install(self,op_id,actor,chat):
         with self.db() as db:
             self.initialize(db);db.execute("BEGIN IMMEDIATE")
+            # Legacy installer allocates Core WG peer IPs and appends Core WG
+            # config. That is a truly shared resource across both pathways.
+            # Do not admit concurrent/uncertain installers until reconciled.
+            if db.execute(
+                "SELECT 1 FROM manual_edge_operations "
+                "WHERE id!=? AND status IN ('INSTALLING','INSTALL_HOLD') LIMIT 1",
+                (op_id,),
+            ).fetchone():
+                raise ManualEdgeHold("CORE_WG_INSTALL_LEASE_BUSY")
+            if db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='cloudzy_edge_operations'"
+            ).fetchone() and db.execute(
+                "SELECT 1 FROM cloudzy_edge_operations "
+                "WHERE status IN ('PROVISIONING','HOLD_PROVISION') LIMIT 1"
+            ).fetchone():
+                raise ManualEdgeHold("CORE_WG_INSTALL_LEASE_BUSY")
             self._cas(db,op_id,actor,chat,"READY_INSTALL","INSTALLING",
                       "REMOTE_EFFECT_INTENT")
         return self.get(op_id)

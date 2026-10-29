@@ -161,14 +161,19 @@ class QueueTests(unittest.TestCase):
         with self.factory() as db:
             db.execute("ALTER TABLE cloudzy_cz04b_operations ADD COLUMN kind TEXT")
             db.execute("ALTER TABLE cloudzy_cz04b_operations ADD COLUMN count INTEGER")
+            db.execute("ALTER TABLE cloudzy_cz04b_operations ADD COLUMN actor INTEGER")
+            db.execute("ALTER TABLE cloudzy_cz04b_operations ADD COLUMN chat INTEGER")
+            db.execute("ALTER TABLE cloudzy_cz04b_operations ADD COLUMN provider_id TEXT")
             db.execute(
                 "UPDATE ssh_accounts SET host=? WHERE username < 'user0400'",
                 (self.fake.target,),
             )
             db.executemany(
                 "INSERT INTO cloudzy_cz04b_operations "
-                "(source,target,status,started_at,kind,count) VALUES (?,?,?,?,?,?)",
-                [(self.fake.source, self.fake.target, "DONE", 100, "users", 200)]*2,
+                "(source,target,status,started_at,kind,count,actor,chat,provider_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                [(self.fake.source,self.fake.target,"DONE",100,"users",200,
+                  7,8,"provider-1")]*2,
             )
             db.execute(
                 "UPDATE host_pool SET is_default=0 WHERE host=?", (self.fake.source,))

@@ -228,17 +228,15 @@ class ReceiptStore:
                 host_key_fingerprint TEXT,
                 hold_reason TEXT
             )""")
-            # Upgrade the existing partial index: merely adding a CANCELLED
-            # status without rebuilding it would keep purchases locked forever.
-            old_index = db.execute(
-                "SELECT sql FROM sqlite_master WHERE type='index' "
-                "AND name='cloudzy_edge_one_unfinished'"
-            ).fetchone()
-            if old_index and "'CANCELLED'" not in (old_index[0] or ""):
-                db.execute("DROP INDEX cloudzy_edge_one_unfinished")
-            db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS cloudzy_edge_one_unfinished
-                ON cloudzy_edge_operations((1))
-                WHERE status NOT IN ('EDGE_READY','REJECTED','CANCELLED')""")
+            # Remove the legacy global lease. Only running work for the
+            # same admin/chat is mutually exclusive; uncertain and paused
+            # order receipts are retained without freezing new purchases.
+            db.execute("DROP INDEX IF EXISTS cloudzy_edge_one_unfinished")
+            db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS cloudzy_edge_active_owner_v2
+                ON cloudzy_edge_operations(actor_id,chat_id)
+                WHERE status IN ('CREATING','CREATED','WAITING','PROVISIONING')""")
+            db.execute("""CREATE INDEX IF NOT EXISTS cloudzy_edge_status_v2
+                ON cloudzy_edge_operations(status,updated_at)""")
             db.execute("""CREATE TABLE IF NOT EXISTS cloudzy_edge_cancel_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 operation_id TEXT NOT NULL,
@@ -277,10 +275,13 @@ class ReceiptStore:
             with self.db() as db:
                 db.execute("BEGIN IMMEDIATE")
                 prior = db.execute(
-                    "SELECT id FROM cloudzy_edge_operations WHERE status NOT IN ('EDGE_READY','REJECTED','CANCELLED') LIMIT 1"
+                    "SELECT id FROM cloudzy_edge_operations "
+                    "WHERE actor_id=? AND chat_id=? "
+                    "AND status IN ('CREATING','CREATED','WAITING','PROVISIONING') "
+                    "LIMIT 1", (actor, chat)
                 ).fetchone()
                 if prior:
-                    raise QuickEdgeHold("PREVIOUS_CLOUDZY_OPERATION_UNSETTLED")
+                    raise QuickEdgeHold("ACTIVE_PURCHASE_FOR_SAME_OPERATOR")
                 db.execute("""INSERT INTO cloudzy_edge_operations
                     (id,actor_id,chat_id,status,created_at,updated_at,
                      hostname,region,plan_id,billing_cycle,price_cents,customer_port,

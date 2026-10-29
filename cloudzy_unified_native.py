@@ -242,7 +242,7 @@ def observe_native_cancellation(db, *, operation_id, uncertain=False, now=None):
         "SELECT status FROM cloudzy_edge_operations WHERE id=?",
         (operation_id,),
     ).fetchone()
-    if row != ("CANCELLED",):
+    if not row or row[0] != "CANCELLED":
         raise UnifiedLinkHold("NATIVE_CANCELLATION_NOT_COMMITTED")
     link = _linked(db, operation_id)
     if link is None:

@@ -489,6 +489,14 @@ class ManualQuickSwitch:
             raise QuickSwitchHold("DNS_UNCERTAIN_REVIEW_REQUIRED")
         if rec["status"] != "DB_COMMITTED":
             try:
+                # A long external DNS cutover can outlive an earlier probe.
+                # Revalidate pinned SSH/WG/NAT before the SQLite route CAS.
+                with self.db() as db:
+                    plan = self._plan(db,rec["target"])
+                    if (plan["fingerprint"] != rec["account_fingerprint"]
+                            or plan["count"] != rec["account_count"]):
+                        raise QuickSwitchHold("ACCOUNT_SNAPSHOT_CHANGED")
+                await self._check(plan)
                 self._commit(rec)
             except Exception:
                 self._hold(job, "DB_COMMIT_REVIEW_REQUIRED")

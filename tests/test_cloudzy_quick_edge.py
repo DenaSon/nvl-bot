@@ -1421,9 +1421,17 @@ class JournalTests(unittest.TestCase):
 
     def test_upgrades_legacy_global_index_without_losing_receipts(self):
         old = self.reserve()
-        self.journal.change(old, "CREATING", "HOLD_PROVISION",
-                            hold_reason="HISTORIC_UNVERIFIED_INSTALL")
+        # This is a snapshot of a pre-upgrade, provider-owned HOLD,
+        # not an attempt to bypass the new UO identity transition.
         with self.journal.db() as db:
+            db.execute(
+                "UPDATE cloudzy_edge_operations "
+                "SET status='HOLD_PROVISION',"
+                "provider_server_id='legacy-provider-id',"
+                "public_ipv4='8.8.4.4',"
+                "hold_reason='HISTORIC_UNVERIFIED_INSTALL' "
+                "WHERE id=? AND status='CREATING'", (old,)
+            )
             db.execute("DROP INDEX cloudzy_edge_active_owner_v2")
             db.execute("""CREATE UNIQUE INDEX cloudzy_edge_one_unfinished
                 ON cloudzy_edge_operations((1))

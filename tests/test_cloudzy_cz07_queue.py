@@ -263,6 +263,38 @@ class QueueTests(unittest.TestCase):
         with self.factory() as db:
             self.assertFalse(db.execute("SELECT 1 FROM cloudzy_cz07_acceptance").fetchone())
 
+    def test_persian_hold_recovery_button_is_owner_bound_and_one_use(self):
+        from asyncio import run
+        job = self._prepared_holding_job(fully_moved=True)
+        class Query:
+            def __init__(self):
+                self.message = self
+                self.text, self.callbacks = "", []
+            async def edit_message_text(self, text, **kwargs):
+                self.text = text
+                self.callbacks = [callback for row in kwargs["reply_markup"]
+                                  for _label, callback in row]
+            async def reply_text(self, text, **_kwargs):
+                self.text = text
+        query, context = Query(), type("Ctx", (), {"user_data":{}})()
+        async def click(data, actor=7):
+            await self.q.handle_callback(
+                query,context,data,role="admin",actor=actor,chat=8,
+                markup=lambda rows: rows,app=OfflineApp())
+        run(self.q._show_status(query,self.q.get(job),lambda x:x,7,8))
+        self.assertIn("apps_cz7_hold_review_"+job,query.callbacks)
+        run(click("apps_cz7_hold_review_"+job,actor=99))
+        self.assertEqual(self.q.get(job)["status"],"HOLD")
+        run(click("apps_cz7_hold_review_"+job))
+        self.assertIn("حساب‌های جدید مقصد",query.text)
+        self.assertNotIn("CLOUDZY_PROVIDER_UNAVAILABLE",query.text)
+        go = next(v for v in query.callbacks if v.startswith("apps_cz7_hold_go_"))
+        run(click(go))
+        self.assertEqual(self.q.get(job)["status"],"VERIFYING")
+        run(click(go))
+        self.assertEqual(self.q.get(job)["status"],"VERIFYING")
+        self.assertEqual(self.fake.batch_sizes,[])
+
     def test_no_audit_for_unaudited_manual_changes_must_not_unlock(self):
         import asyncio
         job = self._prepared_holding_job(fully_moved=True,emergency=False)

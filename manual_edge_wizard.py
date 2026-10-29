@@ -9,6 +9,8 @@ import asyncio
 import base64
 import hashlib
 from html import escape
+from contextvars import ContextVar
+from manual_edge_rich import ManualRichDelivery, render_manual_card
 import os
 import secrets
 import socket
@@ -19,6 +21,9 @@ from manual_edge_secure_form import IntakeHold, ManualFormStore
 from manual_edge_journal import ManualEdgeHold, ManualEdgeJournal
 from manual_edge_identity import assert_ref as assert_edge_ref
 from cloudzy_cz04b import _digest
+
+
+_RICH_SCOPE = ContextVar('manual_edge_rich_scope', default=None)
 
 
 class ManualWizardHold(RuntimeError):
@@ -88,30 +93,27 @@ class ManualEdgeWizard:
         self.form_url=form_url or (lambda:os.environ.get("NVL_MANUAL_FORM_PUBLIC_URL",""))
         self.running=set()
 
-    @staticmethod
-    def _view(query,text,rows):
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        keyboard=InlineKeyboardMarkup([
-            [InlineKeyboardButton(label,callback_data=action) for label,action in line]
-            for line in rows
-        ])
-        return query.edit_message_text(text,parse_mode="HTML",reply_markup=keyboard)
+    async def _view(self,query,text,rows):
+        # The central handler binds operator-specific context once per
+        # callback. ContextVar prevents cross-admin async state leakage.
+        scope = _RICH_SCOPE.get()
+        if not scope:
+            raise ManualWizardHold("RICH_OPERATOR_UNAVAILABLE")
+        token, context, chat = scope
+        return await ManualRichDelivery(token).show(
+            chat=chat, context=context, text=text, rows=rows)
 
-    def _form_button(self,query,*,text,notice,nonce):
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+    async def _form_button(self,query,*,text,notice,nonce):
         public_url=self.form_url().rstrip("/")
         u=urlsplit(public_url)
         if u.scheme!="https" or not u.netloc or u.username or u.password or u.fragment:
             raise ManualWizardHold("SECURE_WEB_FORM_NOT_CONFIGURED")
         url=public_url+"/manual-edge/form?ticket="+nonce
-        return query.edit_message_text(
-            text,parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(notice,web_app=WebAppInfo(url=url))],
-                [InlineKeyboardButton("✅ اطلاعات را ثبت کردم",
-                                      callback_data="apps_edge_manual_form_done_"+nonce)],
-                [InlineKeyboardButton("انصراف",callback_data="apps_edge_manual_cancel")],
-            ]))
+        return await self._view(query,text,[
+            [(notice, {"web_app": {"url": url}})],
+            [("✅ اطلاعات را ثبت کردم", "apps_edge_manual_form_done_"+nonce)],
+            [("انصراف", "apps_edge_manual_cancel")],
+        ])
 
     def _session(self,context,actor,chat):
         obj=context.user_data.get("manual_edge_session")
@@ -235,6 +237,9 @@ class ManualEdgeWizard:
             [InlineKeyboardButton(t,callback_data=d) for t,d in row] for row in rows])
 
     async def handle(self,query,context,data,*,role,actor,chat,app):
+        # This is a UI-only task-local scope; never persist the bot token in
+        # user_data or a Telegram callback. No HTML screen fallback.
+        _RICH_SCOPE.set((app.bot.token,context,chat))
         if role!="admin" or actor!=chat:
             return await self._view(query,"⛔️ فقط مدیر در گفتگوی خصوصی مجاز است.",
                                     [[("↩️ برنامه‌ها","apps_home")]])

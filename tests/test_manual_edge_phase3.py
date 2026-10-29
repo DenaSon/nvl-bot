@@ -488,5 +488,170 @@ class Phase3ManualTests(unittest.TestCase):
         self.assertEqual(self.journal.get(op)["status"],"EDGE_READY")
 
 
+    def _promote_for_test(self, ip="8.8.8.8"):
+        op=self.prepare(ip,port=2299)
+        self.journal.mark_standby(op,77,77)
+        self.journal.bind_route(op,77,77,"test-job-"+ip)
+        with self.db() as db:
+            db.execute("UPDATE host_pool SET is_default=0 WHERE host='1.1.1.1'")
+            db.execute("UPDATE host_pool SET is_default=1,is_standby=0 WHERE host=?",
+                       (ip,))
+        self.journal.finish(op,77,77,"test-job-"+ip)
+        return op
+
+    def test_current_default_and_historical_active_are_different_labels(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from manual_edge_wizard import ManualEdgeWizard
+        former=self._promote_for_test("8.8.8.8")
+        current=self._promote_for_test("8.8.4.4")
+        with self.db() as db:
+            db.execute("UPDATE host_pool SET is_default=0 WHERE host='8.8.8.8'")
+            db.execute("UPDATE settings SET value='8.8.4.4' "
+                       "WHERE key IN ('hosts','dns_current_ip')")
+        missing=self.prepare("9.9.9.9",port=2298)
+        with self.db() as db:
+            db.execute("DELETE FROM host_pool WHERE host='9.9.9.9'")
+        self.assertEqual(self.journal.display_state(current,77,77),"DEFAULT")
+        self.assertEqual(self.journal.display_state(former,77,77),"FORMER")
+        self.assertEqual(self.journal.display_state(missing,77,77),"POOL_MISSING")
+        wiz=ManualEdgeWizard(db=self.db,preflight=lambda:(2222,"pub"),
+            provision=AsyncMock(),verify=AsyncMock(),probe=AsyncMock(),
+            nat=AsyncMock(),queue=SimpleNamespace())
+        wiz._view=AsyncMock(return_value=1)
+        asyncio.run(wiz.handle(SimpleNamespace(),SimpleNamespace(user_data={}),
+            "apps_edge_manual_home",role="admin",actor=77,chat=77,
+            app=SimpleNamespace(bot=SimpleNamespace(token="123:TEST"))))
+        rows=wiz._view.await_args.args[2]
+        labels=" ".join(label for row in rows for label,_ in row)
+        self.assertEqual(labels.count("رله اصلی"),1)
+        self.assertIn("8.8.4.4 · 🟢 رله اصلی",labels)
+        self.assertIn("8.8.8.8 · ⚪ رله سابق",labels)
+        self.assertIn("9.9.9.9 · 🔴 ثبت سرور ناقص",labels)
+        with self.db() as db:
+            db.execute("UPDATE settings SET value='1.1.1.1' "
+                       "WHERE key='dns_current_ip'")
+        self.assertEqual(self.journal.display_state(current,77,77),"ROUTE_REVIEW")
+
+    def test_archive_former_preserves_every_live_resource_and_audit(self):
+        op=self._promote_for_test()
+        with self.db() as db:
+            db.execute("UPDATE host_pool SET is_default=0 WHERE host='8.8.8.8'")
+            db.execute("UPDATE host_pool SET is_default=1 WHERE host='1.1.1.1'")
+            before_pool=db.execute(
+                "SELECT * FROM host_pool WHERE host='8.8.8.8'").fetchone()
+            before_settings=dict(db.execute("SELECT * FROM settings"))
+        self.assertEqual(self.journal.display_state(op,77,77),"FORMER")
+        preview=self.journal.archive_preview(op,77,77)
+        self.assertEqual(preview["status"],"ACTIVE")
+        self.journal.archive_inactive(op,77,77)
+        self.assertNotIn(op,[x["id"] for x in self.journal.list_by_owner(77,77)])
+        with self.db() as db:
+            self.assertEqual(db.execute(
+                "SELECT * FROM host_pool WHERE host='8.8.8.8'").fetchone(),
+                before_pool)
+            self.assertEqual(dict(db.execute("SELECT * FROM settings")),before_settings)
+            self.assertEqual(db.execute(
+                "SELECT status FROM manual_edge_operations WHERE id=?",(op,)
+                ).fetchone()[0],"ACTIVE")
+            self.assertTrue(db.execute(
+                "SELECT archived_at FROM manual_edge_operations WHERE id=?",
+                (op,)).fetchone()[0])
+            self.assertEqual(db.execute(
+                "SELECT code FROM manual_edge_events WHERE op_id=? "
+                "ORDER BY seq DESC LIMIT 1",(op,)).fetchone()[0],
+                "REMOVED_FROM_EDGE_LIST")
+        with self.assertRaisesRegex(ManualEdgeHold,"ALREADY_ARCHIVED"):
+            self.journal.archive_inactive(op,77,77)
+        with self.assertRaises(ManualEdgeHold):
+            self.journal.set_server(self.journal.start(77,77),77,77,
+                                    "8.8.8.8",22)
+
+    def test_archive_never_hides_default_standby_or_assigned_customers(self):
+        current=self._promote_for_test()
+        with self.assertRaisesRegex(ManualEdgeHold,"ARCHIVE_HOST_IS_ROUTED"):
+            self.journal.archive_preview(current,77,77)
+        with self.db() as db:
+            db.execute("UPDATE host_pool SET is_default=0 WHERE host='8.8.8.8'")
+            db.execute("UPDATE host_pool SET is_default=1 WHERE host='1.1.1.1'")
+            db.execute("INSERT INTO ssh_accounts "
+                       "(username,host,status,service_type) "
+                       "VALUES ('expired-old','8.8.8.8','expired','ssh')")
+        with self.assertRaisesRegex(ManualEdgeHold,"ARCHIVE_USERS_STILL_ASSIGNED"):
+            self.journal.archive_inactive(current,77,77)
+        with self.db() as db:
+            db.execute("DELETE FROM ssh_accounts WHERE username='expired-old'")
+        standby=self.prepare("9.9.9.9",port=2298)
+        self.journal.mark_standby(standby,77,77)
+        with self.assertRaisesRegex(ManualEdgeHold,"ARCHIVE_STATUS_UNSAFE"):
+            self.journal.archive_inactive(standby,77,77)
+        with self.assertRaisesRegex(ManualEdgeHold,"OPERATOR_MISMATCH"):
+            self.journal.archive_inactive(current,99,99)
+        self.assertIsNone(self.journal.get(current)["archived_at"])
+
+    def test_archive_rechecks_pending_jobs_and_is_atomic(self):
+        op=self._promote_for_test()
+        with self.db() as db:
+            db.execute("UPDATE host_pool SET is_default=0 WHERE host='8.8.8.8'")
+            db.execute("UPDATE host_pool SET is_default=1 WHERE host='1.1.1.1'")
+            db.execute("""CREATE TABLE manual_quick_switch_jobs (
+                source TEXT,target TEXT,kind TEXT,status TEXT)""")
+            db.execute("INSERT INTO manual_quick_switch_jobs VALUES "
+                       "('8.8.8.8','9.9.9.9','QUICK','HOLD')")
+        with self.assertRaisesRegex(ManualEdgeHold,"ARCHIVE_ROUTE_JOB_UNRESOLVED"):
+            self.journal.archive_inactive(op,77,77)
+        with self.db() as db:
+            db.execute("UPDATE manual_quick_switch_jobs SET status='DONE'")
+        self.journal.archive_inactive(op,77,77)
+        self.assertEqual(self.journal.get(op)["status"],"ACTIVE")
+
+    def test_archive_missing_inventory_edge_ready_does_not_fake_recovery(self):
+        op=self.prepare("8.8.8.8",port=2299)
+        with self.db() as db:
+            db.execute("DELETE FROM host_pool WHERE host='8.8.8.8'")
+        self.assertEqual(self.journal.display_state(op,77,77),"POOL_MISSING")
+        self.journal.archive_inactive(op,77,77)
+        self.assertEqual(self.journal.get(op)["status"],"EDGE_READY")
+        with self.db() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM host_pool "
+                "WHERE host='8.8.8.8'").fetchone()[0],0)
+
+    def test_archive_is_two_step_rich_and_requires_exact_owner(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from manual_edge_wizard import ManualEdgeWizard
+        from manual_edge_rich import render_manual_card
+        op=self._promote_for_test()
+        with self.db() as db:
+            db.execute("UPDATE host_pool SET is_default=0 WHERE host='8.8.8.8'")
+            db.execute("UPDATE host_pool SET is_default=1 WHERE host='1.1.1.1'")
+        wiz=ManualEdgeWizard(db=self.db,preflight=lambda:(2222,"pub"),
+            provision=AsyncMock(),verify=AsyncMock(),probe=AsyncMock(),
+            nat=AsyncMock(),queue=SimpleNamespace())
+        wiz._view=AsyncMock(return_value=1)
+        context=SimpleNamespace(user_data={})
+        app=SimpleNamespace(bot=SimpleNamespace(token="123:TEST"))
+        def invoke(action,actor=77,chat=77):
+            asyncio.run(wiz.handle(SimpleNamespace(),context,action,role="admin",
+                                   actor=actor,chat=chat,app=app))
+            txt,rows=wiz._view.await_args.args[1:]
+            render_manual_card(txt,rows)
+            return txt,rows
+        _,rows=invoke("apps_edge_manual_detail_"+op)
+        self.assertIn("apps_edge_manual_archive_"+op,
+            [a for row in rows for _,a in row])
+        _,rows=invoke("apps_edge_manual_archive_"+op)
+        self.assertIn("apps_edge_manual_archive_yes_"+op,
+            [a for row in rows for _,a in row])
+        deny,_=invoke("apps_edge_manual_archive_yes_"+op,actor=78,chat=78)
+        self.assertIn("عملیات متوقف شد",deny)
+        self.assertIsNone(self.journal.get(op)["archived_at"])
+        done,_=invoke("apps_edge_manual_archive_yes_"+op)
+        self.assertIn("سابقه از فهرست",done)
+        self.assertIsNotNone(self.journal.get(op)["archived_at"])
+
+
 if __name__=="__main__":
     unittest.main()

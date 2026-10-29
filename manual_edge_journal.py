@@ -44,8 +44,13 @@ class ManualEdgeJournal:
             pin_type TEXT, pin_base64 TEXT, pin_fingerprint TEXT,
             status TEXT NOT NULL, reason TEXT,
             created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-            route_job TEXT
+            route_job TEXT,
+            archived_at INTEGER
         )""")
+        # Schema-only compatible extension for existing Core databases.
+        columns={r[1] for r in db.execute("PRAGMA table_info(manual_edge_operations)")}
+        if "archived_at" not in columns:
+            db.execute("ALTER TABLE manual_edge_operations ADD COLUMN archived_at INTEGER")
         db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS manual_edge_host_identity
             ON manual_edge_operations(ip)
             WHERE ip IS NOT NULL AND status != 'CANCELLED'""")
@@ -92,7 +97,8 @@ class ManualEdgeJournal:
             self.initialize(db)
             row=db.execute(
                 "SELECT id FROM manual_edge_operations WHERE actor=? AND chat=? "
-                "AND status != 'CANCELLED' ORDER BY created_at DESC,rowid DESC LIMIT 1",
+                "AND status != 'CANCELLED' AND archived_at IS NULL "
+                "ORDER BY created_at DESC,rowid DESC LIMIT 1",
                 (actor,chat),
             ).fetchone()
             return self.get(row[0]) if row else None
@@ -109,10 +115,151 @@ class ManualEdgeJournal:
             rows = db.execute(
                 "SELECT * FROM manual_edge_operations "
                 "WHERE actor=? AND chat=? AND status!='CANCELLED' "
+                "AND archived_at IS NULL "
                 "ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?",
                 (actor, chat, limit, offset),
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def display_state(self, op_id, actor, chat):
+        """Actual route role for the UI; journal ACTIVE is only historical."""
+        with self.db() as db:
+            self.initialize(db)
+            op=db.execute(
+                "SELECT ip,status,archived_at FROM manual_edge_operations "
+                "WHERE id=? AND actor=? AND chat=?",
+                (op_id,actor,chat),
+            ).fetchone()
+            if op is None:
+                raise ManualEdgeHold("OPERATOR_MISMATCH")
+            ip,status,archived_at=op
+            if archived_at is not None:
+                return "ARCHIVED"
+            if not ip:
+                return "JOURNAL"
+            pool=db.execute(
+                "SELECT active,is_default,is_standby,provider "
+                "FROM host_pool WHERE host=?", (ip,),
+            ).fetchone()
+            if pool and pool[1] == 1:
+                st=dict(db.execute(
+                    "SELECT key,value FROM settings "
+                    "WHERE key IN ('hosts','dns_current_ip')"
+                ).fetchall())
+                defaults=db.execute(
+                    "SELECT COUNT(*) FROM host_pool "
+                    "WHERE active=1 AND is_default=1"
+                ).fetchone()[0]
+                if (pool==(1,1,0,"manual") and defaults==1
+                        and st.get("hosts")==ip
+                        and st.get("dns_current_ip")==ip
+                        and status=="ACTIVE"):
+                    return "DEFAULT"
+                return "ROUTE_REVIEW"
+            if status=="ACTIVE":
+                if pool and pool[2]:
+                    return "ROUTE_REVIEW"
+                return "FORMER" if pool and pool[3]=="manual" else "POOL_REVIEW"
+            if status=="STANDBY":
+                return ("STANDBY" if pool==(1,0,1,"manual")
+                        else "POOL_REVIEW")
+            if status=="EDGE_READY":
+                if pool is None:
+                    return "POOL_MISSING"
+                return ("EDGE_READY" if pool==(0,0,0,"manual")
+                        else "POOL_REVIEW")
+            return "JOURNAL"
+
+    @staticmethod
+    def _table_exists(db, name):
+        return db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (name,),
+        ).fetchone() is not None
+
+    def _archive_checks(self, db, op_id, actor, chat):
+        """Read only, called again under BEGIN IMMEDIATE at commit."""
+        op=db.execute(
+            "SELECT ip,status,archived_at FROM manual_edge_operations "
+            "WHERE id=? AND actor=? AND chat=?",
+            (op_id,actor,chat),
+        ).fetchone()
+        if not op:
+            raise ManualEdgeHold("OPERATOR_MISMATCH")
+        ip,status,archived=op
+        if archived is not None:
+            raise ManualEdgeHold("ALREADY_ARCHIVED")
+        if not ip or status not in ("ACTIVE","EDGE_READY"):
+            raise ManualEdgeHold("ARCHIVE_STATUS_UNSAFE")
+        pool=db.execute(
+            "SELECT active,is_default,is_standby,provider FROM host_pool "
+            "WHERE host=?", (ip,),
+        ).fetchone()
+        if pool and (pool[1] or pool[2] or pool[3]!="manual"):
+            raise ManualEdgeHold("ARCHIVE_HOST_IS_ROUTED_OR_STANDBY")
+        if status=="ACTIVE" and (not pool or pool[:3]!=(1,0,0)):
+            raise ManualEdgeHold("ARCHIVE_ROLE_UNVERIFIED")
+        if status=="EDGE_READY" and pool and pool[:3]!=(0,0,0):
+            raise ManualEdgeHold("ARCHIVE_ROLE_UNVERIFIED")
+        settings=dict(db.execute(
+            "SELECT key,value FROM settings "
+            "WHERE key IN ('dns_current_ip','hosts')"
+        ).fetchall())
+        if (ip==settings.get("dns_current_ip")
+                or ip in (settings.get("hosts") or "").split(",")):
+            raise ManualEdgeHold("ARCHIVE_HOST_IS_ROUTED_OR_STANDBY")
+        if db.execute(
+            "SELECT 1 FROM ssh_accounts WHERE host=? LIMIT 1",(ip,)
+        ).fetchone():
+            raise ManualEdgeHold("ARCHIVE_USERS_STILL_ASSIGNED")
+        if self._table_exists(db,"manual_quick_switch_jobs") and db.execute(
+            "SELECT 1 FROM manual_quick_switch_jobs "
+            "WHERE (source=? OR target=?) AND kind='QUICK' "
+            "AND status NOT IN ('DONE','ABORTED') LIMIT 1",
+            (ip,ip),
+        ).fetchone():
+            raise ManualEdgeHold("ARCHIVE_ROUTE_JOB_UNRESOLVED")
+        if self._table_exists(db,"cloudzy_cz07_jobs") and db.execute(
+            "SELECT 1 FROM cloudzy_cz07_jobs "
+            "WHERE (source=? OR target=?) "
+            "AND status NOT IN ('DONE','ABORTED','MOVED') LIMIT 1",
+            (ip,ip),
+        ).fetchone():
+            raise ManualEdgeHold("ARCHIVE_ROUTE_JOB_UNRESOLVED")
+        if self._table_exists(db,"failover_operations") and db.execute(
+            "SELECT 1 FROM failover_operations "
+            "WHERE status='RUNNING' AND (source_host=? OR target_host=?) "
+            "LIMIT 1",(ip,ip),
+        ).fetchone():
+            raise ManualEdgeHold("ARCHIVE_ROUTE_JOB_UNRESOLVED")
+        return {"id":op_id,"ip":ip,"status":status,
+                "pool_registered":pool is not None}
+
+    def archive_preview(self, op_id, actor, chat):
+        """Read-only preview for removing an inactive card from the UI."""
+        with self.db() as db:
+            self.initialize(db)
+            return self._archive_checks(db,op_id,actor,chat)
+
+    def archive_inactive(self, op_id, actor, chat):
+        """Hide only the retired operation, preserving identity and all effects.
+
+        This NEVER removes host_pool, accounts, DNS, WG peers or external VPS.
+        """
+        with self.db() as db:
+            self.initialize(db)
+            db.execute("BEGIN IMMEDIATE")
+            snapshot=self._archive_checks(db,op_id,actor,chat)
+            changed=db.execute(
+                "UPDATE manual_edge_operations SET archived_at=? "
+                "WHERE id=? AND actor=? AND chat=? AND archived_at IS NULL "
+                "AND status=?",
+                (int(self.now()),op_id,actor,chat,snapshot["status"]),
+            ).rowcount
+            if changed!=1:
+                raise ManualEdgeHold("MANUAL_CAS_FAILED")
+            self._log(db,op_id,actor,snapshot["status"],"REMOVED_FROM_EDGE_LIST")
+            return snapshot
 
     def assert_standby_candidate(self, op_id, actor, chat, customer_port):
         """Reject missing/stale inventory *before* expensive network probes."""

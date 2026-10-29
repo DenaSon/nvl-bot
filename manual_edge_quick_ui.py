@@ -231,3 +231,14 @@ class QuickSwitchUI:
                 [[("🔄 وضعیت و بازیابی","apps_edge_quick_status")],
                  [("↩️ مدیریت Edge","apps_cz_home")]],
             )
+
+        except Exception:
+            # Raw DNS/API/SSH/SQLite errors must never be echoed to Telegram.
+            # QuickSwitch's durable journal is reviewed through status.
+            return await self._screen(
+                chat,context,
+                "⛔️ بررسی فنی ناموفق بود.\\n"
+                "وضعیت عملیات را بررسی کنید؛ تغییر DNS را کورکورانه تکرار نکنید.",
+                [[("🔄 وضعیت و بازیابی","apps_edge_quick_status")],
+                 [("↩️ مدیریت Edge","apps_cz_home")]],
+            )

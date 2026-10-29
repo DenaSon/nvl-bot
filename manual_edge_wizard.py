@@ -261,9 +261,20 @@ class ManualEdgeWizard:
             return await self._view(query,"⛔️ فقط مدیر در گفتگوی خصوصی مجاز است.",
                                     [[("↩️ برنامه‌ها","apps_home")]])
         if not self.enabled():
+            # Existing Legacy host-pool IP management is operational without
+            # the *optional* fresh-VPS HTTPS credential intake.  Do not
+            # advertise it as disabled, and never invoke the installer here.
+            # All actual host mutations remain behind the existing bot's
+            # admin/protected-mode guards and Cloudflare confirmation steps.
             return await self._view(query,
-                "⛔️ افزودن سرور دستی هنوز در این نصب فعال نشده است.",
-                [[("↩️ مدیریت Edge","apps_cz_home")]])
+                "🌍 <b>مدیریت دستی Edge</b>\n\n"
+                "برای سروری که قبلاً آماده و تست شده، IP را در روش موجود "
+                "ثبت کنید. سپس از مدیریت IP، سرور پیش‌فرض و انتقال کاربران "
+                "را با تأیید خودتان انتخاب کنید.\n"
+                "تغییر DNS با اتصال Cloudflare فعلی انجام می‌شود.",
+                [[("➕ ثبت IP سرور آماده", "hp_add")],
+                 [("🌐 مدیریت IP و انتخاب رله", "hp_menu")],
+                 [("↩️ مدیریت Edge","apps_cz_home")]])
         try:
             if data=="apps_edge_manual_home":
                 return await self._show(query,actor,chat)

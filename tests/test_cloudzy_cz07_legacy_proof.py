@@ -1,14 +1,17 @@
 """One-job historical CZ07 identity proof: no SSH/Cloudflare/provider effects."""
 import hashlib
 import json
+import os
 import sqlite3
+from unittest.mock import patch
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
 from cloudzy_cz07_legacy_proof import (
     HISTORICAL_JOB_ID, HISTORICAL_SOURCE, HISTORICAL_TARGET,
-    HistoricalProofHold, _digest_rows, verify_historical_job,
+    ONE_ABSENT_ACK_ENV, HistoricalProofHold, _digest_rows,
+    verify_historical_job,
 )
 
 
@@ -106,6 +109,68 @@ class HistoricalSnapshotProofTests(unittest.TestCase):
         self.assertEqual(len(result["historical_proof_sha256"]),64)
         self.assertEqual(len(result["historical_snapshots_sha256"]),3)
         self.assertNotIn("user0001",str(result))
+
+    def test_one_pinned_deleted_batch_account_requires_explicit_ack(self):
+        username = self.names[0]
+        self.db.execute("DELETE FROM ssh_accounts WHERE username=?", (username,))
+        with self.assertRaisesRegex(
+                HistoricalProofHold, "EVIDENCE_ORIGINAL_ACCOUNT_NOT_AT_TARGET"):
+            self.proof()
+        with patch.dict(os.environ, {ONE_ABSENT_ACK_ENV: "1"}), patch(
+            "cloudzy_cz07_legacy_proof.ONE_ABSENT_USERNAME_SHA256",
+            hashlib.sha256(username.encode()).hexdigest(),
+        ):
+            proof = self.proof()
+            self.assertTrue(proof["one_absent_acknowledged"])
+            self.assertEqual(proof["one_absent_sha256"],
+                             hashlib.sha256(username.encode()).hexdigest())
+            self.assertEqual(proof["moved"], 468)
+            self.assertEqual(proof["remaining"], 0)
+            self.assertEqual(proof["extra_target"], 4)
+            with patch("cloudzy_cz07_legacy_proof.pwd.getpwnam",
+                       return_value=object()):
+                with self.assertRaisesRegex(
+                        HistoricalProofHold,"EVIDENCE_ABSENT_LINUX_ACCOUNT_PRESENT"):
+                    self.proof()
+
+    def test_one_absent_not_in_postbatch_snapshot_is_rejected(self):
+        username = self.names[0]
+        self.db.execute("DELETE FROM ssh_accounts WHERE username=?", (username,))
+        with sqlite3.connect(self.after) as db:
+            db.execute("UPDATE ssh_accounts SET host=? WHERE username=?",
+                       (HISTORICAL_SOURCE, username))
+        with patch.dict(os.environ,{ONE_ABSENT_ACK_ENV:"1"}), patch(
+            "cloudzy_cz07_legacy_proof.ONE_ABSENT_USERNAME_SHA256",
+            hashlib.sha256(username.encode()).hexdigest(),
+        ):
+            with self.assertRaisesRegex(
+                    HistoricalProofHold,"EVIDENCE_ABSENT_NOT_TRANSFERRED"):
+                self.proof()
+
+    def test_one_absent_identity_is_pinned_to_exact_user(self):
+        self.db.execute("DELETE FROM ssh_accounts WHERE username='user0000'")
+        with patch.dict(os.environ,{ONE_ABSENT_ACK_ENV:"1"}):
+            with self.assertRaisesRegex(
+                    HistoricalProofHold,"EVIDENCE_UNEXPECTED_ABSENT_IDENTITY"):
+                self.proof()
+
+    def test_multiple_absent_or_reassigned_are_not_accepted(self):
+        username = self.names[0]
+        self.db.execute("DELETE FROM ssh_accounts WHERE username=?", (username,))
+        with patch.dict(os.environ,{ONE_ABSENT_ACK_ENV:"1"}), patch(
+            "cloudzy_cz07_legacy_proof.ONE_ABSENT_USERNAME_SHA256",
+            hashlib.sha256(username.encode()).hexdigest(),
+        ):
+            self.db.execute("INSERT INTO ssh_accounts VALUES(?,?,?,?)",
+                            (username,"other-host","🔴 غیرفعال","ssh"))
+            with self.assertRaisesRegex(
+                    HistoricalProofHold,"EVIDENCE_ACCOUNT_REASSIGNED"):
+                self.proof()
+            self.db.execute("DELETE FROM ssh_accounts WHERE username=?", (username,))
+            self.db.execute("DELETE FROM ssh_accounts WHERE username='user0001'")
+            with self.assertRaisesRegex(
+                    HistoricalProofHold,"EVIDENCE_ORIGINAL_ACCOUNT_NOT_AT_TARGET"):
+                self.proof()
 
     def test_new_account_cannot_replace_missing_original(self):
         self.db.execute("DELETE FROM ssh_accounts WHERE username='user0467'")

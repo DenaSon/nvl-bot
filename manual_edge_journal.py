@@ -49,11 +49,22 @@ class ManualEdgeJournal:
         db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS manual_edge_host_identity
             ON manual_edge_operations(ip)
             WHERE ip IS NOT NULL AND status != 'CANCELLED'""")
+        # Upgrade the old per-admin lifetime lock in place. Only intake and
+        # an actually running install are exclusive; READY/STANDBY/ROUTING
+        # belong to different Edge identities and may coexist. Never drop the
+        # unique IP identity index or any route/installer lease.
+        existing = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' "
+            "AND name='manual_edge_live_owner'"
+        ).fetchone()
+        if existing and any(status in (existing[0] or "") for status in
+                            ("'EDGE_READY'", "'STANDBY'", "'ROUTING'",
+                             "'MIGRATING'")):
+            db.execute("DROP INDEX manual_edge_live_owner")
         db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS manual_edge_live_owner
             ON manual_edge_operations(actor,chat)
             WHERE status IN ('DRAFT','IDENTITY_PENDING','HOSTKEY_PENDING',
-                'READY_INSTALL','INSTALLING','EDGE_READY','STANDBY','ROUTING',
-                'MIGRATING')""")
+                'READY_INSTALL','INSTALLING')""")
         db.execute("""CREATE TABLE IF NOT EXISTS manual_edge_events(
             seq INTEGER PRIMARY KEY AUTOINCREMENT,
             op_id TEXT NOT NULL, actor INTEGER NOT NULL,
@@ -86,6 +97,43 @@ class ManualEdgeJournal:
             ).fetchone()
             return self.get(row[0]) if row else None
 
+    def list_by_owner(self, actor, chat, *, limit=7, offset=0):
+        """Read-only paginated inventory, scoped to the private admin owner."""
+        if type(actor) is not int or type(chat) is not int or actor <= 0 or chat <= 0:
+            raise ManualEdgeHold("ADMIN_IDENTITY_INVALID")
+        if type(limit) is not int or not 1 <= limit <= 20 or type(offset) is not int or offset < 0:
+            raise ManualEdgeHold("INVALID_PAGE")
+        with self.db() as db:
+            self.initialize(db)
+            db.row_factory = sqlite3.Row
+            rows = db.execute(
+                "SELECT * FROM manual_edge_operations "
+                "WHERE actor=? AND chat=? AND status!='CANCELLED' "
+                "ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?",
+                (actor, chat, limit, offset),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def assert_standby_candidate(self, op_id, actor, chat, customer_port):
+        """Reject missing/stale inventory *before* expensive network probes."""
+        with self.db() as db:
+            self.initialize(db)
+            row = db.execute(
+                "SELECT ip,admin_port FROM manual_edge_operations "
+                "WHERE id=? AND actor=? AND chat=? AND status='EDGE_READY'",
+                (op_id, actor, chat),
+            ).fetchone()
+            if not row:
+                raise ManualEdgeHold("EDGE_NOT_READY")
+            pool = db.execute(
+                "SELECT active,is_default,is_standby,provider,provider_instance_id,"
+                "service_port,admin_ssh_port FROM host_pool WHERE host=?",
+                (row[0],),
+            ).fetchone()
+            if (not pool or tuple(pool[:5]) != (0,0,0,"manual",None)
+                    or pool[5] != customer_port or pool[6] != row[1]):
+                raise ManualEdgeHold("MANUAL_HOST_POOL_MISMATCH")
+
     def start(self, actor, chat):
         if type(actor) is not int or type(chat) is not int or actor <= 0 or chat <= 0:
             raise ManualEdgeHold("ADMIN_IDENTITY_INVALID")
@@ -95,7 +143,7 @@ class ManualEdgeJournal:
             if db.execute(
                 "SELECT 1 FROM manual_edge_operations WHERE actor=? AND chat=? "
                 "AND status IN ('DRAFT','IDENTITY_PENDING','HOSTKEY_PENDING',"
-                "'READY_INSTALL','INSTALLING','EDGE_READY','STANDBY','ROUTING','MIGRATING')",
+                "'READY_INSTALL','INSTALLING')",
                 (actor,chat),
             ).fetchone():
                 raise ManualEdgeHold("ACTIVE_MANUAL_OPERATION_EXISTS")

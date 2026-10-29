@@ -4180,15 +4180,16 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
                 cur_hosts.append(edge_ip)
                 await asyncio.to_thread(_db_update_setting, 'hosts', ",".join(cur_hosts))
             await asyncio.to_thread(_db_set_host_active, edge_ip, True)
-        # F3: legacy ingress onboarding records only an INGRESS_ONLY candidate.
-        # Egress staging requires a separately pinned, explicitly authorized
-        # 6G operation; never reuse this installer password for Egress SSH.
-        try:
-            await asyncio.to_thread(record_ingress_candidate, db_conn, edge_ip)
-        except Exception:
-            log.exception("F3 ingress candidate audit failed for host (redacted)")
-            # Ingress succeeded regardless; never pretend the Egress tunnel was
-            # automatically provisioned.
+        # F3 audits ACTIVE legacy ingress only. A new manual Edge is staged
+        # deliberately inactive (EDGE_READY -> STANDBY); auditing it as active
+        # would emit the false INGRESS_HOST_NOT_ACTIVE error. Keep the F3
+        # behavior for all other legacy/provisioning paths.
+        if not manual_safe_bootstrap:
+            try:
+                await asyncio.to_thread(record_ingress_candidate, db_conn, edge_ip)
+            except Exception:
+                log.exception("F3 ingress candidate audit failed for host (redacted)")
+                # Ingress succeeded regardless; never claim Egress readiness.
 
     if egress_stage_requested:
         # No default/DNS/UID switch on the new protected-aware entrypoint.

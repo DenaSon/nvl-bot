@@ -369,8 +369,13 @@ class Cloudzy04B:
             finished=not hold, require_running=True,
         )
 
-    async def _fresh(self, state, *, check_nat=True):
-        if await self.provider(state["target"], state["provider_id"]) is not True:
+    async def _fresh(self, state, *, check_nat=True, check_provider=True):
+        # Provider ownership is checked at initial Cloudzy admission, NOT in
+        # every accepted CZ07 migration batch. The source of truth here is
+        # the locally pinned signed SSH host identity plus live transport.
+        # Other management/cutover callers keep their original provider check.
+        if check_provider and await self.provider(
+                state["target"], state["provider_id"]) is not True:
             raise CutoverHold("CLOUDZY_PROVIDER_ID_STATUS_IP_UNVERIFIED")
         if await self.probe(state["target"], state["customer_port"],
                             state["admin_port"]) is not True:
@@ -625,7 +630,7 @@ class Cloudzy04B:
                 raise CutoverHold("DNS_OR_DEFAULT_UNCERTAIN_LOCK_HELD") from None
             raise CutoverHold("ROUTE_ABORTED_OR_PREFLIGHT_FAILED") from None
 
-    async def _run_users(self, actor, chat, names, fp):
+    async def _run_users(self, actor, chat, names, fp, *, check_provider=True):
         if not self.enabled():
             raise CutoverHold(DEFAULT_LOCK)
         source, target, pid = await asyncio.to_thread(self._route_ready)
@@ -636,7 +641,7 @@ class Cloudzy04B:
         if not names or not set(names).issubset(available):
             raise CutoverHold("ACCOUNT_SELECTION_INVALID")
         state = await asyncio.to_thread(self._ready_probe_state, source, target, pid)
-        await self._fresh(state)
+        await self._fresh(state, check_provider=check_provider)
         live_dns = await asyncio.to_thread(self.dns.snapshot)
         self._expect_dns(live_dns, target)
         lock, busy = await self._acquire(source, target)

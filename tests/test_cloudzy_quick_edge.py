@@ -1178,10 +1178,12 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         self.wizard.store.change(opid, "CREATING", "CREATE_UNCERTAIN")
         self.prepare_cancel_guards()
         self.now[0] += 125
-        with self.assertRaisesRegex(QuickEdgeHold, "CANCEL_STATE_CHANGED|INVALID_OWNER"):
+        with self.assertRaisesRegex(QuickEdgeHold, "CANCEL_OWNER_MISMATCH"):
             self.wizard.store.cancel(opid, actor=999, chat=999,
-                                     expected_status="CREATING",
+                                     expected_status="CREATE_UNCERTAIN",
                                      uncertain_ack=True, provider_observation="NOT_OBSERVED")
+        await self.cb("apps_cz_qcancel_" + opid, actor=999, chat=999)
+        self.assertIn("CANCEL_OWNER_MISMATCH", self.query.text)
         # The old generic cancellation API must reject a missing explicit ACK.
         with self.assertRaisesRegex(QuickEdgeHold, "UNCERTAIN_CREATE_REQUIRES"):
             self.wizard.store.cancel(opid, actor=112, chat=334,

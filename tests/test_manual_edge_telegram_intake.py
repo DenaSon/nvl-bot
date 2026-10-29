@@ -18,6 +18,7 @@ class PrivateIntakeTests(unittest.IsolatedAsyncioTestCase):
             is_core_host=lambda ip:False,
             enabled=lambda:False,form_url=lambda:"")
         w._view=AsyncMock(return_value=42)
+        w._tls_port=lambda:2088
         w.journal.set_server=lambda *a: calls.append(a)
         w.journal.get=lambda op:{
             "id":op,"status":"READY_INSTALL","actor":77,"chat":77}
@@ -93,6 +94,18 @@ class PrivateIntakeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(coros)
         self.assertNotIn("state",ctx.user_data)
         u.effective_chat.send_message.assert_awaited_once()
+
+    async def test_expired_password_session_is_deleted_and_not_retried(self):
+        w,_=self.wizard()
+        ctx=self.context("password","MANUAL_EDGE_PASSWORD")
+        ctx.user_data["manual_edge_session"]["expires"]=99
+        u=self.update()
+        app,coros=self.app()
+        await w.receive_text(u,ctx,"MANUAL_EDGE_PASSWORD","secret",
+                             actor=77,chat=77,role="admin",app=app)
+        u.message.delete.assert_awaited_once()
+        self.assertFalse(coros)
+        self.assertNotIn("state",ctx.user_data)
 
     async def test_group_and_nonadmin_rejected(self):
         for role,actor,chat in [

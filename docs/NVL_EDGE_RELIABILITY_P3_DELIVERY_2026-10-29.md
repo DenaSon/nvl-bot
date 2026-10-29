@@ -8,6 +8,7 @@
 
 **مسیر:** «برنامه‌ها → مدیریت Edge → افزودن دستی (اضطراری)». 
 - فرم امن HTTPS/Telegram WebApp برای IP و پورت مدیریت SSH، سپس تأیید Host Key مستقل و فرم جداگانه ورود رمز. ورود رمز به پیام متنی تلگرام ممنوع است.
+- تمام صفحات وضعیت، Preview، تأیید انتقال و خطای ویزارد **Native Rich Messages** هستند، نه پیام HTML یا InlineKeyboard قدیمی؛ فرم HTTPS صرفاً برای ورود اطلاعات محرمانه حفظ شده است. اعلان‌های پس‌زمینه نصب نیز Rich هستند.
 - `ManualFormStore` فقط در حافظه پروسه، nonce/TTL=۱۸۰ ثانیه، اعتبارسنجی HMAC `initData` تلگرام، مالک/گفتگوی ثابت، مصرف یک‌باره، بدون ذخیره رمز در SQLite/Pickle/ارسال پیام/توکن URL. Listener فقط `127.0.0.1` روی پورت اختصاصی و پشت HTTPS Reverse Proxy است.
 - ثبت عملیات و شواهد مستقل در `manual_edge_operations` و `manual_edge_events`، با `provider='manual'` و `provider_instance_id IS NULL`. **هیچ رسید خرید Cloudzy، Provider Server ID یا عملیات Cloudzy API ساخته نمی‌شود.**
 - Reuse از Legacy Installer موجود، با اتصال روی **همان پورت مدیریت SSH داده‌شده**، Host Key پین‌شده، عدم بازکردن ورود Root با رمز و نصب کلید مدیریت Core. نصب non-idempotent پس از شروع `INSTALLING` بدون شواهد مجدداً راه‌اندازی نمی‌شود.
@@ -20,7 +21,9 @@
 - `manual_edge_secure_form.py`: HTTPS-terminated WebApp intake، validation و secret one-use.
 - `manual_edge_journal.py`: جدول و تاریخچه دستی با CAS، گیت Standby و نصب Core WG.
 - `manual_edge_identity.py`: هویت پین‌شده مستقل Manual/Cloudzy و `manual:<op>` صرفاً مرجع داخلی، نه Provider ID.
-- `manual_edge_wizard.py`: ویزارد فارسی و Callbackهای فقط مدیر.
+- `manual_edge_wizard.py`: ویزارد فارسی و Callbackهای فقط مدیر؛ صفحات با **Rich Messages** و بدون HTML fallback.
+- `manual_edge_rich.py`: تبدیل صفحه‌های مدیریتی به `InputRichMessage` استاندارد Bot API 10.3؛ CTAها با `RichMessageButton` و دریافت رمز با دکمه Rich Web App؛ ارسال/ویرایش از `RichBotAPI` موجود، فقط یک کارت برای هر نشست و جلوگیری از بازپخش پیام با نتیجه نامطمئن.
+- `tests/test_manual_edge_rich_phase3.py`: تست ساختار Rich، دکمه Web App امن، مجوز Callbackها، ارسال/ویرایش و نبود مسیر جایگزین HTML.
 - `cloudzy_cz04b.py`، `cloudzy_cz07_queue.py`: استفاده مشترک از route/DNS/6G و Batch، بدون جعل رسید خرید.
 - `cloudzy_quick_edge.py`: جلوگیری از تداخل هم‌زمان نصب Cloudzy و Manual روی IP/WG.
 - `cloudzy_admin_panel.py`: دو دکمه جدا «افزودن با Cloudzy» و «افزودن دستی».
@@ -63,6 +66,7 @@ Cloudflare zone/token با سطح دسترسی محدود همان تنظیما�
 - `_run_route` و `_run_users` دستی با provider stub `raise AssertionError` و Cloudflare fake؛ موفقیت مسیر 6G/CAS و عدم تماس Cloudzy.
 - Cloudflare جزئی/قطع: در صورت rollback موفق، DNS/Default به مبدا برگردند، کاربر منتقل نشود؛ در حالت نامطمئن عملیات HOLD بماند.
 - Shared WG نصب، Host collision، K2 محافظت‌شده، Worker/callback تکراری، timeout و Resume.
+- تست `manual_edge_rich`: دکمه Web App با `web_app`، نمایش RTL و callbackهای فارسی در Rich blocks؛ بدون `parse_mode=HTML`، `reply_markup` یا تکرار پیام در خطای ارسال نامعلوم.
 - اجرای کامل CI (Python checks + Legacy Core Migration Safety + Edge egress stage-only) قبل از Merge. **Merge ≠ Deploy**.
 
 **تعهد محدود:** این فاز در Source توسعه یافته است؛ تا زمانی که CI و آزمون روی Edge واقعی انجام نشده‌اند، نباید «آماده Production» خوانده شود.

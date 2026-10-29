@@ -77,3 +77,58 @@ After operator deploy, run read-only DB checks for active SSH counts per host,
 `settings.hosts`, `dns_current_ip`, `host_pool` default, 6H OFF, and
 journal lines for pressure and health. A GitHub merge by itself is not a
 production acceptance.
+
+
+## 2026-10-29 — Confirmed operational entrypoint (NO HTTPS dependency)
+
+The operator confirmed that Edge `153.75.87.190` serves clients after a
+partially failed installation. The Core production read-only inspection recorded:
+`is_default=1`, `dns_current_ip=153.75.87.190`, the picker starts with
+`153.75.87.190`, 444 active SSH metadata rows assigned to that Edge,
+and a healthy WG tunnel `10.77.0.125 ↔ 10.77.0.1`. Independent public
+TCP checks from Windows succeeded on 2252 and 2088, and the operator confirmed
+real client connectivity. These checks do NOT prove all 444 users individually
+connected, and do NOT close any outstanding historical CZ07 journal.
+
+**Production primary manual route — already implemented:**
+- `hpdef_` selects the existing Edge/default, followed by the separate
+  `hpdef_migrate_` / `hpdefmig_yes_` explicit migration and the
+  already-connected Cloudflare DNS adapter.
+- This workflow changes the publicly selected Edge IP; it does not require a
+  new HTTPS hostname, WebApp, per-VPS password form or new feature flag.
+- The optional `manual_edge_wizard.py` is a *different* workflow:
+  bootstrap of an unconfigured VPS requiring password entry. Its HTTPS form
+  is **only** for protecting management credentials. It must not become a
+  prerequisite for Legacy IP switching, and the old route must not silently
+  switch to its provider/journal semantics.
+- A pre-existing `NVL_EDGE_MANUAL_ENABLED=0` **does not disable** the
+  original legacy manual IP selection path. No new flags are introduced to
+  enable that path. Do not remove protection against concurrent DNS writes,
+  foreign host collisions, or inconsistent account routing.
+- Do not rerun `setup_edge_relay.sh` on an already working Edge: it can
+  duplicate iptables rules and restart a healthy WG tunnel.
+
+### Added read-only operator preflight
+
+`python3 ops/nvl_legacy_manual_route_audit.py --db /root/master_bot.db --dns`
+
+This source-only, zero-write helper validates the unique active non-Standby
+default, configured service port, cached DNS/default congruence, picker ordering,
+and the active SSH roster grouped by endpoint. Optionally it resolves the
+configured public A-record names; this is only local DNS observation, **not**
+an authoritative Cloudflare API postcheck. Separate historical HOLDs appear
+as warnings and are **never** marked MOVED, DONE or ABORTED by this tool.
+
+Exit codes: 0 = metadata consistent; 2 = metadata mismatch; 3 = unable to
+observe. It is a field diagnostic, not an installer, DNS writer or connection
+health certification. An external ISP client test remains required after any
+future IP cutover.
+
+### Recovery and hardening backlog boundary
+
+The legacy path remains two-stage and non-atomic. A default selection without
+the subsequent confirmed customer/DNS migration can make new subscriptions fail
+closed. Do not advertise this workflow as the atomic CZ04B/CZ07 engine or claim
+Phase 4/5 Production acceptance based on this audit. The operator-approved
+manual path is the immediate priority; optional VPS bootstrap/WebApp hardening
+is tracked separately and never blocks IP switching.

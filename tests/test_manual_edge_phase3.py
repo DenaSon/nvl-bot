@@ -243,6 +243,26 @@ class Phase3ManualTests(unittest.TestCase):
                        "WHERE host='8.8.8.8'")
         self.journal.finish(op,77,77,"route-1")
         self.assertEqual(self.journal.get(op)["status"],"ACTIVE")
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock,patch
+        from manual_edge_wizard import ManualEdgeWizard
+        async def prohibited(*_):
+            raise AssertionError("NO_NETWORK_TEST")
+        wizard=ManualEdgeWizard(
+            db=self.db,preflight=lambda:(2252,"pub"),
+            provision=prohibited,verify=prohibited,
+            probe=prohibited,nat=prohibited,queue=SimpleNamespace(),
+            enabled=lambda:True)
+        with patch("manual_edge_wizard.ManualRichDelivery") as rich:
+            rich.return_value.show=AsyncMock(return_value=99)
+            asyncio.run(wizard.handle(
+                SimpleNamespace(),SimpleNamespace(user_data={}),
+                "apps_edge_manual_home",role="admin",actor=77,chat=77,
+                app=SimpleNamespace(bot=SimpleNamespace(token="123:TEST"))))
+            actions=[item[1] for row in rich.return_value.show.call_args.kwargs["rows"]
+                     for item in row]
+            self.assertIn("apps_edge_manual_new",actions)
         newer=self.journal.start(77,77)
         # Fixed timestamp=10000 in fixture: rowid must win ties, not a
         # lexicographic sort of random operation IDs.

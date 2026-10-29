@@ -97,8 +97,8 @@ class ManualEdgeJournal:
             self.initialize(db)
             row=db.execute(
                 "SELECT id FROM manual_edge_operations WHERE actor=? AND chat=? "
-                "AND status != 'CANCELLED' AND archived_at IS NULL
-                ORDER BY created_at DESC,rowid DESC LIMIT 1",
+                "AND status != 'CANCELLED' AND archived_at IS NULL "
+                "ORDER BY created_at DESC,rowid DESC LIMIT 1",
                 (actor,chat),
             ).fetchone()
             return self.get(row[0]) if row else None

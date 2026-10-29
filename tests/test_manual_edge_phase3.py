@@ -221,6 +221,34 @@ class Phase3ManualTests(unittest.TestCase):
                 "https://secure.example/manual-edge/form?ticket="))
             self.assertNotIn("password",str(context.user_data).lower())
 
+    def test_management_port_collisions_fail_before_any_remote_effect(self):
+        from manual_edge_wizard import ManualEdgeWizard, ManualWizardHold
+        for unsafe in (2252,2088):
+            with self.subTest(port=unsafe), self.assertRaisesRegex(
+                    ManualWizardHold, "SSH_MANAGEMENT_PORT_CONFLICT"):
+                ManualEdgeWizard._assert_management_port_safe(
+                    unsafe,customer_port=2252,tls_port=2088)
+        ManualEdgeWizard._assert_management_port_safe(
+            22,customer_port=2252,tls_port=2088)
+        ManualEdgeWizard._assert_management_port_safe(
+            2299,customer_port=2252,tls_port=2088)
+
+    def test_after_activation_a_new_manual_operation_becomes_current(self):
+        op=self.prepare("8.8.8.8",port=2299)
+        self.journal.mark_standby(op,77,77)
+        self.journal.bind_route(op,77,77,"route-1")
+        with self.db() as db:
+            db.execute("UPDATE host_pool SET is_default=0 WHERE host='1.1.1.1'")
+            db.execute("UPDATE host_pool SET is_default=1,is_standby=0 "
+                       "WHERE host='8.8.8.8'")
+        self.journal.finish(op,77,77,"route-1")
+        self.assertEqual(self.journal.get(op)["status"],"ACTIVE")
+        newer=self.journal.start(77,77)
+        # Fixed timestamp=10000 in fixture: rowid must win ties, not a
+        # lexicographic sort of random operation IDs.
+        self.assertEqual(self.journal.latest(77,77)["id"],newer)
+        self.assertEqual(self.journal.get(op)["status"],"ACTIVE")
+
     def test_actor_and_chat_owned_and_draft_cancel_only(self):
         op=self.journal.start(77,77)
         with self.assertRaises(ManualEdgeHold):

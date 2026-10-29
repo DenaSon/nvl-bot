@@ -1072,22 +1072,126 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any("خطای غیرمنتظره" in text
                              for text, _kw in self.query.screens))
 
-    async def test_cancel_disallowed_during_uncertain_purchase_and_nonadmin(self):
+    async def test_uncertain_purchase_quarantine_is_owner_confirmed_and_audited(self):
+        self.wizard.standby_service = FakeStandby()
+        self.wizard.cz06_enabled = lambda: True
+        self.api.fail_create = CloudzyUncertainError("POST /services", idempotency_key="same")
+        await self.cb("apps_cz6_start")
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qr_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qp_")))
+        await self.cb(next(x for x in self.query.callbacks if x.startswith("apps_cz_qbuy_")))
+        await self.app.drain()
+        op = self.wizard.store.latest()
+        opid = op["id"]
+        self.assertEqual(op["status"], "CREATE_UNCERTAIN")
+        self.prepare_cancel_guards()
+        await self.cb("apps_cz_operations")
+        self.assertTrue(any(x.startswith("apps_cz_qcancel_") for x in self.query.callbacks))
+        before_create = len([x for x in self.api.calls
+                             if isinstance(x, tuple) and x[0] == "create"])
+        await self.cb("apps_cz_qcancel_" + opid, role="agent")
+        self.assertIn("فقط مدیر", self.query.text)
+        with self.assertRaisesRegex(QuickEdgeHold, "UNCERTAIN_CREATE_REQUIRES"):
+            self.wizard.store.cancel(opid, actor=112, chat=334,
+                                     expected_status="CREATE_UNCERTAIN")
+        await self.cb("apps_cz_qcancel_" + opid)
+        self.assertIn("پذیرش احتمال هزینه", self.query.text)
+        confirm = next(x for x in self.query.callbacks if x.startswith("apps_cz_qcancelyes_"))
+        await self.cb(confirm)
+        self.assertIn("UNCERTAIN_CREATE_SETTLEMENT_GRACE", self.query.text)
+        self.assertEqual(self.wizard.store.get(opid)["status"], "CREATE_UNCERTAIN")
+        self.now[0] += 121
+        await self.cb(confirm)
+        self.assertEqual(self.wizard.store.get(opid)["status"], "CANCELLED")
+        self.assertEqual(self.wizard.quick_runs.get(opid)["stage"], "CANCELLED")
+        self.assertEqual(
+            len([x for x in self.api.calls
+                 if isinstance(x, tuple) and x[0] == "create"]), before_create)
+        with self.db() as db:
+            quarantine = db.execute(
+                "SELECT disposition,provider_observation FROM cloudzy_purchase_quarantine "
+                "WHERE operation_id=?", (opid,)).fetchone()
+            uo = db.execute(
+                "SELECT state,code,external_intent FROM cloudzy_uo_operations WHERE id=?",
+                (opid,)).fetchone()
+            cancel_events = db.execute(
+                "SELECT COUNT(*) FROM cloudzy_edge_cancel_events WHERE operation_id=?",
+                (opid,)).fetchone()[0]
+        self.assertEqual(quarantine,
+                         ("PENDING_PROVIDER_RECONCILIATION", "NOT_OBSERVED"))
+        self.assertEqual(uo, ("RECONCILE_REQUIRED",
+                              "PROVIDER_PURCHASE_QUARANTINED", 1))
+        self.assertEqual(cancel_events, 1)
+        await self.cb("apps_cz6_start")
+        self.assertTrue(any(x.startswith("apps_cz_qr_") for x in self.query.callbacks))
+
+    async def test_quarantine_with_provider_api_unavailable_is_explicit_not_automatic(self):
         opid = self.wizard.store.reserve(
             actor=112, chat=334, region="DE-Frankfurt", plan="plan-1",
             cycle="hourly", price=1, port=2252, pubkey=self.pub)
+        self.wizard.store.mark_paid_intent(opid)
         self.wizard.store.change(opid, "CREATING", "CREATE_UNCERTAIN")
-        await self.cb("apps_cz_operations")
-        self.assertFalse(any(x.startswith("apps_cz_qcancel_") for x in self.query.callbacks))
-        await self.cb("apps_cz_qcancel_" + opid)
-        self.assertIn("CANCEL_NOT_ALLOWED_OR_RUNNING", self.query.text)
-        self.assertEqual(self.wizard.store.get(opid)["status"], "CREATE_UNCERTAIN")
         self.prepare_cancel_guards()
-        with self.assertRaises(QuickEdgeHold):
+        def down():
+            raise CloudzyUncertainError("GET list")
+        self.api.list_servers = down
+        self.now[0] += 125
+        await self.cb("apps_cz_operations")
+        self.assertEqual(self.wizard.store.latest()["status"], "CREATE_UNCERTAIN")
+        await self.cb("apps_cz_qcancel_" + opid)
+        self.assertIn("PROVIDER_UNAVAILABLE", self.query.text)
+        confirm = next(x for x in self.query.callbacks if x.startswith("apps_cz_qcancelyes_"))
+        await self.cb(confirm)
+        self.assertEqual(self.wizard.store.get(opid)["status"], "CANCELLED")
+        with self.db() as db:
+            q = db.execute(
+                "SELECT provider_observation FROM cloudzy_purchase_quarantine"
+            ).fetchone()[0]
+        self.assertEqual(q, "PROVIDER_UNAVAILABLE")
+
+    async def test_uncertain_purchase_with_existing_cloudzy_server_refuses_release(self):
+        opid = self.wizard.store.reserve(
+            actor=112, chat=334, region="DE-Frankfurt", plan="plan-1",
+            cycle="hourly", price=1, port=2252, pubkey=self.pub)
+        self.wizard.store.mark_paid_intent(opid)
+        self.wizard.store.change(opid, "CREATING", "CREATE_UNCERTAIN")
+        self.prepare_cancel_guards()
+        self.now[0] += 125
+        self.api.server["hostname"] = "nvl-edge-" + opid[:12]
+        await self.cb("apps_cz_operations")
+        await self.cb("apps_cz_qcancel_" + opid)
+        self.assertIn("CANCEL_PROVIDER_RESOURCE_FOUND", self.query.text)
+        self.assertEqual(self.wizard.store.get(opid)["status"], "CREATE_UNCERTAIN")
+        self.api.server["hostname"] = ""
+        await self.cb("apps_cz_qcancel_" + opid)
+        confirm = next(x for x in self.query.callbacks if x.startswith("apps_cz_qcancelyes_"))
+        self.api.server["hostname"] = "nvl-edge-" + opid[:12]
+        await self.cb(confirm)
+        self.assertIn("CANCEL_PROVIDER_RESOURCE_FOUND", self.query.text)
+        self.assertEqual(self.wizard.store.get(opid)["status"], "CREATE_UNCERTAIN")
+
+    async def test_quarantine_rejects_identity_route_and_stale_owner(self):
+        opid = self.wizard.store.reserve(
+            actor=112, chat=334, region="DE-Frankfurt", plan="plan-1",
+            cycle="hourly", price=1, port=2252, pubkey=self.pub)
+        self.wizard.store.mark_paid_intent(opid)
+        self.wizard.store.change(opid, "CREATING", "CREATE_UNCERTAIN")
+        self.prepare_cancel_guards()
+        self.now[0] += 125
+        with self.assertRaisesRegex(QuickEdgeHold, "CANCEL_STATE_CHANGED|INVALID_OWNER"):
+            self.wizard.store.cancel(opid, actor=999, chat=999,
+                                     expected_status="CREATING",
+                                     uncertain_ack=True, provider_observation="NOT_OBSERVED")
+        # The old generic cancellation API must reject a missing explicit ACK.
+        with self.assertRaisesRegex(QuickEdgeHold, "UNCERTAIN_CREATE_REQUIRES"):
             self.wizard.store.cancel(opid, actor=112, chat=334,
                                      expected_status="CREATE_UNCERTAIN")
-        await self.cb("apps_cz_qcancel_" + opid, role="agent")
-        self.assertIn("فقط مدیر", self.query.text)
+        self.wizard.store.change(opid, "CREATE_UNCERTAIN", "CREATE_UNCERTAIN",
+                                 provider_server_id="server-1")
+        with self.assertRaisesRegex(QuickEdgeHold, "HAS_PROVIDER_IDENTITY"):
+            self.wizard.store.cancel(opid, actor=112, chat=334,
+                                     expected_status="CREATE_UNCERTAIN",
+                                     uncertain_ack=True, provider_observation="NOT_OBSERVED")
 
     async def test_cancel_route_guard_and_stale_confirm(self):
         op = await self.purchase()

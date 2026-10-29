@@ -3816,6 +3816,9 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
     دراپلت‌ها اصلاً رمز روت ندارند، فقط کلید). connect_retries برای زمانی است که سرور تازه
     از cloud-init بالا آمده و SSHـش هنوز کاملاً آماده نیست — چند بار با فاصله دوباره تلاش می‌کند.
     """
+    # Root-password SSH must never be enabled for the pinned manual path.
+    # Keep the historic K2 protected_wizard semantics for existing callers.
+    protected_wizard = bool(protected_wizard or manual_safe_bootstrap)
     if paramiko is None:
         return False, "❌ کتابخانهٔ paramiko نصب نیست. روی Core بزنید: pip install paramiko --break-system-packages", None
 
@@ -3916,7 +3919,7 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
     # یک فایل override با نام «99-» می‌سازیم که چون آخر همه خوانده می‌شود، همیشه برنده است — فارغ
     # از اینکه فایل‌های ۵۰/۶۰ چه چیز دیگری بگویند یا در آینده اضافه شوند.
     # The integrated K2 wizard must never enable password-root SSH or restart SSHD.
-    if not (protected_wizard or manual_safe_bootstrap):
+    if not protected_wizard:
         try:
             _fix_cmd = (
                 "cat > /etc/ssh/sshd_config.d/99-nvlbot-force-password-auth.conf << 'INNER'\n"
@@ -3937,7 +3940,7 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
     ok_key, err_key = _install_local_pubkey_on_open_ssh(ssh)
     if not ok_key:
         log.warning("نصب کلید SSH دائمی روی Edge %s شکست خورد: %s", edge_ip, err_key)
-        if protected_wizard or manual_safe_bootstrap:
+        if protected_wizard:
             with contextlib.suppress(Exception):
                 ssh.close()
             return False, "⛔️ ثبت دسترسی مدیریتی امن روی Edge کامل نشد.", None

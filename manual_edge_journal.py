@@ -185,7 +185,7 @@ class ManualEdgeJournal:
             # Do not admit concurrent/uncertain installers until reconciled.
             if db.execute(
                 "SELECT 1 FROM manual_edge_operations "
-                "WHERE id!=? AND status IN ('INSTALLING','INSTALL_HOLD') LIMIT 1",
+                "WHERE id!=? AND status='INSTALLING' LIMIT 1",
                 (op_id,),
             ).fetchone():
                 raise ManualEdgeHold("CORE_WG_INSTALL_LEASE_BUSY")

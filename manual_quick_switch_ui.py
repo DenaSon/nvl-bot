@@ -9,6 +9,7 @@ import asyncio
 from html import escape
 import os
 import secrets
+import threading
 import time
 
 from manual_edge_rich import ManualRichDelivery
@@ -53,6 +54,9 @@ class ManualQuickSwitchUI:
         self.pending = {}
         self.running = set()
         self.last_errors = {}
+        # The engine runs in a worker thread to avoid blocking Telegram on
+        # synchronous Cloudflare HTTP, so serialize effects across actors.
+        self.effect_lock = threading.Lock()
 
     async def _view(self, context, chat, text, rows):
         return await ManualRichDelivery(context.application.bot.token).show(
@@ -120,7 +124,8 @@ class ManualQuickSwitchUI:
                "DONE":"تکمیل فنی","EXTERNAL_VERIFIED":"بازیابی دستی ثبت شد",
                "ABORTED":"لغوشده"}.get(status,status)
         rows=[]
-        if rec["kind"]=="QUICK" and status in ("DNS_INTENT","HOLD","DB_COMMITTED"):
+        if (rec["kind"]=="QUICK" and rec["actor"]==str(chat)
+                and status in ("DNS_INTENT","HOLD","DB_COMMITTED")):
             rows.append([("🔎 بررسی و ادامه بدون تکرار DNS",
                          "apps_edge_quick_resume_"+rec["id"])])
             if status=="HOLD":
@@ -139,16 +144,16 @@ class ManualQuickSwitchUI:
             rows)
 
     async def _execute(self, *, plan=None, actor, job=None, retry_dns=False):
+        def run():
+            with self.effect_lock:
+                if job:
+                    return asyncio.run(self.engine.resume(
+                        job,actor=actor,retry_dns=retry_dns))
+                return asyncio.run(self.engine.start(
+                    plan,actor=actor,
+                    client_witness="ADMIN_CONFIRMED_INDEPENDENT_NPV_ISP_E2E"))
         try:
-            if job:
-                await asyncio.to_thread(
-                    lambda: asyncio.run(self.engine.resume(
-                        job,actor=actor,retry_dns=retry_dns)))
-            else:
-                await asyncio.to_thread(
-                    lambda: asyncio.run(self.engine.start(
-                        plan,actor=actor,
-                        client_witness="ADMIN_CONFIRMED_INDEPENDENT_NPV_ISP_E2E")))
+            await asyncio.to_thread(run)
         except Exception as exc:
             # Durable engine journal is the source of truth; no second DNS PUT.
             # Only a sanitized reason is retained for UI diagnostics.
@@ -215,6 +220,8 @@ class ManualQuickSwitchUI:
                     "بازیابی از دکمه وضعیت استفاده کنید.",
                     [[("🔄 وضعیت انتقال","apps_edge_quick_status")]])
             if data.startswith("apps_edge_quick_resume_"):
+                if not self.enabled():
+                    raise QuickSwitchHold("QUICK_SWITCH_NOT_RELEASED")
                 job=data[len("apps_edge_quick_resume_"):]
                 if str(actor) in self.running:
                     raise QuickSwitchHold("OPERATION_ALREADY_RUNNING")

@@ -92,6 +92,6 @@ class SharedWGInstallLeaseTests(unittest.TestCase):
         self.assertIn(
             "async def _provision_new_edge(",source)
         self.assertIn(
-            "asyncio.to_thread(\n            _provision_new_edge_sync",
+            "_provision_new_edge_sync, edge_ip, root_password",
             source)
         self.assertIn("EDGE_NEW_PORT",source)

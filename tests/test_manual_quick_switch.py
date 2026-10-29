@@ -5,7 +5,8 @@ import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 
-from manual_quick_switch import ManualQuickSwitch, QuickSwitchHold
+from manual_quick_switch import (ManualQuickSwitch, QuickSwitchHold,
+                                 check_manual_relay_via_cz04b)
 
 
 OLD = "153.75.87.190"
@@ -298,6 +299,26 @@ class QuickSwitchTests(unittest.IsolatedAsyncioTestCase):
                          before)
         self.assertEqual(self.one(
             "SELECT status FROM cloudzy_cz07_jobs"),("HOLD",))
+
+    async def test_production_probe_adapter_never_calls_cloudzy_provider(self):
+        calls = []
+        class ExistingLegacy:
+            async def probe(self, target, service, admin):
+                calls.append(("probe", target, service, admin))
+                return True
+
+            async def nat(self, target, admin, service, tls, pinned):
+                calls.append(("nat", target, admin, service, tls, pinned))
+                return True
+
+            async def provider(self, *args, **kwargs):
+                raise AssertionError("CLOUDZY_API_MUST_NOT_BE_CALLED")
+
+        plan = await self.engine.preview(NEW)
+        self.assertTrue(await check_manual_relay_via_cz04b(
+            ExistingLegacy(), plan))
+        self.assertEqual([c[0] for c in calls], ["probe", "nat"])
+        self.assertEqual(calls[-1][-1], ("ssh-ed25519", "pinned"))
 
     async def test_external_attestation_rejects_wrong_account_count(self):
         with self.assertRaisesRegex(QuickSwitchHold,"EXTERNAL_ROUTE_UNVERIFIED"):

@@ -204,22 +204,10 @@ class Cloudzy04B:
             except sqlite3.OperationalError:
                 # No CZ03 order placed yet. Never create fake provider ownership.
                 rows = []
-            targets=[(str(ip),str(pid)) for ip,pid in rows]
-            if db.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND "
-                "name='manual_edge_operations'"
-            ).fetchone():
-                manual = db.execute(
-                    "SELECT ip FROM manual_edge_operations "
-                    "WHERE status='STANDBY' ORDER BY ip"
-                ).fetchall()
-                for (ip,) in manual:
-                    try:
-                        binding=resolve_edge(db,ip,require_standby=True)
-                    except Exception:
-                        continue
-                    targets.append((ip,binding["identity_ref"]))
-            return targets
+            # The old CZ04B UI exposes only verified Cloudzy targets.
+            # Manual adoption/transfer must enter through its own guarded
+            # wizard and durable CZ07 operator approval; never bypass it here.
+            return [(str(ip),str(pid)) for ip,pid in rows]
 
     def _latest(self):
         with self.db() as db:

@@ -3806,6 +3806,10 @@ def _next_edge_wg_ip():
     return f"10.77.0.{n}"
 
 
+from legacy_wg_install_lease import exclusive_legacy_edge_install
+
+
+@exclusive_legacy_edge_install
 def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, private_key_path=None, connect_retries=1, *, protected_wizard=False, trusted_host_key=None, admin_ssh_port=None, manual_safe_bootstrap=False):
     """
     تابع مسدودکننده (blocking، به‌خاطر paramiko و subprocess). باید حتماً با

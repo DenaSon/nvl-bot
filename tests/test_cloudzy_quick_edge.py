@@ -1380,11 +1380,71 @@ class JournalTests(unittest.TestCase):
         with self.assertRaises(QuickEdgeHold):
             self.reserve()
         self.journal.change(opid, "CREATING", "CREATE_UNCERTAIN", hold_reason="UNCERTAIN")
+        # This was the production deadlock: a historical uncertain order
+        # must not hold the global purchase lease.
+        second = self.reserve()
+        self.assertNotEqual(second, opid)
         with self.assertRaises(QuickEdgeHold):
-            self.reserve()
+            self.reserve()  # The NEW active order still fences its owner.
         with self.assertRaises(QuickEdgeHold):
             self.journal.change(opid, "CREATING", "CREATED")
         self.assertEqual(self.journal.get(opid)["status"], "CREATE_UNCERTAIN")
+        self.assertEqual(self.journal.get(second)["status"], "CREATING")
+
+    def test_separate_operator_can_buy_while_first_order_is_running(self):
+        first = self.reserve()
+        other = self.journal.reserve(
+            actor=3, chat=4, region="DE-Frankfurt", plan="plan",
+            cycle="hourly", price=350, port=2252,
+            pubkey="ssh-ed25519 AAAA",
+        )
+        self.assertNotEqual(first, other)
+        self.assertEqual(self.journal.get(first)["status"], "CREATING")
+        self.assertEqual(self.journal.get(other)["status"], "CREATING")
+
+    def test_historical_registered_hold_does_not_block_independent_purchase(self):
+        first = self.reserve()
+        # Recreate a historical persisted receipt (as observed on Core)
+        # without forging a new native UO transition from unverified CREATE.
+        with self.journal.db() as db:
+            db.execute(
+                "UPDATE cloudzy_edge_operations "
+                "SET status='HOLD_PROVISION',"
+                "provider_server_id='known-existing-vps',"
+                "public_ipv4='8.8.8.8',"
+                "hold_reason='PARTIAL_OR_UNVERIFIED_LEGACY_INSTALL' "
+                "WHERE id=? AND status='CREATING'", (first,)
+            )
+        second = self.reserve()
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.journal.get(first)["status"], "HOLD_PROVISION")
+
+    def test_upgrades_legacy_global_index_without_losing_receipts(self):
+        old = self.reserve()
+        # This is a snapshot of a pre-upgrade, provider-owned HOLD,
+        # not an attempt to bypass the new UO identity transition.
+        with self.journal.db() as db:
+            db.execute(
+                "UPDATE cloudzy_edge_operations "
+                "SET status='HOLD_PROVISION',"
+                "provider_server_id='legacy-provider-id',"
+                "public_ipv4='8.8.4.4',"
+                "hold_reason='HISTORIC_UNVERIFIED_INSTALL' "
+                "WHERE id=? AND status='CREATING'", (old,)
+            )
+            db.execute("DROP INDEX cloudzy_edge_active_owner_v2")
+            db.execute("""CREATE UNIQUE INDEX cloudzy_edge_one_unfinished
+                ON cloudzy_edge_operations((1))
+                WHERE status NOT IN ('EDGE_READY','REJECTED','CANCELLED')""")
+        self.journal.initialize()
+        with self.journal.db() as db:
+            indexes = {row[1] for row in
+                       db.execute("PRAGMA index_list(cloudzy_edge_operations)")}
+        self.assertIn("cloudzy_edge_active_owner_v2", indexes)
+        self.assertNotIn("cloudzy_edge_one_unfinished", indexes)
+        self.assertEqual(self.journal.get(old)["hold_reason"],
+                         "HISTORIC_UNVERIFIED_INSTALL")
+        self.assertNotEqual(self.reserve(), old)
 
     def test_only_globally_routable_ip_is_accepted(self):
         self.assertEqual(_public_ipv4({"data": {"primaryIpv4": "8.8.4.4"}}), "8.8.4.4")

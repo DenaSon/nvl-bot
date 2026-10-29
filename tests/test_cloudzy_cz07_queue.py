@@ -123,7 +123,7 @@ class QueueTests(unittest.TestCase):
                 CREATE TABLE cloudzy_edge_operations(id TEXT,status TEXT,
                     public_ipv4 TEXT,provider_server_id TEXT);
                 CREATE TABLE failover_operations(status TEXT);
-                CREATE TABLE cloudzy_cz04a_actions(status TEXT);
+                CREATE TABLE cloudzy_cz04a_actions(status TEXT, host TEXT);
                 CREATE TABLE cloudzy_cz04b_operations(
                     source TEXT,target TEXT,status TEXT,started_at INTEGER);
             """)

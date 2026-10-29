@@ -11,7 +11,9 @@ legacy api.cloudzy.com/developers API-Token interface.
 from __future__ import annotations
 
 import json as jsonlib
+import logging
 import os
+import socket
 import time
 import uuid
 import urllib.error
@@ -52,6 +54,7 @@ class _StdlibSession:
 
 
 DEFAULT_BASE_URL = "https://dash.cloudzy.com/api/v1"
+log = logging.getLogger(__name__)
 BILLING_CYCLES = frozenset({
     "hourly", "daily", "weekly", "monthly", "quarterly",
     "semi-annually", "annually",
@@ -85,6 +88,33 @@ class CloudzyUncertainError(CloudzyError):
 
 class CloudzyTimeout(CloudzyError):
     """Server did not reach ACTIVE before the local wait deadline."""
+
+
+class CloudzyReadError(CloudzyError):
+    """Temporary GET/HEAD transport failure; no provider mutation occurred."""
+
+    def __init__(self, detail: str, *, kind: str, attempts: int = 1):
+        self.kind = kind
+        self.attempts = attempts
+        super().__init__(f"Cloudzy read request failed: {detail}")
+
+
+def _route_label(path: str) -> str:
+    """Bounded low-cardinality metric: never log IDs, tokens, or query values."""
+    route = path.split("?", 1)[0]
+    if route.startswith("/services/"):
+        return "/services/{id}/" + route.rsplit("/", 1)[-1] if route.endswith(("/status", "/usage")) else "/services/{id}"
+    return route if route in ("/services", "/regions", "/pricing/catalog",
+                              "/plan-availability", "/billing/summary",
+                              "/auth/me", "/ssh-keys") else "other"
+
+
+def _transport_kind(exc: BaseException) -> str:
+    reason = getattr(exc, "reason", None)
+    if isinstance(exc, (TimeoutError, socket.timeout)) or isinstance(
+            reason, (TimeoutError, socket.timeout)):
+        return "TIMEOUT"
+    return "NETWORK"
 
 
 def _required(value: str, field: str) -> str:
@@ -128,6 +158,8 @@ class CloudzyService:
         session=None,
         read_timeout: float = 15,
         write_timeout: float = 120,
+        read_max_attempts: int = 2,
+        read_retry_delay: float = 0.25,
         sleep=None,
         monotonic=None,
     ):
@@ -141,13 +173,71 @@ class CloudzyService:
             raise ValueError("Cloudzy base URL must end with /api/v1")
         if read_timeout <= 0 or write_timeout <= 0:
             raise ValueError("timeouts must be positive")
+        if type(read_max_attempts) is not int or not 1 <= read_max_attempts <= 3:
+            raise ValueError("read_max_attempts must be between 1 and 3")
+        if not 0 <= read_retry_delay <= 3:
+            raise ValueError("read_retry_delay must be between 0 and 3 seconds")
         self._session = session if session is not None else _StdlibSession()
         self._read_timeout = read_timeout
         self._write_timeout = write_timeout
+        self._read_max_attempts = read_max_attempts
+        self._read_retry_delay = read_retry_delay
         self._sleep = sleep if sleep is not None else time.sleep
         self._monotonic = monotonic if monotonic is not None else time.monotonic
 
     def _request(self, method: str, path: str, *, body=None, headers=None):
+        """Bounded retries only for safe reads; never replay provider mutations.
+
+        Default worst-case GET budget is two 15s attempts plus 250ms delay.
+        Every attempt has its own transport timeout; no retry on 401/403,
+        unexpected 4xx, invalid JSON, or a paid/write request.
+        """
+        if method not in ("GET", "HEAD"):
+            return self._request_once(method, path, body=body, headers=headers)
+
+        attempts = self._read_max_attempts
+        budget = self._read_timeout * attempts + self._read_retry_delay * (attempts - 1)
+        deadline = self._monotonic() + budget
+        route = _route_label(path)
+        for attempt in range(1, attempts + 1):
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                raise CloudzyReadError("TimeoutError", kind="TIMEOUT", attempts=attempt - 1)
+            started = self._monotonic()
+            try:
+                result = self._request_once(
+                    method, path, body=body, headers=headers,
+                    read_timeout=min(self._read_timeout, remaining),
+                )
+            except (CloudzyReadError, CloudzyAPIError) as exc:
+                elapsed_ms = max(0, round((self._monotonic() - started) * 1000))
+                transient = (isinstance(exc, CloudzyReadError)
+                             or isinstance(exc, CloudzyAPIError)
+                             and exc.status in (429, 500, 502, 503, 504))
+                code = (exc.kind if isinstance(exc, CloudzyReadError)
+                        else "HTTP_" + str(exc.status))
+                log.warning(
+                    "CLOUDZY_READ result=FAIL route=%s attempt=%d/%d latency_ms=%d code=%s",
+                    route, attempt, attempts, elapsed_ms, code,
+                )
+                if isinstance(exc, CloudzyReadError):
+                    exc.attempts = attempt
+                if not transient or attempt == attempts:
+                    raise
+                delay = min(self._read_retry_delay, max(0, deadline - self._monotonic()))
+                if delay:
+                    self._sleep(delay)
+                continue
+            else:
+                log.info(
+                    "CLOUDZY_READ result=OK route=%s attempt=%d/%d latency_ms=%d",
+                    route, attempt, attempts,
+                    max(0, round((self._monotonic() - started) * 1000)),
+                )
+                return result
+        raise AssertionError("unreachable read retry loop")
+
+    def _request_once(self, method: str, path: str, *, body=None, headers=None, read_timeout=None):
         mutation = method not in ("GET", "HEAD")
         operation = f"{method} {path}"
         key = (headers or {}).get("Idempotency-Key")
@@ -166,13 +256,13 @@ class CloudzyService:
                 method, self.base_url + path,
                 headers=request_headers,
                 json=body,
-                timeout=self._write_timeout if mutation else self._read_timeout,
+                timeout=self._write_timeout if mutation else (self._read_timeout if read_timeout is None else read_timeout),
                 allow_redirects=False,
             )
         except (OSError, urllib.error.URLError, TimeoutError) as exc:
             if mutation:
                 raise CloudzyUncertainError(operation, idempotency_key=key) from None
-            raise CloudzyError(f"Cloudzy read request failed: {type(exc).__name__}") from None
+            raise CloudzyReadError(type(exc).__name__, kind=_transport_kind(exc)) from None
         if not 200 <= response.status_code < 300:
             try:
                 payload = response.json()

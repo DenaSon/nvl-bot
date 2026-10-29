@@ -150,6 +150,28 @@ class CZ04ATests(unittest.IsolatedAsyncioTestCase):
         return None
 
 
+    def test_unrelated_provider_hold_does_not_block_standby_action(self):
+        with self.db() as db:
+            self.controller._init(db)
+            db.execute(
+                "INSERT INTO cloudzy_cz04a_actions "
+                "(id,actor_id,chat_id,provider_id,host,action,status,started_at,updated_at) "
+                "VALUES ('old',11,22,'other-vps','9.9.9.9','relay','HOLD',1,1)"
+            )
+        # This VPS is independent; failed operations on another VPS
+        # must not turn its standby registration into a global deadlock.
+        state = self.controller._state("8.8.8.8", "svc1", mutation=True)
+        self.assertFalse(state["active"])
+        action = self.controller._reserve(11, 22, "8.8.8.8", "svc1", "relay")
+        self.assertTrue(action)
+        with self.assertRaises(Exception):
+            self.controller._reserve(11, 22, "8.8.8.8", "svc1", "relay")
+        with self.db() as db:
+            self.assertEqual(
+                db.execute("SELECT status FROM cloudzy_cz04a_actions WHERE id='old'").fetchone()[0],
+                "HOLD",
+            )
+
     async def test_unified_inventory_23_manual_edges_and_pagination(self):
         """Realistic Core snapshot: 23 Legacy rows, three active, no Cloudzy."""
         with self.db() as db:

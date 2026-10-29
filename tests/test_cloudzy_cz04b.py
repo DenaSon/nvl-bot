@@ -100,7 +100,7 @@ class CZ04BTests(unittest.IsolatedAsyncioTestCase):
                 provider_server_id TEXT, public_ipv4 TEXT, status TEXT,
                 host_key_type TEXT, host_key_base64 TEXT
             );
-            CREATE TABLE cloudzy_cz04a_actions(status TEXT);
+            CREATE TABLE cloudzy_cz04a_actions(status TEXT, host TEXT);
             CREATE TABLE failover_operations(
                 id INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT,
                 source_host TEXT, target_host TEXT, status TEXT,

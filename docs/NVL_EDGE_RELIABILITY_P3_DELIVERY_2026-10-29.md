@@ -1,7 +1,7 @@
 # NVL — فاز سوم: تحویل ویزارد Edge دستی با DNS خودکار Cloudflare
 
 **تاریخ:** 2026-10-29  
-**وضعیت:** کد در [PR #239](https://github.com/DenaSon/nvl-bot/pull/239)؛ نتیجه CI و Merge باید پس از اجرای واقعی ثبت شود. **PRODUCTION_DEPLOYED=NO؛ هیچ VPS واقعی نصب یا منتقل نشده است.**  
+**وضعیت:** **SOURCE_MERGED** — [PR #239](https://github.com/DenaSon/nvl-bot/pull/239)، Squash Merge در `master`: `bd468e8b1795a3c826a9de818078de726361ffa6` (2026-10-29). سه Workflow Python / Legacy Core / Edge stage موفق؛ ۳۰۶۹ تست در بسته Root موفق (۳ مورد skipped)؛ Review Thread باز: صفر. **CORE_DEPLOYMENT_NOT_VERIFIED / PRODUCTION_ACCEPTED=NO؛ هیچ VPS واقعی به‌موجب این PR نصب یا منتقل نشده است.**
 **قرارداد:** [فاز سوم تأییدشده](NVL_EDGE_MANUAL_CLOUDFLARE_WIZARD_PHASE3_2026-10-29.md) و [نقشه پنج‌فازی](NVL_EDGE_RELIABILITY_MANUAL_RECOVERY_5_PHASE_PLAN_2026-10-29.md).
 
 ## خروجی اجرایی

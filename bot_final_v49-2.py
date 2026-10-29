@@ -4094,7 +4094,8 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
     if not ok:
         await app.bot.send_message(chat_id,
             "⛔️ راه‌اندازی کامل نشد. ابتدا وضعیت سرور را بررسی کنید؛ نصب را تکرار نکنید."
-            if egress_stage_requested else err, parse_mode="HTML")
+            if (egress_stage_requested or manual_safe_bootstrap) else err,
+            parse_mode="HTML")
         # Keep the legacy caller contract, but return a safe machine-readable
         # code to the Cloudzy installer (which uses inactive/pinned provisioning).
         # Do not classify arbitrary package errors as a transient APT lock.
@@ -7375,6 +7376,7 @@ _manual_edge = ManualEdgeWizard(
     form_store=_manual_form_store,
     enabled=lambda: os.environ.get("NVL_EDGE_MANUAL_ENABLED")=="1"
                      and _manual_form_ready,
+    guard=_cloudzy_04a_guard,
 )
 
 # Phase 7 is opt-in and strictly a read-only Rich admin view. No effectful

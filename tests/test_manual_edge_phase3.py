@@ -653,5 +653,166 @@ class Phase3ManualTests(unittest.TestCase):
         self.assertIsNotNone(self.journal.get(op)["archived_at"])
 
 
+    def _former_after_verified_transfer(self):
+        """Simulates a completed switch away from a previous manual relay."""
+        op=self._promote_for_test("8.8.8.8")
+        with self.db() as db:
+            db.execute("UPDATE host_pool SET is_default=0 "
+                       "WHERE host='8.8.8.8'")
+            db.execute("UPDATE host_pool SET is_default=1 "
+                       "WHERE host='1.1.1.1'")
+            db.execute("INSERT INTO settings(key,value) VALUES "
+                       "('core_wg_public_ip','91.107.170.239')")
+        self.assertEqual(self.journal.display_state(op,77,77),"FORMER")
+        return op
+
+    def test_former_rearm_is_atomic_and_preserves_dns_accounts_and_history(self):
+        op=self._former_after_verified_transfer()
+        with self.db() as db:
+            settings=dict(db.execute("SELECT key,value FROM settings"))
+            history=db.execute(
+                "SELECT status FROM manual_edge_operations WHERE id=?",
+                (op,)).fetchone()[0]
+        preview=self.journal.preview_former_standby(op,77,77,2222)
+        self.assertEqual(preview["source"],"1.1.1.1")
+        self.assertEqual(preview["pin_type"],self.fake_key()[0])
+        self.journal.mark_former_standby(op,77,77,2222)
+        with self.db() as db:
+            self.assertEqual(dict(db.execute("SELECT key,value FROM settings")),
+                             settings)
+            self.assertEqual(db.execute(
+                "SELECT active,is_default,is_standby FROM host_pool "
+                "WHERE host='8.8.8.8'").fetchone(),(1,0,1))
+            self.assertEqual(db.execute(
+                "SELECT active,is_default FROM host_pool "
+                "WHERE host='1.1.1.1'").fetchone(),(1,1))
+            self.assertEqual(db.execute(
+                "SELECT status FROM manual_edge_operations WHERE id=?",
+                (op,)).fetchone()[0],"STANDBY")
+            self.assertEqual(history,"ACTIVE")
+            self.assertEqual(db.execute(
+                "SELECT code FROM manual_edge_events WHERE op_id=? "
+                "ORDER BY seq DESC LIMIT 1",(op,)).fetchone()[0],
+                "FORMER_NETWORK_REVERIFIED")
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM ssh_accounts").fetchone()[0],0)
+            self.assertEqual(resolve(db,"8.8.8.8",require_standby=True)["provider"],
+                             "manual")
+        with self.assertRaisesRegex(ManualEdgeHold,"FORMER_NOT_ELIGIBLE"):
+            self.journal.mark_former_standby(op,77,77,2222)
+
+    def test_former_rearm_denies_current_default_accounts_and_unresolved_jobs(self):
+        op=self._promote_for_test("8.8.8.8")
+        with self.db() as db:
+            db.execute("INSERT INTO settings(key,value) VALUES "
+                       "('core_wg_public_ip','91.107.170.239')")
+            db.execute("UPDATE settings SET value='8.8.8.8' "
+                       "WHERE key IN ('hosts','dns_current_ip')")
+        with self.assertRaisesRegex(ManualEdgeHold,"FORMER_ROLE_CHANGED"):
+            self.journal.mark_former_standby(op,77,77,2222)
+        with self.db() as db:
+            db.execute("UPDATE host_pool SET is_default=0 WHERE host='8.8.8.8'")
+            db.execute("UPDATE host_pool SET is_default=1 WHERE host='1.1.1.1'")
+            db.execute("UPDATE settings SET value='1.1.1.1' "
+                       "WHERE key IN ('hosts','dns_current_ip')")
+            db.execute("INSERT INTO ssh_accounts VALUES "
+                       "('expired','8.8.8.8','expired','ssh')")
+        with self.assertRaisesRegex(ManualEdgeHold,"FORMER_USERS_STILL_ASSIGNED"):
+            self.journal.mark_former_standby(op,77,77,2222)
+        with self.db() as db:
+            db.execute("DELETE FROM ssh_accounts WHERE username='expired'")
+            db.execute("CREATE TABLE manual_quick_switch_jobs "
+                       "(source TEXT,target TEXT,kind TEXT,status TEXT)")
+            db.execute("INSERT INTO manual_quick_switch_jobs VALUES "
+                       "('1.1.1.1','8.8.8.8','QUICK','HOLD')")
+        with self.assertRaisesRegex(ManualEdgeHold,"FORMER_TRANSFER_UNRESOLVED"):
+            self.journal.mark_former_standby(op,77,77,2222)
+        with self.db() as db:
+            db.execute("UPDATE manual_quick_switch_jobs SET status='DONE'")
+        with self.assertRaisesRegex(ManualEdgeHold,"OPERATOR_MISMATCH"):
+            self.journal.mark_former_standby(op,99,99,2222)
+        with self.assertRaisesRegex(ManualEdgeHold,"FORMER_ROLE_CHANGED"):
+            self.journal.mark_former_standby(op,77,77,2223)
+        self.assertEqual(self.journal.get(op)["status"],"ACTIVE")
+
+    def test_former_rearm_ui_verifies_pinned_key_probe_nat_then_quick_cta(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock,Mock
+        from manual_edge_wizard import ManualEdgeWizard
+        from manual_edge_rich import render_manual_card
+        op=self._former_after_verified_transfer()
+        probe=AsyncMock(return_value=True)
+        nat=AsyncMock(return_value=True)
+        key=Mock(return_value=self.fake_key())
+        wizard=ManualEdgeWizard(db=self.db,preflight=lambda:(2222,"pub"),
+            provision=AsyncMock(),verify=AsyncMock(),probe=probe,nat=nat,
+            queue=SimpleNamespace(),key_reader=key)
+        wizard._view=AsyncMock(return_value=42)
+        context=SimpleNamespace(user_data={})
+        app=SimpleNamespace(bot=SimpleNamespace(token="123:TEST"))
+        def invoke(callback):
+            asyncio.run(wizard.handle(
+                SimpleNamespace(),context,callback,
+                role="admin",actor=77,chat=77,app=app))
+            text,rows=wizard._view.await_args.args[1:]
+            render_manual_card(text,rows)
+            return text,[action for row in rows for _,action in row]
+        _,detail=invoke("apps_edge_manual_detail_"+op)
+        self.assertIn("apps_edge_manual_rearm_"+op,detail)
+        _,review=invoke("apps_edge_manual_rearm_"+op)
+        self.assertIn("apps_edge_manual_rearm_yes_"+op,review)
+        self.assertEqual(self.journal.get(op)["status"],"ACTIVE")
+        text,actions=invoke("apps_edge_manual_rearm_yes_"+op)
+        self.assertIn("دوباره Standby شد",text)
+        self.assertIn("apps_edge_quick_select_8.8.8.8",actions)
+        self.assertEqual(self.journal.get(op)["status"],"STANDBY")
+        key.assert_called_once_with("8.8.8.8",2299)
+        probe.assert_awaited_once_with("8.8.8.8",2222,2299)
+        nat.assert_awaited_once()
+        self.assertEqual(nat.await_args.args[-1],self.fake_key()[:2])
+        _,after=invoke("apps_edge_manual_detail_"+op)
+        self.assertIn("apps_edge_quick_select_8.8.8.8",after)
+
+    def test_former_rearm_hostkey_changed_blocks_probes_and_changes(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from manual_edge_wizard import ManualEdgeWizard
+        op=self._former_after_verified_transfer()
+        probe=AsyncMock(return_value=True)
+        nat=AsyncMock(return_value=True)
+        wizard=ManualEdgeWizard(db=self.db,preflight=lambda:(2222,"pub"),
+            provision=AsyncMock(),verify=AsyncMock(),probe=probe,nat=nat,
+            queue=SimpleNamespace(),
+            key_reader=lambda *_:("ssh-ed25519","DIFFERENT","SHA256:MISMATCH"))
+        wizard._view=AsyncMock(return_value=42)
+        asyncio.run(wizard.handle(SimpleNamespace(),SimpleNamespace(user_data={}),
+            "apps_edge_manual_rearm_yes_"+op,role="admin",actor=77,chat=77,
+            app=SimpleNamespace(bot=SimpleNamespace(token="123:TEST"))))
+        self.assertIn("FORMER_HOSTKEY_CHANGED",wizard._view.await_args.args[1])
+        probe.assert_not_awaited()
+        nat.assert_not_awaited()
+        self.assertEqual(self.journal.get(op)["status"],"ACTIVE")
+
+    def test_new_edge_standby_to_quick_switch_action_stays_visible(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from manual_edge_wizard import ManualEdgeWizard
+        op=self.prepare("8.8.8.8",port=2299)
+        self.journal.mark_standby(op,77,77)
+        wizard=ManualEdgeWizard(db=self.db,preflight=lambda:(2222,"pub"),
+            provision=AsyncMock(),verify=AsyncMock(),probe=AsyncMock(),
+            nat=AsyncMock(),queue=SimpleNamespace())
+        wizard._view=AsyncMock(return_value=42)
+        asyncio.run(wizard.handle(SimpleNamespace(),SimpleNamespace(user_data={}),
+            "apps_edge_manual_detail_"+op,role="admin",actor=77,chat=77,
+            app=SimpleNamespace(bot=SimpleNamespace(token="123:TEST"))))
+        self.assertIn("apps_edge_quick_select_8.8.8.8",
+            [action for row in wizard._view.await_args.args[2]
+             for _,action in row])
+
+
 if __name__=="__main__":
     unittest.main()

@@ -261,6 +261,107 @@ class ManualEdgeJournal:
             self._log(db,op_id,actor,snapshot["status"],"REMOVED_FROM_EDGE_LIST")
             return snapshot
 
+    def _former_standby_checks(self, db, op_id, actor, chat, customer_port):
+        """Fail closed on stale route/identity. Run again under write lock."""
+        op=db.execute(
+            "SELECT ip,status,admin_port,pin_type,pin_base64,archived_at "
+            "FROM manual_edge_operations "
+            "WHERE id=? AND actor=? AND chat=?",
+            (op_id,actor,chat),
+        ).fetchone()
+        if not op:
+            raise ManualEdgeHold("OPERATOR_MISMATCH")
+        ip,status,admin_port,key_type,key_data,archived=op
+        if archived is not None or status!="ACTIVE" or not ip:
+            raise ManualEdgeHold("FORMER_NOT_ELIGIBLE")
+        if not admin_port or not key_type or not key_data:
+            raise ManualEdgeHold("FORMER_IDENTITY_MISSING")
+        pool=db.execute(
+            "SELECT active,is_default,is_standby,provider,"
+            "provider_instance_id,service_port,admin_ssh_port "
+            "FROM host_pool WHERE host=?", (ip,),
+        ).fetchone()
+        if (not pool or pool!=(1,0,0,"manual",None,customer_port,admin_port)):
+            raise ManualEdgeHold("FORMER_ROLE_CHANGED")
+        st=dict(db.execute(
+            "SELECT key,value FROM settings WHERE key IN "
+            "('hosts','dns_current_ip','core_wg_public_ip',"
+            "'auto_failover_mode','phase6h_auto_failover_enabled',"
+            "'edge_egress_v1_onboard_enabled')"
+        ).fetchall())
+        defaults=db.execute(
+            "SELECT host FROM host_pool WHERE active=1 AND is_default=1"
+        ).fetchall()
+        if (len(defaults)!=1 or defaults[0][0] == ip
+                or not st.get("core_wg_public_ip")
+                or st.get("hosts") != defaults[0][0]
+                or st.get("dns_current_ip") != defaults[0][0]
+                or ip == st.get("core_wg_public_ip")):
+            raise ManualEdgeHold("FORMER_ROUTE_UNVERIFIED")
+        if any(st.get(flag)=="1" for flag in
+               ("auto_failover_mode","phase6h_auto_failover_enabled",
+                "edge_egress_v1_onboard_enabled")):
+            raise ManualEdgeHold("AUTO_FAILOVER_OR_K2_BUSY")
+        if db.execute(
+            "SELECT 1 FROM ssh_accounts WHERE host=? LIMIT 1",(ip,)
+        ).fetchone():
+            raise ManualEdgeHold("FORMER_USERS_STILL_ASSIGNED")
+        # Shared DNS, 6G and migration state must be settled. Completed
+        # historical jobs are retained, never deleted or rewritten.
+        if self._table_exists(db,"manual_quick_switch_jobs") and db.execute(
+            "SELECT 1 FROM manual_quick_switch_jobs WHERE kind='QUICK' "
+            "AND status NOT IN ('DONE','ABORTED') LIMIT 1"
+        ).fetchone():
+            raise ManualEdgeHold("FORMER_TRANSFER_UNRESOLVED")
+        if self._table_exists(db,"cloudzy_cz07_jobs") and db.execute(
+            "SELECT 1 FROM cloudzy_cz07_jobs WHERE (source=? OR target=?) "
+            "AND status NOT IN ('DONE','ABORTED','MOVED') LIMIT 1",
+            (ip,ip),
+        ).fetchone():
+            raise ManualEdgeHold("FORMER_TRANSFER_UNRESOLVED")
+        if self._table_exists(db,"failover_operations") and db.execute(
+            "SELECT 1 FROM failover_operations WHERE status='RUNNING' LIMIT 1"
+        ).fetchone():
+            raise ManualEdgeHold("FORMER_TRANSFER_UNRESOLVED")
+        return {"id":op_id,"ip":ip,"admin_port":admin_port,
+                "service_port":customer_port,
+                "pin_type":key_type,"pin_base64":key_data,
+                "source":defaults[0][0]}
+
+    def preview_former_standby(self, op_id, actor, chat, customer_port):
+        """Read-only eligibility before fresh independent SSH/WG/NAT checks."""
+        with self.db() as db:
+            self.initialize(db)
+            return self._former_standby_checks(
+                db,op_id,actor,chat,customer_port)
+
+    def mark_former_standby(self, op_id, actor, chat, customer_port):
+        """Rearm a historical ACTIVE Edge. No installer, DNS or account writes.
+
+        External network checks are performed by the wizard first; revalidate
+        every local guard atomically before changing role and journal.
+        """
+        with self.db() as db:
+            self.initialize(db)
+            db.execute("BEGIN IMMEDIATE")
+            self._protected(db)
+            snapshot=self._former_standby_checks(
+                db,op_id,actor,chat,customer_port)
+            ip=snapshot["ip"]
+            changed=db.execute(
+                "UPDATE host_pool SET is_standby=1 "
+                "WHERE host=? AND provider='manual' "
+                "AND provider_instance_id IS NULL AND active=1 "
+                "AND is_default=0 AND is_standby=0 "
+                "AND service_port=? AND admin_ssh_port=?",
+                (ip,customer_port,snapshot["admin_port"]),
+            ).rowcount
+            if changed!=1:
+                raise ManualEdgeHold("FORMER_ROLE_CHANGED")
+            self._cas(db,op_id,actor,chat,"ACTIVE","STANDBY",
+                      "FORMER_NETWORK_REVERIFIED")
+            return snapshot
+
     def assert_standby_candidate(self, op_id, actor, chat, customer_port):
         """Reject missing/stale inventory *before* expensive network probes."""
         with self.db() as db:

@@ -93,7 +93,7 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
         self.engine=FakeEngine()
         self.ui=ManualQuickSwitchUI(
             engine=self.engine,db=connect,admin_ids=lambda:[7],
-            now=lambda:100)
+            now=lambda:100,enabled=lambda:True)
         self.context=SimpleNamespace(
             application=SimpleNamespace(bot=SimpleNamespace(token="test-token")),
             user_data={})
@@ -121,6 +121,15 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
         await self.cb("apps_cz_home")
         self.assertIn("مدیریت Edge",FakeRich.cards[-1][0])
         self.assertNotIn("Cloudzy",FakeRich.cards[-1][0])
+
+    async def test_mutation_is_not_released_by_default(self):
+        self.ui.enabled=lambda:False
+        await self.cb("apps_edge_quick_select_45.59.126.73")
+        confirm=next(d for row in FakeRich.cards[-1][1] for _,d in row
+                     if d.startswith("apps_edge_quick_confirm_"))
+        await self.cb(confirm)
+        self.assertIn("فعال نشده",FakeRich.cards[-1][0])
+        self.assertFalse(any(e[0]=="start" for e in self.engine.events))
 
     async def test_admin_must_be_active_and_private(self):
         for kwargs in ({"role":"member"},{"actor":8,"chat":8},

@@ -1,7 +1,7 @@
 # NVL — گزارش فاز ۱: خواندن مقاوم Cloudzy و محدودسازی قفل‌ها
 
 **تاریخ:** 2026-10-29  
-**وضعیت:** تغییرات Source در PR #236؛ اجرای CI و Merge باید مستقل تأیید شوند. **عدم استقرار Production**.  
+**وضعیت:** **SOURCE_MERGED** — PR [#236](https://github.com/DenaSon/nvl-bot/pull/236)، commit `461d5ee0c11bd2637c9c56020122f5f59fc65112`. CI «Python checks» [run 40862996084](https://github.com/DenaSon/nvl-bot/actions/runs/40862996084) موفق: `3031` تست (۱۳ مورد skipped در اجرای اصلی) و بازآزمایی بسته انتشار به‌صورت Root (۳ مورد skipped). **CORE_DEPLOYED=NO / PRODUCTION_ACCEPTED=NO**.  
 **سند مبنا:** [برنامه پنج‌فازی](NVL_EDGE_RELIABILITY_MANUAL_RECOVERY_5_PHASE_PLAN_2026-10-29.md).  
 **هدف:** قطع تبدیل شکست موقت GET و عملیات نامرتبط به بن‌بست در خرید و آماده‌سازی Edge، بدون تغییر وضعیت کاربران، DNS و 6G.
 

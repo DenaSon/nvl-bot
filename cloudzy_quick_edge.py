@@ -883,7 +883,7 @@ class QuickEdgeWizard:
                         "uncertain_ack": False,
                     }
                 await self._display(query,
-                    "⚠️ <b>تأیید لغو عملیات Cloudzy</b>\n\n"
+                    ("🛡 <b>تأیید لغو محلی خرید نامشخص</b>\n\n" if uncertain\n                     else "⚠️ <b>تأیید لغو عملیات Cloudzy</b>\n\n")
                     f"شناسه: <code>{opid[:16]}</code>\n"
                     f"وضعیت: <b>{_text(op['status'])}</b>\n"
                     f"IP: <code>{_text(op.get('public_ipv4') or 'نامشخص')}</code>\n\n"

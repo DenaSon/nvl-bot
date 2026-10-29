@@ -37,6 +37,11 @@ class _VisibleText(HTMLParser):
 def _readable(source):
     if not isinstance(source, str) or len(source) > 4500:
         raise ManualRichHold("RICH_SCREEN_INVALID")
+    # Only legacy inline emphasis markers are accepted as *input* to the
+    # native block renderer. Never silently swallow unknown/malformed tags.
+    bare = re.sub(r"</?(?:b|code|i|strong|em)>", "", source)
+    if "<" in bare or ">" in bare:
+        raise ManualRichHold("RICH_SCREEN_INVALID")
     parser = _VisibleText()
     try:
         parser.feed(source)

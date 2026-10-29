@@ -433,6 +433,163 @@ class DurableCutoverQueue:
         log.warning("CZ07 job=%s stage=ABORTED code=SAFE_STALE_ROUTING_CLOSED", job[:16])
         return rec
 
+    def _hold_evidence(self, db, rec):
+        """Reconstruct only independently journaled SSH moves, never guesses.
+
+        CZ04B DONE batches are durable local CAS receipts. The separate
+        operator-approved emergency CAS has its own immutable one-job audit.
+        Counts of new users on the target are NOT proof of old job moves.
+        """
+        total = rec["total"]
+        source, target = rec["source"], rec["target"]
+        remaining = len(self.cz04b._source_accounts(db, source))
+        actual = total - remaining
+        if not 0 <= actual <= total or actual < rec["moved"]:
+            raise CZ07Hold("RECOVERY_SOURCE_COHORT_CHANGED")
+        batches = db.execute(
+            "SELECT COALESCE(SUM(count),0) FROM cloudzy_cz04b_operations "
+            "WHERE kind='users' AND status='DONE' AND source=? AND target=? "
+            "AND started_at>=?",
+            (source, target, rec["started_at"]),
+        ).fetchone()[0]
+        emergency = 0
+        if db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='nvl_emergency_migration_audit'"
+        ).fetchone():
+            audits = db.execute(
+                "SELECT source,target,affected,event_code "
+                "FROM nvl_emergency_migration_audit WHERE job_id=?",
+                (rec["id"],),
+            ).fetchall()
+            if len(audits) > 1:
+                raise CZ07Hold("RECOVERY_EMERGENCY_AUDIT_CONFLICT")
+            if audits:
+                original, destination, affected, code = audits[0]
+                if ((original, destination, code) !=
+                        (source, target, "EMERGENCY_LOCAL_CAS_E2E_PENDING")
+                        or type(affected) is not int or affected <= 0):
+                    raise CZ07Hold("RECOVERY_EMERGENCY_AUDIT_INVALID")
+                emergency = affected
+                if not db.execute(
+                    "SELECT 1 FROM cloudzy_cz07_events "
+                    "WHERE job_id=? AND stage='HOLD' "
+                    "AND code='EMERGENCY_LOCAL_CAS_E2E_PENDING' "
+                    "AND moved=? AND remaining=0 LIMIT 1",
+                    (rec["id"], total),
+                ).fetchone():
+                    raise CZ07Hold("RECOVERY_EMERGENCY_EVENT_MISSING")
+        if batches + emergency != actual:
+            raise CZ07Hold("RECOVERY_COMMITTED_MOVES_UNVERIFIED")
+        # Never accept vanished original accounts as successfully moved.
+        # A new customer created on the destination increases this count,
+        # but is not added to the immutable original job's total.
+        dest_active = db.execute(
+            "SELECT COUNT(*) FROM ssh_accounts WHERE service_type='ssh' "
+            "AND status LIKE '%فعال%' AND status NOT LIKE '%غیر%' "
+            "AND host=?", (target,),
+        ).fetchone()[0]
+        foreign = db.execute(
+            "SELECT COUNT(*) FROM ssh_accounts WHERE service_type='ssh' "
+            "AND status LIKE '%فعال%' AND status NOT LIKE '%غیر%' "
+            "AND COALESCE(host,'') NOT IN (?,?)",
+            (source, target),
+        ).fetchone()[0]
+        if dest_active < actual or foreign:
+            raise CZ07Hold("RECOVERY_ACTIVE_ACCOUNT_LOCATION_MISMATCH")
+        return {"moved": actual, "remaining": remaining,
+                "batches": batches, "emergency": emergency,
+                "extra_target": dest_active-actual}
+
+    async def review_hold(self, job, *, actor, chat):
+        """Network+ledger preflight with ZERO Cloudzy provider reads/writes."""
+        rec = await asyncio.to_thread(self.get, job)
+        if not rec or (rec["actor"], rec["chat"]) != (actor, chat):
+            raise CZ07Hold("RECOVERY_OWNER_MISMATCH")
+        if rec["status"] != "HOLD" or rec["cancel_requested"] or job in self._running:
+            raise CZ07Hold("RECOVERY_HOLD_NOT_IDLE")
+        ready = await asyncio.to_thread(self.cz04b._route_ready)
+        if ready != (rec["source"], rec["target"], rec["provider_id"]):
+            raise CZ07Hold("RECOVERY_ROUTE_CHANGED")
+        state = await asyncio.to_thread(
+            self.cz04b._ready_probe_state, rec["source"],
+            rec["target"], rec["provider_id"])
+        await self.cz04b._fresh(state, check_provider=False)
+        dns = await asyncio.to_thread(self.cz04b.dns.snapshot)
+        self.cz04b._expect_dns(dns, rec["target"])
+        await asyncio.to_thread(
+            self.cz04b._migration_snapshot, rec["source"], rec["target"])
+        with self.db() as db:
+            self._init(db)
+            self.cz04b.guard(db)
+            self.cz04b._guard_settings(self.cz04b._settings(db))
+            proof = self._hold_evidence(db, rec)
+        return rec, proof
+
+    def reconcile_hold(self, job, *, actor, chat, updated_at, expected_moved,
+                       expected_remaining):
+        """Persist a reviewed HOLD recovery; do NOT mutate DNS or SSH accounts.
+
+        Caller performs review_hold immediately before this CAS. The live
+        SQLite identity, route, original 6G and source ledger are checked again.
+        After full transfer, use VERIFYING -> MOVED (separate transport proof);
+        otherwise resume only remaining accounts, never replay a completed batch.
+        """
+        with self.db() as db:
+            self._init(db)
+            db.execute("BEGIN IMMEDIATE")
+            db.row_factory = sqlite3.Row
+            row = db.execute(
+                "SELECT * FROM cloudzy_cz07_jobs WHERE id=?", (job,)
+            ).fetchone()
+            if not row or (row["actor"], row["chat"]) != (actor, chat):
+                raise CZ07Hold("RECOVERY_OWNER_MISMATCH")
+            if (row["status"] != "HOLD" or row["updated_at"] != updated_at
+                    or row["cancel_requested"] or job in self._running):
+                raise CZ07Hold("RECOVERY_SNAPSHOT_CHANGED")
+            self.cz04b.guard(db)
+            self.cz04b._guard_settings(self.cz04b._settings(db))
+            if self.cz04b._open(db) or db.execute(
+                "SELECT 1 FROM failover_operations "
+                "WHERE status='RUNNING' LIMIT 1"
+            ).fetchone():
+                raise CZ07Hold("RECOVERY_LOCK_BUSY")
+            if db.execute(
+                "SELECT 1 FROM cloudzy_cz04a_actions "
+                "WHERE status NOT IN ('DONE','REJECTED') "
+                "AND host IN (?,?) LIMIT 1",
+                (row["source"], row["target"]),
+            ).fetchone():
+                raise CZ07Hold("RECOVERY_STANDBY_OPERATION_BUSY")
+            st = self.cz04b._settings(db)
+            if (st.get("hosts") != row["target"]
+                    or st.get("dns_current_ip") != row["target"]):
+                raise CZ07Hold("RECOVERY_ROUTE_METADATA_CHANGED")
+            defaults = db.execute(
+                "SELECT host,active,is_default,is_standby,provider,provider_instance_id "
+                "FROM host_pool WHERE is_default=1"
+            ).fetchall()
+            if defaults != [(row["target"], 1, 1, 0, "cloudzy",
+                             row["provider_id"])]:
+                raise CZ07Hold("RECOVERY_DEFAULT_CHANGED")
+            proof = self._hold_evidence(db, row)
+            if ((proof["moved"], proof["remaining"]) !=
+                    (expected_moved, expected_remaining)):
+                raise CZ07Hold("RECOVERY_ACCOUNT_SNAPSHOT_CHANGED")
+            status = "VERIFYING" if expected_remaining == 0 else "MIGRATING"
+            code = ("RECOVERED_TRANSPORT_REVIEW_REQUIRED" if status == "VERIFYING"
+                    else "RECOVERED_COMMITTED_CHECKPOINT")
+            if db.execute(
+                "UPDATE cloudzy_cz07_jobs SET status=?,moved=?,code=?,updated_at=? "
+                "WHERE id=? AND status='HOLD' AND updated_at=? "
+                "AND cancel_requested=0",
+                (status, expected_moved, code, int(self.now()), job, updated_at),
+            ).rowcount != 1:
+                raise CZ07Hold("RECOVERY_CAS_FAILED")
+            self._log(db, job, status, code,
+                      expected_moved, expected_remaining)
+        return status
+
     def request_cancel(self, job, *, actor, chat):
         """Record cancellation intent only; never stop an in-flight CZ04B write."""
         with self.db() as db:

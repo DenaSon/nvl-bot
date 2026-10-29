@@ -122,7 +122,8 @@ class QuickSwitchTests(unittest.IsolatedAsyncioTestCase):
 
         self.connect = connect
         self.engine = ManualQuickSwitch(
-            db_conn=connect,dns=self.dns,check_target=check
+            db_conn=connect,dns=self.dns,check_target=check,
+            guard=lambda db: None
         )
 
     def one(self, sql, *params):

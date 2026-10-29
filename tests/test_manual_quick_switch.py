@@ -158,6 +158,22 @@ class QuickSwitchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.engine.resume(
             job,actor="telegram:7"),"DONE")
 
+    async def test_shared_original_6g_lease_is_protected_before_dns(self):
+        from edge_egress_handoff import is_egress_recovery_hold
+        plan = await self.engine.preview(NEW)
+        job = self.engine._reserve(plan,actor="telegram:7",
+                                   evidence="real client verified")
+        detail = self.one(
+            "SELECT detail_json FROM failover_operations")[0]
+        self.assertTrue(is_egress_recovery_hold(detail))
+        self.assertEqual(self.engine.get(job)["status"],"DNS_INTENT")
+        self.assertEqual(self.one(
+            "SELECT host FROM host_pool WHERE is_default=1"),(OLD,))
+
+    async def test_preview_cannot_select_active_default_as_target(self):
+        with self.assertRaisesRegex(QuickSwitchHold,"INVALID_SOURCE_TARGET"):
+            await self.engine.preview(OLD)
+
     async def test_relevant_hold_blocks_route_without_6g_writes(self):
         with self.connect() as db:
             db.execute("UPDATE cloudzy_cz07_jobs SET source=?", (OLD,))

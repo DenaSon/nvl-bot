@@ -504,16 +504,23 @@ class ManualEdgeWizard:
         dispatch. No form server, Cloudzy API or runtime feature flag is used.
         """
         _RICH_SCOPE.set((app.bot.token,context,chat))
+        # Delete ANY password-state message BEFORE checking owner/session/TTL.
+        # An expired or missing session must not strand a raw root password
+        # in Telegram history.
+        if state=="MANUAL_EDGE_PASSWORD":
+            try:
+                await update.message.delete()
+            except Exception:
+                context.user_data.pop("state",None)
+                context.user_data.pop("manual_edge_session",None)
+                return await update.effective_chat.send_message(
+                    "⛔️ حذف پیام رمز ممکن نبود؛ نصب متوقف شد. "
+                    "این پیام را از تاریخچه چت حذف کنید.")
         if role!="admin" or actor!=chat or actor<=0:
             context.user_data.pop("manual_edge_session",None)
             context.user_data.pop("state",None)
             return await update.message.reply_text("⛔️ فقط مدیر در گفتگوی خصوصی مجاز است.")
         if text.strip() in ("/cancel","لغو","انصراف"):
-            if state=="MANUAL_EDGE_PASSWORD":
-                try:
-                    await update.message.delete()
-                except Exception:
-                    pass
             session=context.user_data.pop("manual_edge_session",None)
             context.user_data.pop("state",None)
             context.user_data.pop("manual_edge_candidate_ip",None)
@@ -561,16 +568,8 @@ class ManualEdgeWizard:
                        "apps_edge_manual_key_"+opid)],
                      [("↩️ وضعیت Edge","apps_edge_manual_home")]])
             if state=="MANUAL_EDGE_PASSWORD" and sess["stage"]=="password":
-                # NEVER put the password in context.user_data (persistent)
-                # and never log it. Delete even on validation failures.
-                try:
-                    await update.message.delete()
-                except Exception:
-                    context.user_data.pop("state",None)
-                    context.user_data.pop("manual_edge_session",None)
-                    return await update.effective_chat.send_message(
-                        "⛔️ حذف پیام رمز ممکن نبود؛ برای جلوگیری از ماندن رمز "
-                        "در تاریخچه چت، نصب اجرا نشد. پیام را دستی حذف کنید.")
+                # Password was already deleted before session/TTL validation.
+                # NEVER put it in context.user_data (persistent) or any log.
                 context.user_data.pop("state",None)
                 context.user_data.pop("manual_edge_session",None)
                 op=await asyncio.to_thread(self.journal.get,opid)

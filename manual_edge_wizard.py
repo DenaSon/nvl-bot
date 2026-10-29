@@ -135,7 +135,7 @@ class ManualEdgeWizard:
         if op is None:
             return await self._view(query,
                 "🛟 <b>افزودن Edge دستی</b>\n\n"
-                "سرور خودتان را بدون Cloudzy اضافه کنید. "
+                "سرور خودتان را به‌صورت دستی اضافه کنید. "
                 "تغییر DNS پس از آماده‌سازی فقط از طریق Cloudflare انجام می‌شود.",
                 [[("➕ افزودن سرور", "apps_edge_manual_new")],
                  [("↩️ مدیریت Edge","apps_cz_home")]])
@@ -448,7 +448,7 @@ class ManualEdgeWizard:
                         "MOVED":"رله فعال، پذیرش مشتری در انتظار",
                     }.get(rec["status"],"نیازمند بررسی"))+"</b>",
                     [[("🔄 تازه‌سازی","apps_edge_manual_progress_"+opid)],
-                     [("📋 بررسی و بازیابی صف","apps_cz7_status")]])
+                     [("🔄 وضعیت عملیات","apps_edge_manual_home")]])
             if data.startswith("apps_edge_manual_finish_"):
                 opid=data[len("apps_edge_manual_finish_"):]
                 op=await asyncio.to_thread(self.journal.get,opid)

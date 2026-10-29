@@ -247,7 +247,7 @@ class CloudzyServiceTests(unittest.TestCase):
             self.client.delete_server("s", confirm=True)
 
     def test_read_network_and_bad_json_are_distinct(self):
-        self.session.responses = [OSError("failed")]
+        self.session.responses = [OSError("failed"), OSError("failed")]
         with self.assertRaises(CloudzyError):
             self.client.list_servers()
         self.session.responses = [FakeResponse({"ignored": True}, invalid_json=True)]
@@ -256,6 +256,75 @@ class CloudzyServiceTests(unittest.TestCase):
         self.session.responses = [FakeResponse({"ignored": True}, invalid_json=True)]
         with self.assertRaises(CloudzyUncertainError):
             self.client.restart_server("id")
+
+
+    def test_safe_get_retries_once_after_timeout_without_replaying_mutation(self):
+        self.session.responses = [
+            TimeoutError("PRIVATE timed out"),
+            FakeResponse({"id": "svc", "state": "active"}),
+        ]
+        client = CloudzyService(
+            token="hpt_TEST_DO_NOT_EXPOSE", session=self.session, sleep=lambda _: None,
+        )
+        with self.assertLogs("cloudzy_service", level="WARNING") as logs:
+            result = client.get_server("svc")
+        self.assertEqual(result["state"], "active")
+        self.assertEqual([x[0] for x in self.session.calls], ["GET", "GET"])
+        self.assertTrue(all(x[2]["timeout"] <= 15 for x in self.session.calls))
+        self.assertIn("code=TIMEOUT", logs.output[0])
+        self.assertNotIn("PRIVATE", logs.output[0])
+        self.assertNotIn("hpt_TEST_DO_NOT_EXPOSE", logs.output[0])
+
+    def test_repeated_timeout_is_bounded_and_carries_retry_count(self):
+        from cloudzy_service import CloudzyReadError
+        self.session.responses = [
+            TimeoutError("secret1"), TimeoutError("secret2"),
+            FakeResponse({"unexpected": True}),
+        ]
+        client = CloudzyService(
+            token="hpt_TEST_DO_NOT_EXPOSE", session=self.session, sleep=lambda _: None,
+        )
+        with self.assertRaises(CloudzyReadError) as ctx:
+            client.get_server("svc")
+        self.assertEqual(ctx.exception.kind, "TIMEOUT")
+        self.assertEqual(ctx.exception.attempts, 2)
+        self.assertEqual(len(self.session.calls), 2)
+        self.assertNotIn("secret", str(ctx.exception))
+
+    def test_read_503_retries_but_auth_and_nonretryable_4xx_do_not(self):
+        client = CloudzyService(
+            token="hpt_TEST_DO_NOT_EXPOSE", session=self.session, sleep=lambda _: None,
+        )
+        self.session.responses = [
+            FakeResponse({"error": "transient"}, status=503),
+            FakeResponse({"healthy": True}),
+        ]
+        self.assertTrue(client.list_servers()["healthy"])
+        self.assertEqual(len(self.session.calls), 2)
+        for code in (401, 403, 404):
+            self.session.calls.clear()
+            self.session.responses = [
+                FakeResponse({"message": "bad"}, status=code),
+                FakeResponse({"unexpected": True}),
+            ]
+            with self.assertRaises(CloudzyAPIError) as ctx:
+                client.list_servers()
+            self.assertEqual(ctx.exception.status, code)
+            self.assertEqual(len(self.session.calls), 1)
+
+    def test_no_write_retries_even_if_read_retries_enabled(self):
+        self.session.responses = [TimeoutError("secret"), FakeResponse({"ok": True})]
+        with self.assertRaises(CloudzyUncertainError):
+            self.client.create_server(hostname="one", plan_id="p", region="fra",
+                                      confirm=True, idempotency_key="fixed")
+        self.assertEqual(len(self.session.calls), 1)
+        self.assertEqual(self.session.calls[0][0], "POST")
+
+    def test_retry_constructor_bounds(self):
+        for kwargs in ({"read_max_attempts": 0}, {"read_max_attempts": 4},
+                       {"read_retry_delay": -1}, {"read_retry_delay": 4}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                CloudzyService(token="t", session=self.session, **kwargs)
 
     def test_constructor_validation(self):
         with self.assertRaises(ValueError):

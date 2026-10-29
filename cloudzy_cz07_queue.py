@@ -449,8 +449,9 @@ class DurableCutoverQueue:
         batches = db.execute(
             "SELECT COALESCE(SUM(count),0) FROM cloudzy_cz04b_operations "
             "WHERE kind='users' AND status='DONE' AND source=? AND target=? "
-            "AND started_at>=?",
-            (source, target, rec["started_at"]),
+            "AND actor=? AND chat=? AND provider_id=? AND started_at>=?",
+            (source, target, rec["actor"], rec["chat"], rec["provider_id"],
+             rec["started_at"]),
         ).fetchone()[0]
         emergency = 0
         if db.execute(

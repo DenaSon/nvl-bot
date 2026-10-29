@@ -52,6 +52,7 @@ class ManualQuickSwitchUI:
         # Volatile preview; never serialize customer rows into user_data.
         self.pending = {}
         self.running = set()
+        self.last_errors = {}
 
     async def _view(self, context, chat, text, rows):
         return await ManualRichDelivery(context.application.bot.token).show(
@@ -90,7 +91,7 @@ class ManualQuickSwitchUI:
         rows=[]
         if rec and rec["kind"]=="QUICK" and rec["status"] not in ("DONE","ABORTED"):
             rows.append([("⚠️ بررسی انتقال ناتمام","apps_edge_quick_status")])
-        for ip in standby[:8]:
+        for ip in standby[:6]:
             rows.append([("🔁 تغییر IP به "+ip, "apps_edge_quick_select_"+ip)])
         rows.extend([
             [("➕ افزودن Edge دستی","apps_edge_manual_home")],
@@ -104,11 +105,13 @@ class ManualQuickSwitchUI:
     async def _status(self,context,chat):
         current,standby,count=await asyncio.to_thread(self._inventory)
         rec=await asyncio.to_thread(self.engine.latest)
+        error=self.last_errors.get(str(chat))
         if not rec:
             return await self._view(
                 context,chat,"📋 <b>سوابق انتقال</b>\n\n"
                 "هنوز عملیات Quick Switch در Journal جدید ثبت نشده است.\n"
-                f"Edge فعال: <code>{escape(current or 'نامشخص')}</code>",
+                f"Edge فعال: <code>{escape(current or 'نامشخص')}</code>\n"
+                f"آخرین نتیجه: {escape(error or 'بدون عملیات جدید')}",
                 [[("🔄 تازه‌سازی","apps_edge_quick_status")],
                  [("↩️ مدیریت Edge","apps_edge_quick_home")]])
         status=rec["status"]
@@ -131,7 +134,7 @@ class ManualQuickSwitchUI:
             f"مقصد: <code>{escape(rec['target'])}</code>\n"
             f"حساب‌های انتقال: <b>{rec['account_count']}</b>\n"
             f"وضعیت: <b>{escape(label)}</b>\n"
-            f"جزئیات فنی: <code>{escape(rec['error_code'] or '—')}</code>\n\n"
+            f"جزئیات فنی: <code>{escape(rec['error_code'] or error or '—')}</code>\n\n"
             "تکمیل فنی، جایگزین بررسی اتصال واقعی مشتری نیست.",
             rows)
 
@@ -146,9 +149,14 @@ class ManualQuickSwitchUI:
                     lambda: asyncio.run(self.engine.start(
                         plan,actor=actor,
                         client_witness="ADMIN_CONFIRMED_INDEPENDENT_NPV_ISP_E2E")))
-        except Exception:
+        except Exception as exc:
             # Durable engine journal is the source of truth; no second DNS PUT.
-            pass
+            # Only a sanitized reason is retained for UI diagnostics.
+            self.last_errors[str(actor)] = (
+                str(exc) if isinstance(exc,QuickSwitchHold)
+                else type(exc).__name__)
+        else:
+            self.last_errors.pop(str(actor),None)
         finally:
             self.running.discard(str(actor))
 

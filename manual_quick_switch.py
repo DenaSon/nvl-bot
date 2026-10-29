@@ -67,6 +67,7 @@ class ManualQuickSwitch:
         self.check_target = check_target
         self.guard = guard or (lambda db: None)
         self.now = now
+        self._resume_lock = asyncio.Lock()
 
     @staticmethod
     def _init(db):
@@ -286,6 +287,25 @@ class ManualQuickSwitch:
             ).fetchone()
             return dict(rec) if rec else None
 
+    def latest(self, *, actor=None):
+        """Find the recoverable intent when a callback lost its returned ID."""
+        with self.db() as db:
+            if not _has(db, "manual_quick_switch_jobs"):
+                return None
+            db.row_factory = __import__("sqlite3").Row
+            if actor is None:
+                row = db.execute(
+                    "SELECT * FROM manual_quick_switch_jobs "
+                    "ORDER BY created_at DESC,id DESC LIMIT 1"
+                ).fetchone()
+            else:
+                row = db.execute(
+                    "SELECT * FROM manual_quick_switch_jobs "
+                    "WHERE actor=? ORDER BY created_at DESC,id DESC LIMIT 1",
+                    (str(actor),)
+                ).fetchone()
+            return dict(row) if row else None
+
     def _hold(self, job, code):
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -429,6 +449,13 @@ class ManualQuickSwitch:
             self._log(db, rec["id"], "DONE", "LIVE_DNS_DB_VERIFIED")
 
     async def resume(self, job, *, actor, retry_dns=False):
+        # Serializes double-clicks/retries in the running bot process. The
+        # durable shared 6G lease provides cross-operation protection.
+        async with self._resume_lock:
+            return await self._resume_once(
+                job, actor=actor, retry_dns=retry_dns)
+
+    async def _resume_once(self, job, *, actor, retry_dns=False):
         rec = self.get(job)
         if not rec or rec["kind"] != "QUICK" or rec["actor"] != str(actor):
             raise QuickSwitchHold("OPERATOR_OR_JOB_MISMATCH")
@@ -484,7 +511,8 @@ class ManualQuickSwitch:
         No route/account/Cloudflare/6G/CZ07 mutations. Operator must provide a
         real client witness and independently observed active-account count.
         """
-        if (not actor or not str(client_witness).strip()
+        if (not actor or not isinstance(client_witness, str)
+                or not client_witness.strip() or len(client_witness) > 256
                 or type(expected_active) is not int or expected_active < 1):
             raise QuickSwitchHold("EXTERNAL_WITNESS_REQUIRED")
         with self.db() as db:
@@ -500,9 +528,18 @@ class ManualQuickSwitch:
                 "WHERE host IN (?,?)", (source,target)
             ).fetchall()
             op = db.execute(
-                "SELECT status FROM manual_edge_operations WHERE ip=?",
+                "SELECT id,status,reason FROM manual_edge_operations WHERE ip=?",
                 (target,)
             ).fetchone()
+            emergency_receipt = bool(
+                op and op[2] == "EMERGENCY_DELETED_SOURCE_RECOVERY"
+                and db.execute(
+                    "SELECT 1 FROM manual_edge_events "
+                    "WHERE op_id=? AND status='ACTIVE' "
+                    "AND code='EMERGENCY_DELETED_SOURCE_RECOVERY' LIMIT 1",
+                    (op[0],)
+                ).fetchone()
+            )
             count = db.execute(
                 "SELECT COUNT(*) FROM ssh_accounts WHERE service_type='ssh' "
                 "AND " + ACTIVE + " AND host=?", (target,)
@@ -514,7 +551,7 @@ class ManualQuickSwitch:
             if (source == target or source == st.get("core_wg_public_ip")
                     or defaults != [(target,)] or
                     st.get("hosts") != target or st.get("dns_current_ip") != target
-                    or op != ("ACTIVE",) or
+                    or not op or op[1] != "ACTIVE" or not emergency_receipt or
                     (target,1,1,"manual") not in roles or
                     not any(r[0] == source and r[2] == 0 for r in roles)
                     or count != expected_active or other):
@@ -546,10 +583,19 @@ class ManualQuickSwitch:
                 "SELECT host FROM host_pool WHERE active=1 AND is_default=1"
             ).fetchall() != [(target,)]:
                 raise QuickSwitchHold("EXTERNAL_DEFAULT_CHANGED")
-            if db.execute(
-                "SELECT COUNT(*) FROM ssh_accounts WHERE service_type='ssh' "
-                "AND " + ACTIVE + " AND host=?", (target,)
-            ).fetchone()[0] != expected_active:
+            st_now = dict(db.execute(
+                "SELECT key,value FROM settings "
+                "WHERE key IN ('hosts','dns_current_ip')"
+            ).fetchall())
+            if (st_now.get("hosts") != target
+                    or st_now.get("dns_current_ip") != target):
+                raise QuickSwitchHold("EXTERNAL_METADATA_CHANGED")
+            counts = db.execute(
+                "SELECT COUNT(*),SUM(CASE WHEN host=? THEN 1 ELSE 0 END) "
+                "FROM ssh_accounts WHERE service_type='ssh' AND " + ACTIVE,
+                (target,)
+            ).fetchone()
+            if counts[0] != expected_active or counts[1] != expected_active:
                 raise QuickSwitchHold("EXTERNAL_ACCOUNTS_CHANGED")
             existing = db.execute(
                 "SELECT id FROM manual_quick_switch_jobs "

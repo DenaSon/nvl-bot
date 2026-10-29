@@ -1380,11 +1380,35 @@ class JournalTests(unittest.TestCase):
         with self.assertRaises(QuickEdgeHold):
             self.reserve()
         self.journal.change(opid, "CREATING", "CREATE_UNCERTAIN", hold_reason="UNCERTAIN")
+        # This was the production deadlock: a historical uncertain order
+        # must not hold the global purchase lease.
+        second = self.reserve()
+        self.assertNotEqual(second, opid)
         with self.assertRaises(QuickEdgeHold):
-            self.reserve()
+            self.reserve()  # The NEW active order still fences its owner.
         with self.assertRaises(QuickEdgeHold):
             self.journal.change(opid, "CREATING", "CREATED")
         self.assertEqual(self.journal.get(opid)["status"], "CREATE_UNCERTAIN")
+        self.assertEqual(self.journal.get(second)["status"], "CREATING")
+
+    def test_separate_operator_can_buy_while_first_order_is_running(self):
+        first = self.reserve()
+        other = self.journal.reserve(
+            actor=3, chat=4, region="DE-Frankfurt", plan="plan",
+            cycle="hourly", price=350, port=2252,
+            pubkey="ssh-ed25519 AAAA",
+        )
+        self.assertNotEqual(first, other)
+        self.assertEqual(self.journal.get(first)["status"], "CREATING")
+        self.assertEqual(self.journal.get(other)["status"], "CREATING")
+
+    def test_historical_registered_hold_does_not_block_independent_purchase(self):
+        first = self.reserve()
+        self.journal.change(first, "CREATING", "HOLD_PROVISION",
+                            hold_reason="PARTIAL_OR_UNVERIFIED_LEGACY_INSTALL")
+        second = self.reserve()
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.journal.get(first)["status"], "HOLD_PROVISION")
 
     def test_only_globally_routable_ip_is_accepted(self):
         self.assertEqual(_public_ipv4({"data": {"primaryIpv4": "8.8.4.4"}}), "8.8.4.4")

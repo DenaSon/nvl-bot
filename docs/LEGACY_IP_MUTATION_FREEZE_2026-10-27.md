@@ -132,3 +132,30 @@ closed. Do not advertise this workflow as the atomic CZ04B/CZ07 engine or claim
 Phase 4/5 Production acceptance based on this audit. The operator-approved
 manual path is the immediate priority; optional VPS bootstrap/WebApp hardening
 is tracked separately and never blocks IP switching.
+ 
+## 2026-10-29 — Telegram disabled-message hotfix
+
+The Telegram menu `برنامه‌ها → مدیریت Edge → افزودن دستی` reached
+`ManualEdgeWizard.handle`. On installations with
+`NVL_EDGE_MANUAL_ENABLED=0`, the code incorrectly displayed
+`افزودن سرور دستی هنوز در این نصب فعال نشده است`, implying the *existing*
+manual-IP workflow was unavailable. That warning only belonged to the
+separate new-VPS credential intake.
+
+Patch: when the optional new-VPS bootstrap is unavailable, the same Rich
+Telegram entry now offers **two already-existing callbacks**:
+`hp_add` (register an already prepared Edge IP in host-pool) and
+`hp_menu` (manage relay IP/default; existing `hpdef_` and confirmed
+`hpdef_migrate_/hpdefmig_yes_` continue to use the current Cloudflare
+integration). No new flag or HTTPS origin is necessary for this route.
+The existing bot authorization, protected-mode and route/DNS guards are
+**not** bypassed, removed or downgraded.
+
+This is a **navigation-only hotfix** to
+`manual_edge_wizard.py`, not an automatic cutover or installer fix.
+Before installing it to Core, verify its pinned SHA and restart `nvlbot`
+with a saved copy and rollback. On Telegram verify the menu shows
+`ثبت IP سرور آماده` and `مدیریت IP و انتخاب رله` and that no change
+to the current active IP/users occurs just from opening that menu.
+`NVL_EDGE_MANUAL_ENABLED` continues to control only the *optional* new
+SSH bootstrap, which still requires HTTPS for secure root-password entry.

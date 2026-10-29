@@ -26,14 +26,6 @@ def resolve_ssh_reactivation_host(db, previous_host):
     MOVED/DONE cutover retired it. Unknown, inactive, standby, Core and unlisted hosts
     must be replaced only by a verifiably eligible current default.
     """
-    if _table_exists(db, "cloudzy_cz07_jobs"):
-        unresolved = db.execute(
-            "SELECT 1 FROM cloudzy_cz07_jobs "
-            "WHERE status NOT IN ('DONE','ABORTED','MOVED') LIMIT 1"
-        ).fetchone()
-        if unresolved:
-            raise SSHReactivationHold("SSH_REACTIVATION_CZ07_UNRESOLVED")
-
     settings = dict(db.execute(
         "SELECT key,value FROM settings "
         "WHERE key IN ('hosts','core_wg_public_ip','dns_current_ip')"
@@ -60,6 +52,31 @@ def resolve_ssh_reactivation_host(db, previous_host):
         ).fetchall()
     ]
     default = defaults[0] if len(defaults) == 1 else None
+
+    # An unrelated historical CZ-07 HOLD must not freeze SSH renewals.
+    # Only a nonfinal job involving the current customer route (or an
+    # explicitly configured previous customer host) owns this reactivation.
+    # Keep the check inside the caller's BEGIN IMMEDIATE transaction.
+    if _table_exists(db, "cloudzy_cz07_jobs"):
+        open_jobs = db.execute(
+            "SELECT source,target FROM cloudzy_cz07_jobs "
+            "WHERE status NOT IN ('DONE','ABORTED','MOVED')"
+        ).fetchall()
+        if open_jobs:
+            # Do not ignore stale migration metadata if the live single-host
+            # route cannot be established from the authoritative local DB.
+            if (not default or not eligible(default) or not configured
+                    or configured[0] != default
+                    or settings.get("dns_current_ip") != default):
+                raise SSHReactivationHold(
+                    "SSH_REACTIVATION_CZ07_ROUTE_UNVERIFIED")
+            affected = {default}
+            if eligible(old):
+                affected.add(old)
+            if any(source in affected or target in affected
+                   for source, target in open_jobs):
+                raise SSHReactivationHold(
+                    "SSH_REACTIVATION_CZ07_UNRESOLVED")
 
     # A verified transport-complete CZ-07 cutover is authoritative; the previous
     # source may still be powered on and even active in host_pool.

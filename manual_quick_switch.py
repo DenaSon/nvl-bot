@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import secrets
+import sqlite3
 import time
 
 from manual_edge_identity import resolve as resolve_edge
@@ -288,7 +289,7 @@ class ManualQuickSwitch:
         with self.db() as db:
             if not _has(db, "manual_quick_switch_jobs"):
                 return None
-            db.row_factory = __import__("sqlite3").Row
+            db.row_factory = sqlite3.Row
             rec = db.execute(
                 "SELECT * FROM manual_quick_switch_jobs WHERE id=?", (job,)
             ).fetchone()
@@ -299,7 +300,7 @@ class ManualQuickSwitch:
         with self.db() as db:
             if not _has(db, "manual_quick_switch_jobs"):
                 return None
-            db.row_factory = __import__("sqlite3").Row
+            db.row_factory = sqlite3.Row
             if actor is None:
                 row = db.execute(
                     "SELECT * FROM manual_quick_switch_jobs "
@@ -619,6 +620,11 @@ class ManualQuickSwitch:
             ).fetchone()
             if existing:
                 return existing[0]
+            roster = db.execute(
+                "SELECT username,host,status FROM ssh_accounts "
+                "WHERE service_type='ssh' AND " + ACTIVE +
+                " ORDER BY username"
+            ).fetchall()
             job = secrets.token_hex(16)
             db.execute(
                 "INSERT INTO manual_quick_switch_jobs "
@@ -627,7 +633,7 @@ class ManualQuickSwitch:
                 "dns_before_json,lease_id,created_at,updated_at) "
                 "VALUES (?,'EXTERNAL','EXTERNAL_VERIFIED',?,?,?,?,?,?,?,?,NULL,?,?)",
                 (job,source,target,str(actor),client_witness,
-                 "EXTERNAL_CURRENT_ROSTER",expected_active,target,
+                 _hash(roster),expected_active,target,
                  json.dumps(dns,sort_keys=True),now,now),
             )
             self._log(db, job, "EXTERNAL_VERIFIED",

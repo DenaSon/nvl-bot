@@ -1277,6 +1277,69 @@ class DurableCutoverQueue:
                     [[("🚀 بررسی انتقال بعدی", "apps_cz7_home")],
                      [("📋 مشاهده نتیجه", "apps_cz7_status")]], markup)
                 return
+            if data.startswith("apps_cz7_hold_review_"):
+                job = data[len("apps_cz7_hold_review_"):]
+                rec, proof = await self.review_hold(job, actor=actor, chat=chat)
+                nonce = secrets.token_hex(8)
+                context.user_data["cz7_hold_recovery"] = {
+                    "job": job, "actor": actor, "chat": chat,
+                    "updated_at": rec["updated_at"],
+                    "moved": proof["moved"], "remaining": proof["remaining"],
+                    "nonce": nonce, "expires": self.now() + APPROVAL_TTL,
+                }
+                complete = proof["remaining"] == 0
+                action = ("✅ ثبت بررسی انتقال" if complete
+                          else "▶️ ادامه حساب‌های باقی‌مانده")
+                await self._display(query,
+                    "🔎 <b>بررسی انتقال متوقف‌شده</b>\n\n"
+                    f"مبدأ: <code>{_short(rec['source'])}</code>\n"
+                    f"مقصد: <code>{_short(rec['target'])}</code>\n"
+                    f"حساب‌های جابه‌جاشده: <b>{proof['moved']}/{rec['total']}</b>\n"
+                    f"باقی‌مانده: <b>{proof['remaining']}</b>\n"
+                    f"حساب‌های جدید مقصد: <b>{proof['extra_target']}</b>\n\n"
+                    "هویت SSH، تونل، مسیر، DNS زنده و رسیدهای ثبت‌شده "
+                    "بررسی شدند. هیچ درخواستی به Cloudzy ارسال نشده است.\n\n"
+                    + ("تأیید، پرونده را برای کنترل نهایی انتقال آماده می‌کند؛ "
+                       "پذیرش کامل سرویس همچنان جداست."
+                       if complete else
+                       "با تأیید فقط حساب‌های باقی‌مانده از آخرین وضعیت "
+                       "معتبر انتقال داده می‌شوند؛ سرور قبلی حذف نمی‌شود."),
+                    [[(action, "apps_cz7_hold_go_"+nonce)],
+                     [("انصراف", "apps_cz7_status")]], markup)
+                return
+            if data.startswith("apps_cz7_hold_go_"):
+                session = context.user_data.pop("cz7_hold_recovery", None)
+                if (not isinstance(session, dict)
+                        or (session.get("actor"), session.get("chat")) !=
+                           (actor, chat)
+                        or self.now() > session.get("expires", 0)
+                        or data != "apps_cz7_hold_go_"+session.get("nonce", "")):
+                    raise CZ07Hold("RECOVERY_CONFIRMATION_EXPIRED")
+                job = session["job"]
+                if (session["remaining"] and
+                        (not self.enabled() or not self.cz04b.enabled())):
+                    raise CZ07Hold("CZ07_OR_CZ04B_DISABLED")
+                rec, proof = await self.review_hold(job, actor=actor, chat=chat)
+                if (rec["updated_at"] != session["updated_at"]
+                        or (proof["moved"], proof["remaining"]) !=
+                           (session["moved"], session["remaining"])):
+                    raise CZ07Hold("RECOVERY_PREVIEW_EXPIRED")
+                status = await asyncio.to_thread(
+                    self.reconcile_hold, job, actor=actor, chat=chat,
+                    updated_at=session["updated_at"],
+                    expected_moved=session["moved"],
+                    expected_remaining=session["remaining"])
+                if status == "MIGRATING":
+                    self.launch(app, job, resume=True)
+                await self._display(query,
+                    ("✅ <b>انتقال برای کنترل نهایی ثبت شد.</b>\n"
+                     "برای آزادکردن مسیر انتقال بعدی، "
+                     "کنترل فنی تکمیل انتقال را اجرا کنید."
+                     if status == "VERIFYING" else
+                     "▶️ <b>انتقال باقی‌مانده از آخرین Checkpoint آغاز شد.</b>\n"
+                     "پیشرفت واقعی از دیتابیس خوانده می‌شود."),
+                    [[("🔄 وضعیت", "apps_cz7_status")]], markup)
+                return
             if data.startswith("apps_cz7_recover_"):
                 job = data[len("apps_cz7_recover_"):]
                 rec = await asyncio.to_thread(self.recovery_preview, job, actor, chat)
@@ -1379,14 +1442,29 @@ class DurableCutoverQueue:
                 item = await asyncio.to_thread(self.get, job)
                 if not item or (actor,chat) != (item["actor"], item["chat"]):
                     raise CZ07Hold("RESUME_OWNER_MISMATCH")
-                if item["status"] not in ("MIGRATING", "PAUSED_SAFE"):
+                if item["status"] not in ("QUEUED", "MIGRATING", "PAUSED_SAFE"):
                     raise CZ07Hold("RESUME_ONLY_AFTER_ROUTE_READY")
                 if item.get("cancel_requested"):
                     raise CZ07Hold("CANCEL_PENDING_RECONCILE_BEFORE_RESUME")
                 if not self.enabled() or not self.cz04b.enabled():
                     raise CZ07Hold("CZ07_OR_CZ04B_DISABLED")
-                # Post-restart safety: never replay a route or any unresolved
-                # CZ04B lease. Per-user jobs use fresh CAS and read DB truth.
+                # QUEUED is pre-route: verify the original source cohort
+                # before starting the route once, never replay ROUTING.
+                if item["status"] == "QUEUED":
+                    state = await asyncio.to_thread(
+                        self.cz04b._state, item["target"])
+                    if (state["source"] != item["source"]
+                            or state["provider_id"] != item["provider_id"]
+                            or _digest(state["users"]) !=
+                               item["source_fingerprint"]):
+                        raise CZ07Hold("QUEUED_SOURCE_SNAPSHOT_CHANGED")
+                    self.launch(app, job, resume=False)
+                    await self._display(query,
+                        "▶️ <b>درخواست ثبت‌شده از همان مرحله آغاز شد.</b>",
+                        [[("🔄 وضعیت", "apps_cz7_status")]], markup)
+                    return
+                # Post-restart safety: never replay ROUTING or an uncertain
+                # CZ04B cutover. Resumed batches derive account state from DB.
                 ready = await asyncio.to_thread(self.cz04b._route_ready)
                 if ready != (item["source"],item["target"],item["provider_id"]):
                     raise CZ07Hold("ROUTE_NO_LONGER_VERIFIED")

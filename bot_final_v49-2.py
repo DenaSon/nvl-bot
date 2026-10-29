@@ -406,6 +406,8 @@ from cloudzy_cz04a import Cloudzy04A
 from cloudzy_cz04b_guarded import GuardedCloudzy04B
 from cloudzy_cz07_queue import DurableCutoverQueue
 from cloudzy_cz04b_dns import CloudflareExactDNS
+from manual_edge_wizard import ManualEdgeWizard
+from manual_edge_secure_form import ManualFormStore, serve_private
 from cloudzy_admin_panel import CloudzyAdminPanel
 from edge_egress_k2_root_direct import (
     bound_root_client as k2_root_direct_client,
@@ -3804,7 +3806,7 @@ def _next_edge_wg_ip():
     return f"10.77.0.{n}"
 
 
-def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, private_key_path=None, connect_retries=1, *, protected_wizard=False, trusted_host_key=None):
+def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, private_key_path=None, connect_retries=1, *, protected_wizard=False, trusted_host_key=None, admin_ssh_port=None):
     """
     تابع مسدودکننده (blocking، به‌خاطر paramiko و subprocess). باید حتماً با
     asyncio.to_thread صدا زده شود، نه مستقیم داخل event loop.
@@ -3842,7 +3844,9 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
             if _verified_key.get_name() != _key_type:
                 raise ValueError("SSH_HOST_KEY_TYPE_MISMATCH")
             ssh.get_host_keys().add(edge_ip, _key_type, _verified_key)
-            ssh.get_host_keys().add(f"[{edge_ip}]:{_normalize_ssh_port(customer_port, 22)}",
+            pinned_port = _normalize_ssh_port(
+                admin_ssh_port if admin_ssh_port is not None else customer_port,22)
+            ssh.get_host_keys().add(f"[{edge_ip}]:{pinned_port}",
                                     _key_type, _verified_key)
             ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
         except Exception:
@@ -3854,7 +3858,10 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
     # قبلاً (مثلاً از طریق پنل «تغییر واقعی پورت SSH») پورتش عوض شده و الان دیگه واقعاً یک VPS
     # خام نیست، غلطه — sshd دیگه روی ۲۲ گوش نمی‌ده. الان اگه ۲۲ جواب نداد، پورتِ مشتری که خودِ
     # ادمین همین الان وارد کرده (customer_port) هم به‌عنوان تلاش دوم امتحان می‌شه.
-    candidate_ports = [22] + ([_normalize_ssh_port(customer_port, 22)] if _normalize_ssh_port(customer_port, 22) != 22 else [])
+    candidate_ports = ([_normalize_ssh_port(admin_ssh_port,22)]
+        if admin_ssh_port is not None else
+        [22] + ([_normalize_ssh_port(customer_port,22)]
+                if _normalize_ssh_port(customer_port,22)!=22 else []))
     for attempt in range(connect_retries):
         for cp in candidate_ports:
             try:
@@ -4005,7 +4012,8 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
 async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, chat_id, app,
                                private_key_path=None, connect_retries=1, provider=None, provider_instance_id=None,
                                *, egress_stage_requested=False, trusted_host_key=None,
-                               pool_active=True):
+                               pool_active=True, admin_ssh_port=None,
+                               manual_safe_bootstrap=False):
     """رَپِر async: کار سنگین را در thread جدا اجرا می‌کند تا event loop ربات بلاک نشود.
     🆕 private_key_path/connect_retries برای VPSهایی که از «ساخت VPS ابری خودکار» می‌آیند (بدون
     رمز روت، فقط کلید، و تازه بوت شده پس ممکن است SSHـش چند ثانیه دیرتر آماده شود).
@@ -4066,8 +4074,9 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
             asyncio.to_thread(
                 _provision_new_edge_sync, edge_ip, root_password, customer_port, edge_name,
                 private_key_path, connect_retries,
-                protected_wizard=egress_stage_requested,
+                protected_wizard=(egress_stage_requested or manual_safe_bootstrap),
                 trusted_host_key=trusted_host_key,
+                admin_ssh_port=admin_ssh_port,
             ),
             timeout=_provision_timeout,
         )
@@ -4146,6 +4155,20 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
             await asyncio.to_thread(_db_add_host_pool, edge_ip, active=False)
         if provider:
             await asyncio.to_thread(_db_set_host_provider_meta, edge_ip, provider, provider_instance_id)
+        if provider == "manual":
+            if provider_instance_id is not None or admin_ssh_port is None or pool_active:
+                raise ValueError("MANUAL_EDGE_REGISTRATION_INVALID")
+            def _manual_save_management_port():
+                with db_conn() as conn:
+                    _db_assert_legacy_host_mutation_allowed(conn)
+                    if conn.execute(
+                        "UPDATE host_pool SET admin_ssh_port=? "
+                        "WHERE host=? AND provider='manual' AND provider_instance_id IS NULL "
+                        "AND active=0 AND is_default=0",
+                        (int(admin_ssh_port),edge_ip),
+                    ).rowcount != 1:
+                        raise RuntimeError("MANUAL_SSH_PORT_REGISTRATION_FAILED")
+            await asyncio.to_thread(_manual_save_management_port)
         if pool_active:
             cur_hosts = [h.strip() for h in (await asyncio.to_thread(_db_get_setting, 'hosts', '')).split(',') if h.strip()]
             if edge_ip not in cur_hosts:
@@ -7309,6 +7332,45 @@ _cloudzy_07 = DurableCutoverQueue(
     cz04b=_cloudzy_04b,
     enabled=lambda: os.environ.get("NVL_CZ07_ENABLE", "0") == "1",
     acceptance_witness=IndependentCZ07Witness.from_environment(),
+)
+
+# Manual Edge wizard: separate ownership and secrets; shared CZ04B/CZ07
+# Cloudflare/6G migration engine. Never instantiate CloudzyService here.
+_manual_form_store = ManualFormStore()
+_manual_form_ready = False
+
+async def _manual_edge_provision(ip, ssh_port, password, trusted_key, chat, app):
+    if await asyncio.to_thread(_db_host_exists,ip):
+        raise RuntimeError("MANUAL_EDGE_ALREADY_REGISTERED")
+    customer_port,_pub = await asyncio.to_thread(_cloudzy_quick_preflight)
+    label = "edge-"+ip.replace(".","-")
+    return await _provision_new_edge(
+        ip,password,customer_port,label,chat,app,
+        private_key_path=None,connect_retries=1,
+        provider="manual",provider_instance_id=None,
+        egress_stage_requested=False,trusted_host_key=trusted_key,
+        pool_active=False,admin_ssh_port=ssh_port,
+        manual_safe_bootstrap=True,
+    )
+
+async def _manual_edge_verify(ip, details, ssh_port):
+    with db_conn() as db:
+        row=db.execute(
+            "SELECT active,is_default,is_standby,provider,provider_instance_id,"
+            "service_port,admin_ssh_port FROM host_pool WHERE host=?",
+            (ip,),
+        ).fetchone()
+    if not row or tuple(row[:5])!=(0,0,0,"manual",None) or row[6]!=ssh_port:
+        return False
+    return await _cloudzy_04a_probe(ip,row[5],ssh_port)
+
+_manual_edge = ManualEdgeWizard(
+    db=db_conn,preflight=_cloudzy_quick_preflight,
+    provision=_manual_edge_provision,verify=_manual_edge_verify,
+    probe=_cloudzy_04a_probe,nat=_cloudzy_04b_nat,queue=_cloudzy_07,
+    form_store=_manual_form_store,
+    enabled=lambda: os.environ.get("NVL_EDGE_MANUAL_ENABLED")=="1"
+                     and _manual_form_ready,
 )
 
 # Phase 7 is opt-in and strictly a read-only Rich admin view. No effectful
@@ -16496,6 +16558,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             query, context, d, role=role,
             actor=update.effective_user.id, chat=update.effective_chat.id,
             markup=_cloudzy_markup, app=context.application,
+        )
+        return
+    elif d.startswith("apps_edge_manual_"):
+        await _manual_edge.handle(
+            query,context,d,role=role,actor=update.effective_user.id,
+            chat=update.effective_chat.id,app=context.application,
         )
         return
     elif d.startswith("apps_cz_"):
@@ -30758,4 +30826,19 @@ if __name__ == '__main__':
     print(f"🩺 V120B Marzban Local Health فعال است (هر {MARZBAN_LOCAL_HEALTH_INTERVAL_SECONDS}s؛ Main/Node/Public Host؛ بدون Regional/Alert/Mutation).")
     print(f"🌍 V120C Marzban Regional Filtering فعال است (هر {MARZBAN_REGIONAL_INTERVAL_SECONDS}s؛ حداکثر {MARZBAN_REGIONAL_MAX_TARGETS_PER_CYCLE} target در هر دور؛ بدون Action).")
     print("📈 V122B Marzban Observability فعال است (History/Uptime/Health Score؛ بدون Auto-action).")
+    if os.environ.get("NVL_EDGE_MANUAL_ENABLED") == "1":
+        from urllib.parse import urlsplit
+        _form_public_url = os.environ.get("NVL_MANUAL_FORM_PUBLIC_URL","")
+        if urlsplit(_form_public_url).scheme=="https":
+            try:
+                _manual_form_server = serve_private(
+                    _manual_form_store,token=TOKEN,
+                    port=int(os.environ.get("NVL_MANUAL_FORM_PORT","3107")),
+                )
+                _manual_form_ready = True
+                log.info("MANUAL_EDGE_FORM_LOOPBACK_READY")
+            except Exception:
+                log.error("MANUAL_EDGE_FORM_UNAVAILABLE")
+        else:
+            log.error("MANUAL_EDGE_FORM_HTTPS_URL_MISSING")
     app.run_polling()

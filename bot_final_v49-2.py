@@ -25926,7 +25926,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             None, True,
         )
 
-        if service_ok:
+        if (service_ok and admin_ok
+                and local_path.get("wg_peer_ok") is True
+                and local_path.get("core_path_ok") is True):
             await asyncio.to_thread(_db_set_host_active, host, True)
             await asyncio.to_thread(_db_rebuild_hosts_from_pool, activated_host=host)
             admin_txt = (
@@ -25947,8 +25949,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Admin SSH <code>{admin_port}</code>: ❌ {esc(admin_err)}"
             )
             await query.message.reply_text(
-                f"❌ Service <code>{esc(host)}:{service_port}</code> هنوز پاسخ نمی‌دهد: "
-                f"<code>{esc(service_err)}</code>\n{admin_txt}",
+                f"⛔️ این IP هنوز آمادهٔ فعال‌سازی نیست: <code>{esc(host)}:{service_port}</code>\n"
+                f"Service: {'✅' if service_ok else '❌'} | "
+                f"Admin SSH: {'✅' if admin_ok else '❌'} | "
+                f"WireGuard: {'✅' if local_path.get('wg_peer_ok') is True else '❌'} | "
+                f"مسیر Core: {'✅' if local_path.get('core_path_ok') is True else '❌'}\n"
+                "IP غیرفعال ماند؛ DNS و کاربران دست‌نخورده‌اند.",
                 parse_mode="HTML",
             )
         await _render_host_pool_panel(query)

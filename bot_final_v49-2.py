@@ -407,6 +407,8 @@ from cloudzy_cz04b_guarded import GuardedCloudzy04B
 from cloudzy_cz07_queue import DurableCutoverQueue
 from cloudzy_cz04b_dns import CloudflareExactDNS
 from manual_edge_wizard import ManualEdgeWizard
+from manual_quick_switch import ManualQuickSwitch, check_manual_relay_via_cz04b
+from manual_quick_switch_ui import ManualQuickSwitchUI
 from manual_edge_secure_form import ManualFormStore, serve_private
 from cloudzy_admin_panel import CloudzyAdminPanel
 from edge_egress_k2_root_direct import (
@@ -7492,6 +7494,18 @@ _manual_edge = ManualEdgeWizard(
     os_check=_manual_edge_verify_ubuntu,
 )
 
+# Phase 3: provider-independent manual Quick Switch. The legacy CZ07 queue and
+# all Cloudzy engines remain installed, but are no longer advertised in UI.
+_manual_quick_engine = ManualQuickSwitch(
+    db_conn=db_conn,
+    dns=_cloudzy_04b.dns,
+    check_target=lambda plan: check_manual_relay_via_cz04b(_cloudzy_04b,plan),
+    guard=_cloudzy_04b_guard,
+)
+_manual_quick_ui = ManualQuickSwitchUI(
+    engine=_manual_quick_engine, db=db_conn, admin_ids=_db_get_admin_chat_ids,
+)
+
 # Phase 7 is opt-in and strictly a read-only Rich admin view. No effectful
 # Cloudzy/CZ07 callback is forwarded through this bridge.
 from cloudzy_rich_bridge import (
@@ -7509,7 +7523,6 @@ def _cloudzy_markup(rows):
 def _build_admin_programs_kb(*, actor=None, chat=None, active_admin_ids=()):
     """Infrastructure and operational tools available only to NVL administrators."""
     rows = [
-        [InlineKeyboardButton("☁️ Cloudzy | Edge و Relay", callback_data="apps_cz_home")],
         [
             InlineKeyboardButton("🖥 نودها", callback_data="apps_marzban_nodes"),
             InlineKeyboardButton("🌐 هاست‌ها", callback_data="apps_marzban_hosts"),
@@ -7520,16 +7533,13 @@ def _build_admin_programs_kb(*, actor=None, chat=None, active_admin_ids=()):
         ],
         [InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")],
     ]
+    # Only current private-chat admins see the active Edge entry.
+    # Historical provider cards remain callable from old messages, but are
+    # not advertised in the Programs navigation.
     if (type(actor) is int and type(chat) is int
             and actor > 0 and actor == chat and actor in active_admin_ids):
-        rows.insert(1, [InlineKeyboardButton(
-            "📊 مرکز عملیات Edge",
-            callback_data="apps_cz_rich_home",
-        )])
-        rows.insert(2, [InlineKeyboardButton(
-            "📦 گزارش انتقال کاربران SSH",
-            callback_data="apps_cz_rich_migration",
-        )])
+        rows.insert(0,[InlineKeyboardButton(
+            "🌐 مدیریت Edge", callback_data="apps_edge_quick_home")])
     return rows
 
 
@@ -7553,7 +7563,7 @@ async def _show_admin_programs_hub(target, context):
         "🧩 <b>برنامه‌ها</b>\n"
         "━━━━━━━━━━━━━━\n"
         "یک ابزار را انتخاب کنید.\n\n"
-        "☁️ <b>Cloudzy | Edge و Relay</b> — سرورهای ابری و بررسی زیرساخت\n"
+        "🌐 <b>مدیریت Edge</b> — افزودن سرور دستی و تغییر سریع IP کاربران\n"
         "🖥 <b>نودها</b> — وضعیت، تنظیمات، راه‌اندازی و اتصال Node\n"
         "🌐 <b>هاست‌ها</b> — Inboundها و Public Hostها\n"
         "🚚 <b>انتقال</b> — مهاجرت کنترل‌شده سرور اصلی Marzban\n"
@@ -16692,6 +16702,33 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Read-only Rich card entry/refresh/details. Recheck live active-admin
     # membership, private chat, original journal owner and message pointer.
     # The input never reaches Cloudzy purchase/DNS, CZ07 mutation or K2.
+    if d.startswith("apps_edge_quick_") or d == "apps_cz_home":
+        await _manual_quick_ui.handle(
+            query,context,d,role=role,actor=update.effective_user.id,
+            chat=update.effective_chat.id,
+            is_private=(getattr(update.effective_chat,"type",None)=="private"),
+        )
+        return
+    # Old messages using the prior manual-CZ07 preview cannot start its queue.
+    # Preserve navigation, but redirect to the provider-free Quick Switch.
+    if d.startswith(("apps_edge_manual_review_","apps_edge_manual_go_")):
+        if d.startswith("apps_edge_manual_review_"):
+            op_id=d[len("apps_edge_manual_review_"):]
+            op=await asyncio.to_thread(_manual_edge.journal.get,op_id)
+            if (op and op.get("status")=="STANDBY" and
+                    op.get("actor")==update.effective_user.id and
+                    op.get("chat")==update.effective_chat.id):
+                d="apps_edge_quick_select_"+op["ip"]
+            else:
+                d="apps_edge_quick_home"
+        else:
+            d="apps_edge_quick_home"
+        await _manual_quick_ui.handle(
+            query,context,d,role=role,actor=update.effective_user.id,
+            chat=update.effective_chat.id,
+            is_private=(getattr(update.effective_chat,"type",None)=="private"),
+        )
+        return
     if d in ("apps_cz_rich_home", "apps_cz_rich_migration") or d.startswith("u7:"):
         active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
         await _cloudzy_rich_admin_callback(

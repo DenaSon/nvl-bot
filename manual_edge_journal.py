@@ -141,6 +141,11 @@ class ManualEdgeJournal:
         with self.db() as db:
             self.initialize(db)
             db.execute("BEGIN IMMEDIATE")
+            current_core=db.execute(
+                "SELECT value FROM settings WHERE key='core_wg_public_ip'"
+            ).fetchone()
+            if current_core and str(current_core[0] or "").strip()==ip:
+                raise ManualEdgeHold("CORE_IP_CANNOT_BE_EDGE")
             if db.execute("SELECT 1 FROM host_pool WHERE host=?", (ip,)).fetchone():
                 raise ManualEdgeHold("EDGE_IP_ALREADY_REGISTERED")
             if db.execute(

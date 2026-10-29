@@ -52,6 +52,7 @@ FA = {
     "CORE_IP_CANNOT_BE_EDGE":"این نشانی متعلق به خود Core است یا هویت آن قابل بررسی نیست.",
     "UBUNTU24_ROOT_REQUIRED":"اتصال مدیریت Root یا Ubuntu 24.04 تأیید نشد؛ نصب انجام نمی‌شود.",
     "SSH_PORT_INVALID":"پورت مدیریت SSH معتبر نیست.",
+    "SSH_MANAGEMENT_PORT_CONFLICT":"پورت SSH مدیریت با پورت اتصال مشتری یا TLS یکسان است. پورت دیگری انتخاب کنید.",
     "EDGE_IP_ALREADY_REGISTERED":"این IP قبلاً در فهرست سرورها وجود دارد.",
     "EDGE_IP_HAS_CLOUDZY_RECEIPT":"این IP متعلق به پرونده Cloudzy موجود است.",
     "ACTIVE_MANUAL_OPERATION_EXISTS":"ابتدا وضعیت عملیات دستی قبلی را بررسی کنید.",
@@ -177,13 +178,24 @@ class ManualEdgeWizard:
             +("⚠️ نصب قبلی را تکرار نکنید؛ وضعیت سرور باید مستقل بررسی شود."
               if stage=="INSTALL_HOLD" else ""),rows)
 
+    @staticmethod
+    def _assert_management_port_safe(admin_port, customer_port, tls_port):
+        # The Legacy Edge installs unconditional customer/TLS DNAT. A
+        # management port collision would redirect admin SSH to the Core.
+        # This must be rejected BEFORE SSH authentication or installer writes.
+        if int(admin_port) in (int(customer_port), int(tls_port)):
+            raise ManualWizardHold("SSH_MANAGEMENT_PORT_CONFLICT")
+
     async def _install_task(self,app,op_id,actor,chat,password):
         try:
             op=await asyncio.to_thread(self.journal.get,op_id)
             if self.is_core_host is None or await asyncio.to_thread(
                     self.is_core_host,op["ip"]):
                 raise ManualWizardHold("CORE_IP_CANNOT_BE_EDGE")
-            await asyncio.to_thread(self.preflight)
+            customer_port,_ = await asyncio.to_thread(self.preflight)
+            tls_port = await asyncio.to_thread(self._tls_port)
+            self._assert_management_port_safe(
+                op["admin_port"],customer_port,tls_port)
             observed=await asyncio.to_thread(
                 self.key_reader,op["ip"],op["admin_port"])
             if tuple(observed[:2])!=(op["pin_type"],op["pin_base64"]):
@@ -283,6 +295,10 @@ class ManualEdgeWizard:
                     if self.is_core_host is None or await asyncio.to_thread(
                             self.is_core_host,value["ip"]):
                         raise ManualWizardHold("CORE_IP_CANNOT_BE_EDGE")
+                    customer_port,_ = await asyncio.to_thread(self.preflight)
+                    tls_port = await asyncio.to_thread(self._tls_port)
+                    self._assert_management_port_safe(
+                        value["port"],customer_port,tls_port)
                     await asyncio.to_thread(self.journal.set_server,sess["op"],
                                             actor,chat,value["ip"],value["port"])
                     return await self._view(query,

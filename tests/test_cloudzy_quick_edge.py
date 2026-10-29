@@ -1192,7 +1192,7 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(db.execute(
                 "SELECT COUNT(*) FROM cloudzy_edge_cancel_intents").fetchone()[0], 0)
         await self.cb(confirm)
-        self.assertIn("CANCEL_CONFIRMATION_EXPIRED", self.query.text)
+        self.assertIn("تأیید لغو منقضی", self.query.text)
 
     async def test_uncertain_cancel_requires_current_nonce_and_expires_safely(self):
         opid = self.wizard.store.reserve(
@@ -1207,10 +1207,10 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         await self.cb("apps_cz_qcancel_" + opid)
         second = next(x for x in self.query.callbacks if x.startswith("apps_cz_qcancelyes_"))
         await self.cb(first)
-        self.assertIn("CANCEL_CONFIRMATION_EXPIRED", self.query.text)
+        self.assertIn("تأیید لغو منقضی", self.query.text)
         self.now[0] += 901
         await self.cb(second)
-        self.assertIn("CANCEL_CONFIRMATION_EXPIRED", self.query.text)
+        self.assertIn("تأیید لغو منقضی", self.query.text)
         self.assertEqual(self.wizard.store.get(opid)["status"], "CREATE_UNCERTAIN")
         await self.cb("apps_cz_qcancel_" + opid)
         new = next(x for x in self.query.callbacks if x.startswith("apps_cz_qcancelyes_"))
@@ -1254,7 +1254,7 @@ class CZ03Tests(unittest.IsolatedAsyncioTestCase):
         confirm = next(x for x in self.query.callbacks if x.startswith("apps_cz_qcancelyes_"))
         self.now[0] += 181
         await self.cb(confirm)
-        self.assertIn("CANCEL_CONFIRMATION_EXPIRED", self.query.text)
+        self.assertIn("تأیید لغو منقضی", self.query.text)
         self.assertEqual(self.wizard.store.get(op["id"])["status"], "HOSTKEY_PENDING")
         with self.db() as db:
             db.execute("UPDATE settings SET value='8.8.8.8' WHERE key='dns_current_ip'")

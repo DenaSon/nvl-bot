@@ -62,7 +62,11 @@ class GuardedRouteTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_manual_standby_shares_guarded_cloudflare_and_6g_route(self):
         self.manualize()
-        await self.route()
+        # Legacy picker stays Cloudzy-only; the manual wizard/CZ07 invokes
+        # this SAME guarded engine after explicit confirmed handoff.
+        self.assertEqual(self.fixture.manager._targets(), [])
+        self.assertEqual(
+            await self.fixture.manager._run_route(7,8,DST),"READY")
         self.assertEqual(self.state(),(DST,"READY","SUCCEEDED"))
         self.assertEqual({r["ip"] for r in self.fixture.dns.records},{DST})
         self.assertEqual(self.fixture.manager._route_ready(),
@@ -85,7 +89,8 @@ class GuardedRouteTests(unittest.IsolatedAsyncioTestCase):
     async def test_manual_cloudflare_partial_write_preserves_shared_6g_hold(self):
         self.manualize()
         self.fixture.dns.fail_after=0
-        await self.route()
+        with self.assertRaises(CutoverHold):
+            await self.fixture.manager._run_route(7,8,DST)
         self.assertEqual(self.state(),(SRC,"HOLD","RUNNING"))
         self.assertEqual([r["ip"] for r in self.fixture.dns.records],[DST,SRC])
         self.assertEqual(self.fixture.dns.calls,[("write",DST,0)])

@@ -84,8 +84,8 @@ def render_manual_card(text, rows):
                 # arbitrary hp* mutations or disabled route buttons.
                 legacy_navigation = action in ("hp_add", "hp_menu")
                 if (not legacy_navigation and
-                    not action.startswith(("apps_edge_manual_", "apps_cz_",
-                                           "apps_cz7_", "apps_home"))
+                    not action.startswith(("apps_edge_manual_", "apps_edge_quick_",
+                                           "apps_cz_", "apps_cz7_", "apps_home"))
                         or not 1 <= len(action.encode("utf-8")) <= 64):
                     raise ManualRichHold("RICH_ACTION_INVALID")
                 button = {"text": label, "callback_data": action}

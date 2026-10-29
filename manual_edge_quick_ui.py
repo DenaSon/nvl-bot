@@ -164,6 +164,9 @@ class QuickSwitchUI:
                 if rec["kind"] == "QUICK" and rec["status"] not in (
                         "DONE","ABORTED"):
                     rows.insert(0,[("🔍 بررسی و ادامه امن","apps_edge_quick_resume")])
+                    if rec["status"] in ("DNS_INTENT","HOLD"):
+                        rows.insert(1,[("🔁 بررسی تلاش مجدد DNS",
+                                       "apps_edge_quick_retry")])
                 return await self._screen(
                     chat,context,
                     "📋 وضعیت تغییر IP\n"
@@ -171,6 +174,41 @@ class QuickSwitchUI:
                     f"وضعیت: {rec['status']}\n"
                     f"علت بررسی: {rec.get('error_code') or '—'}",
                     rows,
+                )
+            if data == "apps_edge_quick_retry":
+                rec = self.engine.latest(actor=self._actor(actor))
+                if not rec or rec["kind"] != "QUICK" or rec["status"] not in (
+                        "DNS_INTENT","HOLD"):
+                    raise QuickSwitchUIHold("RECOVERY_NOT_ELIGIBLE")
+                nonce = secrets.token_hex(8)
+                context.user_data["quick_edge_retry"] = {
+                    "actor":actor,"chat":chat,"nonce":nonce,
+                    "job":rec["id"],"expires":self.now()+TTL,
+                }
+                return await self._screen(
+                    chat,context,
+                    "⚠️ بررسی و تلاش مجدد DNS\n"
+                    "ابتدا باید وضعیت واقعی Cloudflare بررسی شود.\n"
+                    "اگر DNS همچنان روی مبدأ باشد، پس از تأیید شما و "
+                    "بررسی دوباره مقصد، فقط یک تلاش انجام می‌شود. "
+                    "اگر تغییر قبلی کامل شده باشد DNS دوباره نوشته نمی‌شود.",
+                    [[("✅ بررسی و تلاش امن","apps_edge_quick_retry_yes_"+nonce)],
+                     [("انصراف","apps_edge_quick_status")]],
+                )
+            if data.startswith("apps_edge_quick_retry_yes_"):
+                nonce=data[len("apps_edge_quick_retry_yes_"):]
+                saved=context.user_data.pop("quick_edge_retry",None)
+                if (not isinstance(saved,dict)
+                        or saved.get("actor")!=actor or saved.get("chat")!=chat
+                        or saved.get("nonce")!=nonce
+                        or self.now()>=saved.get("expires",0)):
+                    raise QuickSwitchUIHold("CONFIRMATION_EXPIRED")
+                result=await self.engine.resume(
+                    saved["job"],actor=self._actor(actor),retry_dns=True)
+                return await self._screen(
+                    chat,context,"✅ نتیجه بازیابی: "+result,
+                    [[("🔄 وضعیت","apps_edge_quick_status")],
+                     [("↩️ مدیریت Edge","apps_cz_home")]],
                 )
             if data == "apps_edge_quick_resume":
                 rec = self.engine.latest(actor=self._actor(actor))

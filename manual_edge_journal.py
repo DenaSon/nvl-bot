@@ -191,7 +191,7 @@ class ManualEdgeJournal:
                 "AND name='cloudzy_edge_operations'"
             ).fetchone() and db.execute(
                 "SELECT 1 FROM cloudzy_edge_operations "
-                "WHERE status IN ('PROVISIONING','HOLD_PROVISION') LIMIT 1"
+                "WHERE status='PROVISIONING' LIMIT 1"
             ).fetchone():
                 raise ManualEdgeHold("CORE_WG_INSTALL_LEASE_BUSY")
             self._cas(db,op_id,actor,chat,"READY_INSTALL","INSTALLING",

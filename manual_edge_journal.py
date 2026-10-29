@@ -176,7 +176,10 @@ class ManualEdgeJournal:
     def begin_install(self,op_id,actor,chat):
         with self.db() as db:
             self.initialize(db);db.execute("BEGIN IMMEDIATE")
-            self._protected(db)
+            # This is an isolated, inactive installation (no route or customer
+            # mutation). The protected-route gate applies at mark_standby and
+            # transfer, not before a new VPS can be prepared. The shared WG
+            # installer mutex still prevents concurrent peer writes.
             # Legacy installer allocates Core WG peer IPs and appends Core WG
             # config. That is a truly shared resource across both pathways.
             # Do not admit concurrent/uncertain installers until reconciled.

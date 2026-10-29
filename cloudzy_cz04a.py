@@ -76,8 +76,11 @@ class Cloudzy04A:
             status TEXT NOT NULL, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
             note TEXT DEFAULT NULL
         )""")
-        db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS cloudzy_cz04a_one_pending
-            ON cloudzy_cz04a_actions((1)) WHERE status NOT IN ('DONE','REJECTED')""")
+        # A different VPS' historical HOLD must not fence this VPS.
+        db.execute("DROP INDEX IF EXISTS cloudzy_cz04a_one_pending")
+        db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS cloudzy_cz04a_pending_per_vps_v2
+            ON cloudzy_cz04a_actions(provider_id)
+            WHERE status NOT IN ('DONE','REJECTED')""")
 
     def _read(self):
         """Only CZ03 completed, provider-bound NVL records are manageable."""
@@ -243,7 +246,8 @@ class Cloudzy04A:
             if mutation:
                 running = db.execute(
                     "SELECT id FROM cloudzy_cz04a_actions "
-                    "WHERE status NOT IN ('DONE','REJECTED') LIMIT 1"
+                    "WHERE provider_id=? AND status NOT IN ('DONE','REJECTED') LIMIT 1",
+                    (provider_id,)
                 ).fetchone()
                 if running:
                     raise Cloudzy04AHold("PREVIOUS_OPERATION_NEEDS_RECONCILIATION")
@@ -273,7 +277,8 @@ class Cloudzy04A:
             self.guard(db)
             if db.execute(
                 "SELECT 1 FROM cloudzy_cz04a_actions "
-                "WHERE status NOT IN ('DONE','REJECTED') LIMIT 1"
+                "WHERE provider_id=? AND status NOT IN ('DONE','REJECTED') LIMIT 1",
+                (provider_id,)
             ).fetchone():
                 raise Cloudzy04AHold("PREVIOUS_OPERATION_NEEDS_RECONCILIATION")
             if not db.execute(

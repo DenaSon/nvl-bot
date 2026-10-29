@@ -123,17 +123,20 @@ class Cloudzy04B:
                 raise CutoverHold("SHARED_6G_BUSY")
             if self._open(db):
                 raise CutoverHold("CZ04B_UNRESOLVED_OPERATION")
-            if db.execute(
-                "SELECT 1 FROM cloudzy_cz04a_actions "
-                "WHERE status NOT IN ('DONE','REJECTED') LIMIT 1"
-            ).fetchone():
-                raise CutoverHold("CZ04A_UNRESOLVED_OPERATION")
             defaults = db.execute(
                 "SELECT host FROM host_pool WHERE is_default=1 AND active=1"
             ).fetchall()
             if len(defaults) != 1:
                 raise CutoverHold("DEFAULT_HOST_AMBIGUOUS")
             current = str(defaults[0][0])
+            # Only unsettled actions on either endpoint can affect this
+            # cutover; a HOLD on another VPS is not a route lease.
+            if db.execute(
+                "SELECT 1 FROM cloudzy_cz04a_actions "
+                "WHERE status NOT IN ('DONE','REJECTED') "
+                "AND host IN (?,?) LIMIT 1", (current, target)
+            ).fetchone():
+                raise CutoverHold("CZ04A_UNRESOLVED_OPERATION")
             if current == target:
                 raise CutoverHold("TARGET_IS_ALREADY_DEFAULT")
             if current == str(st.get("core_wg_public_ip") or "") or target == str(st.get("core_wg_public_ip") or ""):

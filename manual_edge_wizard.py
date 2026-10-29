@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import logging
 from html import escape
 from contextvars import ContextVar
 from manual_edge_rich import ManualRichDelivery, render_manual_card
@@ -24,6 +25,7 @@ from cloudzy_cz04b import _digest
 
 
 _RICH_SCOPE = ContextVar('manual_edge_rich_scope', default=None)
+log = logging.getLogger(__name__)
 
 
 class ManualWizardHold(RuntimeError):
@@ -55,13 +57,21 @@ FA = {
     "SSH_MANAGEMENT_PORT_CONFLICT":"پورت SSH مدیریت با پورت اتصال مشتری یا TLS یکسان است. پورت دیگری انتخاب کنید.",
     "EDGE_IP_ALREADY_REGISTERED":"این IP قبلاً در فهرست سرورها وجود دارد.",
     "EDGE_IP_HAS_CLOUDZY_RECEIPT":"این IP متعلق به پرونده Cloudzy موجود است.",
-    "ACTIVE_MANUAL_OPERATION_EXISTS":"ابتدا وضعیت عملیات دستی قبلی را بررسی کنید.",
+    "ACTIVE_MANUAL_OPERATION_EXISTS":"ورود اطلاعات یا نصب یک سرور دیگر هنوز در جریان است. همان مرحله را تکمیل یا ورود اطلاعات را لغو کنید.",
+    "OPERATOR_MISMATCH":"این پرونده متعلق به گفتگوی مدیر فعلی نیست.",
+    "EDGE_NOT_READY":"این سرور هنوز در مرحله آماده‌سازی تأییدشده قرار ندارد.",
+    "INSTALL_NOT_READY":"شروع نصب برای این پرونده مجاز نیست؛ وضعیت را دوباره بررسی کنید.",
+    "STANDBY_CORE_PATH_UNVERIFIED":"ارتباط پورت مشتری، SSH مدیریت یا مسیر WireGuard از Core تأیید نشد؛ پیش از ادامه مسیر شبکه را بررسی کنید.",
+    "STANDBY_NAT_UNVERIFIED":"قوانین NAT یا دسترسی SSH با کلید تأییدشده روی Edge قابل تأیید نیست.",
+    "STANDBY_PROBE_ERROR":"بررسی اتصال سرور با خطای اجرایی روبه‌رو شد؛ لاگ فنی سرور را بررسی کنید.",
+    "STANDBY_NAT_ERROR":"بررسی قوانین NAT با خطای اجرایی روبه‌رو شد؛ لاگ فنی سرور را بررسی کنید.",
+    "INVALID_PAGE":"شماره صفحه سرورها معتبر نیست.",
     "HOST_KEY_CHANGED":"اثر انگشت سرور تغییر کرده است. اتصال متوقف شد.",
     "FORM_NOT_SUBMITTED_OR_EXPIRED":"فرم هنوز ثبت نشده یا زمان آن تمام شده است.",
     "INTAKE_EXPIRED":"زمان فرم تمام شده است.",
     "MANUAL_OPERATION_CHANGED":"وضعیت عملیات تغییر کرده؛ صفحه را تازه کنید.",
     "INSTALL_PROOF_MISSING":"نصب سرور هنوز تأیید نشده است.",
-    "MANUAL_HOST_POOL_MISMATCH":"ثبت سرور با نتیجه نصب سازگار نیست.",
+    "MANUAL_HOST_POOL_MISMATCH":"پرونده نصب آماده است، اما ثبت مستقل سرور در فهرست Edgeها ناقص یا ناسازگار است. نصب را تکرار نکنید؛ ثبت سرور نیازمند بازیابی ایمن است.",
     "STANDBY_ROLE_CHANGED":"وضعیت Standby سرور تغییر کرده است.",
     "CANCEL_REQUIRES_SAFE_RECONCILIATION":"این عملیات اثر خارجی داشته و لغو ساده مجاز نیست.",
     "CLOUDFLARE_CONFIG_MISSING":"اتصال Cloudflare تنظیم نشده است؛ سرور در Standby می‌ماند.",
@@ -130,53 +140,87 @@ class ManualEdgeWizard:
                 f"IP: <code>{escape(str(op.get('ip') or '—'))}</code>\n"
                 f"پورت SSH: <b>{int(op.get('admin_port') or 22)}</b>\n")
 
-    async def _show(self,query,actor,chat):
-        op=await asyncio.to_thread(self.journal.latest,actor,chat)
-        if op is None:
+    @staticmethod
+    def _status_label(status):
+        return {
+            "DRAFT":"در انتظار مشخصات", "HOSTKEY_PENDING":"تأیید هویت SSH",
+            "READY_INSTALL":"آماده نصب", "INSTALLING":"در حال نصب",
+            "INSTALL_HOLD":"نصب نیازمند بررسی", "EDGE_READY":"نصب‌شده؛ بررسی Standby",
+            "STANDBY":"آماده‌به‌کار", "ROUTING":"انتقال در جریان",
+            "MIGRATING":"انتقال در جریان", "ACTIVE":"رله فعال",
+            "HOLD":"نیازمند بررسی", "IDENTITY_PENDING":"تأیید هویت",
+        }.get(status,"نیازمند بررسی")
+
+    async def _show(self,query,actor,chat,page=0):
+        # All manual Edges belong to their own IP and journal. Never bind the
+        # administrator's new-edge workflow to whichever operation is latest.
+        latest=await asyncio.to_thread(self.journal.latest,actor,chat)
+        if latest is None:
             return await self._view(query,
                 "🛟 <b>افزودن Edge دستی</b>\n\n"
                 "سرور خودتان را به‌صورت دستی اضافه کنید. "
                 "تغییر DNS پس از آماده‌سازی فقط از طریق Cloudflare انجام می‌شود.",
                 [[("➕ افزودن سرور", "apps_edge_manual_new")],
                  [("↩️ مدیریت Edge","apps_cz_home")]])
+        if type(page) is not int or not 0<=page<=10000:
+            raise ManualWizardHold("INVALID_PAGE")
+        items=await asyncio.to_thread(
+            self.journal.list_by_owner,actor,chat,limit=8,offset=page*7)
+        rows=[[("➕ افزودن سرور جدید","apps_edge_manual_new")]]
+        for op in items[:7]:
+            label=str(op.get("ip") or "در انتظار IP")
+            if len(label)>25:
+                label=label[:25]
+            rows.append([(
+                label+" · "+self._status_label(op["status"]),
+                "apps_edge_manual_detail_"+op["id"],
+            )])
+        pager=[]
+        if page>0:
+            pager.append(("⬅️ جدیدتر","apps_edge_manual_list_"+str(page-1)))
+        if len(items)>7:
+            pager.append(("قدیمی‌تر ➡️","apps_edge_manual_list_"+str(page+1)))
+        if pager:
+            rows.append(pager)
+        rows.extend([
+            [("🔄 تازه‌سازی","apps_edge_manual_list_"+str(page))],
+            [("↩️ مدیریت Edge","apps_cz_home")],
+        ])
+        return await self._view(query,
+            "🛟 <b>سرورهای دستی</b>\n\n"
+            "هر سرور پرونده و وضعیت مستقل دارد. آماده‌به‌کارها با افزودن "
+            "سرور جدید حذف یا جابه‌جا نمی‌شوند.",rows)
+
+    async def _detail(self,query,actor,chat,opid):
+        op=await asyncio.to_thread(self.journal.get,opid)
+        if not op or (op["actor"],op["chat"])!=(actor,chat):
+            raise ManualWizardHold("OPERATOR_MISMATCH")
         stage=op["status"]
-        labels={
-            "DRAFT":"در انتظار مشخصات سرور",
-            "HOSTKEY_PENDING":"در انتظار تأیید هویت SSH",
-            "READY_INSTALL":"آماده نصب",
-            "INSTALLING":"در حال آماده‌سازی سرور",
-            "INSTALL_HOLD":"نصب نیازمند بررسی است",
-            "EDGE_READY":"نصب تکمیل شده؛ بررسی Standby",
-            "STANDBY":"آماده انتقال",
-            "ROUTING":"در حال تغییر مسیر یا انتقال کاربران",
-            "ACTIVE":"رله فعال",
-            "HOLD":"نیازمند بررسی",
-        }
         rows=[]
         if stage=="HOSTKEY_PENDING":
-            rows.append([("🔐 بررسی هویت SSH","apps_edge_manual_key_"+op["id"])])
+            rows.append([("🔐 بررسی هویت SSH","apps_edge_manual_key_"+opid)])
         if stage=="READY_INSTALL":
-            rows.append([("📝 ورود امن رمز","apps_edge_manual_password_"+op["id"])])
+            rows.append([("📝 ورود امن رمز","apps_edge_manual_password_"+opid)])
         if stage=="EDGE_READY":
             rows.append([("✅ بررسی و فعال‌سازی Standby",
-                          "apps_edge_manual_standby_"+op["id"])])
+                         "apps_edge_manual_standby_"+opid)])
         if stage=="STANDBY":
             rows.append([("🔁 تغییر IP کاربران",
-                          "apps_edge_quick_select_"+op["ip"])])
+                         "apps_edge_quick_select_"+op["ip"])])
         if stage=="ROUTING":
             rows.append([("🔄 وضعیت انتقال و تکمیل",
-                          "apps_edge_manual_progress_"+op["id"])])
-        if stage=="ACTIVE":
-            rows.append([("➕ افزودن سرور جدید",
-                          "apps_edge_manual_new")])
+                         "apps_edge_manual_progress_"+opid)])
         if stage in ("DRAFT","HOSTKEY_PENDING","READY_INSTALL"):
             rows.append([("❌ لغو درخواست","apps_edge_manual_cancel")])
-        rows.extend([[("🔄 تازه‌سازی","apps_edge_manual_home")],
-                     [("↩️ مدیریت Edge","apps_cz_home")]])
+        rows.extend([
+            [("➕ افزودن سرور جدید","apps_edge_manual_new")],
+            [("↩️ همه سرورها","apps_edge_manual_home")],
+            [("↩️ مدیریت Edge","apps_cz_home")],
+        ])
+        warning=("\n⚠️ نصب قبلی را تکرار نکنید؛ وضعیت سرور باید مستقل بررسی شود."
+                 if stage in ("INSTALL_HOLD","HOLD") else "")
         return await self._view(query,self._summary(op)+
-            "وضعیت: <b>"+escape(labels.get(stage,"نیازمند بررسی"))+"</b>\n"
-            +("⚠️ نصب قبلی را تکرار نکنید؛ وضعیت سرور باید مستقل بررسی شود."
-              if stage=="INSTALL_HOLD" else ""),rows)
+            "وضعیت: <b>"+escape(self._status_label(stage))+"</b>"+warning,rows)
 
     @staticmethod
     def _assert_management_port_safe(admin_port, customer_port, tls_port):
@@ -230,8 +274,15 @@ class ManualEdgeWizard:
                 ))
         except Exception as exc:
             safe=str(exc) if isinstance(exc,(ManualEdgeHold,ManualWizardHold)) else type(exc).__name__
-            if await asyncio.to_thread(self.journal.get,op_id):
-                op=await asyncio.to_thread(self.journal.get,op_id)
+            log.error("Manual Edge install stopped op=%s ip=redacted "
+                      "code=%s exception_type=%s",op_id,safe,type(exc).__name__)
+            op=await asyncio.to_thread(self.journal.get,op_id)
+            if op and op["status"]=="EDGE_READY":
+                # Post-commit Telegram delivery failure is NOT an install
+                # failure. Keep the durable success and never replay setup.
+                log.warning("Manual Edge completion delivery unconfirmed op=%s",op_id)
+                return
+            if op:
                 if op["status"]=="INSTALLING":
                     try:
                         await asyncio.to_thread(
@@ -273,6 +324,14 @@ class ManualEdgeWizard:
         try:
             if data=="apps_edge_manual_home":
                 return await self._show(query,actor,chat)
+            if data.startswith("apps_edge_manual_list_"):
+                raw=data[len("apps_edge_manual_list_"):]
+                if not raw.isascii() or not raw.isdigit() or len(raw)>5:
+                    raise ManualWizardHold("INVALID_PAGE")
+                return await self._show(query,actor,chat,int(raw))
+            if data.startswith("apps_edge_manual_detail_"):
+                opid=data[len("apps_edge_manual_detail_"):]
+                return await self._detail(query,actor,chat,opid)
             if data=="apps_edge_manual_new":
                 await asyncio.to_thread(self.preflight)
                 op=await asyncio.to_thread(self.journal.start,actor,chat)
@@ -354,12 +413,34 @@ class ManualEdgeWizard:
                 if not op or (op["actor"],op["chat"])!=(actor,chat) or op["status"]!="EDGE_READY":
                     raise ManualWizardHold("EDGE_NOT_READY")
                 port,pub=await asyncio.to_thread(self.preflight)
+                # A missing or mismatched host_pool receipt must be diagnosed
+                # BEFORE any remote/network checks; do not forge recovery.
+                await asyncio.to_thread(
+                    self.journal.assert_standby_candidate,opid,actor,chat,port)
                 tls=await asyncio.to_thread(self._tls_port)
-                ok=await self.probe(op["ip"],port,op["admin_port"])
-                nat=await self.nat(op["ip"],op["admin_port"],port,tls,
-                                   (op["pin_type"],op["pin_base64"]))
-                if ok is not True or nat is not True:
-                    raise ManualWizardHold("STANDBY_NETWORK_UNVERIFIED")
+                try:
+                    ok=await self.probe(op["ip"],port,op["admin_port"])
+                except Exception:
+                    log.exception("Manual Edge standby Core path probe failed op=%s ip=%s",
+                                  opid,op["ip"])
+                    raise ManualWizardHold("STANDBY_PROBE_ERROR") from None
+                if ok is not True:
+                    log.warning("Manual Edge standby Core path invalid op=%s ip=%s "
+                                "service_port=%s admin_port=%s",
+                                opid,op["ip"],port,op["admin_port"])
+                    raise ManualWizardHold("STANDBY_CORE_PATH_UNVERIFIED")
+                try:
+                    nat=await self.nat(op["ip"],op["admin_port"],port,tls,
+                                       (op["pin_type"],op["pin_base64"]))
+                except Exception:
+                    log.exception("Manual Edge standby NAT probe failed op=%s ip=%s",
+                                  opid,op["ip"])
+                    raise ManualWizardHold("STANDBY_NAT_ERROR") from None
+                if nat is not True:
+                    log.warning("Manual Edge standby NAT invalid op=%s ip=%s "
+                                "service_port=%s tls_port=%s",
+                                opid,op["ip"],port,tls)
+                    raise ManualWizardHold("STANDBY_NAT_UNVERIFIED")
                 await asyncio.to_thread(self.journal.mark_standby,opid,actor,chat)
                 return await self._view(query,
                     "✅ <b>سرور در حالت آماده‌به‌کار قرار گرفت.</b>\n"
@@ -498,10 +579,20 @@ class ManualEdgeWizard:
             return await self._show(query,actor,chat)
         except Exception as exc:
             code=str(exc) if isinstance(exc,(ManualWizardHold,ManualEdgeHold,IntakeHold)) else type(exc).__name__
+            if isinstance(exc,(ManualWizardHold,ManualEdgeHold,IntakeHold)):
+                log.warning("Manual Edge callback rejected action=%s actor=%s "
+                            "code=%s",data,actor,code)
+            else:
+                # No passwords or other input payloads are included.
+                log.exception("Manual Edge callback unexpected action=%s actor=%s "
+                              "exception_type=%s",data,actor,type(exc).__name__)
+            diagnostic=("\nکد پیگیری: <code>"+escape(code)+"</code>"
+                        if code in FA else "")
             return await self._view(query,
                 "⛔️ <b>عملیات متوقف شد.</b>\n"+
-                escape(FA.get(code,"وضعیت سرور یا مسیر نیازمند بررسی است. "
-                       "از انجام دوباره نصب یا تغییر DNS خودداری کنید.")),
+                escape(FA.get(code,"خطای پیش‌بینی‌نشده در عملیات Edge رخ داد. "
+                       "به‌جای تکرار نصب، لاگ فنی Core را بررسی کنید."))+
+                diagnostic,
                 [[("🔄 وضعیت سرور دستی","apps_edge_manual_home")],
                  [("↩️ مدیریت Edge","apps_cz_home")]])
 

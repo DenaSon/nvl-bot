@@ -295,6 +295,7 @@ class QuickSwitchTests(unittest.IsolatedAsyncioTestCase):
             expected_active=2)
         self.assertEqual(job,same)
         self.assertEqual(self.engine.get(job)["status"],"EXTERNAL_VERIFIED")
+        self.assertEqual(len(self.engine.get(job)["account_fingerprint"]),64)
         self.assertEqual(self.one("SELECT COUNT(*) FROM failover_operations")[0],
                          before)
         self.assertEqual(self.one(

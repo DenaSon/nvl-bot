@@ -208,10 +208,11 @@ class ManualEdgeWizard:
             port,_pub=await asyncio.to_thread(self.preflight)
             await asyncio.to_thread(
                 self.journal.mark_edge_ready,op_id,actor,chat,port)
-            await app.bot.send_message(chat,
-                "✅ نصب انجام شد. برای بررسی Standby، «وضعیت سرور دستی» را باز کنید.",
-                reply_markup=self._buttons([
-                    [("🟢 وضعیت سرور دستی","apps_edge_manual_home")]]))
+            await ManualRichDelivery(app.bot.token).api.send(
+                chat_id=chat, rich_message=render_manual_card(
+                    "✅ نصب سرور تکمیل شد.\nبرای بررسی Standby، وضعیت را باز کنید.",
+                    [[("🟢 وضعیت سرور دستی", "apps_edge_manual_home")]],
+                ))
         except Exception as exc:
             safe=str(exc) if isinstance(exc,(ManualEdgeHold,ManualWizardHold)) else type(exc).__name__
             if await asyncio.to_thread(self.journal.get,op_id):
@@ -222,19 +223,20 @@ class ManualEdgeWizard:
                             self.journal.install_hold,op_id,actor,chat,safe)
                     except Exception:
                         pass
-            await app.bot.send_message(chat,
-                "⛔️ آماده‌سازی به بررسی نیاز دارد. "
-                "برای جلوگیری از تکرار نصب و قوانین شبکه، عملیات متوقف شد. "
-                "وضعیت فعلی سرور را بررسی کنید.")
+            try:
+                await ManualRichDelivery(app.bot.token).api.send(
+                    chat_id=chat, rich_message=render_manual_card(
+                        "⛔️ آماده‌سازی به بررسی نیاز دارد.\n"
+                        "برای جلوگیری از تکرار نصب و قوانین شبکه، عملیات متوقف شد.",
+                        [[("🔄 وضعیت سرور دستی", "apps_edge_manual_home")]],
+                    ))
+            except Exception:
+                # Telegram delivery failure must not replay an installer or
+                # undo the durable INSTALL_HOLD receipt.
+                pass
         finally:
             self.running.discard(op_id)
             password=None  # best effort only: Python strings cannot be zeroized
-
-    @staticmethod
-    def _buttons(rows):
-        from telegram import InlineKeyboardButton,InlineKeyboardMarkup
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton(t,callback_data=d) for t,d in row] for row in rows])
 
     async def handle(self,query,context,data,*,role,actor,chat,app):
         # This is a UI-only task-local scope; never persist the bot token in

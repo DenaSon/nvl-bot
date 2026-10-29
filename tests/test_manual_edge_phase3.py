@@ -183,6 +183,44 @@ class Phase3ManualTests(unittest.TestCase):
                 "SELECT active,is_standby,is_default FROM host_pool "
                 "WHERE host='8.8.8.8'").fetchone(),(1,1,0))
 
+    def test_wizard_callbacks_use_rich_delivery_and_keep_webapp(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+        from manual_edge_wizard import ManualEdgeWizard
+
+        async def no_network(*args):
+            raise AssertionError("NETWORK_NOT_PERMITTED")
+        wizard = ManualEdgeWizard(
+            db=self.db, preflight=lambda:(2252,"ssh-pub"),
+            provision=no_network,verify=no_network,probe=no_network,
+            nat=no_network,queue=SimpleNamespace(),
+            enabled=lambda:True,
+            form_url=lambda:"https://secure.example",
+        )
+        context=SimpleNamespace(user_data={})
+        app=SimpleNamespace(bot=SimpleNamespace(token="123:TEST_TOKEN"))
+        # Any attempt to edit an HTML/inline-keyboard message fails.
+        query=SimpleNamespace(edit_message_text=lambda *a,**kw:
+                              (_ for _ in ()).throw(
+                                  AssertionError("HTML_UI_FORBIDDEN")))
+        with patch("manual_edge_wizard.ManualRichDelivery") as factory:
+            factory.return_value.show=AsyncMock(return_value=44)
+            asyncio.run(wizard.handle(
+                query,context,"apps_edge_manual_home",
+                role="admin",actor=77,chat=77,app=app))
+            args=factory.return_value.show.call_args.kwargs
+            self.assertIn("افزودن Edge دستی",args["text"])
+            self.assertEqual(args["rows"][0][0][1],"apps_edge_manual_new")
+            asyncio.run(wizard.handle(
+                query,context,"apps_edge_manual_new",
+                role="admin",actor=77,chat=77,app=app))
+            args=factory.return_value.show.call_args.kwargs
+            self.assertIn("web_app",args["rows"][0][0][1])
+            self.assertTrue(args["rows"][0][0][1]["web_app"]["url"].startswith(
+                "https://secure.example/manual-edge/form?ticket="))
+            self.assertNotIn("password",str(context.user_data).lower())
+
     def test_actor_and_chat_owned_and_draft_cancel_only(self):
         op=self.journal.start(77,77)
         with self.assertRaises(ManualEdgeHold):

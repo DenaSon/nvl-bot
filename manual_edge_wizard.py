@@ -534,7 +534,13 @@ class ManualEdgeWizard:
                 "ورود اطلاعات لغو شد. اگر نصب شروع شده باشد، "
                 "پرونده آن برای بررسی حفظ می‌شود.")
         try:
-            sess=self._session(context,actor,chat)
+            try:
+                sess=self._session(context,actor,chat)
+            except ManualWizardHold:
+                context.user_data.pop("state",None)
+                context.user_data.pop("manual_edge_session",None)
+                context.user_data.pop("manual_edge_candidate_ip",None)
+                raise
             opid=sess["op"]
             if state=="MANUAL_EDGE_IP" and sess["stage"]=="server_ip":
                 from manual_edge_secure_form import public_ip

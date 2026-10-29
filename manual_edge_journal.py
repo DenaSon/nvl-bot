@@ -22,8 +22,13 @@ ACTIVE = ("DRAFT", "IDENTITY_PENDING", "HOSTKEY_PENDING",
 
 
 class ManualEdgeJournal:
-    def __init__(self, factory, *, now=time.time, guard=None):
+    def __init__(self, factory, *, now=time.time, guard=None,
+                 install_lock_path=None):
         self.db, self.now, self.guard = factory, now, guard
+        # Production always uses the shared installer lock. A private test
+        # fixture can supply an isolated path without touching /run/lock.
+        from legacy_wg_install_lease import LOCK_PATH
+        self.install_lock_path = install_lock_path or LOCK_PATH
 
     def _protected(self, db):
         # Reuse original protected Core 6G/Legacy safety fence in the SAME
@@ -178,11 +183,10 @@ class ManualEdgeJournal:
         # against the very same flock used by all real Legacy installers.
         # Any still-running old worker holds it and must stop this new one.
         import fcntl, os, stat
-        from legacy_wg_install_lease import LOCK_PATH
         flags=os.O_RDWR|os.O_CREAT|getattr(os,"O_CLOEXEC",0)
         flags |= getattr(os,"O_NOFOLLOW",0)
         try:
-            fd=os.open(LOCK_PATH,flags,0o600)
+            fd=os.open(self.install_lock_path,flags,0o600)
         except OSError as exc:
             raise ManualEdgeHold("CORE_WG_INSTALL_LOCK_UNAVAILABLE") from exc
         try:

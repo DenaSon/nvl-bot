@@ -508,11 +508,24 @@ class ManualEdgeWizard:
             context.user_data.pop("manual_edge_session",None)
             context.user_data.pop("state",None)
             return await update.message.reply_text("⛔️ فقط مدیر در گفتگوی خصوصی مجاز است.")
-        if text.strip() in ("/cancel","لغو","انصراف") and state!="MANUAL_EDGE_PASSWORD":
+        if text.strip() in ("/cancel","لغو","انصراف"):
+            if state=="MANUAL_EDGE_PASSWORD":
+                try:
+                    await update.message.delete()
+                except Exception:
+                    pass
+            session=context.user_data.pop("manual_edge_session",None)
             context.user_data.pop("state",None)
-            context.user_data.pop("manual_edge_session",None)
+            context.user_data.pop("manual_edge_candidate_ip",None)
+            if isinstance(session,dict) and session.get("op"):
+                try:
+                    await asyncio.to_thread(self.journal.cancel_draft,
+                                            session["op"],actor,chat)
+                except ManualEdgeHold:
+                    pass  # A started installer is never blindly cancelled.
             return await update.message.reply_text(
-                "ورود اطلاعات متوقف شد؛ پرونده قبلی را از وضعیت Edge بررسی کنید.")
+                "ورود اطلاعات لغو شد. اگر نصب شروع شده باشد، "
+                "پرونده آن برای بررسی حفظ می‌شود.")
         try:
             sess=self._session(context,actor,chat)
             opid=sess["op"]

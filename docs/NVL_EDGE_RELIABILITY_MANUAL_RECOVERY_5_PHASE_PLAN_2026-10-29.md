@@ -1,3 +1,5 @@
+> **اصلاح دامنه فاز سوم (2026-10-29):** [قرارداد فاز سوم ویزارد دستی با DNS خودکار Cloudflare](NVL_EDGE_MANUAL_CLOUDFLARE_WIZARD_PHASE3_2026-10-29.md) مرجع قطعی این بخش است: ویزارد دستی **از IP/SSH تا Standby، تغییر خودکار DNS با Cloudflare، انتقال کاربران و رله فعال** را پوشش می‌دهد؛ **Cloudzy API صفر تماس، DNS دستی حذف شده**. فاز چهارم صرفاً سخت‌سازی Recovery/تداخل و فاز پنجم پالایش UI و انتشار است. فازهای ۱ و ۲ و وضعیت Merge آن‌ها تغییری ندارند. این تغییر فقط مستندات است.
+
 > **فاز دوم SOURCE_MERGED (2026-10-29):** [گزارش فاز دوم](NVL_EDGE_RELIABILITY_P2_DELIVERY_2026-10-29.md)، PR #237 / `038d6c2ddd53a76108eccd28880a66b63b1ae64f`؛ تست‌های Python و بسته انتشار Root، هرکدام ۳۰۳۹ تست موفق. Batchهای CZ07 پس از پذیرش اولیه به Cloudzy GET وابسته نیستند؛ HOLD با رسیدهای دقیق قابل بازیابی است. **Production هنوز Deploy نشده؛ پرونده اضطراری تاریخی روی Core صرفاً با Merge بسته نشده است.**
 
 > **فاز اول SOURCE_MERGED (2026-10-29):** [گزارش رسمی فاز اول](NVL_EDGE_RELIABILITY_P1_DELIVERY_2026-10-29.md) — PR #236 Merge شد (commit `461d5ee0c11bd2637c9c56020122f5f59fc65112`)؛ ۳۰۳۱ تست و آزمون بسته انتشار Root موفق. **Production هنوز استقرار/پذیرش نشده است.** محدوده فاز اول: Retry محدود GET، تله‌متری امن و Scope قفل‌های خرید/CZ06/CZ04A و guardهای مربوط. **تغییر صف CZ07 و بازیابی پرونده جاری جزو فاز دوم است.**
@@ -29,11 +31,12 @@
 6. **UI مدیر ساده و فارسی:** نام‌های داخلی مانند `CZ03`, `CZ06`, `CZ07`, `HOLD`, `6G`, `Phase` و جزئیات توسعه در متن اصلی و دکمه‌ها ممنوع؛ فقط در «جزئیات فنی» نمایش داده شوند.
 7. **هیچ تغییر Production در PR مستندسازی انجام نمی‌شود.** استقرار در هر فاز با پذیرش اپراتور و انتشار جدا از Merge.
 
-### مرز مهم «بدون API»
+### مرز مهم API — تصمیم نهایی
 
-- `Manual emergency` **صفر وابستگی به Cloudzy API** دارد؛ IP و دسترسی SSH از خود مدیر می‌آید.
-- برای **حالت مطلق بدون API خارجی**، مسیر اضطراری باید بدون Cloudflare API هم قابل استفاده باشد: اتصال مستقیم به IP جدید و/یا تغییر DNS از پنل بیرونی توسط مدیر + تأیید پاسخ زنده DNS. بات حق ندارد «DNS خودکار انجام شد» اعلام کند. اگر DNS دامنه کاربران باید عوض شود، هیچ راهی برای تغییر DNS ثبت‌شده در Cloudflare بدون دسترسی مدیریتی به خود Cloudflare وجود ندارد؛ این dependency با تغییر دستی در پنل از فرایند بات حذف می‌شود.
-- حالت عادی می‌تواند Cloudflare DNS API را برای Cutover استفاده کند، **اما هرگز Cloudzy API را در مسیر دستی صدا نمی‌زند**. انتخاب `DNS automatic / DNS manual` باید شفاف و جدا باشد.
+- مسیر **Manual emergency** هیچ درخواستی به `dash.cloudzy.com` یا `CloudzyService` ندارد؛ نه برای خرید، نه نصب، نه Standby و نه Cutover/Batch. توکن Cloudzy حتی می‌تواند حذف شده باشد.
+- تغییر DNS باید **فقط از طریق Cloudflare API به‌صورت خودکار** انجام شود. آداپتر موجود `CloudflareExactDNS` با بررسی شناسه دقیق رکورد، IP، TTL، `proxied=false` و تأیید پس از PUT مشترک هر دو مسیر است.
+- **گزینه DNS دستی یا اتصال مستقیم به‌عنوان جایگزین Cutover در این ویزارد وجود ندارد.** قطعی Cloudflare انتقال را متوقف و قابل بازیابی می‌کند؛ نصب و Standby قبلی محفوظ می‌ماند.
+- **بدون API** در این سند یعنی **بدون Cloudzy API**، نه بدون Cloudflare API. جدایی هویت و مالکیت Cloudzy/Manual بدون جعل receipt یا شناسه Provider اجباری است.
 
 ## 3) معماری هدف و قراردادهای فنی
 
@@ -72,7 +75,7 @@ Manual (IP/SSH/password) ─► SSH Adapter┘             │
 - **Journal:** append-only events برای هر intent، preflight، SSH provisioning، effect، checkpoint، cancel و reconcile؛ CAS و transactional outbox/نسخه رویداد. تغییر نتیجه یک اثر محلی همراه با event معتبر ثبت شود، نه صرفاً `UPDATE status`.
 - **Secrets:** هیچ رمز، توکن، کلید خصوصی یا متن کامل پاسخ خارجی داخل SQLite، Telegram callback، log، crash dump یا Git نوشته نشود.
 - **Locks:** keyed by resource و نوع اثر: `purchase intent`، `target adoption/install`، `core route/6G`، `source-target migration`، `provider deletion`. `HOLD` تاریخی برابر `RUNNING` یا مالک lease زنده نیست. برای worker از lease/heartbeat/fencing/version استفاده شود. آزادشدن قفل فقط بعد از اثبات نبود اثر هم‌زمان یا Reconciliation مستند مجاز است.
-- **درگاه تشخیص Provider:** نتیجه‌های `PROVIDER_OK`, `PROVIDER_DEGRADED`, `PROVIDER_IDENTITY_MISMATCH`, `PROVIDER_UNKNOWN` از هم جدا باشند. `DEGRADED` اجازه bypass هویت اولیه یا حذف VPS را نمی‌دهد؛ صرفاً ادامه پردازش مستقلی را مجاز می‌کند که هویت آن قبلاً با دلیل معتبر Pin شده است.
+- **درگاه تشخیص Provider (فقط برای مسیر Cloudzy):** نتیجه‌های `PROVIDER_OK`, `PROVIDER_DEGRADED`, `PROVIDER_IDENTITY_MISMATCH`, `PROVIDER_UNKNOWN` از هم جدا باشند. `DEGRADED` اجازه bypass هویت اولیه یا حذف VPS را نمی‌دهد؛ صرفاً ادامه پردازش مستقلی را مجاز می‌کند که هویت آن قبلاً با دلیل معتبر Pin شده است.
 - **محدوده دست‌نخورده:** K2/UID Egress، Marzban/V2Ray، حساب و رمز کاربر، پرداخت، 6H auto-failover و سیستم حذف VPS، مگر Adapter سازگاری لازم باشد. هماهنگی با 6G اصلی حذف نمی‌شود.
 
 ## 4) UX الزامی مدیر و امنیت فرم
@@ -145,19 +148,21 @@ Manual (IP/SSH/password) ─► SSH Adapter┘             │
 
 **پذیرش:** شکست GET پس از batch 200/400، قطع Worker، تغییر تعداد حساب‌های مقصد، انتقال دستیِ باقیمانده و اجرای مجدد همان callback، هیچ‌کدام انتقال تکراری یا قفل بی‌بازگشت نسازند. `MOVED` به معنی تنها تکمیل ثبت انتقال است؛ گزارش `DONE` بدون گواهی E2E ممنوع.
 
-### فاز ۳ — افزودن دستی Edge و آماده‌سازی تا Standby بدون Cloudzy
+### فاز ۳ — ویزارد سرتاسری افزودن دستی تا Relay فعال
 
-**تحویل:** ورودی روشن در **برنامه‌ها**، فرم امن سه‌فیلدی IP/SSH port/password، validation و SSH host fingerprint approval، اتصال واقعی SSH از Core، بررسی Host ناشناخته/تکراری، نصب Legacy Edge با Worker معتبر و کنترل‌شده، WG + DNAT/NAT + service port + TLS port + ACL و preflight، ثبت `manual` Edge با Identity مستقل و Evidence، فعال‌سازی Standby. از منطق اصلی Legacy قابل‌استفاده مجدد بهره ببرید؛ نصب موجود را کورکورانه دوباره اجرا نکنید؛ APT lock را محدود منتظر بمانید و از Checkpoint فقط در صورت idempotency اثبات‌شده ادامه دهید.
+**مرجع اجرایی الزام‌آور:** [قرارداد فاز سوم ویزارد دستی با DNS خودکار Cloudflare](NVL_EDGE_MANUAL_CLOUDFLARE_WIZARD_PHASE3_2026-10-29.md).
 
-**فایل‌های اصلی:** adapter جدید `manual_edge_*`، تنظیمات/اتصال اصلی بات، provision/verify موجود، `setup_edge_relay.sh` (صرفاً با refactor و تست)، unified Edge Registry و UI.
+**تحویل:** ویزارد کوتاه و مرحله‌ای از **برنامه‌ها → مدیریت Edge → افزودن دستی**: (۱) فرم امن HTTPS با IP عمومی، پورت SSH مدیریت و رمز کوتاه‌عمر؛ (۲) تأیید مستقل SSH Host Key/Ubuntu/دسترسی؛ (۳) نصب بخش‌های WireGuard/Legacy Relay/NAT/پورت و اتصال به Core از Worker ایمن و checkpointدار؛ (۴) ثبت مستقل `provider='manual'` و آماده‌سازی Standby **بدون Cloudzy API**؛ (۵) Preview و تأیید انتقال؛ (۶) **تغییر خودکار DNS در Cloudflare با همان آداپتر موجود** و 6G/route CAS؛ (۷) انتقال خودکار کاربران با همان موتور CZ07، checkpoint/resume و تفکیک حساب‌های جدید مقصد؛ (۸) ثبت تکمیل Transport/Relay فعال و آزمون مستقل پذیرش نهایی سرویس.
 
-**پذیرش:** با **توکن Cloudzy حذف/نامعتبر/قطع**، سرور Ubuntu 24.04 تازه با IP/port/password معتبر از Core به Standby سالم برسد؛ هیچ Cloudzy endpoint فراخوانی نشود؛ رمز در DB/log/Telegram ثبت نشود؛ SSH host key تعویض‌شده نصب را متوقف کند؛ ناموفق‌شدن Telegram UI باعث تکرار installer نشود.
+**شرط reuse:** اجزای Legacy Provision/Verify و `CloudflareExactDNS` استخراج و به‌صورت مشترک استفاده شوند؛ Guardهای `cloudzy_cz04a.py`, `cloudzy_cz04b.py`, `cloudzy_cz07_queue.py` که امروز به `provider='cloudzy'` و رسید CZ03/CZ06 وابسته‌اند به **راستی‌آزمایی هویت قابل تزریق** برای Cloudzy و Manual تبدیل شوند. هرگز `provider_server_id` یا رسید خرید جعلی تولید نشود؛ مسیر Cloudzy موجود نباید دچار رگرسیون شود. اجرای مستقیم و تکراری `setup_edge_relay.sh` به علت iptables `-A` و اثرهای WG بدون checkpoint ممنوع است.
 
-### فاز ۴ — مسیر اضطراری انتقال مشترک و بدون API ارائه‌دهنده
+**پذیرش:** با Cloudzy Token حذف‌شده و Provider stub که با هر فراخوانی خطا می‌دهد، Edge تازه تا Standby و سپس Relay پیش‌فرض و انتقال کاربران با Cloudflare API سالم کار کند؛ **صفر Cloudzy calls**، DNS خودکار و چک نهایی، حفظ Edge قدیم، بدون نشت رمز و تکرار نصب یا Batch. اگر Cloudflare خطا بدهد، فقط نصب/Standby معتبر می‌ماند و هیچ تغییر دستی DNS پیشنهاد نمی‌شود.
 
-**تحویل:** از Standby دستی، نمایش Preview `source → target`، کاربران واجد شرایط، پورت مشتری و وضعیت DNS؛ انتخاب explicit «DNS خودکار» (در صورت سالم‌بودن Cloudflare API) یا **«DNS دستی/اتصال مستقیم»** (بدون هیچ API خارجی در بات). برای DNS دستی، بات فقط راهنمای مقدار رکورد مقصد و تأیید مشاهده DNS واقعی را ارائه دهد؛ بدون اثبات هماهنگی route/DNS اجرا نشود. سپس موتور مشترک 6G/route CAS + batch مهاجرت checkpoint شده، توقف امن، ادامه فقط مانده، پیگیری account جدید، تست اتصال واقعی در ISP هدف و `MOVED` را اجرا کند. Edge مبدأ تا پذیرش کامل روشن بماند؛ Rollback مسیر یک عملیات مستقل با approval و preflight باشد.
+### فاز ۴ — سخت‌سازی، Recovery و تداخل مسیر Manual/Cloudzy
 
-**پذیرش:** یک انتقال ۴۶۸ حسابی شبیه‌سازی‌شده (۲۰۰+۲۰۰+۶۸) با ساخت حساب جدید وسط کار، قطع Worker، DNS دستی و Cloudzy کاملاً قطع، بدون از دست‌دادن اکانت و بدون دوباره‌کاری پایان یابد؛ تست اتصال خارجی و CREATE/RENEW برای `DONE` مجزا لازم باشد. هیچ API Cloudzy در stack مسیر Manual فراخوانی نشود (spy/assertion).
+**تحویل:** پوشش خطاهای Cloudflare PUT جزئی/Timeout، DNS uncertain، Worker crash در نصب/انتقال، timeout/lease، resume از checkpoint، replay protection، DNS/6G/host lock scopes و recovery/rollback محافظت‌شده؛ آزمون هم‌زمان Manual و Cloudzy برای IPهای مختلف و رد سخت collision یک IP یا route مشترک. همان موتور مشترک حفظ می‌شود؛ توسعه مسیر DNS دستی خارج از دامنه است.
+
+**پذیرش:** هیچ Cloudzy HOLD نامرتبط مسیر Manual را قفل نمی‌کند و هیچ Manual HOLD نامرتبط خرید/نصب Cloudzy را قفل نمی‌کند؛ تداخل واقعی IP/WG/route با خطای فارسی و بدون effect رد می‌شود؛ DNS نامطمئن باعث انتقال نمی‌شود.
 
 ### فاز ۵ — پالایش UI فارسی، لغو روشن، تست جامع و انتشار کنترل‌شده
 
@@ -176,8 +181,8 @@ Manual (IP/SSH/password) ─► SSH Adapter┘             │
 | CZ07 در 400/468 متوقف و حساب جدید مقصد ساخته می‌شود | فقط ۶۸ مانده منتقل شود؛ شمار cohort مستقل از حساب جدید؛ ledger صحیح |
 | حذف/غیرفعال‌سازی Edge پیش‌فرض یا دارای مشتری | رد بدون حتی یک تغییر |
 | Core/Edge SSH Host Key mismatch | STOP امنیتی، بدون ارسال رمز و اجرای نصب |
-| Cloudzy env/token absent | Manual: ایجاد Edge/Standby/انتقال با موفقیت؛ Cloudzy-assisted: خطای صریح |
-| Cloudflare API ناموجود در مسیر DNS دستی | دستور دستی + live DNS probe + approval؛ **هیچ ادعای DNS write توسط بات** |
+| Cloudzy env/token absent | مسیر Manual با Cloudflare سالم تا Relay فعال کار کند؛ Cloudzy-assisted خطای صریح بدهد |
+| Cloudflare API قطع یا PUT جزئی | نصب/Standby حفظ شود؛ Cutover و انتقال متوقف و قابل بازیابی بماند؛ **بدون تغییر DNS دستی** |
 | DNS target ناسازگار با default یا lease 6G فعال | STOP واقعی، بدون bypass |
 | متن‌های UI | بدون نام فاز/کد داخلی، فارسی کوتاه + action واضح، جزئیات فنی جدا |
 | Secret hygiene | رمز فقط در حافظه با TTL، بدون log/SQLite/Telegram/Git و بدون Shell injection |
@@ -195,7 +200,7 @@ Manual (IP/SSH/password) ─► SSH Adapter┘             │
 
 1. مسیر Cloudzy در صورت اختلال GET، عملیات مستقل را قفل نکند و در وسط صف به Cloudzy GET وابسته نباشد.
 2. هر عملیات قابل بازیابی/توقف/لغو متناسب با وضعیت باشد؛ قفل نامرتبط تاریخی هیچ عملیات مستقلی را مسدود نکند.
-3. مسیر دستی از «برنامه‌ها»، تنها با **IP + پورت SSH + رمز** و تأیید هویت مستقل، Edge را تا Standby و سپس با تأیید جداگانه کاربران را انتقال دهد؛ **صفر Cloudzy API**.
-4. در حالت DNS دستی، مسیر بات **صفر API خارجی** داشته باشد؛ تأیید DNS و E2E واقعی اجباری بماند.
+3. ویزارد دستی در **فاز سوم** از «برنامه‌ها»، تنها با **IP + پورت SSH + رمز** و تأیید هویت مستقل، Edge را تا Standby و با **Cloudflare DNS خودکار** و انتقال Batch از موتور مشترک به Relay فعال برساند؛ **صفر Cloudzy API**.
+4. تغییر رکوردهای DNS برای Manual و Cloudzy فقط **خودکار با Cloudflare API** انجام شود؛ نبود Cloudflare عملیات Cutover را متوقف کند؛ هیچ fallback DNS دستی وجود نداشته باشد.
 5. UI فارسی، خلوت، بدون اصطلاحات توسعه، با ErrorCatalog و دکمه‌های عملی و قابل‌فهم باشد.
 6. تست‌های حادثه 2026-10-29، بازگشت از خطا، crash و secret hygiene در CI سبز شوند و Edge آزمایشی + تست همراه اول با تأیید اپراتور پذیرفته شود.

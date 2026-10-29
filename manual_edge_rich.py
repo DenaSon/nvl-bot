@@ -75,7 +75,7 @@ def render_manual_card(text, rows):
                 raise ManualRichHold("RICH_ACTION_INVALID")
             if isinstance(action, str):
                 if (not action.startswith(("apps_edge_manual_", "apps_cz_",
-                                           "apps_home"))
+                                           "apps_cz7_", "apps_home"))
                         or not 1 <= len(action.encode("utf-8")) <= 64):
                     raise ManualRichHold("RICH_ACTION_INVALID")
                 button = {"text": label, "callback_data": action}

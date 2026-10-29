@@ -7492,6 +7492,18 @@ _manual_edge = ManualEdgeWizard(
     os_check=_manual_edge_verify_ubuntu,
 )
 
+# Provider-free Quick Switch: same pinned manual transport probes and
+# original protected legacy mutation gate; no Cloudzy provider API calls.
+from manual_quick_switch import ManualQuickSwitch, check_manual_relay_via_cz04b
+from manual_edge_quick_ui import QuickSwitchUI
+
+_manual_quick_switch = ManualQuickSwitch(
+    db_conn=db_conn,
+    dns=CloudflareExactDNS(_cf_get_config),
+    check_target=lambda plan: check_manual_relay_via_cz04b(_cloudzy_04b, plan),
+    guard=_cloudzy_04b_guard,
+)
+
 # Phase 7 is opt-in and strictly a read-only Rich admin view. No effectful
 # Cloudzy/CZ07 callback is forwarded through this bridge.
 from cloudzy_rich_bridge import (
@@ -7509,7 +7521,7 @@ def _cloudzy_markup(rows):
 def _build_admin_programs_kb(*, actor=None, chat=None, active_admin_ids=()):
     """Infrastructure and operational tools available only to NVL administrators."""
     rows = [
-        [InlineKeyboardButton("☁️ Cloudzy | Edge و Relay", callback_data="apps_cz_home")],
+        [InlineKeyboardButton("🌐 مدیریت Edge", callback_data="apps_cz_home")],
         [
             InlineKeyboardButton("🖥 نودها", callback_data="apps_marzban_nodes"),
             InlineKeyboardButton("🌐 هاست‌ها", callback_data="apps_marzban_hosts"),
@@ -7520,16 +7532,6 @@ def _build_admin_programs_kb(*, actor=None, chat=None, active_admin_ids=()):
         ],
         [InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")],
     ]
-    if (type(actor) is int and type(chat) is int
-            and actor > 0 and actor == chat and actor in active_admin_ids):
-        rows.insert(1, [InlineKeyboardButton(
-            "📊 مرکز عملیات Edge",
-            callback_data="apps_cz_rich_home",
-        )])
-        rows.insert(2, [InlineKeyboardButton(
-            "📦 گزارش انتقال کاربران SSH",
-            callback_data="apps_cz_rich_migration",
-        )])
     return rows
 
 
@@ -16705,6 +16707,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d == 'apps_home':
         context.user_data.pop("mza_nodes_origin", None)
         await _show_admin_programs_hub(query, context)
+        return
+    elif d.startswith("apps_edge_quick_"):
+        active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
+        await QuickSwitchUI(
+            engine=_manual_quick_switch,
+            token=context.application.bot.token,
+            db_conn=db_conn,
+        ).handle(
+            data=d,query=query,context=context,role=role,
+            actor=update.effective_user.id,chat=update.effective_chat.id,
+            is_private=(getattr(update.effective_chat,"type",None)=="private"),
+            active_admin_ids=active_admin_ids,
+        )
         return
     elif d.startswith("apps_cz7_"):
         await _cloudzy_07.handle_callback(

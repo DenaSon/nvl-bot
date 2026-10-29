@@ -231,6 +231,38 @@ class CZ04BTests(unittest.IsolatedAsyncioTestCase):
                 db.execute("SELECT value FROM settings WHERE key='dns_current_ip'"
                            ).fetchone()[0],"203.0.113.12")
 
+    async def test_fresh_manual_core_initializes_standby_guard_without_cloudzy_use(self):
+        # A manual operator has never opened the Cloudzy Standby menu.
+        # The shared route must create its guard schema locally, without
+        # querying the provider or silently skipping unsettled-action checks.
+        with self.db() as db:
+            db.execute("DROP TABLE cloudzy_cz04a_actions")
+            db.execute("""CREATE TABLE manual_edge_operations(
+                id TEXT,ip TEXT,pin_type TEXT,pin_base64 TEXT,status TEXT)""")
+            db.execute(
+                "INSERT INTO manual_edge_operations VALUES "
+                "('fresh-manual','203.0.113.12','ssh-ed25519','YWJjZA==','STANDBY')")
+            db.execute(
+                "UPDATE host_pool SET provider='manual',provider_instance_id=NULL "
+                "WHERE host='203.0.113.12'")
+            db.execute("DELETE FROM cloudzy_edge_operations")
+        async def provider_disabled(*_):
+            raise AssertionError("NO_CLOUDZY_API_ALLOWED")
+        self.manager.provider=provider_disabled
+        state=self.manager._state("203.0.113.12")
+        self.assertEqual(state["provider_id"],"manual:fresh-manual")
+        with self.db() as db:
+            cols={row[1] for row in db.execute(
+                "PRAGMA table_info(cloudzy_cz04a_actions)")}
+            self.assertTrue({"id","provider_id","host","status"}.issubset(cols))
+        self.assertEqual(await self.manager._run_route(
+            7,8,"203.0.113.12"),"READY")
+        self.assertEqual(self.manager._route_ready(),
+                         ("203.0.113.11","203.0.113.12","manual:fresh-manual"))
+        with self.db() as db:
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM cloudzy_edge_operations").fetchone()[0],0)
+
     async def test_manual_route_rejects_partial_cloudflare_write_without_user_move(self):
         with self.db() as db:
             db.execute("""CREATE TABLE manual_edge_operations(

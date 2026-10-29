@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import AsyncMock
 
 from manual_edge_wizard import ManualEdgeWizard
+from manual_edge_rich import ManualRichHold, render_manual_card
 
 
 class LegacyManualEntryTests(unittest.TestCase):
@@ -42,6 +43,21 @@ class LegacyManualEntryTests(unittest.TestCase):
                 buttons=[entry[1] for row in args[2] for entry in row]
                 self.assertEqual(buttons, ["hp_add","hp_menu","apps_cz_home"])
                 self.assertNotIn("web_app",str(args[2]))
+                # Exercise the REAL Rich rendering validation rather than
+                # just mocking its delivery: hp* callbacks must be accepted.
+                rich=render_manual_card(args[1],args[2])
+                callbacks=[
+                    button["callback_data"]
+                    for block in rich["blocks"] if block["type"]=="buttons"
+                    for button in block["buttons"]
+                ]
+                self.assertEqual(callbacks,buttons)
+
+    def test_rich_renderer_does_not_allow_disabled_legacy_mutations(self):
+        for bad in ("hpdef_1.2.3.4", "hpdef_migrate_1.2.3.4",
+                    "hpdefmig_yes_1.2.3.4", "hp_del", "hp_addedge"):
+            with self.subTest(callback=bad), self.assertRaises(ManualRichHold):
+                render_manual_card("بررسی", [[("اجرا",bad)]])
 
     def test_unauthorized_does_not_expose_legacy_mutating_cta(self):
         for role,actor,chat in [("member",77,77),("admin",77,78)]:

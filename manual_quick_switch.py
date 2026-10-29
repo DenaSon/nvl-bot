@@ -132,7 +132,7 @@ class ManualQuickSwitch:
         self.guard(db)
         st = dict(db.execute(
             "SELECT key,value FROM settings WHERE key IN "
-            "('hosts','dns_current_ip','core_wg_public_ip',"
+            "('hosts','dns_current_ip','core_wg_public_ip','tls_port',"
             "'phase6h_auto_failover_enabled','auto_failover_mode',"
             "'edge_egress_v1_onboard_enabled')"
         ).fetchall())
@@ -194,6 +194,7 @@ class ManualQuickSwitch:
             "count": len(rows), "fingerprint": _hash(rows),
             "users": rows, "identity": identity, "service_port": dest[3],
             "admin_port": dest[6] or 22,
+            "tls_port": int(st.get("tls_port") or 2088),
         }
 
     async def _check(self, plan):
@@ -287,7 +288,9 @@ class ManualQuickSwitch:
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             if db.execute(
-                "UPDATE manual_quick_switch_jobs SET status='HOLD',"
+                "UPDATE manual_quick_switch_jobs SET "
+                "status=CASE WHEN status='DB_COMMITTED' "
+                "THEN status ELSE 'HOLD' END,"
                 "error_code=?,updated_at=? WHERE id=? AND "
                 "status NOT IN ('DONE','ABORTED')",
                 (code, int(self.now()), job)
@@ -514,9 +517,20 @@ class ManualQuickSwitch:
                     not any(r[0] == source and r[2] == 0 for r in roles)
                     or count != expected_active or other):
                 raise QuickSwitchHold("EXTERNAL_ROUTE_UNVERIFIED")
-        # Avoid a Cloudzy provider request; independent SSH/WG/NAT checks.
-        await self._check({"source":source,"target":target,
-                           "external":True})
+        # Avoid a Cloudzy provider request; independently recheck the
+        # pinned identity and transport of the now-default manual Edge.
+        with self.db() as db:
+            identity = resolve_edge(db,target,require_default=True)
+            tls = db.execute(
+                "SELECT value FROM settings WHERE key='tls_port'"
+            ).fetchone()
+        await self._check({
+            "source":source,"target":target,"external":True,
+            "identity":identity,
+            "service_port":identity["customer_port"],
+            "admin_port":identity["admin_port"],
+            "tls_port":int(tls[0]) if tls and tls[0] else 2088,
+        })
         dns = self.dns.snapshot()
         if not _exact_records(dns,dns,target):
             raise QuickSwitchHold("EXTERNAL_DNS_UNVERIFIED")
@@ -556,3 +570,21 @@ class ManualQuickSwitch:
             self._log(db, job, "EXTERNAL_VERIFIED",
                       "OPERATOR_ATTESTED_PREEXISTING_ROUTE")
         return job
+
+
+async def check_manual_relay_via_cz04b(cz04b, plan):
+    """Adapter for production probes: zero Cloudzy provider API calls.
+
+    Reuses legacy pinned SSH/WG/customer probe and verified NAT rules.
+    Note: direct customer ISP E2E is an additional operator witness.
+    """
+    if plan["identity"]["provider"] != "manual":
+        raise QuickSwitchHold("NOT_MANUAL_EDGE")
+    if await cz04b.probe(
+            plan["target"], plan["service_port"],plan["admin_port"]) is not True:
+        raise QuickSwitchHold("MANUAL_CUSTOMER_ADMIN_WG_NOT_READY")
+    if await cz04b.nat(
+            plan["target"],plan["admin_port"],plan["service_port"],
+            plan["tls_port"],plan["identity"]["pinned_key"]) is not True:
+        raise QuickSwitchHold("PINNED_MANUAL_NAT_NOT_READY")
+    return True

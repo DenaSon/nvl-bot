@@ -81,6 +81,13 @@ FA = {
     "ARCHIVE_ROLE_UNVERIFIED":"وضعیت واقعی ثبت‌شده سرور با پرونده قبلی سازگار نیست؛ پیش از حذف بررسی کنید.",
     "ARCHIVE_USERS_STILL_ASSIGNED":"هنوز حساب‌هایی روی این Edge ثبت شده‌اند؛ ابتدا وضعیت همه حساب‌ها را بررسی و اصلاح کنید.",
     "ARCHIVE_ROUTE_JOB_UNRESOLVED":"یک انتقال یا عملیات مسیر مرتبط ناتمام است؛ ابتدا وضعیت آن را بررسی کنید.",
+    "FORMER_NOT_ELIGIBLE":"این سرور دیگر رله سابق معتبر نیست یا سابقه آن بایگانی شده است.",
+    "FORMER_IDENTITY_MISSING":"کلید SSH ثبت‌شده برای رله سابق ناقص است؛ بررسی دستی لازم است.",
+    "FORMER_ROLE_CHANGED":"وضعیت عملیاتی یا پورت‌های رله سابق تغییر کرده‌اند؛ پرونده را تازه کنید.",
+    "FORMER_ROUTE_UNVERIFIED":"مسیر اصلی، DNS ثبت‌شده در Core یا هویت سرور با شرایط انتقال سازگار نیست.",
+    "FORMER_USERS_STILL_ASSIGNED":"هنوز حساب‌هایی به این رله سابق منتسب‌اند؛ تا تعیین‌تکلیف همه آن‌ها امکان Standby نیست.",
+    "FORMER_TRANSFER_UNRESOLVED":"یک انتقال ناتمام یا قفل عملیاتی فعال وجود دارد؛ ابتدا وضعیت انتقال را بررسی کنید.",
+    "FORMER_HOSTKEY_CHANGED":"کلید SSH رله سابق با کلید تأییدشده قبلی تطابق ندارد؛ عملیات متوقف شد.",
 
     "SSH_HOSTKEY_MISSING":"کلید هویت SSH از سرور دریافت نشد.",
     "RICH_OPERATOR_UNAVAILABLE":"ارسال صفحه مدیریتی ممکن نیست؛ گفتگو را از منوی برنامه‌ها باز کنید.",
@@ -273,9 +280,12 @@ class ManualEdgeWizard:
         if stage=="EDGE_READY":
             rows.append([("✅ بررسی و فعال‌سازی Standby",
                          "apps_edge_manual_standby_"+opid)])
-        if stage=="STANDBY":
-            rows.append([("🔁 تغییر IP کاربران",
+        if stage=="STANDBY" and role=="STANDBY":
+            rows.append([("🚀 تبدیل به رله اصلی (کاربران + DNS)",
                          "apps_edge_quick_select_"+op["ip"])])
+        if stage=="ACTIVE" and role=="FORMER":
+            rows.append([("🔄 بررسی و تبدیل رله سابق به Standby",
+                         "apps_edge_manual_rearm_"+opid)])
         if stage=="ROUTING":
             rows.append([("🔄 وضعیت انتقال و تکمیل",
                          "apps_edge_manual_progress_"+opid)])
@@ -433,6 +443,72 @@ class ManualEdgeWizard:
                     "فرایند جداگانه لازم است.",
                     [[("✅ حذف فقط از فهرست",
                        "apps_edge_manual_archive_yes_"+opid)],
+                     [("انصراف","apps_edge_manual_detail_"+opid)]])
+            if data.startswith("apps_edge_manual_rearm_yes_"):
+                opid=data[len("apps_edge_manual_rearm_yes_"):]
+                port,_=await asyncio.to_thread(self.preflight)
+                # Snapshot is advisory only: every mutable guard will be
+                # checked again in one BEGIN IMMEDIATE transaction.
+                proof=await asyncio.to_thread(
+                    self.journal.preview_former_standby,opid,actor,chat,port)
+                tls=await asyncio.to_thread(self._tls_port)
+                log.info("Manual former rearm verification op=%s stage=HOSTKEY",opid)
+                try:
+                    observed=await asyncio.to_thread(
+                        self.key_reader,proof["ip"],proof["admin_port"])
+                except Exception as exc:
+                    log.warning("Manual former rearm probe failed op=%s "
+                                "stage=HOSTKEY type=%s trace=%s",
+                                opid,type(exc).__name__,_safe_trace_location(exc))
+                    raise ManualWizardHold("STANDBY_PROBE_ERROR") from None
+                if tuple(observed[:2]) != (proof["pin_type"],proof["pin_base64"]):
+                    raise ManualWizardHold("FORMER_HOSTKEY_CHANGED")
+                try:
+                    ok=await self.probe(proof["ip"],port,proof["admin_port"])
+                except Exception as exc:
+                    log.warning("Manual former rearm probe failed op=%s "
+                                "stage=CORE_PATH type=%s trace=%s",
+                                opid,type(exc).__name__,_safe_trace_location(exc))
+                    raise ManualWizardHold("STANDBY_PROBE_ERROR") from None
+                if ok is not True:
+                    raise ManualWizardHold("STANDBY_CORE_PATH_UNVERIFIED")
+                try:
+                    nat=await self.nat(
+                        proof["ip"],proof["admin_port"],port,tls,
+                        (proof["pin_type"],proof["pin_base64"]))
+                except Exception as exc:
+                    log.warning("Manual former rearm probe failed op=%s "
+                                "stage=NAT type=%s trace=%s",
+                                opid,type(exc).__name__,_safe_trace_location(exc))
+                    raise ManualWizardHold("STANDBY_NAT_ERROR") from None
+                if nat is not True:
+                    raise ManualWizardHold("STANDBY_NAT_UNVERIFIED")
+                await asyncio.to_thread(
+                    self.journal.mark_former_standby,opid,actor,chat,port)
+                log.info("Manual former Edge rearmed to Standby op=%s ip=%s",
+                         opid,proof["ip"])
+                return await self._view(query,
+                    "✅ <b>رله سابق دوباره Standby شد.</b>\n"
+                    "سرور: <code>"+escape(proof["ip"])+"</code>\n"
+                    "هیچ حساب یا DNS تغییر نکرده است. برای انتقال همه کاربران "
+                    "و تغییر خودکار Cloudflare، مرحله بعد را انتخاب کنید.",
+                    [[("🚀 تبدیل به رله اصلی (کاربران + DNS)",
+                       "apps_edge_quick_select_"+proof["ip"])],
+                     [("↩️ سرورهای دستی","apps_edge_manual_home")]])
+            if data.startswith("apps_edge_manual_rearm_"):
+                opid=data[len("apps_edge_manual_rearm_"):]
+                port,_=await asyncio.to_thread(self.preflight)
+                proof=await asyncio.to_thread(
+                    self.journal.preview_former_standby,opid,actor,chat,port)
+                return await self._view(query,
+                    "🔄 <b>آماده‌سازی رله سابق</b>\n\n"
+                    "سرور سابق: <code>"+escape(proof["ip"])+"</code>\n"
+                    "رله اصلی کنونی: <code>"+escape(proof["source"])+"</code>\n\n"
+                    "کلید SSH، مسیر Core، WireGuard و NAT مجدداً بررسی می‌شوند. "
+                    "فقط در صورت تأیید همه شروط، سرور Standby می‌شود. "
+                    "در این مرحله هیچ حساب یا DNS تغییر نمی‌کند.",
+                    [[("✅ بررسی مجدد و تبدیل به Standby",
+                       "apps_edge_manual_rearm_yes_"+opid)],
                      [("انصراف","apps_edge_manual_detail_"+opid)]])
             if data=="apps_edge_manual_new":
                 await asyncio.to_thread(self.preflight)

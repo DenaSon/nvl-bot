@@ -183,42 +183,36 @@ class Phase3ManualTests(unittest.TestCase):
                 "SELECT active,is_standby,is_default FROM host_pool "
                 "WHERE host='8.8.8.8'").fetchone(),(1,1,0))
 
-    def test_wizard_callbacks_use_rich_delivery_and_keep_webapp(self):
+    def test_wizard_callbacks_use_rich_native_telegram_without_webapp(self):
         import asyncio
         from types import SimpleNamespace
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import AsyncMock,patch
         from manual_edge_wizard import ManualEdgeWizard
 
-        async def no_network(*args):
-            raise AssertionError("NETWORK_NOT_PERMITTED")
-        wizard = ManualEdgeWizard(
-            db=self.db, preflight=lambda:(2252,"ssh-pub"),
+        def no_network(*args):
+            raise AssertionError("NO_REMOTE_EFFECTS")
+        wizard=ManualEdgeWizard(
+            db=self.db,preflight=lambda:(2252,"ssh-pub"),
             provision=no_network,verify=no_network,probe=no_network,
-            nat=no_network,queue=SimpleNamespace(),
-            enabled=lambda:True,
-            form_url=lambda:"https://secure.example",
-        )
+            nat=no_network,queue=SimpleNamespace(),enabled=lambda:False,
+            form_url=lambda:"")
         context=SimpleNamespace(user_data={})
         app=SimpleNamespace(bot=SimpleNamespace(token="123:TEST_TOKEN"))
-        # Any attempt to edit an HTML/inline-keyboard message fails.
-        query=SimpleNamespace(edit_message_text=lambda *a,**kw:
-                              (_ for _ in ()).throw(
-                                  AssertionError("HTML_UI_FORBIDDEN")))
         with patch("manual_edge_wizard.ManualRichDelivery") as factory:
             factory.return_value.show=AsyncMock(return_value=44)
             asyncio.run(wizard.handle(
-                query,context,"apps_edge_manual_home",
+                SimpleNamespace(),context,"apps_edge_manual_home",
                 role="admin",actor=77,chat=77,app=app))
-            args=factory.return_value.show.call_args.kwargs
-            self.assertIn("افزودن Edge دستی",args["text"])
-            self.assertEqual(args["rows"][0][0][1],"apps_edge_manual_new")
+            view=factory.return_value.show.call_args.kwargs
+            self.assertIn("افزودن Edge دستی",view["text"])
+            self.assertEqual(view["rows"][0][0][1],"apps_edge_manual_new")
             asyncio.run(wizard.handle(
-                query,context,"apps_edge_manual_new",
+                SimpleNamespace(),context,"apps_edge_manual_new",
                 role="admin",actor=77,chat=77,app=app))
-            args=factory.return_value.show.call_args.kwargs
-            self.assertIn("web_app",args["rows"][0][0][1])
-            self.assertTrue(args["rows"][0][0][1]["web_app"]["url"].startswith(
-                "https://secure.example/manual-edge/form?ticket="))
+            view=factory.return_value.show.call_args.kwargs
+            self.assertIn("IP عمومی",view["text"])
+            self.assertEqual(context.user_data["state"],"MANUAL_EDGE_IP")
+            self.assertNotIn("web_app",str(view["rows"]))
             self.assertNotIn("password",str(context.user_data).lower())
 
     def test_management_port_collisions_fail_before_any_remote_effect(self):

@@ -22,8 +22,14 @@ ACTIVE = ("DRAFT", "IDENTITY_PENDING", "HOSTKEY_PENDING",
 
 
 class ManualEdgeJournal:
-    def __init__(self, factory, *, now=time.time):
-        self.db, self.now = factory, now
+    def __init__(self, factory, *, now=time.time, guard=None):
+        self.db, self.now, self.guard = factory, now, guard
+
+    def _protected(self, db):
+        # Reuse original protected Core 6G/Legacy safety fence in the SAME
+        # transaction as install intent and Standby registration.
+        if self.guard is not None:
+            self.guard(db)
 
     @staticmethod
     def initialize(db):
@@ -165,6 +171,7 @@ class ManualEdgeJournal:
     def begin_install(self,op_id,actor,chat):
         with self.db() as db:
             self.initialize(db);db.execute("BEGIN IMMEDIATE")
+            self._protected(db)
             # Legacy installer allocates Core WG peer IPs and appends Core WG
             # config. That is a truly shared resource across both pathways.
             # Do not admit concurrent/uncertain installers until reconciled.
@@ -217,6 +224,7 @@ class ManualEdgeJournal:
     def mark_standby(self,op_id,actor,chat):
         with self.db() as db:
             self.initialize(db);db.execute("BEGIN IMMEDIATE")
+            self._protected(db)
             row=db.execute(
                 "SELECT ip FROM manual_edge_operations "
                 "WHERE id=? AND actor=? AND chat=? AND status='EDGE_READY'",

@@ -1,7 +1,7 @@
 # NVL — گزارش توسعه فاز ۲: انتقال بدون Cloudzy GET و بازیابی امن صف
 
 **تاریخ:** 2026-10-29  
-**وضعیت:** پیاده‌سازی Source در [PR #237](https://github.com/DenaSon/nvl-bot/pull/237)؛ CI و Merge نهایی جداگانه تأیید می‌شوند. **هیچ تغییر Production، DNS، VPS یا حساب کاربر در زمان توسعه انجام نشده است.**  
+**وضعیت:** **SOURCE_MERGED** — [PR #237](https://github.com/DenaSon/nvl-bot/pull/237)، commit `038d6c2ddd53a76108eccd28880a66b63b1ae64f`. [CI موفق #40865995415](https://github.com/DenaSon/nvl-bot/actions/runs/40865995415): **۳۰۳۹ تست Python موفق** (۱۳ مورد skip در اجرای اصلی)، بازآزمایی در بسته Root با **۳۰۳۹ تست موفق** (۳ مورد skip). **CORE_DEPLOYED=NO / PRODUCTION_ACCEPTED=NO**. هیچ تغییر Production، DNS، VPS یا حساب کاربر در زمان توسعه انجام نشده است.  
 **مرجع:** [برنامه پنج‌فازی NVL](NVL_EDGE_RELIABILITY_MANUAL_RECOVERY_5_PHASE_PLAN_2026-10-29.md) و [تحویل فاز ۱](NVL_EDGE_RELIABILITY_P1_DELIVERY_2026-10-29.md).
 
 ## ۱. تفکیک وابستگی API و مسیر داده
@@ -49,7 +49,7 @@
 
 - عملیات قدیمی با اثر ناشناخته و **بدون audit معتبر** خودکار آزاد نمی‌شود؛ نمایش «نیازمند بررسی شواهد» درست است، نه `MOVED` جعلی.
 - `GET` Cloudzy در فرآیند اولیه خرید/نصب/Cutover **هنوز وجود دارد**. این فاز فقط استقلال صف Migration پس از Admission را پیاده می‌کند؛ مسیر صفر API از ابتدا تا انتها هدف فاز ۳ و ۴ است.
-- محاسبه `actual_moved=total−remaining` باید با receipts `DONE` همان source-target از زمان شروع Job و Audit اصلی تطبیق داشته باشد. اگر کاربران حذف، غیرفعال یا جابه‌جا شده‌اند و شواهد ناسازگار شد، fail closed؛ تصحیح نیازمند ممیزی جدا است.
+- محاسبه `actual_moved=total−remaining` باید با receipts `DONE` همان source-target، مدیر، گفتگو و شناسه VPS از زمان شروع Job و Audit اصلی تطبیق داشته باشد. اگر کاربران حذف، غیرفعال یا جابه‌جا شده‌اند و شواهد ناسازگار شد، fail closed؛ تصحیح نیازمند ممیزی جدا است.
 - چک‌های DNS و سلامت سرویس بعد از Preview و پیش از تأیید مجدداً اجرا می‌شوند؛ تغییر خارجی ناگهانی بعد از snapshot همچنان ریسک `time-of-check/time-of-use` است که با CAS DB/lease و توقف روی شواهد ناسازگار کاهش یافته، اما تضمین اتمیک DNS خارجی ممکن نیست.
 - `MOVED` و `DONE` متفاوت‌اند. تا زمان رسید معتبر پس از انتقال، حذف Edge قدیمی خودکار ممنوع است.
 

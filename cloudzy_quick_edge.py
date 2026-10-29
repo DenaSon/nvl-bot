@@ -29,7 +29,7 @@ from cloudzy_service import (
 from cloudzy_cz05_catalog import CatalogHold, eligible_offers, preferred_regions
 from cloudzy_unified_native import (
     register_native_purchase, mark_paid_intent, observe_native_status,
-    UnifiedLinkHold,
+    observe_native_cancellation, UnifiedLinkHold,
 )
 from cloudzy_purchase_guard import (
     PurchaseHold, classify_preflight, classify_create,
@@ -56,6 +56,7 @@ CHARGEABLE_STATES = frozenset({
 CANCELLABLE_STATES = frozenset({
     "HOSTKEY_PENDING", "HOLD_WAIT", "HOLD_IP", "HOLD_SSH",
     "HOLD_PROVISION", "HOLD_PREFLIGHT", "HOLD_PROVIDER", "HOLD_UNKNOWN",
+    "CREATE_UNCERTAIN",  # opt-in quarantine requires explicit risk acknowledgement
 })
 CLOSED_STATES = ("EDGE_READY", "REJECTED", "CANCELLED")
 CYCLES = {"hourly": "ساعتی"}
@@ -345,7 +346,8 @@ class ReceiptStore:
                 "SELECT 1 FROM host_pool WHERE host=? LIMIT 1", (ip,)
             ).fetchone() is not None
 
-    def cancel(self, operation_id, *, actor, chat, expected_status):
+    def cancel(self, operation_id, *, actor, chat, expected_status,
+               uncertain_ack=False, provider_observation=None):
         """Cancel an idle failed/paused purchase ledger, never provider/Edge resources.
 
         Caller must enforce admin permission and the absence of a live local worker.
@@ -357,6 +359,10 @@ class ReceiptStore:
             raise QuickEdgeHold("INVALID_OWNER_OR_CHAT")
         if expected_status not in CANCELLABLE_STATES:
             raise QuickEdgeHold("CANCEL_STATE_NOT_ALLOWED")
+        if expected_status == "CREATE_UNCERTAIN":
+            if uncertain_ack is not True or provider_observation not in (
+                    "NOT_OBSERVED", "PROVIDER_UNAVAILABLE"):
+                raise QuickEdgeHold("UNCERTAIN_CREATE_REQUIRES_EXPLICIT_RISK_ACK")
         self.initialize()
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -367,6 +373,17 @@ class ReceiptStore:
             if not row or row[0] != expected_status:
                 raise QuickEdgeHold("CANCEL_STATE_CHANGED")
             status, ip, provider_id, original_reason = row
+            if status == "CREATE_UNCERTAIN":
+                if ip or provider_id:
+                    # An identified VPS must be managed using that receipt,
+                    # not disposed of as an unknown charge.
+                    raise QuickEdgeHold("UNCERTAIN_CREATE_HAS_PROVIDER_IDENTITY")
+                last_changed = db.execute(
+                    "SELECT updated_at FROM cloudzy_edge_operations WHERE id=?",
+                    (operation_id,),
+                ).fetchone()[0]
+                if int(self.now()) - int(last_changed) < 120:
+                    raise QuickEdgeHold("UNCERTAIN_CREATE_SETTLEMENT_GRACE")
 
             # A previously RETIRED host may hold the same recycled public IP.
             # The purchase receipt identifies the NEW provider VPS; never
@@ -447,6 +464,32 @@ class ReceiptStore:
                 "(operation_id,actor_id,chat_id,previous_status,previous_reason,created_at) "
                 "VALUES (?,?,?,?,?,?)",
                 (operation_id, actor, chat, status, original_reason, ts)
+            )
+            if status == "CREATE_UNCERTAIN":
+                # This is NOT proof that Cloudzy did not charge/create a VPS.
+                # The immutable receipt, idempotency key and hostname survive.
+                db.execute("""CREATE TABLE IF NOT EXISTS cloudzy_purchase_quarantine(
+                    operation_id TEXT PRIMARY KEY,
+                    actor_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,
+                    hostname TEXT NOT NULL,provider_observation TEXT NOT NULL,
+                    disposition TEXT NOT NULL,created_at INTEGER NOT NULL
+                )""")
+                original_hostname = db.execute(
+                    "SELECT hostname FROM cloudzy_edge_operations WHERE id=?",
+                    (operation_id,),
+                ).fetchone()[0]
+                db.execute(
+                    "INSERT INTO cloudzy_purchase_quarantine "
+                    "(operation_id,actor_id,chat_id,hostname,provider_observation,"
+                    "disposition,created_at) VALUES (?,?,?,?,?,?,?)",
+                    (operation_id, actor, chat, original_hostname,
+                     provider_observation, "PENDING_PROVIDER_RECONCILIATION", ts),
+                )
+            # CZ03, CZ06 and UO checkpoint in the SAME transaction.
+            # UO stays RECONCILE_REQUIRED for any possible paid effect.
+            observe_native_cancellation(
+                db, operation_id=operation_id,
+                uncertain=status == "CREATE_UNCERTAIN", now=ts,
             )
         return "CANCELLED"
 
@@ -709,9 +752,18 @@ class QuickEdgeWizard:
                 opid = pending["id"]
                 if opid in self._running:
                     raise QuickEdgeHold("CANCEL_WORKER_STILL_RUNNING")
+                if pending["status"] == "CREATE_UNCERTAIN":
+                    current = await asyncio.to_thread(self.store.get, opid)
+                    observed = await self._observe_uncertain_purchase(current)
+                    if observed in ("PROVIDER_EXISTS", "PROVIDER_AMBIGUOUS"):
+                        raise QuickEdgeHold("CANCEL_PROVIDER_RESOURCE_FOUND_OR_AMBIGUOUS")
+                else:
+                    observed = None
                 await asyncio.to_thread(
                     self.store.cancel, opid, actor=actor, chat=chat,
-                    expected_status=pending["status"]
+                    expected_status=pending["status"],
+                    uncertain_ack=pending.get("uncertain_ack", False),
+                    provider_observation=observed,
                 )
                 # Consume confirmation only after durable journal cancellation.
                 # A rejected safety check must not silently invalidate the
@@ -720,11 +772,14 @@ class QuickEdgeWizard:
                 log.warning("CZ06_CANCEL op=%s actor=%s code=OPERATOR_CANCELLED",
                             opid[:16], actor)
                 await self._display(query,
-                    "✅ <b>عملیات لغو و قفل خرید آزاد شد.</b>\n\n"
+                    "✅ <b>پرونده محلی بسته و قفل خرید آزاد شد.</b>\n\n"
                     f"شناسه: <code>{opid[:16]}</code>\n"
                     "🛡 هیچ VPS حذف نشده و Relay/DNS/کاربران تغییر نکرده‌اند.\n"
-                    "⚠️ آثار احتمالی نصب ناقص روی Core/WireGuard باید جداگانه بررسی شوند. "
-                    "اگر VPS هنوز موجود باشد، ممکن است هزینه آن ادامه داشته باشد.",
+                    + ("⚠️ نتیجه خرید Cloudzy هنوز نامشخص است. پرونده هزینه "
+                       "در قرنطینه و در انتظار تطبیق با Cloudzy باقی می‌ماند؛ "
+                       "در صورت وجود VPS، هزینه آن ادامه خواهد داشت."
+                       if pending["status"] == "CREATE_UNCERTAIN" else
+                       "⚠️ آثار نصب احتمالی و هزینه VPS باید جداگانه بررسی شوند."),
                     [[("⚡ ساخت Edge جدید", "apps_cz_wizard")],
                      [("📋 وضعیت عملیات", "apps_cz_operations")]], markup)
             elif data.startswith("apps_cz_qcancel_"):
@@ -732,10 +787,20 @@ class QuickEdgeWizard:
                 op = await asyncio.to_thread(self.store.get, opid)
                 if op["status"] not in CANCELLABLE_STATES or opid in self._running:
                     raise QuickEdgeHold("CANCEL_NOT_ALLOWED_OR_RUNNING")
+                uncertain = op["status"] == "CREATE_UNCERTAIN"
+                if uncertain:
+                    if op.get("provider_server_id") or op.get("public_ipv4"):
+                        raise QuickEdgeHold("UNCERTAIN_CREATE_HAS_PROVIDER_IDENTITY")
+                    observed = await self._observe_uncertain_purchase(op)
+                    if observed in ("PROVIDER_EXISTS", "PROVIDER_AMBIGUOUS"):
+                        raise QuickEdgeHold("CANCEL_PROVIDER_RESOURCE_FOUND_OR_AMBIGUOUS")
+                else:
+                    observed = None
                 nonce = secrets.token_hex(6)
                 context.user_data["cz3_cancel"] = {
                     "id": opid, "status": op["status"], "actor": actor,
-                    "chat": chat, "nonce": nonce, "expires": self.now() + 180
+                    "chat": chat, "nonce": nonce, "expires": self.now() + 180,
+                    "uncertain_ack": uncertain,
                 }
                 await self._display(query,
                     "⚠️ <b>تأیید لغو عملیات Cloudzy</b>\n\n"
@@ -744,9 +809,17 @@ class QuickEdgeWizard:
                     f"IP: <code>{_text(op.get('public_ipv4') or 'نامشخص')}</code>\n\n"
                     "این اقدام فقط پرونده عملیات را می‌بندد و قفل خرید را آزاد می‌کند؛ "
                     "VPS، WireGuard، DNS و کاربران را حذف یا جابه‌جا نمی‌کند.\n"
-                    "❗ اگر VPS هنوز وجود دارد، هزینه‌های آن متوقف نمی‌شود. "
-                    "آثار احتمالی نصب ناقص نیازمند رسیدگی جداگانه‌اند.",
-                    [[("✅ لغو قطعی و آزادسازی قفل", "apps_cz_qcancelyes_" + nonce)],
+                    + (f"⚠️ نتیجه POST خرید قطعی نیست؛ مشاهده API: {_text(observed)}.\n"
+                       f"Hostname: <code>{_text(op['hostname'])}</code>\n"
+                       "فقط پس از بررسی مستقل کنسول Cloudzy و پذیرش احتمال هزینه "
+                       "VPS دیده‌نشده تأیید کنید. این لغو، اثبات عدم خرید/حذف نیست؛ "
+                       "بدهی احتمالی در Journal قرنطینه می‌ماند."
+                       if uncertain else
+                       "❗ اگر VPS هنوز وجود دارد، هزینه‌های آن متوقف نمی‌شود. "
+                       "آثار احتمالی نصب ناقص نیازمند رسیدگی جداگانه‌اند."),
+                    [[("✅ پذیرش ریسک و خروج از قفل خرید" if uncertain
+                       else "✅ لغو قطعی و آزادسازی قفل",
+                       "apps_cz_qcancelyes_" + nonce)],
                      [("↩️ بازگشت بدون لغو", "apps_cz_qview_" + opid)]], markup)
             elif data.startswith("apps_cz_qview_"):
                 op = await asyncio.to_thread(self.store.get, data[len("apps_cz_qview_"):])
@@ -1106,6 +1179,27 @@ class QuickEdgeWizard:
             "موجودی لحظه‌ای پیش از خرید دوباره کنترل می‌شود.",
             rows, markup)
 
+    async def _observe_uncertain_purchase(self, op):
+        """Read Cloudzy inventory without replaying a chargeable POST.
+
+        Negative inventory is not conclusive absence. Only positive exact
+        matching identity blocks quarantine. A failed GET is separately logged.
+        """
+        try:
+            inventory = _items(await self._cloudzy("list_servers"))
+            exact_existing_server(
+                inventory, hostname=op["hostname"],
+                provider_id=op.get("provider_server_id"),
+            )
+        except PurchaseHold as exc:
+            code = str(exc)
+            if code == "PROVIDER_CREATION_UNPROVEN":
+                return "NOT_OBSERVED"
+            return "PROVIDER_AMBIGUOUS"
+        except Exception:
+            return "PROVIDER_UNAVAILABLE"
+        return "PROVIDER_EXISTS"
+
     async def _operation_screen(self, query, op, markup, actor, chat):
         """One readable status for an existing receipt; buttons are pure gates.
 
@@ -1149,7 +1243,9 @@ class QuickEdgeWizard:
                 rows.append([("🩺 مسیر بازیابی همین VPS", "apps_cz_qrecover_" + opid)])
 
             if status in CANCELLABLE_STATES and not is_running:
-                rows.append([("❌ بررسی بستن پرونده (بدون حذف VPS)",
+                rows.append([("🛡 درخواست لغو و تعیین تکلیف خرید نامشخص"
+                             if status == "CREATE_UNCERTAIN"
+                             else "❌ بررسی بستن پرونده (بدون حذف VPS)",
                              "apps_cz_qcancel_" + opid)])
 
             rows.append([("🔎 جزئیات فنی و کد خطا", "apps_cz_qdetails_" + opid)])

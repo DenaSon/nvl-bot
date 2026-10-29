@@ -8181,6 +8181,23 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Emergency escape hatch for persisted/stateful bot workflows."""
     chat_id = update.effective_chat.id if hasattr(update, 'effective_chat') else 0
 
+    if context.user_data.get("state") in (
+            "MANUAL_EDGE_IP","MANUAL_EDGE_PORT","MANUAL_EDGE_PASSWORD"):
+        sess=context.user_data.get("manual_edge_session")
+        actor=update.effective_user.id
+        if (isinstance(sess,dict) and context.user_data.get("role")=="admin"
+                and actor==chat_id and
+                (sess.get("actor"),sess.get("chat"))==(actor,chat_id)):
+            try:
+                await asyncio.to_thread(
+                    _manual_edge.journal.cancel_draft,sess["op"],actor,chat_id)
+            except Exception:
+                # Clearing input does not remove an effectful journal entry.
+                safe_clear_context(context)
+                await update.message.reply_text(
+                    "⚠️ ورودی متوقف شد ولی پروندهٔ نصب همچنان باز است. "
+                    "از وضعیت Edge آن را بررسی کنید.")
+                return
     # Cancel non-persistent in-memory wizard sessions as well as persisted
     # user_data so /cancel is safe even after a navigation/state mismatch.
     with contextlib.suppress(Exception):

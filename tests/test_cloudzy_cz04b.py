@@ -334,6 +334,43 @@ class CZ04BTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT COUNT(*) FROM failover_operations"
             ).fetchone()[0], 0)
 
+    async def test_cz07_batch_uses_pinned_ssh_network_not_cloudzy_api(self):
+        # Initial route approval still verifies provider ownership.
+        await self.confirmed_route()
+        self.net_calls.clear()
+        async def forbidden_provider(ip, pid):
+            raise AssertionError("BATCH_MUST_NOT_CALL_CLOUDZY")
+        self.manager.provider = forbidden_provider
+        rows, fp = self.manager._migration_snapshot(
+            "203.0.113.11", "203.0.113.12")
+        count = await self.manager._run_users(
+            7,8,["alice"],fp,check_provider=False)
+        self.assertEqual(count,1)
+        self.assertEqual(self.net_calls,["probe","nat"])
+        with self.db() as db:
+            self.assertEqual(
+                db.execute("SELECT host FROM ssh_accounts WHERE username='alice'").fetchone()[0],
+                "203.0.113.12",
+            )
+
+    async def test_cz07_provider_free_batch_rejects_bad_nat_without_move(self):
+        await self.confirmed_route()
+        self.net_calls.clear()
+        self.provider_good = False
+        self.nat_good = False
+        rows, fp = self.manager._migration_snapshot(
+            "203.0.113.11", "203.0.113.12")
+        from cloudzy_cz04b import CutoverHold
+        with self.assertRaisesRegex(CutoverHold,"PINNED_SSH_NAT_RULES_NOT_VERIFIED"):
+            await self.manager._run_users(
+                7,8,["alice"],fp,check_provider=False)
+        self.assertEqual(self.net_calls,["probe","nat"])
+        with self.db() as db:
+            self.assertEqual(
+                db.execute("SELECT host FROM ssh_accounts WHERE username='alice'").fetchone()[0],
+                "203.0.113.11",
+            )
+
     async def test_duplicate_and_stale_confirmations_one_use(self):
         go = await self.confirmed_route()
         self.assertEqual(len(self.dns.calls), 2)

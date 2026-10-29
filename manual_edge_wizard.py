@@ -135,7 +135,7 @@ class ManualEdgeWizard:
         if op is None:
             return await self._view(query,
                 "🛟 <b>افزودن Edge دستی</b>\n\n"
-                "سرور خودتان را بدون Cloudzy اضافه کنید. "
+                "سرور خودتان را به‌صورت دستی اضافه کنید. "
                 "تغییر DNS پس از آماده‌سازی فقط از طریق Cloudflare انجام می‌شود.",
                 [[("➕ افزودن سرور", "apps_edge_manual_new")],
                  [("↩️ مدیریت Edge","apps_cz_home")]])
@@ -161,8 +161,8 @@ class ManualEdgeWizard:
             rows.append([("✅ بررسی و فعال‌سازی Standby",
                           "apps_edge_manual_standby_"+op["id"])])
         if stage=="STANDBY":
-            rows.append([("🔁 بررسی انتقال کاربران",
-                          "apps_edge_manual_review_"+op["id"])])
+            rows.append([("🔁 تغییر IP کاربران",
+                          "apps_edge_quick_select_"+op["ip"])])
         if stage=="ROUTING":
             rows.append([("🔄 وضعیت انتقال و تکمیل",
                           "apps_edge_manual_progress_"+op["id"])])
@@ -355,7 +355,7 @@ class ManualEdgeWizard:
                     "✅ <b>سرور در حالت آماده‌به‌کار قرار گرفت.</b>\n"
                     "DNS و حساب‌های مشتری هنوز تغییر نکرده‌اند.",
                     [[("🔁 بررسی انتقال کاربران",
-                       "apps_edge_manual_review_"+opid)],
+                       "apps_edge_quick_select_"+op["ip"])],
                      [("↩️ وضعیت","apps_edge_manual_home")]])
             if data.startswith("apps_edge_manual_review_"):
                 opid=data[len("apps_edge_manual_review_"):]
@@ -448,7 +448,7 @@ class ManualEdgeWizard:
                         "MOVED":"رله فعال، پذیرش مشتری در انتظار",
                     }.get(rec["status"],"نیازمند بررسی"))+"</b>",
                     [[("🔄 تازه‌سازی","apps_edge_manual_progress_"+opid)],
-                     [("📋 بررسی و بازیابی صف","apps_cz7_status")]])
+                     [("📋 وضعیت و بازیابی","apps_edge_quick_status")]])
             if data.startswith("apps_edge_manual_finish_"):
                 opid=data[len("apps_edge_manual_finish_"):]
                 op=await asyncio.to_thread(self.journal.get,opid)

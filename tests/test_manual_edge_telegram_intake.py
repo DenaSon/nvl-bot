@@ -74,7 +74,7 @@ class PrivateIntakeTests(unittest.IsolatedAsyncioTestCase):
         ctx=self.context("password","MANUAL_EDGE_PASSWORD")
         u=self.update()
         app,coros=self.app()
-        secret="DEMO_ROOT_PASSWORD_DO_NOT_LOG"
+        secret="/DEMO_ROOT_PASSWORD_DO_NOT_LOG"
         await w.receive_text(u,ctx,"MANUAL_EDGE_PASSWORD",secret,
                              actor=77,chat=77,role="admin",app=app)
         u.message.delete.assert_awaited_once()
@@ -82,6 +82,20 @@ class PrivateIntakeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(secret,str(ctx.user_data))
         self.assertNotIn("state",ctx.user_data)
         self.assertIn("آغاز",w._view.await_args.args[1])
+
+    async def test_bot_routes_command_shaped_secret_before_commandhandlers(self):
+        from pathlib import Path
+        source=(Path(__file__).resolve().parents[1]/
+                "bot_final_v49-2.py").read_text(encoding="utf-8")
+        self.assertIn("async def _manual_edge_command_intake",source)
+        self.assertIn("raise ApplicationHandlerStop",source)
+        sensitive=source.index("filters.TEXT & filters.COMMAND, _manual_edge_command_intake")
+        ordinary=source.index('app.add_handler(CommandHandler("start"')
+        self.assertLess(sensitive,ordinary)
+        self.assertIn("group=-1",source[sensitive:sensitive+140])
+        self.assertNotIn('log.error("خطای پردازش‌نشده در آپدیت %s:"',source)
+        self.assertIn("type(context.error).__name__",source)
+
 
     async def test_delete_failure_never_runs_remote_install(self):
         w,_=self.wizard()

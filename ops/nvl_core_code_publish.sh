@@ -14,7 +14,7 @@ JOB=a0b997e06a92ca35261561f8a5aa5f87
 BEFORE_BOT_SHA=e2a859372196044389c60a6b495d2a281fb7a0435d3e06260cf6076cc762261c
 BEFORE_QUEUE_SHA=bf14760d84b50ca89ea96ab375641888cd84b5278605ffc288e29fd64b82ad3a
 
-fail() { echo "STOP: $*" >&2; exit 1; }
+fail() { echo "STOP: $*" >&2; return 1; }
 [[ "$EUID" -eq 0 ]] || fail "root required"
 [[ "$PIN_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "set NVL_PIN_SHA to an exact 40-char Git SHA"
 for cmd in git sqlite3 python3 systemctl sha256sum cmp readlink stat cp install mktemp; do

@@ -126,6 +126,22 @@ class UiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("CONFIRMATION_EXPIRED",retry["text"])
         self.assertEqual(len(self.engine.starts),1)
 
+    async def test_dns_retry_requires_separate_one_use_confirmation(self):
+        self.engine.record={
+            "id":"job1","kind":"QUICK","source":"a","target":"b",
+            "status":"HOLD","error_code":"DNS_UNCERTAIN",
+        }
+        page=await self.go("apps_edge_quick_retry")
+        action=page["rows"][0][0][1]
+        self.assertTrue(action.startswith("apps_edge_quick_retry_yes_"))
+        self.assertEqual(self.engine.resumes,[])
+        page=await self.go(action)
+        self.assertIn("نتیجه بازیابی",page["text"])
+        self.assertEqual(self.engine.resumes,[("job1","telegram:7",True)])
+        page=await self.go(action)
+        self.assertIn("CONFIRMATION_EXPIRED",page["text"])
+        self.assertEqual(len(self.engine.resumes),1)
+
     async def test_unresolved_recovery_uses_no_blind_dns_retry(self):
         self.engine.record={
             "id":"job1","kind":"QUICK","source":"a","target":"b",

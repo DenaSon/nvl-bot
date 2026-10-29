@@ -260,6 +260,16 @@ class ManualEdgeWizard:
         if role!="admin" or actor!=chat:
             return await self._view(query,"⛔️ فقط مدیر در گفتگوی خصوصی مجاز است.",
                                     [[("↩️ برنامه‌ها","apps_home")]])
+        # The installer publishes a *new* Rich completion receipt, while the
+        # wizard's user_data pointer still refers to an earlier message.
+        # Always edit the exact bot message carrying the clicked callback,
+        # not an unrelated stale Rich card higher up in chat history.
+        message=getattr(query,"message",None)
+        message_id=getattr(message,"message_id",None)
+        callback_chat=getattr(getattr(message,"chat",None),"id",None)
+        if (type(message_id) is int and message_id>0
+                and type(callback_chat) is int and callback_chat==chat):
+            context.user_data["manual_edge_rich_pointer"]=message_id
         try:
             if data=="apps_edge_manual_home":
                 return await self._show(query,actor,chat)

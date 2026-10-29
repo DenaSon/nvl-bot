@@ -61,11 +61,18 @@ class ManualQuickSwitch:
     required at the calling UI boundary; no unattended switch is exposed.
     """
 
-    def __init__(self, *, db_conn, dns, check_target, guard=None, now=time.time):
+    def __init__(self, *, db_conn, dns, check_target, guard, now=time.time):
+        # The production caller must explicitly supply the original protected
+        # route/account mutation fence; a silent no-op default is unsafe.
+        if not all(callable(x) for x in (db_conn,check_target,guard)):
+            raise ValueError("QUICK_SWITCH_GUARDS_REQUIRED")
+        if not callable(getattr(dns,"snapshot",None)) or not callable(
+                getattr(dns,"set_all",None)):
+            raise ValueError("QUICK_SWITCH_DNS_ADAPTER_REQUIRED")
         self.db = db_conn
         self.dns = dns
         self.check_target = check_target
-        self.guard = guard or (lambda db: None)
+        self.guard = guard
         self.now = now
         self._resume_lock = asyncio.Lock()
 

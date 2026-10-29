@@ -367,12 +367,15 @@ class ReceiptStore:
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
-                "SELECT status,public_ipv4,provider_server_id,hold_reason "
-                "FROM cloudzy_edge_operations WHERE id=?", (operation_id,)
+                "SELECT status,public_ipv4,provider_server_id,hold_reason,"
+                "actor_id,chat_id FROM cloudzy_edge_operations WHERE id=?",
+                (operation_id,),
             ).fetchone()
             if not row or row[0] != expected_status:
                 raise QuickEdgeHold("CANCEL_STATE_CHANGED")
-            status, ip, provider_id, original_reason = row
+            status, ip, provider_id, original_reason, owner, owner_chat = row
+            if (owner, owner_chat) != (actor, chat):
+                raise QuickEdgeHold("CANCEL_OWNER_MISMATCH")
             if status == "CREATE_UNCERTAIN":
                 if ip or provider_id:
                     # An identified VPS must be managed using that receipt,
@@ -785,6 +788,8 @@ class QuickEdgeWizard:
             elif data.startswith("apps_cz_qcancel_"):
                 opid = data[len("apps_cz_qcancel_"):]
                 op = await asyncio.to_thread(self.store.get, opid)
+                if (op["actor_id"], op["chat_id"]) != (actor, chat):
+                    raise QuickEdgeHold("CANCEL_OWNER_MISMATCH")
                 if op["status"] not in CANCELLABLE_STATES or opid in self._running:
                     raise QuickEdgeHold("CANCEL_NOT_ALLOWED_OR_RUNNING")
                 uncertain = op["status"] == "CREATE_UNCERTAIN"

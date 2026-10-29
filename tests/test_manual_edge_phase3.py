@@ -49,7 +49,9 @@ class Phase3ManualTests(unittest.TestCase):
                 (host,active,is_default,is_standby,provider,provider_instance_id,
                  service_port,admin_ssh_port)
                  VALUES ('1.1.1.1',1,1,0,'legacy',NULL,2222,22)""")
-        self.journal=ManualEdgeJournal(self.db,now=lambda:10000)
+        self.journal=ManualEdgeJournal(
+            self.db,now=lambda:10000,
+            install_lock_path=os.path.join(self.temp.name,"wg-install.lock"))
 
     def tearDown(self):
         self.temp.cleanup()

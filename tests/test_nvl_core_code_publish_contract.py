@@ -28,6 +28,10 @@ class CorePublishContractTests(unittest.TestCase):
         self.assertIn('PRAGMA quick_check', text)
         self.assertIn('src.backup(dst', text)
         self.assertIn('git -C "$SRC" rev-parse HEAD', text)
+        self.assertIn('find "$SRC/ops" "$SRC/server_migration"', text)
+        self.assertIn('install -D -m "$mode" "$SRC/$rel" "$ROOT/$rel"', text)
+        self.assertIn('done < "$RELEASE/manifest.txt"', text)
+        self.assertIn('cp -p "$RELEASE/previous/$rel" "$ROOT/$rel"', text)
 
     def test_does_not_write_accounts_routes_dns_or_auto_enable_flags(self):
         script = SCRIPT.read_text()

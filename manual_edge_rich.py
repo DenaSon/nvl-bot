@@ -79,7 +79,12 @@ def render_manual_card(text, rows):
             if not isinstance(label, str) or not 1 <= len(label) <= 70:
                 raise ManualRichHold("RICH_ACTION_INVALID")
             if isinstance(action, str):
-                if (not action.startswith(("apps_edge_manual_", "apps_cz_",
+                # Only these two existing Legacy navigation callbacks are
+                # cross-linked; do not broaden the Rich action allowlist to
+                # arbitrary hp* mutations or disabled route buttons.
+                legacy_navigation = action in ("hp_add", "hp_menu")
+                if (not legacy_navigation and
+                    not action.startswith(("apps_edge_manual_", "apps_cz_",
                                            "apps_cz7_", "apps_home"))
                         or not 1 <= len(action.encode("utf-8")) <= 64):
                     raise ManualRichHold("RICH_ACTION_INVALID")

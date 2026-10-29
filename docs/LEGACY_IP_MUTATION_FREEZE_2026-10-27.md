@@ -1,5 +1,15 @@
 # LEGACY IP ROUTE FREEZE — 2026-10-27
 
+> **توضیح اجرایی ۲۰۲۶-۱۰-۲۹ (مقدم بر تاریخچه پایین):** در کد فعلی،
+> `hp_add` و `hp_menu` برای **ثبت و فهرست IP** وجود دارند؛ اما
+> `hpdef_ / hpdef_migrate_ / hpdefmig_yes_` عمداً از سوی callback_handler
+> با ارجاع به `CZ04B/CZ07` متوقف می‌شوند. بنابراین جملات تاریخی پایین
+> درباره «تغییر پیش‌فرض از مسیر Legacy» مجوز اجرای انتقال نیستند.
+> PR مربوط به نمایش منوی دستی صرفاً راه ورود به inventory را اصلاح می‌کند،
+> **نه انتقال خودکار/تغییر DNS**. راه‌اندازی گردش‌کار امن برای انتخاب IP
+> دستی و تغییر Relay، کار توسعه مستقل است و با حذف Guard جایگزین نمی‌شود.
+>
+
 ## Decision and observed Production baseline
 
 This patch is **source only** until the operator deploys it to Core.
@@ -132,3 +142,30 @@ closed. Do not advertise this workflow as the atomic CZ04B/CZ07 engine or claim
 Phase 4/5 Production acceptance based on this audit. The operator-approved
 manual path is the immediate priority; optional VPS bootstrap/WebApp hardening
 is tracked separately and never blocks IP switching.
+ 
+## 2026-10-29 — Telegram disabled-message hotfix
+
+The Telegram menu `برنامه‌ها → مدیریت Edge → افزودن دستی` reached
+`ManualEdgeWizard.handle`. With optional fresh-VPS bootstrap disabled,
+it displayed `افزودن سرور دستی هنوز در این نصب فعال نشده است`.
+This incorrectly hid even the unrelated legacy inventory navigation.
+
+Patch: when fresh-VPS bootstrap is unavailable, the same Rich screen offers
+**two existing navigation callbacks**: `hp_add` (register an already
+prepared Edge IP) and `hp_menu` (view/manage the inventory).
+The Rich renderer accepts ONLY these two additional exact callback strings,
+not any `hpdef_*` / `hpdef_migrate_*` / `hpdefmig_yes_*` mutations.
+Those Legacy cutover callbacks remain blocked in the current bot; safe IP
+switching must use a separately supported guarded workflow and cannot be
+claimed complete based on this menu fix. This patch neither modifies public
+DNS nor schedules account transfers. No new flag or HTTPS origin is required
+for inventory. Existing authorization/protected-mode guards remain.
+
+This is a **navigation-only hotfix** to
+`manual_edge_wizard.py`, not an automatic cutover or installer fix.
+Before installing it to Core, verify its pinned SHA and restart `nvlbot`
+with a saved copy and rollback. On Telegram verify the menu shows
+`ثبت IP سرور آماده` and `مدیریت IP و انتخاب رله` and that no change
+to the current active IP/users occurs just from opening that menu.
+`NVL_EDGE_MANUAL_ENABLED` continues to control only the *optional* new
+SSH bootstrap, which still requires HTTPS for secure root-password entry.

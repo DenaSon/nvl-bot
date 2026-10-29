@@ -86,8 +86,9 @@ class QuickSwitchUI:
                 if current and current["status"] not in (
                         "DONE", "ABORTED", "EXTERNAL_VERIFIED"):
                     rows.append([("🛠 بازیابی عملیات","apps_edge_quick_status")])
-                rows.extend([[("🖥 سرورهای من","hp_menu")],
-                             [("↩️ مدیریت Edge","apps_cz_home")]])
+                rows.extend([[("➕ افزودن Edge دستی","apps_edge_manual_home")],
+                             [("🖥 سرورهای من","hp_menu")],
+                             [("↩️ برنامه‌ها","apps_home")]])
                 return await self._screen(
                     chat,context,
                     "🌐 مدیریت Edge\n"

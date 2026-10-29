@@ -211,7 +211,7 @@ class ManualEdgeWizard:
             rows.append([("🔄 وضعیت انتقال و تکمیل",
                          "apps_edge_manual_progress_"+opid)])
         if stage in ("DRAFT","HOSTKEY_PENDING","READY_INSTALL"):
-            rows.append([("❌ لغو درخواست","apps_edge_manual_cancel")])
+            rows.append([("❌ لغو درخواست","apps_edge_manual_cancel_"+opid)])
         rows.extend([
             [("➕ افزودن سرور جدید","apps_edge_manual_new")],
             [("↩️ همه سرورها","apps_edge_manual_home")],
@@ -566,16 +566,26 @@ class ManualEdgeWizard:
                     "تأیید مستقل ساخت/تمدید و اتصال مشتری همچنان لازم است. "
                     "رله قبلی حذف نشده است.",
                     [[("🔄 وضعیت سرور","apps_edge_manual_home")]])
-            if data=="apps_edge_manual_cancel":
-                op=await asyncio.to_thread(self.journal.latest,actor,chat)
-                if op and op["status"] in ("DRAFT","HOSTKEY_PENDING","READY_INSTALL"):
-                    await asyncio.to_thread(
-                        self.journal.cancel_draft,op["id"],actor,chat)
+            if data=="apps_edge_manual_cancel" or data.startswith("apps_edge_manual_cancel_"):
+                if data=="apps_edge_manual_cancel":
+                    session=context.user_data.get("manual_edge_session")
+                    opid=session.get("op") if isinstance(session,dict) and (
+                        session.get("actor"),session.get("chat"))==(actor,chat) else None
+                else:
+                    opid=data[len("apps_edge_manual_cancel_"):]
+                op=await asyncio.to_thread(self.journal.get,opid) if opid else None
+                if (not op or (op["actor"],op["chat"])!=(actor,chat) or
+                        op["status"] not in ("DRAFT","HOSTKEY_PENDING","READY_INSTALL")):
+                    raise ManualWizardHold("CANCEL_REQUIRES_SAFE_RECONCILIATION")
+                await asyncio.to_thread(self.journal.cancel_draft,opid,actor,chat)
+                session=context.user_data.get("manual_edge_session")
+                if isinstance(session,dict) and session.get("op")==opid:
                     context.user_data.pop("manual_edge_session",None)
-                    context.user_data.pop("manual_edge_pin",None)
-                    return await self._view(query,"✅ درخواست بدون تغییر سرور لغو شد.",
-                        [[("↩️ مدیریت Edge","apps_cz_home")]])
-                raise ManualWizardHold("CANCEL_REQUIRES_SAFE_RECONCILIATION")
+                    context.user_data.pop("state",None)
+                    context.user_data.pop("manual_edge_candidate_ip",None)
+                context.user_data.pop("manual_edge_pin",None)
+                return await self._view(query,"✅ درخواست بدون تغییر سرور لغو شد.",
+                                        [[("↩️ همه سرورها","apps_edge_manual_home")]])
             return await self._show(query,actor,chat)
         except Exception as exc:
             code=str(exc) if isinstance(exc,(ManualWizardHold,ManualEdgeHold,IntakeHold)) else type(exc).__name__

@@ -1,3 +1,5 @@
+> **Supersession note (2026-10-29):** For future development of API resilience, independent manual Edge onboarding, operation locks/cancellation, transfer recovery, and simplified Persian Telegram UI, the newer [five-phase reliability & emergency recovery plan](NVL_EDGE_RELIABILITY_MANUAL_RECOVERY_5_PHASE_PLAN_2026-10-29.md) is authoritative. This 2026-10-28 design remains historical architecture evidence and continues to inform compatible safety invariants. Documentation change only; no implementation or runtime activation.
+
 # NVL — Unified Cloudzy / Legacy Ingress Edge Lifecycle (design v1)
 
 **Date:** 2026-10-28  

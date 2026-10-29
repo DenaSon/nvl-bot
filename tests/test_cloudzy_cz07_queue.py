@@ -73,9 +73,9 @@ class DryRun04B(Fake04B):
         return rows,_digest(rows)
     def _ready_probe_state(self, source, target, pid):
         return {}
-    async def _fresh(self, state):
+    async def _fresh(self, state, *, check_provider=True):
         return
-    async def _run_users(self, actor, chat, names, fingerprint):
+    async def _run_users(self, actor, chat, names, fingerprint, *, check_provider=True):
         from cloudzy_cz04b import _digest
         with self.db() as db:
             rows = self._source_accounts(db,self.source)
@@ -142,6 +142,133 @@ class QueueTests(unittest.TestCase):
         self.fake=Fake04B()
         self.q=DurableCutoverQueue(db_conn=factory,cz04b=self.fake,
                                    enabled=lambda:True,now=lambda:100)
+
+    def _prepared_holding_job(self, *, fully_moved=False, emergency=True):
+        """Replay 400/468 interrupted transfer with independent new buyer."""
+        from cloudzy_cz04b import _digest
+        with self.factory() as db:
+            db.execute("DELETE FROM ssh_accounts")
+            db.executemany("INSERT INTO ssh_accounts VALUES (?,?,?,?)", [
+                (f"user{i:04}", self.fake.source, "🟢 فعال", "ssh")
+                for i in range(468)
+            ])
+            rows = self.fake._source_accounts(db, self.fake.source)
+        job = self.q.reserve(
+            self.q.candidate(), self.fake.source, actor=7, chat=8,
+            expected_fp=_digest(rows), expected_count=468)
+        self.q.transition(job, "QUEUED", "ROUTING", code="ROUTE_START")
+        self.q.transition(job, "ROUTING", "MIGRATING", code="ROUTE_READY")
+        with self.factory() as db:
+            db.execute("ALTER TABLE cloudzy_cz04b_operations ADD COLUMN kind TEXT")
+            db.execute("ALTER TABLE cloudzy_cz04b_operations ADD COLUMN count INTEGER")
+            db.execute(
+                "UPDATE ssh_accounts SET host=? WHERE username < 'user0400'",
+                (self.fake.target,),
+            )
+            db.executemany(
+                "INSERT INTO cloudzy_cz04b_operations "
+                "(source,target,status,started_at,kind,count) VALUES (?,?,?,?,?,?)",
+                [(self.fake.source, self.fake.target, "DONE", 100, "users", 200)]*2,
+            )
+            db.execute(
+                "UPDATE host_pool SET is_default=0 WHERE host=?", (self.fake.source,))
+            db.execute(
+                "UPDATE host_pool SET is_default=1,is_standby=0 WHERE host=?",
+                (self.fake.target,))
+            db.execute(
+                "UPDATE settings SET value=? WHERE key IN ('hosts','dns_current_ip')",
+                (self.fake.target,),
+            )
+            db.execute("INSERT INTO ssh_accounts VALUES (?,?,?,?)",
+                       ("new_customer",self.fake.target,"🟢 فعال","ssh"))
+        self.fake = DryRun04B(self.factory)
+        self.fake.dns.current = self.fake.target
+        self.q.cz04b = self.fake
+        self.q.transition(job,"MIGRATING","MIGRATING",
+                          code="BATCH_CAS_COMMITTED",moved=400,remaining=68)
+        self.q.transition(job,"MIGRATING","HOLD",
+                          code="CLOUDZY_PROVIDER_UNAVAILABLE",moved=400,remaining=68)
+        if fully_moved:
+            with self.factory() as db:
+                db.execute("UPDATE ssh_accounts SET host=? WHERE host=?",
+                           (self.fake.target,self.fake.source))
+                if emergency:
+                    db.execute("""CREATE TABLE nvl_emergency_migration_audit(
+                        job_id TEXT PRIMARY KEY,source TEXT,target TEXT,
+                        affected INTEGER, previous_status TEXT,
+                        previous_code TEXT,event_code TEXT,at_utc INTEGER)""")
+                    db.execute(
+                        "INSERT INTO nvl_emergency_migration_audit "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        (job,self.fake.source,self.fake.target,68,"HOLD",
+                         "CLOUDZY_PROVIDER_UNAVAILABLE",
+                         "EMERGENCY_LOCAL_CAS_E2E_PENDING",100),
+                    )
+                    db.execute(
+                        "UPDATE cloudzy_cz07_jobs SET moved=468,"
+                        "code='EMERGENCY_LOCAL_CAS_E2E_PENDING' WHERE id=?", (job,))
+                    db.execute(
+                        "INSERT INTO cloudzy_cz07_events "
+                        "(job_id,at,stage,code,moved,remaining) "
+                        "VALUES (?,100,'HOLD',?,468,0)",
+                        (job,"EMERGENCY_LOCAL_CAS_E2E_PENDING"),
+                    )
+        return job
+
+    def test_hold_400_of_468_can_resume_only_68_without_provider_api(self):
+        import asyncio
+        job = self._prepared_holding_job()
+        rec, proof = asyncio.run(self.q.review_hold(job, actor=7, chat=8))
+        self.assertEqual((proof["moved"],proof["remaining"],proof["extra_target"]),
+                         (400,68,1))
+        status = self.q.reconcile_hold(
+            job, actor=7, chat=8, updated_at=rec["updated_at"],
+            expected_moved=400,expected_remaining=68)
+        self.assertEqual(status,"MIGRATING")
+        self.assertEqual(self.q.get(job)["moved"],400)
+        with self.assertRaisesRegex(CZ07Hold,"RECOVERY_SNAPSHOT_CHANGED"):
+            self.q.reconcile_hold(job,actor=7,chat=8,
+                updated_at=rec["updated_at"],expected_moved=400,expected_remaining=68)
+        async def no_delay(_):
+            return None
+        self.q.pause = no_delay
+        asyncio.run(self.q._work(job,OfflineApp(),resume=True))
+        after = self.q.get(job)
+        self.assertEqual((after["status"],after["moved"],after["total"]),
+                         ("VERIFYING",468,468))
+        self.assertEqual(self.fake.batch_sizes,[68])
+        with self.factory() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM ssh_accounts "
+                                        "WHERE host=?",(self.fake.target,)).fetchone()[0],469)
+
+    def test_emergency_68_audit_reconciles_to_verifying_without_replaying(self):
+        import asyncio
+        job = self._prepared_holding_job(fully_moved=True)
+        rec, proof = asyncio.run(self.q.review_hold(job,actor=7,chat=8))
+        self.assertEqual((proof["moved"],proof["remaining"],
+                          proof["emergency"],proof["extra_target"]), (468,0,68,1))
+        with self.assertRaisesRegex(CZ07Hold,"RECOVERY_OWNER_MISMATCH"):
+            asyncio.run(self.q.review_hold(job,actor=99,chat=8))
+        status = self.q.reconcile_hold(
+            job,actor=7,chat=8,updated_at=rec["updated_at"],
+            expected_moved=468,expected_remaining=0)
+        self.assertEqual(status,"VERIFYING")
+        self.assertEqual(self.q.get(job)["code"],
+                         "RECOVERED_TRANSPORT_REVIEW_REQUIRED")
+        self.assertEqual(self.fake.batch_sizes,[])
+        self.assertTrue(self.q.complete_transport(
+            job,actor=7,chat=8,
+            expected_updated_at=self.q.get(job)["updated_at"]))
+        self.assertEqual(self.q.get(job)["status"],"MOVED")
+        with self.factory() as db:
+            self.assertFalse(db.execute("SELECT 1 FROM cloudzy_cz07_acceptance").fetchone())
+
+    def test_no_audit_for_unaudited_manual_changes_must_not_unlock(self):
+        import asyncio
+        job = self._prepared_holding_job(fully_moved=True,emergency=False)
+        with self.assertRaisesRegex(CZ07Hold,"RECOVERY_COMMITTED_MOVES_UNVERIFIED"):
+            asyncio.run(self.q.review_hold(job,actor=7,chat=8))
+        self.assertEqual(self.q.get(job)["status"],"HOLD")
 
     def test_capacity_bound_and_exact_candidate(self):
         self.assertEqual(BATCH_SIZE, 200)
@@ -684,8 +811,9 @@ class QueueTests(unittest.TestCase):
         import asyncio
         class CrashOnce(DryRun04B):
             crashed = False
-            async def _run_users(self, actor, chat, names, fp):
-                result = await super()._run_users(actor, chat, names, fp)
+            async def _run_users(self, actor, chat, names, fp, *, check_provider=True):
+                result = await super()._run_users(
+                    actor, chat, names, fp, check_provider=check_provider)
                 if not self.crashed:
                     self.crashed = True
                     raise SystemExit("SIMULATED_PROCESS_DEATH_AFTER_CAS")

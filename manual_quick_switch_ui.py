@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from html import escape
+import os
 import secrets
 import time
 
@@ -19,6 +20,7 @@ HISTORICAL_TARGET = "45.59.126.73"
 
 _MESSAGES = {
     "QUICK_ROUTE_UNRESOLVED": "یک انتقال نیمه‌تمام وجود دارد. ابتدا وضعیت و بازیابی را بررسی کنید.",
+    "QUICK_SWITCH_NOT_RELEASED": "تغییر IP هنوز برای Production فعال نشده است.",
     "SHARED_6G_BUSY": "یک عملیات مهم دیگر روی مسیر فعال است.",
     "RELEVANT_CZ07_OPERATION": "یک انتقال مرتبط با این مسیر هنوز تعیین‌تکلیف نشده است.",
     "OTHER_DNS_ROUTE_OPERATION": "یک تغییر DNS قبلی هنوز باز است.",
@@ -39,7 +41,10 @@ def _message(error):
 
 
 class ManualQuickSwitchUI:
-    def __init__(self, *, engine, db, admin_ids, now=time.time):
+    def __init__(self, *, engine, db, admin_ids, now=time.time,
+                 enabled=None):
+        self.enabled = enabled or (
+            lambda: os.environ.get("NVL_MANUAL_QUICK_SWITCH_ENABLED","0")=="1")
         self.engine = engine
         self.db = db
         self.admin_ids = admin_ids
@@ -80,6 +85,8 @@ class ManualQuickSwitchUI:
                 f"کاربران SSH فعال: <b>{count}</b>\n"
                 f"Edgeهای دستی آماده: <b>{len(standby)}</b>\n\n"
                 "تغییر IP فقط پس از بررسی SSH/WG، DNS و تأیید شما انجام می‌شود.")
+        if not self.enabled():
+            text += "\n\n🟡 حالت آماده‌سازی: تغییر IP هنوز فعال نشده است."
         rows=[]
         if rec and rec["kind"]=="QUICK" and rec["status"] not in ("DONE","ABORTED"):
             rows.append([("⚠️ بررسی انتقال ناتمام","apps_edge_quick_status")])
@@ -178,6 +185,8 @@ class ManualQuickSwitchUI:
                        "apps_edge_quick_confirm_"+nonce)],
                      [("انصراف","apps_edge_quick_home")]])
             if data.startswith("apps_edge_quick_confirm_"):
+                if not self.enabled():
+                    raise QuickSwitchHold("QUICK_SWITCH_NOT_RELEASED")
                 nonce=data[len("apps_edge_quick_confirm_"):]
                 pending=self.pending.pop((actor,chat),None)
                 if (not pending or pending["nonce"]!=nonce or
@@ -225,6 +234,8 @@ class ManualQuickSwitchUI:
                        "apps_edge_quick_retry_yes_"+nonce)],
                      [("انصراف","apps_edge_quick_status")]])
             if data.startswith("apps_edge_quick_retry_yes_"):
+                if not self.enabled():
+                    raise QuickSwitchHold("QUICK_SWITCH_NOT_RELEASED")
                 nonce=data[len("apps_edge_quick_retry_yes_"):]
                 pending=self.pending.pop((actor,chat),None)
                 if (not pending or pending.get("nonce")!=nonce or
@@ -260,6 +271,8 @@ class ManualQuickSwitchUI:
                     [[("✅ ثبت نتیجه تأییدشده","apps_edge_quick_attest_yes_"+nonce)],
                      [("انصراف","apps_edge_quick_home")]])
             if data.startswith("apps_edge_quick_attest_yes_"):
+                if not self.enabled():
+                    raise QuickSwitchHold("QUICK_SWITCH_NOT_RELEASED")
                 nonce=data[len("apps_edge_quick_attest_yes_"):]
                 pending=self.pending.pop((actor,chat),None)
                 if (not pending or pending.get("nonce")!=nonce or

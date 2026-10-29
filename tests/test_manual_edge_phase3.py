@@ -339,5 +339,154 @@ class Phase3ManualTests(unittest.TestCase):
         self.journal.start(77,77)
 
 
+    def test_two_standbys_coexist_and_third_intake_is_allowed(self):
+        first=self.prepare("8.8.8.8",port=2299)
+        second=self.prepare("8.8.4.4",port=2298)
+        self.journal.mark_standby(first,77,77)
+        self.journal.mark_standby(second,77,77)
+        pending=self.journal.start(77,77)
+        self.assertEqual(self.journal.get(pending)["status"],"DRAFT")
+        with self.assertRaisesRegex(ManualEdgeHold,"ACTIVE_MANUAL_OPERATION_EXISTS"):
+            self.journal.start(77,77)
+        rows=self.journal.list_by_owner(77,77)
+        self.assertEqual([x["id"] for x in rows[:3]],[pending,second,first])
+        self.assertEqual(self.journal.list_by_owner(78,78),[])
+        with self.db() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM host_pool WHERE is_standby=1").fetchone()[0],2)
+            self.assertEqual(dict(db.execute(
+                "SELECT key,value FROM settings WHERE key IN ('hosts','dns_current_ip')")),
+                {"hosts":"1.1.1.1","dns_current_ip":"1.1.1.1"})
+
+    def test_upgrades_old_single_owner_unique_index_without_dropping_ip_lock(self):
+        first=self.prepare("8.8.8.8",port=2299)
+        with self.db() as db:
+            db.execute("DROP INDEX manual_edge_live_owner")
+            db.execute("""CREATE UNIQUE INDEX manual_edge_live_owner
+                ON manual_edge_operations(actor,chat)
+                WHERE status IN ('DRAFT','IDENTITY_PENDING','HOSTKEY_PENDING',
+                    'READY_INSTALL','INSTALLING','EDGE_READY','STANDBY',
+                    'ROUTING','MIGRATING')""")
+        second=self.journal.start(77,77)
+        with self.db() as db:
+            definition=db.execute("SELECT sql FROM sqlite_master "
+                "WHERE type='index' AND name='manual_edge_live_owner'").fetchone()[0]
+            self.assertNotIn("'EDGE_READY'",definition)
+            self.assertIn("'INSTALLING'",definition)
+            ip_definition=db.execute("SELECT sql FROM sqlite_master "
+                "WHERE type='index' AND name='manual_edge_host_identity'").fetchone()[0]
+            self.assertIn("status != 'CANCELLED'",ip_definition)
+        self.assertEqual(self.journal.get(first)["status"],"EDGE_READY")
+        self.assertEqual(self.journal.get(second)["status"],"DRAFT")
+
+    def test_standby_inventory_mismatch_fails_before_network_effects(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from manual_edge_wizard import ManualEdgeWizard
+        op=self.prepare("8.8.8.8",port=2299)
+        with self.db() as db:
+            db.execute("DELETE FROM host_pool WHERE host='8.8.8.8'")
+        with self.assertRaisesRegex(ManualEdgeHold,"MANUAL_HOST_POOL_MISMATCH"):
+            self.journal.assert_standby_candidate(op,77,77,2222)
+        probe=AsyncMock(return_value=True)
+        nat=AsyncMock(return_value=True)
+        wizard=ManualEdgeWizard(
+            db=self.db,preflight=lambda:(2222,"pub"),
+            provision=AsyncMock(),verify=AsyncMock(),probe=probe,nat=nat,
+            queue=SimpleNamespace(),enabled=lambda:True)
+        wizard._tls_port=lambda:2088
+        wizard._view=AsyncMock(return_value=42)
+        asyncio.run(wizard.handle(
+            SimpleNamespace(),SimpleNamespace(user_data={}),
+            "apps_edge_manual_standby_"+op,role="admin",actor=77,chat=77,
+            app=SimpleNamespace(bot=SimpleNamespace(token="123:TEST"))))
+        self.assertIn("MANUAL_HOST_POOL_MISMATCH",wizard._view.await_args.args[1])
+        probe.assert_not_awaited()
+        nat.assert_not_awaited()
+        self.assertEqual(self.journal.get(op)["status"],"EDGE_READY")
+
+    def test_listing_is_paginated_and_each_detail_is_owner_scoped(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from manual_edge_wizard import ManualEdgeWizard
+        from manual_edge_rich import render_manual_card
+        for n in range(1,10):
+            self.prepare("9.9.9."+str(n),port=2200+n)
+        wizard=ManualEdgeWizard(
+            db=self.db,preflight=lambda:(2222,"pub"),
+            provision=AsyncMock(),verify=AsyncMock(),probe=AsyncMock(),
+            nat=AsyncMock(),queue=SimpleNamespace())
+        wizard._view=AsyncMock(return_value=42)
+        context=SimpleNamespace(user_data={})
+        app=SimpleNamespace(bot=SimpleNamespace(token="123:TEST"))
+        asyncio.run(wizard.handle(SimpleNamespace(),context,
+                "apps_edge_manual_home",role="admin",actor=77,chat=77,app=app))
+        text,rows=wizard._view.await_args.args[1:]
+        self.assertIn("سرورهای دستی",text)
+        actions=[action for row in rows for _,action in row]
+        self.assertIn("apps_edge_manual_new",actions)
+        self.assertIn("apps_edge_manual_list_1",actions)
+        self.assertEqual(sum(x.startswith("apps_edge_manual_detail_")
+                             for x in actions),7)
+        render_manual_card(text,rows)
+        op=self.journal.list_by_owner(77,77)[0]
+        asyncio.run(wizard.handle(SimpleNamespace(),context,
+                "apps_edge_manual_detail_"+op["id"],
+                role="admin",actor=77,chat=77,app=app))
+        self.assertIn(op["ip"],wizard._view.await_args.args[1])
+        asyncio.run(wizard.handle(SimpleNamespace(),context,
+                "apps_edge_manual_detail_"+op["id"],
+                role="admin",actor=78,chat=78,app=app))
+        self.assertIn("OPERATOR_MISMATCH",wizard._view.await_args.args[1])
+
+    def test_specific_cancel_never_cancels_other_newer_draft(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from manual_edge_wizard import ManualEdgeWizard
+        old=self.prepare("8.8.8.8")
+        new=self.journal.start(77,77)
+        wizard=ManualEdgeWizard(
+            db=self.db,preflight=lambda:(2222,"pub"),
+            provision=AsyncMock(),verify=AsyncMock(),probe=AsyncMock(),
+            nat=AsyncMock(),queue=SimpleNamespace())
+        wizard._view=AsyncMock(return_value=42)
+        asyncio.run(wizard.handle(
+            SimpleNamespace(),SimpleNamespace(user_data={}),
+            "apps_edge_manual_cancel_"+old,
+            role="admin",actor=77,chat=77,
+            app=SimpleNamespace(bot=SimpleNamespace(token="123:TEST"))))
+        self.assertIn("عملیات متوقف شد",wizard._view.await_args.args[1])
+        self.assertEqual(self.journal.get(new)["status"],"DRAFT")
+        self.assertEqual(self.journal.get(old)["status"],"EDGE_READY")
+
+    def test_standby_failure_reports_stage_and_keeps_journal_ready(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from manual_edge_wizard import ManualEdgeWizard
+        op=self.prepare("8.8.8.8",port=2299)
+        probe=AsyncMock(return_value=False)
+        nat=AsyncMock(return_value=True)
+        wizard=ManualEdgeWizard(
+            db=self.db,preflight=lambda:(2222,"pub"),
+            provision=AsyncMock(),verify=AsyncMock(),probe=probe,nat=nat,
+            queue=SimpleNamespace())
+        wizard._tls_port=lambda:2088
+        wizard._view=AsyncMock(return_value=42)
+        with self.assertLogs("manual_edge_wizard",level="WARNING") as logged:
+            asyncio.run(wizard.handle(
+                SimpleNamespace(),SimpleNamespace(user_data={}),
+                "apps_edge_manual_standby_"+op,
+                role="admin",actor=77,chat=77,
+                app=SimpleNamespace(bot=SimpleNamespace(token="123:TEST"))))
+        self.assertIn("STANDBY_CORE_PATH_UNVERIFIED",wizard._view.await_args.args[1])
+        self.assertIn("STANDBY_CORE_PATH_UNVERIFIED"," ".join(logged.output))
+        nat.assert_not_awaited()
+        self.assertEqual(self.journal.get(op)["status"],"EDGE_READY")
+
+
 if __name__=="__main__":
     unittest.main()

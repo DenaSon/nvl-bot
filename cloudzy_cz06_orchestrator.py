@@ -41,16 +41,15 @@ class QuickRelayJournal:
                 updated_at INTEGER NOT NULL
             )
         """)
-        existing = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='index' "
-            "AND name='cloudzy_cz06_one_open'"
-        ).fetchone()
-        if existing and "'CANCELLED'" not in (existing[0] or ""):
-            conn.execute("DROP INDEX cloudzy_cz06_one_open")
+        # An old HOLD or a pending operator host-key confirmation is not
+        # an active global worker. Live execution stays exclusive per
+        # operator/chat; every operation has its own durable receipt.
+        conn.execute("DROP INDEX IF EXISTS cloudzy_cz06_one_open")
         conn.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS cloudzy_cz06_one_open
-            ON cloudzy_cz06_runs((1))
-            WHERE stage NOT IN ('READY','HOLD','CANCELLED')
+            CREATE UNIQUE INDEX IF NOT EXISTS cloudzy_cz06_active_owner_v2
+            ON cloudzy_cz06_runs(actor_id,chat_id)
+            WHERE stage IN ('PURCHASING','WAITING_PROVIDER','INSTALLING',
+                            'STANDBY_VERIFYING')
         """)
 
     def create_in_receipt_transaction(self, conn, *, opid, actor, chat, message_id=None):

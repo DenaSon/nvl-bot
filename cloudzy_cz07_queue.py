@@ -569,8 +569,8 @@ class DurableCutoverQueue:
                 "SELECT host,active,is_default,is_standby,provider,provider_instance_id "
                 "FROM host_pool WHERE is_default=1"
             ).fetchall()
-            if defaults != [(row["target"], 1, 1, 0, "cloudzy",
-                             row["provider_id"])]:
+            if [tuple(item) for item in defaults] != [
+                    (row["target"], 1, 1, 0, "cloudzy", row["provider_id"])]:
                 raise CZ07Hold("RECOVERY_DEFAULT_CHANGED")
             proof = self._hold_evidence(db, row)
             if ((proof["moved"], proof["remaining"]) !=
@@ -1459,6 +1459,10 @@ class DurableCutoverQueue:
                  for stage, code, moved, _remaining, _at in events[:5]]
         rows = [[("🔄 تازه‌سازی وضعیت", "apps_cz7_status")]]
         if ((actor, chat) == (job["actor"], job["chat"])
+                and status == "HOLD" and job["id"] not in self._running):
+            rows.insert(0, [("🔎 بررسی و ادامه انتقال",
+                             "apps_cz7_hold_review_"+job["id"])])
+        if ((actor, chat) == (job["actor"], job["chat"])
                 and status == "VERIFYING"):
             rows.insert(0, [("✅ بررسی تکمیل انتقال حساب‌ها",
                              "apps_cz7_transport_review_"+job["id"])])
@@ -1471,7 +1475,7 @@ class DurableCutoverQueue:
             rows.insert(1, [("🧪 بررسی تست‌های پس از انتقال",
                              "apps_cz7_accept_review_"+job["id"])])
         if ((actor, chat) == (job["actor"], job["chat"])
-                and status in ("MIGRATING", "PAUSED_SAFE")
+                and status in ("QUEUED", "MIGRATING", "PAUSED_SAFE")
                 and not job.get("cancel_requested")
                 and job["id"] not in self._running):
             rows.insert(0, [("▶️ بررسی و ادامه امن صف", "apps_cz7_resume_"+job["id"])])

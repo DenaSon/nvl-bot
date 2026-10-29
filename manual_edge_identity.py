@@ -64,3 +64,27 @@ def assert_ref(db,host,ref,*,require_standby=False,require_default=False):
     if obj["identity_ref"]!=ref:
         raise EdgeIdentityHold("EDGE_IDENTITY_CHANGED")
     return obj
+
+
+def assert_role_ref(db,host,ref,*,require_standby=False,require_default=False):
+    """Backwards-compatible CZ07 role fence for legacy Cloudzy receipts.
+
+    CZ07's historical recovery journal stores provider identity and role, but
+    some old database schemas did not yet have the 6A service/admin port pair.
+    Read only those columns for a Cloudzy role fence; the CZ04B admission/
+    active network verification separately requires the full pinned receipt.
+    Manual edges always need complete independent proof.
+    """
+    if ref.startswith("manual:"):
+        return assert_ref(db,host,ref,require_standby=require_standby,
+                          require_default=require_default)
+    row=db.execute(
+        "SELECT provider,provider_instance_id,active,is_default,is_standby "
+        "FROM host_pool WHERE host=?",(host,),
+    ).fetchone()
+    if (not row or tuple(row[:2])!=("cloudzy",ref)
+            or row[2]!=1
+            or (require_standby and tuple(row[3:])!=(0,1))
+            or (require_default and tuple(row[3:])!=(1,0))):
+        raise EdgeIdentityHold("CLOUDZY_ROLE_CHANGED")
+    return {"host":host,"provider":"cloudzy","identity_ref":ref}

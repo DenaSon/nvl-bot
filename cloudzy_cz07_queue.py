@@ -653,6 +653,29 @@ class DurableCutoverQueue:
                      json.dumps(proof["historical_snapshots_sha256"]),
                      row["source_fingerprint"], int(self.now())),
                 )
+            if proof.get("one_absent_acknowledged"):
+                # This exception never asserts that the deletion was legitimate.
+                # Its purpose is to acknowledge an already-absent account in
+                # a once-completed transfer, with fresh proof inside the CAS.
+                db.execute("""
+                    CREATE TABLE IF NOT EXISTS cloudzy_cz07_absent_attestations (
+                        job_id TEXT PRIMARY KEY,
+                        username_sha256 TEXT NOT NULL,
+                        proof_sha256 TEXT NOT NULL,
+                        actor INTEGER NOT NULL,
+                        chat INTEGER NOT NULL,
+                        reason TEXT NOT NULL,
+                        acknowledged_at INTEGER NOT NULL
+                    )""")
+                db.execute(
+                    "INSERT INTO cloudzy_cz07_absent_attestations "
+                    "(job_id,username_sha256,proof_sha256,actor,chat,"
+                    "reason,acknowledged_at) VALUES (?,?,?,?,?,?,?)",
+                    (job, proof["one_absent_sha256"],
+                     proof["historical_proof_sha256"], actor, chat,
+                     "MISSING_AFTER_VERIFIED_BATCH_TRANSFER_"
+                     "DELETION_CAUSE_UNVERIFIED", int(self.now())),
+                )
             self._log(db, job, status, code,
                       expected_moved, expected_remaining)
         return status
@@ -1361,11 +1384,25 @@ class DurableCutoverQueue:
                     "job": job, "actor": actor, "chat": chat,
                     "updated_at": rec["updated_at"],
                     "moved": proof["moved"], "remaining": proof["remaining"],
+                    "one_absent_sha256": proof.get("one_absent_sha256"),
                     "nonce": nonce, "expires": self.now() + APPROVAL_TTL,
                 }
                 complete = proof["remaining"] == 0
-                action = ("✅ ثبت بررسی انتقال" if complete
-                          else "▶️ ادامه حساب‌های باقی‌مانده")
+                one_absent = bool(proof.get("one_absent_acknowledged"))
+                action = (
+                    "⚠️ تأیید استثنای یک حساب و ثبت بررسی"
+                    if one_absent else
+                    ("✅ ثبت بررسی انتقال" if complete
+                     else "▶️ ادامه حساب‌های باقی‌مانده")
+                )
+                absence_notice = (
+                    "⚠️ یک حساب تاریخی بعد از انتقال ثبت‌شده حذف شده است. "
+                    "هویت آن در دو بکاپ مقصد تأیید شده و اکنون در دیتابیس و "
+                    "لینوکس Core وجود ندارد. علت حذف اثبات نشده است؛ "
+                    "تأیید شما فقط پذیرش استثنای ممیزی برای همین پرونده است "
+                    "و حساب را برنمی‌گرداند.\\n\\n"
+                    if one_absent else ""
+                )
                 await self._display(query,
                     "🔎 <b>بررسی انتقال متوقف‌شده</b>\n\n"
                     f"مبدأ: <code>{_short(rec['source'])}</code>\n"
@@ -1373,6 +1410,7 @@ class DurableCutoverQueue:
                     f"حساب‌های جابه‌جاشده: <b>{proof['moved']}/{rec['total']}</b>\n"
                     f"باقی‌مانده: <b>{proof['remaining']}</b>\n"
                     f"حساب‌های جدید مقصد: <b>{proof['extra_target']}</b>\n\n"
+                    + absence_notice +
                     "هویت SSH، تونل، مسیر، DNS زنده و رسیدهای ثبت‌شده "
                     "بررسی شدند. هیچ درخواستی به Cloudzy ارسال نشده است.\n\n"
                     + ("تأیید، پرونده را برای کنترل نهایی انتقال آماده می‌کند؛ "
@@ -1398,7 +1436,9 @@ class DurableCutoverQueue:
                 rec, proof = await self.review_hold(job, actor=actor, chat=chat)
                 if (rec["updated_at"] != session["updated_at"]
                         or (proof["moved"], proof["remaining"]) !=
-                           (session["moved"], session["remaining"])):
+                           (session["moved"], session["remaining"])
+                        or proof.get("one_absent_sha256") !=
+                           session.get("one_absent_sha256")):
                     raise CZ07Hold("RECOVERY_PREVIEW_EXPIRED")
                 status = await asyncio.to_thread(
                     self.reconcile_hold, job, actor=actor, chat=chat,

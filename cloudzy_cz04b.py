@@ -55,6 +55,16 @@ class Cloudzy04B:
         self.now = now
 
     def _init(self, db):
+        # A fresh manual installation may never have entered Cloudzy/CZ04A.
+        # Create the *same* provider standby guard table before any cutover
+        # read. Existing schemas, including legacy test fixtures, are left
+        # untouched and retain their unresolved-action protections.
+        if not db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='cloudzy_cz04a_actions'"
+        ).fetchone():
+            from cloudzy_cz04a import ensure_cz04a_schema
+            ensure_cz04a_schema(db)
         db.execute("""CREATE TABLE IF NOT EXISTS cloudzy_cz04b_operations (
             id TEXT PRIMARY KEY,
             kind TEXT NOT NULL, status TEXT NOT NULL,

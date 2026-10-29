@@ -231,6 +231,42 @@ def observe_cz06_status(db, *, operation_id, stage, now=None):
     )
 
 
+def observe_native_cancellation(db, *, operation_id, uncertain=False, now=None):
+    """Mirror operator cancellation inside the native CZ03/CZ06 transaction.
+
+    A paid POST with an unverified outcome is *quarantined*, never presented as
+    an independently verified cancellation of a Cloudzy VPS or a settled bill.
+    """
+    _assert_identity(operation_id)
+    row = db.execute(
+        "SELECT status FROM cloudzy_edge_operations WHERE id=?",
+        (operation_id,),
+    ).fetchone()
+    if row != ("CANCELLED",):
+        raise UnifiedLinkHold("NATIVE_CANCELLATION_NOT_COMMITTED")
+    link = _linked(db, operation_id)
+    if link is None:
+        return False  # pre-UO legacy receipt
+    if uncertain:
+        return _record(
+            db, operation_id, step="PURCHASE", state="RECONCILE_REQUIRED",
+            code="PROVIDER_PURCHASE_QUARANTINED", now=now,
+            external_intent=True,
+        )
+    # Even a known VPS may remain billable after cancelling local onboarding.
+    # A pre-POST cancellation can be marked safe only without paid intent.
+    if link[5]:
+        return _record(
+            db, operation_id, step="PURCHASE", state="RECONCILE_REQUIRED",
+            code="PROVIDER_RESOURCE_MAY_REMAIN", now=now,
+            external_intent=True,
+        )
+    return _record(
+        db, operation_id, step="PURCHASE", state="CANCELLED_SAFE",
+        code="LOCAL_PURCHASE_CANCELLED_NO_PAID_INTENT", now=now,
+    )
+
+
 _CZ07_STATES = frozenset((
     "QUEUED", "ROUTING", "MIGRATING", "PAUSED_SAFE",
     "VERIFYING", "MOVED", "HOLD", "ABORTED", "DONE",

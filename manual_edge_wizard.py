@@ -16,6 +16,7 @@ import os
 import secrets
 import socket
 import time
+from traceback import extract_tb
 from urllib.parse import urlsplit
 
 from manual_edge_secure_form import IntakeHold, ManualFormStore
@@ -26,6 +27,14 @@ from cloudzy_cz04b import _digest
 
 _RICH_SCOPE = ContextVar('manual_edge_rich_scope', default=None)
 log = logging.getLogger(__name__)
+
+
+def _safe_trace_location(exc):
+    """Function/line only: never record credentials or exception arguments."""
+    return " <- ".join(
+        f"{frame.name}:{frame.lineno}"
+        for frame in extract_tb(exc.__traceback__)[-5:]
+    )
 
 
 class ManualWizardHold(RuntimeError):
@@ -66,6 +75,39 @@ FA = {
     "STANDBY_PROBE_ERROR":"بررسی اتصال سرور با خطای اجرایی روبه‌رو شد؛ لاگ فنی سرور را بررسی کنید.",
     "STANDBY_NAT_ERROR":"بررسی قوانین NAT با خطای اجرایی روبه‌رو شد؛ لاگ فنی سرور را بررسی کنید.",
     "INVALID_PAGE":"شماره صفحه سرورها معتبر نیست.",
+    "SSH_HOSTKEY_MISSING":"کلید هویت SSH از سرور دریافت نشد.",
+    "RICH_OPERATOR_UNAVAILABLE":"ارسال صفحه مدیریتی ممکن نیست؛ گفتگو را از منوی برنامه‌ها باز کنید.",
+    "SECURE_WEB_FORM_NOT_CONFIGURED":"آدرس فرم امن تنظیم نشده است.",
+    "SESSION_EXPIRED":"زمان ورود اطلاعات پایان یافته؛ از ابتدا شروع کنید.",
+    "LEGACY_INSTALL_OR_TUNNEL_FAILED":"راه‌اندازی Relay یا تونل WireGuard تأیید نشد؛ نصب را تکرار نکنید.",
+    "LEGACY_EDGE_POSTCHECK_FAILED":"نصب تمام شده اما آزمون نهایی ارتباط Edge موفق نبود؛ نصب را تکرار نکنید.",
+    "HOST_KEY_CHANGED_AFTER_INSTALL":"اثر انگشت SSH بعد از نصب تغییر کرده؛ ادامه عملیات مجاز نیست.",
+    "OLD_WEBAPP_CALLBACK_DISABLED":"این دکمه قدیمی غیرفعال است؛ از منوی سرورهای دستی استفاده کنید.",
+    "SSH_REVIEW_NOT_READY":"پرونده هنوز آماده تأیید هویت SSH نیست.",
+    "SSH_APPROVAL_EXPIRED":"زمان تأیید اثر انگشت تمام شده؛ مجدداً بررسی کنید.",
+    "STANDBY_IDENTITY_CHANGED":"هویت سرور انتخاب‌شده تغییر کرده؛ پیش‌نمایش را دوباره باز کنید.",
+    "TRANSFER_CONFIRMATION_EXPIRED":"اعتبار تأیید انتقال تمام شده؛ بررسی انتقال را دوباره انجام دهید.",
+    "TRANSFER_IDENTITY_CHANGED":"مبدأ یا مقصد انتقال تغییر کرده؛ ادامه مجاز نیست.",
+    "TRANSFER_PREVIEW_EXPIRED":"حساب‌های مبدأ از زمان پیش‌نمایش تغییر کرده‌اند؛ مجدداً بررسی کنید.",
+    "TRANSFER_ENGINE_DISABLED":"موتور انتقال فعال نیست؛ انتقالی آغاز نشد.",
+    "ROUTE_JOB_NOT_FOUND":"پرونده انتقال مربوط به این سرور پیدا نشد.",
+    "TRANSPORT_NOT_READY":"انتقال هنوز برای تأیید نهایی آماده نیست.",
+    "PASSWORD_INVALID":"رمز واردشده نامعتبر است.",
+    "TEXT_STAGE_CHANGED":"مرحله ورود اطلاعات تغییر کرده؛ وضعیت را تازه کنید.",
+    "ADMIN_IDENTITY_INVALID":"هویت مدیر معتبر نیست.",
+    "INVALID_FIELD":"اطلاعات ثبت‌شده برای این مرحله مجاز نیست.",
+    "EDGE_IDENTITY_OR_OPERATOR_BUSY":"هویت سرور یا عملیات این مدیر درگیر است؛ پرونده را بررسی کنید.",
+    "MANUAL_CAS_FAILED":"وضعیت پرونده هم‌زمان تغییر کرده؛ صفحه را تازه کنید.",
+    "INVALID_SSH_HOSTKEY":"کلید هویت SSH سرور معتبر نیست.",
+    "CORE_WG_INSTALL_LOCK_UNAVAILABLE":"قفل نصب مشترک WireGuard در دسترس نیست؛ نصب دیگری را آغاز نکنید.",
+    "CORE_WG_INSTALL_LOCK_UNTRUSTED":"اعتبار قفل نصب WireGuard تأیید نشد؛ نیازمند بررسی مدیر سرور است.",
+    "CORE_WG_INSTALL_BUSY":"نصب دیگری از WireGuard در جریان است؛ پس از تکمیل آن اقدام کنید.",
+    "CORE_WG_INSTALL_LEASE_BUSY":"فرایند نصب دیگری در Core فعال است؛ نصب مجدد مجاز نیست.",
+    "AUTO_FAILOVER_OR_K2_BUSY":"حالت Failover یا Egress محافظت‌شده با این عملیات تداخل دارد.",
+    "TARGET_ALREADY_ROUTED":"این IP از قبل برای مسیر مشتریان استفاده شده است.",
+    "TARGET_ALREADY_HAS_ACCOUNTS":"این Edge از قبل حساب مشتری دارد؛ نمی‌توان آن را Standby خالی دانست.",
+    "ROUTE_JOB_MISMATCH":"شناسه انتقال با پرونده Edge سازگار نیست.",
+    "ACTIVE_RELAY_NOT_VERIFIED":"تغییر مسیر نهایی هنوز تأیید نشده و ثبت Active مجاز نیست.",
     "HOST_KEY_CHANGED":"اثر انگشت سرور تغییر کرده است. اتصال متوقف شد.",
     "FORM_NOT_SUBMITTED_OR_EXPIRED":"فرم هنوز ثبت نشده یا زمان آن تمام شده است.",
     "INTAKE_EXPIRED":"زمان فرم تمام شده است.",
@@ -274,8 +316,9 @@ class ManualEdgeWizard:
                 ))
         except Exception as exc:
             safe=str(exc) if isinstance(exc,(ManualEdgeHold,ManualWizardHold)) else type(exc).__name__
-            log.error("Manual Edge install stopped op=%s ip=redacted "
-                      "code=%s exception_type=%s",op_id,safe,type(exc).__name__)
+            log.error("Manual Edge install stopped op=%s code=%s "
+                      "exception_type=%s trace=%s",
+                      op_id,safe,type(exc).__name__,_safe_trace_location(exc))
             op=await asyncio.to_thread(self.journal.get,op_id)
             if op and op["status"]=="EDGE_READY":
                 # Post-commit Telegram delivery failure is NOT an install
@@ -591,7 +634,8 @@ class ManualEdgeWizard:
             code=str(exc) if isinstance(exc,(ManualWizardHold,ManualEdgeHold,IntakeHold)) else type(exc).__name__
             if isinstance(exc,(ManualWizardHold,ManualEdgeHold,IntakeHold)):
                 log.warning("Manual Edge callback rejected action=%s actor=%s "
-                            "code=%s",data,actor,code)
+                            "code=%s trace=%s",data,actor,code,
+                            _safe_trace_location(exc))
             else:
                 # No passwords or other input payloads are included.
                 log.exception("Manual Edge callback unexpected action=%s actor=%s "
@@ -713,6 +757,8 @@ class ManualEdgeWizard:
             raise ManualWizardHold("TEXT_STAGE_CHANGED")
         except (ManualEdgeHold,ManualWizardHold,IntakeHold,ValueError) as exc:
             code=str(exc)
+            log.warning("Manual Edge intake rejected actor=%s stage=%s code=%s",
+                        actor,state,code)
             return await update.message.reply_text(
                 "⛔️ "+FA.get(code,"اطلاعات یا وضعیت این مرحله معتبر نیست. "
                       "برای لغو /cancel بفرستید."))

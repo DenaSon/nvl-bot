@@ -1410,6 +1410,25 @@ class JournalTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertEqual(self.journal.get(first)["status"], "HOLD_PROVISION")
 
+    def test_upgrades_legacy_global_index_without_losing_receipts(self):
+        old = self.reserve()
+        self.journal.change(old, "CREATING", "HOLD_PROVISION",
+                            hold_reason="HISTORIC_UNVERIFIED_INSTALL")
+        with self.journal.db() as db:
+            db.execute("DROP INDEX cloudzy_edge_active_owner_v2")
+            db.execute("""CREATE UNIQUE INDEX cloudzy_edge_one_unfinished
+                ON cloudzy_edge_operations((1))
+                WHERE status NOT IN ('EDGE_READY','REJECTED','CANCELLED')""")
+        self.journal.initialize()
+        with self.journal.db() as db:
+            indexes = {row[1] for row in
+                       db.execute("PRAGMA index_list(cloudzy_edge_operations)")}
+        self.assertIn("cloudzy_edge_active_owner_v2", indexes)
+        self.assertNotIn("cloudzy_edge_one_unfinished", indexes)
+        self.assertEqual(self.journal.get(old)["hold_reason"],
+                         "HISTORIC_UNVERIFIED_INSTALL")
+        self.assertNotEqual(self.reserve(), old)
+
     def test_only_globally_routable_ip_is_accepted(self):
         self.assertEqual(_public_ipv4({"data": {"primaryIpv4": "8.8.4.4"}}), "8.8.4.4")
         for value in ("10.0.0.5", "127.0.0.1", "192.168.1.1", "2001:db8::2", ""):

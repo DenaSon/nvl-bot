@@ -45,6 +45,7 @@ def fingerprint_ssh(ip, port, *, timeout=10):
 FA = {
     "PUBLIC_IPV4_REQUIRED":"IP عمومی معتبر نیست.",
     "CORE_IP_CANNOT_BE_EDGE":"این نشانی متعلق به خود Core است یا هویت آن قابل بررسی نیست.",
+    "UBUNTU24_ROOT_REQUIRED":"اتصال مدیریت Root یا Ubuntu 24.04 تأیید نشد؛ نصب انجام نمی‌شود.",
     "SSH_PORT_INVALID":"پورت مدیریت SSH معتبر نیست.",
     "EDGE_IP_ALREADY_REGISTERED":"این IP قبلاً در فهرست سرورها وجود دارد.",
     "EDGE_IP_HAS_CLOUDZY_RECEIPT":"این IP متعلق به پرونده Cloudzy موجود است.",
@@ -66,11 +67,13 @@ FA = {
 class ManualEdgeWizard:
     def __init__(self, *, db, preflight, provision, verify, probe, nat, queue,
                  form_store=None, now=time.time, key_reader=fingerprint_ssh,
-                 enabled=None, form_url=None, guard=None, is_core_host=None):
+                 enabled=None, form_url=None, guard=None, is_core_host=None,
+                 os_check=None):
         self.journal=ManualEdgeJournal(db,now=now,guard=guard)
         # Production wires the authoritative Core-host validator. Without
         # this callback the mutating wizard must fail closed, not guess.
         self.is_core_host=is_core_host
+        self.os_check=os_check
         self.db=db
         self.preflight=preflight
         self.provision=provision
@@ -180,6 +183,12 @@ class ManualEdgeWizard:
                 self.key_reader,op["ip"],op["admin_port"])
             if tuple(observed[:2])!=(op["pin_type"],op["pin_base64"]):
                 raise ManualWizardHold("HOST_KEY_CHANGED")
+            # OS and SSH root password are attested read-only against the
+            # approved host key BEFORE recording a remote install intent.
+            if self.os_check is None or not await asyncio.to_thread(
+                    self.os_check,op["ip"],op["admin_port"],password,
+                    (op["pin_type"],op["pin_base64"])):
+                raise ManualWizardHold("UBUNTU24_ROOT_REQUIRED")
             # The journal commits intent before any remote mutation. Never
             # automatically rerun the Legacy installer after an ambiguous exit.
             await asyncio.to_thread(self.journal.begin_install,op_id,actor,chat)

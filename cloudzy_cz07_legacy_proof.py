@@ -148,7 +148,7 @@ def verify_historical_job(db, rec, *, snapshots=SNAPSHOTS):
         "FROM nvl_emergency_migration_audit WHERE job_id=?",
         (rec["id"],),
     ).fetchall()
-    if audit != [(
+    if [tuple(row) for row in audit] != [(
             HISTORICAL_SOURCE,HISTORICAL_TARGET,HISTORICAL_EMERGENCY,
             "HOLD","CLOUDZY_PROVIDER_UNAVAILABLE",
             "EMERGENCY_LOCAL_CAS_E2E_PENDING",

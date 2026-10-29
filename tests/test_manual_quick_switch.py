@@ -252,8 +252,15 @@ class QuickSwitchTests(unittest.IsolatedAsyncioTestCase):
                 "UPDATE host_pool SET is_default=1,is_standby=0 WHERE host=?",
                 (NEW,))
             db.execute(
-                "UPDATE manual_edge_operations SET status='ACTIVE' WHERE ip=?",
+                "UPDATE manual_edge_operations SET status='ACTIVE',"
+                "reason='EMERGENCY_DELETED_SOURCE_RECOVERY' WHERE ip=?",
                 (NEW,))
+            db.execute(
+                "INSERT INTO manual_edge_events "
+                "(op_id,actor,status,code,happened) "
+                "VALUES ('manual-1',7,'ACTIVE',"
+                "'EMERGENCY_DELETED_SOURCE_RECOVERY',1)"
+            )
             db.execute("UPDATE ssh_accounts SET host=? "
                        "WHERE service_type='ssh'",(NEW,))
             db.execute("UPDATE settings SET value=? "

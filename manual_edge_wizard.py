@@ -504,6 +504,8 @@ class ManualEdgeWizard:
         dispatch. No form server, Cloudzy API or runtime feature flag is used.
         """
         _RICH_SCOPE.set((app.bot.token,context,chat))
+        # Group -1 routing in bot_final_v49-2.py reaches this method even for
+        # slash-prefixed root secrets, before ordinary CommandHandlers.
         # Delete ANY password-state message BEFORE checking owner/session/TTL.
         # An expired or missing session must not strand a raw root password
         # in Telegram history.

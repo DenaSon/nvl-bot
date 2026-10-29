@@ -161,8 +161,8 @@ class ManualEdgeWizard:
             rows.append([("✅ بررسی و فعال‌سازی Standby",
                           "apps_edge_manual_standby_"+op["id"])])
         if stage=="STANDBY":
-            rows.append([("🔁 بررسی انتقال کاربران",
-                          "apps_edge_manual_review_"+op["id"])])
+            rows.append([("🔁 تغییر IP کاربران",
+                          "apps_edge_quick_home")])
         if stage=="ROUTING":
             rows.append([("🔄 وضعیت انتقال و تکمیل",
                           "apps_edge_manual_progress_"+op["id"])])
@@ -354,8 +354,8 @@ class ManualEdgeWizard:
                 return await self._view(query,
                     "✅ <b>سرور در حالت آماده‌به‌کار قرار گرفت.</b>\n"
                     "DNS و حساب‌های مشتری هنوز تغییر نکرده‌اند.",
-                    [[("🔁 بررسی انتقال کاربران",
-                       "apps_edge_manual_review_"+opid)],
+                    [[("🔁 تغییر IP کاربران",
+                       "apps_edge_quick_home")],
                      [("↩️ وضعیت","apps_edge_manual_home")]])
             if data.startswith("apps_edge_manual_review_"):
                 opid=data[len("apps_edge_manual_review_"):]

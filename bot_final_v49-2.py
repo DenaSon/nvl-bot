@@ -238,7 +238,7 @@ def _bilingual_label(en: str, fa: str) -> str:
 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputMediaPhoto
 from telegram.error import BadRequest
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, PicklePersistence, PersistenceInput
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ApplicationHandlerStop, filters, ContextTypes, PicklePersistence, PersistenceInput
 
 from edge_observability import (
     DIAG_CORE_LOCAL,
@@ -27215,11 +27215,39 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="super_admin_users_menu")]]
         await query.edit_message_text(full_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
+
+async def _manual_edge_command_intake(update: Update,
+                                      context: ContextTypes.DEFAULT_TYPE):
+    """Consume slash-prefixed manual root secrets ahead of bot commands.
+
+    Ordinary bot commands are untouched outside the password intake.
+    Explicit /cancel retains its existing cancellation handler.
+    """
+    if context.user_data.get("state") != "MANUAL_EDGE_PASSWORD":
+        return
+    if update.message and update.message.text == "/cancel":
+        return
+    try:
+        await text_handler(update, context)
+    except Exception:
+        # An exception may hold the secret string: never log it or the Update.
+        log.error("Manual SSH password command intake failed")
+        with contextlib.suppress(Exception):
+            await update.effective_chat.send_message(
+                "⛔️ پردازش رمز متوقف شد. وضعیت Edge را بررسی کنید.")
+    raise ApplicationHandlerStop
+
+
 # ==========================================
 # 🧯 مدیریت خطای سراسری
 # ==========================================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    log.error("خطای پردازش‌نشده در آپدیت %s:", update, exc_info=context.error)
+    # Never stringify Telegram Update/Message or raw exception here.
+    # A just-deleted root password may still exist in the Update object,
+    # and some network exceptions include the request payload.
+    log.error("Unhandled Telegram update id=%s error_type=%s",
+              getattr(update, "update_id", None),
+              type(context.error).__name__ if context.error else "Unknown")
 
 # ==========================================
 # 🛡️ حلقهٔ پس‌زمینهٔ پایش تخطی از ظرفیت مجاز
@@ -30989,6 +31017,12 @@ if __name__ == '__main__':
         filepath=PERSISTENCE_PATH,
         store_data=PersistenceInput(bot_data=False, chat_data=False, user_data=True, callback_data=False))
     app = ApplicationBuilder().token(TOKEN).persistence(persistence).post_init(_post_init).post_shutdown(_post_shutdown).build()
+    # Intercept command-shaped root passwords (e.g. /Secret123) before
+    # CommandHandler. This group only consumes a command when a private
+    # manual Edge password intake is pending, then stops group 0 routing.
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.COMMAND, _manual_edge_command_intake),
+        group=-1)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("marzban_monitor", cmd_marzban_monitor))

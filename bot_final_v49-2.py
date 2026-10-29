@@ -7423,8 +7423,8 @@ _manual_edge = ManualEdgeWizard(
     provision=_manual_edge_provision,verify=_manual_edge_verify,
     probe=_cloudzy_04a_probe,nat=_cloudzy_04b_nat,queue=_cloudzy_07,
     form_store=_manual_form_store,
-    enabled=lambda: os.environ.get("NVL_EDGE_MANUAL_ENABLED")=="1"
-                     and _manual_form_ready,
+    # No Cloudzy API, HTTPS WebApp or new opt-in flag for native manual path.
+    enabled=lambda: True,
     guard=_cloudzy_04a_guard,
     is_core_host=_manual_edge_is_core_ip,
     os_check=_manual_edge_verify_ubuntu,
@@ -11419,6 +11419,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = context.user_data.get('state')
     role = context.user_data.get('role')
     chat_id = update.effective_chat.id
+
+    # Native manual Edge intake: IP -> management SSH port -> root password.
+    # Never store the password in context.user_data or Telegram persistence.
+    if state in ('MANUAL_EDGE_IP','MANUAL_EDGE_PORT','MANUAL_EDGE_PASSWORD'):
+        await _manual_edge.receive_text(
+            update,context,state,text,actor=update.effective_user.id,
+            chat=chat_id,role=role,app=context.application)
+        return
 
     if role == 'admin' and state in ('K2_M4_SINGLE','K2_M4_BATCH','EDGE_NEW_IP','EDGE_NEW_ROOTPASS','EDGE_NEW_PORT') and text in (
         '🧩 برنامه‌ها','🧩 برنامه ها','🏠 منوی اصلی'):

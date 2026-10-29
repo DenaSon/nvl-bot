@@ -13722,13 +13722,45 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         safe_clear_context(context); await show_main_menu(update, context)
     elif state == 'HOSTPOOL_ADD_INPUT':
-        # An unknown VPS is inventory, NOT a customer route. Legacy text
-        # onboarding skipped SSH/WG/Cloudzy identity proof: deny stale flow.
-        await update.message.reply_text(
-            "⛔️ ثبت مستقیم IP به‌عنوان Relay فعال از این مسیر متوقف شده است. "
-            "از «افزودن Edge جدید» و بررسی مستقل SSH/WG استفاده کنید."
-        )
+        # Register inventory ONLY. This does not authorize DNS, default,
+        # customer routing, SSH provisioning or replay of the old cutover.
+        from legacy_manual_host_registration import PendingEdgeHold, register_pending_edge
+        try:
+            added = await asyncio.to_thread(
+                register_pending_edge, db_conn, text.strip(),
+                guard=_db_assert_legacy_host_mutation_allowed)
+        except PendingEdgeHold as exc:
+            if str(exc) == "INVALID_PUBLIC_IPV4":
+                await update.message.reply_text(
+                    "❌ فقط یک IP عمومی IPv4 معتبر بفرستید (مثلاً 144.172.68.248).")
+                return
+            friendly = {
+                "EDGE_ALREADY_REGISTERED": "این IP قبلاً در فهرست سرورها وجود دارد.",
+                "MANUAL_EDGE_OPERATION_EXISTS": "این IP پروندهٔ افزودن دستی دارد؛ ابتدا همان پرونده را بررسی کنید.",
+                "CLOUDZY_EDGE_ALREADY_EXISTS": "این IP قبلاً در پروندهٔ Cloudzy ثبت شده است.",
+                "CORE_CANNOT_BE_EDGE": "آدرس Core نمی‌تواند به‌عنوان Edge ثبت شود.",
+                "CORE_IDENTITY_UNAVAILABLE": "هویت Core مشخص نیست؛ ثبت IP متوقف شد.",
+                "CUSTOMER_PORT_INVALID": "پورت سرویس مشتری در تنظیمات معتبر نیست.",
+            }.get(str(exc), "مشخصات IP قابل ثبت نیست.")
+            safe_clear_context(context)
+            await update.message.reply_text("⛔️ " + friendly)
+            return
+        except RuntimeError:
+            safe_clear_context(context)
+            await update.message.reply_text(
+                "⛔️ ثبت IP به دلیل محدودیت ایمنی فعلی انجام نشد؛ تنظیمات مسیر را بررسی کنید.")
+            return
         safe_clear_context(context)
+        await update.message.reply_text(
+            f"✅ IP <code>{esc(added['ip'])}</code> به فهرست سرورها اضافه شد.\n\n"
+            "▫️ وضعیت: غیرفعال، در انتظار بررسی اتصال Edge\n"
+            f"▫️ پورت مشتری: <code>{added['service_port']}</code>\n\n"
+            "DNS، کاربران و Relay فعلی تغییر نکردند. "
+            "تا پیش از تأیید SSH/WireGuard و مسیر برگشت، این IP وارد ترافیک مشتری نمی‌شود.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🌐 فهرست و بررسی IPها",callback_data="hp_menu")]
+            ]))
         return
 
     elif state == 'EDGE_NEW_IP':
@@ -26019,7 +26051,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d == "hp_add" and role == 'admin':
         context.user_data['state'] = 'HOSTPOOL_ADD_INPUT'
-        await query.message.reply_text("➕ آدرس/دامنهٔ IP جدید را بفرستید (بدون فاصله، فقط یک مورد):")
+        await query.message.reply_text(
+            "➕ IP عمومی IPv4 سرور آماده را بفرستید (فقط یک مورد):\n"
+            "ابتدا در فهرست به‌صورت غیرفعال ثبت می‌شود؛ "
+            "DNS یا کاربران بدون بررسی شبکه منتقل نمی‌شوند.")
         return
 
     elif d in ("hp_addedge", "hpeg_wizard"):

@@ -231,7 +231,8 @@ class DurableCutoverQueue:
             if db.execute("SELECT 1 FROM failover_operations WHERE status='RUNNING'").fetchone():
                 raise CZ07Hold("SHARED_6G_BUSY")
             if db.execute("SELECT 1 FROM cloudzy_cz04a_actions "
-                          "WHERE status NOT IN ('DONE','REJECTED')").fetchone():
+                          "WHERE status NOT IN ('DONE','REJECTED') "
+                          "AND host IN (?,?)", (source, target)).fetchone():
                 raise CZ07Hold("CZ04A_UNRESOLVED")
             row = db.execute(
                 "SELECT h.active,h.is_standby,h.is_default,e.status,c.stage "
@@ -367,7 +368,8 @@ class DurableCutoverQueue:
             raise CZ07Hold("RECOVERY_SHARED_LEASE_BUSY")
         if db.execute(
             "SELECT 1 FROM cloudzy_cz04a_actions "
-            "WHERE status NOT IN ('DONE','REJECTED') LIMIT 1"
+            "WHERE status NOT IN ('DONE','REJECTED') "
+            "AND host IN (?,?) LIMIT 1", (rec["source"], rec["target"])
         ).fetchone():
             raise CZ07Hold("RECOVERY_CZ04A_UNRESOLVED")
         self.cz04b._guard_settings(self.cz04b._settings(db))
@@ -631,7 +633,8 @@ class DurableCutoverQueue:
                 raise CZ07Hold("TRANSPORT_LOCK_BUSY")
             if db.execute(
                     "SELECT 1 FROM cloudzy_cz04a_actions "
-                    "WHERE status NOT IN ('DONE','REJECTED') LIMIT 1"
+                    "WHERE status NOT IN ('DONE','REJECTED') "
+                    "AND host IN (?,?) LIMIT 1", (rec["source"], rec["target"])
             ).fetchone():
                 raise CZ07Hold("TRANSPORT_CZ04A_UNRESOLVED")
             settings = self.cz04b._settings(db)

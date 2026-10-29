@@ -3806,7 +3806,7 @@ def _next_edge_wg_ip():
     return f"10.77.0.{n}"
 
 
-def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, private_key_path=None, connect_retries=1, *, protected_wizard=False, trusted_host_key=None, admin_ssh_port=None):
+def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, private_key_path=None, connect_retries=1, *, protected_wizard=False, trusted_host_key=None, admin_ssh_port=None, manual_safe_bootstrap=False):
     """
     تابع مسدودکننده (blocking، به‌خاطر paramiko و subprocess). باید حتماً با
     asyncio.to_thread صدا زده شود، نه مستقیم داخل event loop.
@@ -3916,7 +3916,7 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
     # یک فایل override با نام «99-» می‌سازیم که چون آخر همه خوانده می‌شود، همیشه برنده است — فارغ
     # از اینکه فایل‌های ۵۰/۶۰ چه چیز دیگری بگویند یا در آینده اضافه شوند.
     # The integrated K2 wizard must never enable password-root SSH or restart SSHD.
-    if not protected_wizard:
+    if not (protected_wizard or manual_safe_bootstrap):
         try:
             _fix_cmd = (
                 "cat > /etc/ssh/sshd_config.d/99-nvlbot-force-password-auth.conf << 'INNER'\n"
@@ -3937,7 +3937,7 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
     ok_key, err_key = _install_local_pubkey_on_open_ssh(ssh)
     if not ok_key:
         log.warning("نصب کلید SSH دائمی روی Edge %s شکست خورد: %s", edge_ip, err_key)
-        if protected_wizard:
+        if protected_wizard or manual_safe_bootstrap:
             with contextlib.suppress(Exception):
                 ssh.close()
             return False, "⛔️ ثبت دسترسی مدیریتی امن روی Edge کامل نشد.", None
@@ -4074,7 +4074,8 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
             asyncio.to_thread(
                 _provision_new_edge_sync, edge_ip, root_password, customer_port, edge_name,
                 private_key_path, connect_retries,
-                protected_wizard=(egress_stage_requested or manual_safe_bootstrap),
+                protected_wizard=egress_stage_requested,
+                manual_safe_bootstrap=manual_safe_bootstrap,
                 trusted_host_key=trusted_host_key,
                 admin_ssh_port=admin_ssh_port,
             ),

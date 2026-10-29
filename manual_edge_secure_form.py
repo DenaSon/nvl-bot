@@ -29,7 +29,8 @@ class IntakeHold(ValueError):
 def public_ip(value):
     try:
         ip = ipaddress.IPv4Address(str(value))
-        if not ip.is_global:
+        if (not ip.is_global or ip.is_multicast or ip.is_reserved
+                or ip.is_loopback or ip.is_link_local or ip.is_unspecified):
             raise ValueError("non-public")
         return str(ip)
     except ValueError as exc:

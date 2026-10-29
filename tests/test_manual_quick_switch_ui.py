@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from manual_quick_switch_ui import ManualQuickSwitchUI
+from manual_edge_rich import render_manual_card
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -193,6 +194,19 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
                 break
             await asyncio.sleep(.01)
         self.assertEqual(self.engine.events,[("resume","deadbeef",7,True)])
+
+
+class Phase3RichCardTests(unittest.TestCase):
+    def test_quick_callback_stays_native_rich_without_cloudzy_actions(self):
+        card=render_manual_card(
+            "🌐 <b>مدیریت Edge</b>\\nانتقال SSH",
+            [[("🔁 تغییر IP", "apps_edge_quick_home")],
+             [("↩️ برنامه‌ها", "apps_home")]],
+        )
+        self.assertTrue(card["is_rtl"])
+        buttons=[b["callback_data"] for block in card["blocks"]
+                 if block["type"]=="buttons" for b in block["buttons"]]
+        self.assertEqual(buttons,["apps_edge_quick_home","apps_home"])
 
 
 class Phase3StaticIntegration(unittest.TestCase):

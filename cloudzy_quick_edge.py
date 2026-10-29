@@ -885,7 +885,7 @@ class QuickEdgeWizard:
                 await self._display(query,
                     ("🛡 <b>تأیید لغو محلی خرید نامشخص</b>\n\n" if uncertain
                      else "⚠️ <b>تأیید لغو عملیات Cloudzy</b>\n\n")
-                    f"شناسه: <code>{opid[:16]}</code>\n"
+                    + f"شناسه: <code>{opid[:16]}</code>\n"
                     f"وضعیت: <b>{_text(op['status'])}</b>\n"
                     f"IP: <code>{_text(op.get('public_ipv4') or 'نامشخص')}</code>\n\n"
                     "این اقدام فقط پرونده عملیات را می‌بندد و قفل خرید را آزاد می‌کند؛ "

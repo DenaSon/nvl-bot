@@ -4158,26 +4158,20 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
             )
             return False, edge_ip, result
     else:
-        if pool_active:
-            await asyncio.to_thread(_db_add_host_pool, edge_ip)
-        else:
-            await asyncio.to_thread(_db_add_host_pool, edge_ip, active=False)
-        if provider:
-            await asyncio.to_thread(_db_set_host_provider_meta, edge_ip, provider, provider_instance_id)
-        if provider == "manual":
-            if provider_instance_id is not None or admin_ssh_port is None or pool_active:
+        if manual_safe_bootstrap:
+            if (provider!="manual" or provider_instance_id is not None
+                    or pool_active or admin_ssh_port is None):
                 raise ValueError("MANUAL_EDGE_REGISTRATION_INVALID")
-            def _manual_save_management_port():
-                with db_conn() as conn:
-                    _db_assert_legacy_host_mutation_allowed(conn)
-                    if conn.execute(
-                        "UPDATE host_pool SET admin_ssh_port=? "
-                        "WHERE host=? AND provider='manual' AND provider_instance_id IS NULL "
-                        "AND active=0 AND is_default=0",
-                        (int(admin_ssh_port),edge_ip),
-                    ).rowcount != 1:
-                        raise RuntimeError("MANUAL_SSH_PORT_REGISTRATION_FAILED")
-            await asyncio.to_thread(_manual_save_management_port)
+            await asyncio.to_thread(_manual_register_inactive_host,
+                                    edge_ip,customer_port,admin_ssh_port)
+        else:
+            if pool_active:
+                await asyncio.to_thread(_db_add_host_pool, edge_ip)
+            else:
+                await asyncio.to_thread(_db_add_host_pool, edge_ip, active=False)
+            if provider:
+                await asyncio.to_thread(_db_set_host_provider_meta,
+                                        edge_ip, provider, provider_instance_id)
         if pool_active:
             cur_hosts = [h.strip() for h in (await asyncio.to_thread(_db_get_setting, 'hosts', '')).split(',') if h.strip()]
             if edge_ip not in cur_hosts:
@@ -7367,6 +7361,52 @@ _cloudzy_07 = DurableCutoverQueue(
 # Cloudflare/6G migration engine. Never instantiate CloudzyService here.
 _manual_form_store = ManualFormStore()
 _manual_form_ready = False
+
+def _manual_register_inactive_host(ip, customer_port, admin_port):
+    """Atomic, provider-free registration of the independently pinned Edge.
+
+    No Legacy route guard is needed: no customers, DNS, default or active
+    role are modified. The journal INSTALLING receipt is mandatory.
+    """
+    from ipaddress import IPv4Address
+    if str(IPv4Address(ip)) != ip or not IPv4Address(ip).is_global:
+        raise RuntimeError("MANUAL_IP_INVALID")
+    customer_port=int(customer_port)
+    admin_port=int(admin_port)
+    if not 1<=customer_port<=65535 or not 1<=admin_port<=65535:
+        raise RuntimeError("MANUAL_PORT_INVALID")
+    now=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with db_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows=conn.execute(
+            "SELECT id,admin_port FROM manual_edge_operations "
+            "WHERE ip=? AND status='INSTALLING'",(ip,)
+        ).fetchall()
+        if len(rows)!=1 or int(rows[0][1])!=admin_port:
+            raise RuntimeError("MANUAL_INSTALL_INTENT_NOT_FOUND")
+        if conn.execute("SELECT 1 FROM host_pool WHERE host=?",(ip,)).fetchone():
+            raise RuntimeError("MANUAL_EDGE_ALREADY_REGISTERED")
+        st=dict(conn.execute(
+            "SELECT key,value FROM settings WHERE key IN "
+            "('hosts','dns_current_ip','core_wg_public_ip')"
+        ).fetchall())
+        if not st.get("core_wg_public_ip") or ip in (
+                st.get("core_wg_public_ip"),st.get("dns_current_ip")):
+            raise RuntimeError("MANUAL_ACTIVE_OR_CORE_IP_COLLISION")
+        if ip in [x.strip() for x in (st.get("hosts") or "").split(",")]:
+            raise RuntimeError("MANUAL_ROUTED_IP_COLLISION")
+        if conn.execute(
+            "SELECT 1 FROM ssh_accounts WHERE host=? LIMIT 1",(ip,)
+        ).fetchone():
+            raise RuntimeError("MANUAL_ACCOUNT_COLLISION")
+        conn.execute(
+            "INSERT INTO host_pool "
+            "(host,active,is_default,is_standby,provider,provider_instance_id,"
+            "added_at,ssh_port,service_port,admin_ssh_port) "
+            "VALUES (?,0,0,0,'manual',NULL,?,?,?,?)",
+            (ip,now,customer_port,customer_port,admin_port)
+        )
+
 
 async def _manual_edge_provision(ip, ssh_port, password, trusted_key, chat, app):
     if await asyncio.to_thread(_db_host_exists,ip):

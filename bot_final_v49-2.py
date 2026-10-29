@@ -7523,7 +7523,6 @@ def _cloudzy_markup(rows):
 def _build_admin_programs_kb(*, actor=None, chat=None, active_admin_ids=()):
     """Infrastructure and operational tools available only to NVL administrators."""
     rows = [
-        [InlineKeyboardButton("🌐 مدیریت Edge", callback_data="apps_edge_quick_home")],
         [
             InlineKeyboardButton("🖥 نودها", callback_data="apps_marzban_nodes"),
             InlineKeyboardButton("🌐 هاست‌ها", callback_data="apps_marzban_hosts"),
@@ -7534,8 +7533,13 @@ def _build_admin_programs_kb(*, actor=None, chat=None, active_admin_ids=()):
         ],
         [InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")],
     ]
-    # Legacy Cloudzy Rich cards stay callable for historical messages, but
-    # must never appear in the active Programs navigation.
+    # Only current private-chat admins see the active Edge entry.
+    # Historical provider cards remain callable from old messages, but are
+    # not advertised in the Programs navigation.
+    if (type(actor) is int and type(chat) is int
+            and actor > 0 and actor == chat and actor in active_admin_ids):
+        rows.insert(0,[InlineKeyboardButton(
+            "🌐 مدیریت Edge", callback_data="apps_edge_quick_home")])
     return rows
 
 

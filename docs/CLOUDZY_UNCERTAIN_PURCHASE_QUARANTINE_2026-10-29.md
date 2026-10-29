@@ -11,10 +11,10 @@ The lack of a provider API receipt **does not prove no VPS exists or no charge w
 ## Contract: opt-in quarantine, not false provider cancellation
 
 - The owner in the *same private Telegram chat* sees `🛡 درخواست لغو و تعیین تکلیف خرید نامشخص` when CREATE_UNCERTAIN and no in-process worker exists.
-- On request and final confirmation, Cloudzy's list_servers is observed using GET, never reissue paid POST. A unique matching hostname/provider identity, any ambiguous exact match, or an already-known provider ID/IP blocks this path; resolve/delete that VPS separately.
-- Missing inventory match (not conclusive) or GET unavailable permits **only explicit owner risk acceptance**; confirmation copy states Cloudzy control-panel examination is needed and possible ongoing hourly charges remain. The confirmation is single-use and expires after 180 seconds.
+- **No Cloudzy API call is performed anywhere in the local cancellation path.** A known provider_server_id/IP in the native receipt is deliberately still protected; it must be handled as an identified VPS. A VPS that only exists at the provider (not yet known in the local receipt) is never deleted; its financial state stays unresolved.
+- The local cancellation is available regardless of Cloudzy uptime. A durable one-time 16-hex owner/chat-bound nonce in SQLite survives bot restarts, expires in 900 seconds and is consumed inside the successful SQLite transaction. The confirmation explicitly warns about possible ongoing hourly charges and asks the owner to check the provider console separately.
 - The uncertain status must have remained unchanged at least 120 seconds. The original process must not be actively running; this protects normal in-process work but is **not cryptographic proof** that a remote POST cannot later take effect.
-- In one BEGIN IMMEDIATE DB transaction, recheck exact actor/chat, original status, no known provider ID/IP, no customer/default/DNS/route attachment, no READY/CANCELLED CZ06, and then update CZ03=CANCELLED and CZ06=CANCELLED; create immutable `cloudzy_edge_cancel_events` and `cloudzy_purchase_quarantine` row with disposition `PENDING_PROVIDER_RECONCILIATION`.
+- In one BEGIN IMMEDIATE DB transaction, recheck exact actor/chat, fresh DB-backed nonce, original status, no known provider ID/IP, no customer/default/DNS/route attachment, no READY/CANCELLED CZ06, and then update CZ03=CANCELLED and CZ06=CANCELLED; create immutable `cloudzy_edge_cancel_events` and `cloudzy_purchase_quarantine` row with disposition `PENDING_PROVIDER_RECONCILIATION` and observation `NOT_CHECKED`.
 - The UO linked record is updated atomically to `RECONCILE_REQUIRED / PROVIDER_PURCHASE_QUARANTINED`, keeping paid intent. Other local cancel states with paid intent similarly remain `RECONCILE_REQUIRED`, not falsely provider-settled.
 - The native operation becomes terminal, releasing the one-unfinished index and next purchase selection. Its hostname, idempotency key, provider receipt and linked UO remain visible/auditable. No Cloudzy DELETE is attempted.
 - A new purchase still needs the original independent one-shot operator approval, valid Cloudzy price/stock and unique idempotency key. Never automatically try again.
@@ -22,9 +22,9 @@ The lack of a provider API receipt **does not prove no VPS exists or no charge w
 ## Production operator flow
 
 1. Admin → Programs → Cloudzy → `📋 سوابق و وضعیت عملیات`, select the uncertain receipt.
-2. Optionally `🔎 بررسی همان VPS؛ بدون خرید`; if Cloudzy is down this may keep CREATE_UNCERTAIN. Return to the same receipt.
+2. For financial follow-up, optionally inspect the same VPS separately (Cloudzy GET/console). **This is not a prerequisite for the local cancellation button.**
 3. `🛡 درخواست لغو و تعیین تکلیف خرید نامشخص`. Review the original hostname against Cloudzy control-panel inventory and billing; do **not** delete or disable original customer Edge.
-4. `✅ پذیرش ریسک و خروج از قفل خرید`. After 120 seconds from uncertain status the local journals close; provider outcome stays unresolved.
+4. `✅ پذیرش ریسک و خروج از قفل خرید`. After the original 120-second uncertainty grace, the local journals close without any Cloudzy call; provider outcome stays unresolved. If a previously displayed confirmation expires, open the same operation and request a fresh cancellation nonce; the old button must fail safely.
 5. Verify CZ03/CZ06 CANCELLED, UO RECONCILE_REQUIRED and quarantined purchase tracking; start another purchase only with a fresh explicit approval.
 
 ## Read-only audit
@@ -42,7 +42,7 @@ WHERE o.id LIKE '47580f8095da4314%';
 
 ## Follow-up and limits
 
-The quarantine entry is a **billing/provider reconciliation obligation**, not proof of refund, successful deletion, cancelled Cloudzy subscription or absence of a VPS. Later check the provider's invoices and servers by the original hostname and provider ID, delete orphaned paid VPS from the guarded Cloudzy management path if appropriate, and separately document closure. Repeated API failures can still produce multiple explicit quarantined obligations; monitor the table to prevent unnoticed costs. Do not use direct SQL status edits to release purchase locks.
+The quarantine entry is a **billing/provider reconciliation obligation**, not proof of refund, successful deletion, cancelled Cloudzy subscription or absence of a VPS. Later check the provider's invoices and servers by the original hostname and provider ID, delete orphaned paid VPS from the guarded Cloudzy management path if appropriate, and separately document closure. Repeated provider failures can still produce multiple explicitly quarantined obligations; monitor the table to prevent unnoticed costs. `CANCEL_CONFIRMATION_EXPIRED` refers to an invalid, replaced or expired *Telegram confirmation nonce*, not to a Cloudzy failure. The new database-backed confirmation survives bot restarts and has a 15-minute TTL. Do not use direct SQL status edits to release purchase locks.
 
 ## Rollout
 

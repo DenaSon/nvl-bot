@@ -30,6 +30,7 @@ class LegacyManualRouteAuditTest(unittest.TestCase):
             """)
             db.executemany("INSERT INTO settings VALUES(?,?)", [
                 ("hosts",EDGE+","+OLD), ("dns_current_ip",EDGE),
+                ("core_wg_public_ip","91.107.170.239"),
                 ("public_domain","n1.example.test"),
                 ("tls_domain","tls.example.test"),("tls_passthrough","1")
             ])
@@ -85,6 +86,31 @@ class LegacyManualRouteAuditTest(unittest.TestCase):
                 self.assertIn("DEFAULT_RELAY_NOT_ELIGIBLE", report["failures"])
                 self.sql("UPDATE host_pool SET active=1,is_standby=0 WHERE host=?",
                          (EDGE,))
+
+    def test_core_default_is_rejected_even_when_all_metadata_matches(self):
+        core="91.107.170.239"
+        self.sql("INSERT INTO host_pool VALUES (?,?,?,?,?)",
+                 (core,1,0,0,2252))
+        self.sql("UPDATE host_pool SET is_default=0 WHERE host=?",(EDGE,))
+        self.sql("UPDATE host_pool SET is_default=1 WHERE host=?",(core,))
+        self.sql("UPDATE settings SET value=? WHERE key='dns_current_ip'",(core,))
+        self.sql("UPDATE settings SET value=? WHERE key='hosts'",(core,))
+        report=audit(self.path)
+        self.assertIn("DEFAULT_RELAY_IS_CORE",report["failures"])
+
+    def test_missing_core_identity_rejected(self):
+        self.sql("DELETE FROM settings WHERE key='core_wg_public_ip'")
+        report=audit(self.path)
+        self.assertIn("CORE_IDENTITY_MISSING",report["failures"])
+
+    def test_tls_passthrough_defaults_to_on(self):
+        self.sql("DELETE FROM settings WHERE key='tls_passthrough'")
+        def resolver(name,*args,**kwargs):
+            return [(None,None,None,None,(EDGE if name=="n1.example.test"
+                                           else OLD,0))]
+        report=audit(self.path,resolve_dns=True,resolver=resolver)
+        self.assertEqual(len(report["public_dns"]),2)
+        self.assertIn("PUBLIC_DNS_DEFAULT_MISMATCH",report["warnings"])
 
     def test_duplicate_default_rejected(self):
         self.sql("UPDATE host_pool SET is_default=1 WHERE host=?",(OLD,))

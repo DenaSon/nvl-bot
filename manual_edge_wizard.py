@@ -165,6 +165,9 @@ class ManualEdgeWizard:
         if stage=="ROUTING":
             rows.append([("🔄 وضعیت انتقال و تکمیل",
                           "apps_edge_manual_progress_"+op["id"])])
+        if stage=="ACTIVE":
+            rows.append([("➕ افزودن سرور جدید",
+                          "apps_edge_manual_new")])
         if stage in ("DRAFT","HOSTKEY_PENDING","READY_INSTALL"):
             rows.append([("❌ لغو درخواست","apps_edge_manual_cancel")])
         rows.extend([[("🔄 تازه‌سازی","apps_edge_manual_home")],

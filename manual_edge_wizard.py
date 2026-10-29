@@ -1,0 +1,486 @@
+"""Admin-only manual Edge wizard: private WebApp → pinned SSH → Standby → shared Cloudflare+CZ07.
+
+No Cloudzy imports or CloudzyService calls. Paid VPS lifecycle and receipts
+remain entirely separate. Feature-flagged until HTTPS ingress is configured.
+"""
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+from html import escape
+import os
+import secrets
+import socket
+import time
+from urllib.parse import urlsplit
+
+from manual_edge_secure_form import IntakeHold, ManualFormStore
+from manual_edge_journal import ManualEdgeHold, ManualEdgeJournal
+from manual_edge_identity import assert_ref as assert_edge_ref
+from cloudzy_cz04b import _digest
+
+
+class ManualWizardHold(RuntimeError):
+    pass
+
+
+def fingerprint_ssh(ip, port, *, timeout=10):
+    """Unauthenticated host-key observation; independent operator review needed."""
+    import paramiko
+    with socket.create_connection((ip,int(port)),timeout=timeout) as sock:
+        transport=paramiko.Transport(sock)
+        try:
+            transport.banner_timeout=timeout
+            transport.start_client(timeout=timeout)
+            key=transport.get_remote_server_key()
+            if key is None:
+                raise ManualWizardHold("SSH_HOSTKEY_MISSING")
+            digest=base64.b64encode(hashlib.sha256(key.asbytes()).digest())
+            return key.get_name(), key.get_base64(), "SHA256:"+digest.decode().rstrip("=")
+        finally:
+            transport.close()
+
+
+FA = {
+    "PUBLIC_IPV4_REQUIRED":"IP عمومی معتبر نیست.",
+    "SSH_PORT_INVALID":"پورت مدیریت SSH معتبر نیست.",
+    "EDGE_IP_ALREADY_REGISTERED":"این IP قبلاً در فهرست سرورها وجود دارد.",
+    "EDGE_IP_HAS_CLOUDZY_RECEIPT":"این IP متعلق به پرونده Cloudzy موجود است.",
+    "ACTIVE_MANUAL_OPERATION_EXISTS":"ابتدا وضعیت عملیات دستی قبلی را بررسی کنید.",
+    "HOST_KEY_CHANGED":"اثر انگشت سرور تغییر کرده است. اتصال متوقف شد.",
+    "FORM_NOT_SUBMITTED_OR_EXPIRED":"فرم هنوز ثبت نشده یا زمان آن تمام شده است.",
+    "INTAKE_EXPIRED":"زمان فرم تمام شده است.",
+    "MANUAL_OPERATION_CHANGED":"وضعیت عملیات تغییر کرده؛ صفحه را تازه کنید.",
+    "INSTALL_PROOF_MISSING":"نصب سرور هنوز تأیید نشده است.",
+    "MANUAL_HOST_POOL_MISMATCH":"ثبت سرور با نتیجه نصب سازگار نیست.",
+    "STANDBY_ROLE_CHANGED":"وضعیت Standby سرور تغییر کرده است.",
+    "CANCEL_REQUIRES_SAFE_RECONCILIATION":"این عملیات اثر خارجی داشته و لغو ساده مجاز نیست.",
+    "CLOUDFLARE_CONFIG_MISSING":"اتصال Cloudflare تنظیم نشده است؛ سرور در Standby می‌ماند.",
+    "DNS_CHANGED_CONCURRENTLY":"DNS در زمان بررسی تغییر کرد؛ انتقال متوقف شد.",
+    "DNS_OR_DEFAULT_UNCERTAIN_LOCK_HELD":"نتیجه تغییر DNS مشخص نیست؛ مسیر باید بررسی شود.",
+}
+
+
+class ManualEdgeWizard:
+    def __init__(self, *, db, preflight, provision, verify, probe, nat, queue,
+                 form_store=None, now=time.time, key_reader=fingerprint_ssh,
+                 enabled=None, form_url=None):
+        self.journal=ManualEdgeJournal(db,now=now)
+        self.db=db
+        self.preflight=preflight
+        self.provision=provision
+        self.verify=verify
+        self.probe=probe
+        self.nat=nat
+        self.queue=queue
+        self.form=form_store or ManualFormStore(clock=now)
+        self.now=now
+        self.key_reader=key_reader
+        self.enabled=enabled or (lambda:os.environ.get("NVL_EDGE_MANUAL_ENABLED")=="1")
+        self.form_url=form_url or (lambda:os.environ.get("NVL_MANUAL_FORM_PUBLIC_URL",""))
+        self.running=set()
+
+    @staticmethod
+    def _view(query,text,rows):
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        keyboard=InlineKeyboardMarkup([
+            [InlineKeyboardButton(label,callback_data=action) for label,action in line]
+            for line in rows
+        ])
+        return query.edit_message_text(text,parse_mode="HTML",reply_markup=keyboard)
+
+    def _form_button(self,query,*,text,notice,nonce):
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+        public_url=self.form_url().rstrip("/")
+        u=urlsplit(public_url)
+        if u.scheme!="https" or not u.netloc or u.username or u.password or u.fragment:
+            raise ManualWizardHold("SECURE_WEB_FORM_NOT_CONFIGURED")
+        url=public_url+"/manual-edge/form?ticket="+nonce
+        return query.edit_message_text(
+            text,parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(notice,web_app=WebAppInfo(url=url))],
+                [InlineKeyboardButton("✅ اطلاعات را ثبت کردم",
+                                      callback_data="apps_edge_manual_form_done_"+nonce)],
+                [InlineKeyboardButton("انصراف",callback_data="apps_edge_manual_cancel")],
+            ]))
+
+    def _session(self,context,actor,chat):
+        obj=context.user_data.get("manual_edge_session")
+        if (not isinstance(obj,dict)
+                or (obj.get("actor"),obj.get("chat"))!=(actor,chat)
+                or self.now()>=obj.get("expires",0)):
+            raise ManualWizardHold("SESSION_EXPIRED")
+        return obj
+
+    @staticmethod
+    def _summary(op):
+        return ("🛟 <b>سرور دستی</b>\n\n"
+                f"IP: <code>{escape(str(op.get('ip') or '—'))}</code>\n"
+                f"پورت SSH: <b>{int(op.get('admin_port') or 22)}</b>\n")
+
+    async def _show(self,query,actor,chat):
+        op=await asyncio.to_thread(self.journal.latest,actor,chat)
+        if op is None:
+            return await self._view(query,
+                "🛟 <b>افزودن Edge دستی</b>\n\n"
+                "سرور خودتان را بدون Cloudzy اضافه کنید. "
+                "تغییر DNS پس از آماده‌سازی فقط از طریق Cloudflare انجام می‌شود.",
+                [[("➕ افزودن سرور", "apps_edge_manual_new")],
+                 [("↩️ مدیریت Edge","apps_cz_home")]])
+        stage=op["status"]
+        labels={
+            "DRAFT":"در انتظار مشخصات سرور",
+            "HOSTKEY_PENDING":"در انتظار تأیید هویت SSH",
+            "READY_INSTALL":"آماده نصب",
+            "INSTALLING":"در حال آماده‌سازی سرور",
+            "INSTALL_HOLD":"نصب نیازمند بررسی است",
+            "EDGE_READY":"نصب تکمیل شده؛ بررسی Standby",
+            "STANDBY":"آماده انتقال",
+            "ROUTING":"در حال تغییر مسیر یا انتقال کاربران",
+            "ACTIVE":"رله فعال",
+            "HOLD":"نیازمند بررسی",
+        }
+        rows=[]
+        if stage=="HOSTKEY_PENDING":
+            rows.append([("🔐 بررسی هویت SSH","apps_edge_manual_key_"+op["id"])])
+        if stage=="READY_INSTALL":
+            rows.append([("📝 ورود امن رمز","apps_edge_manual_password_"+op["id"])])
+        if stage=="EDGE_READY":
+            rows.append([("✅ بررسی و فعال‌سازی Standby",
+                          "apps_edge_manual_standby_"+op["id"])])
+        if stage=="STANDBY":
+            rows.append([("🔁 بررسی انتقال کاربران",
+                          "apps_edge_manual_review_"+op["id"])])
+        if stage=="ROUTING":
+            rows.append([("🔄 وضعیت انتقال و تکمیل",
+                          "apps_edge_manual_progress_"+op["id"])])
+        if stage in ("DRAFT","HOSTKEY_PENDING","READY_INSTALL"):
+            rows.append([("❌ لغو درخواست","apps_edge_manual_cancel")])
+        rows.extend([[("🔄 تازه‌سازی","apps_edge_manual_home")],
+                     [("↩️ مدیریت Edge","apps_cz_home")]])
+        return await self._view(query,self._summary(op)+
+            "وضعیت: <b>"+escape(labels.get(stage,"نیازمند بررسی"))+"</b>\n"
+            +("⚠️ نصب قبلی را تکرار نکنید؛ وضعیت سرور باید مستقل بررسی شود."
+              if stage=="INSTALL_HOLD" else ""),rows)
+
+    async def _install_task(self,app,op_id,actor,chat,password):
+        try:
+            op=await asyncio.to_thread(self.journal.get,op_id)
+            await asyncio.to_thread(self.preflight)
+            observed=await asyncio.to_thread(
+                self.key_reader,op["ip"],op["admin_port"])
+            if tuple(observed[:2])!=(op["pin_type"],op["pin_base64"]):
+                raise ManualWizardHold("HOST_KEY_CHANGED")
+            # The journal commits intent before any remote mutation. Never
+            # automatically rerun the Legacy installer after an ambiguous exit.
+            await asyncio.to_thread(self.journal.begin_install,op_id,actor,chat)
+            ok,ip,details=await self.provision(
+                op["ip"],op["admin_port"],password,
+                (op["pin_type"],op["pin_base64"]),chat,app)
+            if not ok or not isinstance(details,dict) or not details.get("tunnel_ok"):
+                raise ManualWizardHold("LEGACY_INSTALL_OR_TUNNEL_FAILED")
+            if await self.verify(op["ip"],details,op["admin_port"]) is not True:
+                raise ManualWizardHold("LEGACY_EDGE_POSTCHECK_FAILED")
+            observed=await asyncio.to_thread(
+                self.key_reader,op["ip"],op["admin_port"])
+            if tuple(observed[:2])!=(op["pin_type"],op["pin_base64"]):
+                raise ManualWizardHold("HOST_KEY_CHANGED_AFTER_INSTALL")
+            port,_pub=await asyncio.to_thread(self.preflight)
+            await asyncio.to_thread(
+                self.journal.mark_edge_ready,op_id,actor,chat,port)
+            await app.bot.send_message(chat,
+                "✅ نصب انجام شد. برای بررسی Standby، «وضعیت سرور دستی» را باز کنید.",
+                reply_markup=self._buttons([
+                    [("🟢 وضعیت سرور دستی","apps_edge_manual_home")]]))
+        except Exception as exc:
+            safe=str(exc) if isinstance(exc,(ManualEdgeHold,ManualWizardHold)) else type(exc).__name__
+            if await asyncio.to_thread(self.journal.get,op_id):
+                op=await asyncio.to_thread(self.journal.get,op_id)
+                if op["status"]=="INSTALLING":
+                    try:
+                        await asyncio.to_thread(
+                            self.journal.install_hold,op_id,actor,chat,safe)
+                    except Exception:
+                        pass
+            await app.bot.send_message(chat,
+                "⛔️ آماده‌سازی به بررسی نیاز دارد. "
+                "برای جلوگیری از تکرار نصب و قوانین شبکه، عملیات متوقف شد. "
+                "وضعیت فعلی سرور را بررسی کنید.")
+        finally:
+            self.running.discard(op_id)
+            password=None  # best effort only: Python strings cannot be zeroized
+
+    @staticmethod
+    def _buttons(rows):
+        from telegram import InlineKeyboardButton,InlineKeyboardMarkup
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(t,callback_data=d) for t,d in row] for row in rows])
+
+    async def handle(self,query,context,data,*,role,actor,chat,app):
+        if role!="admin" or actor!=chat:
+            return await self._view(query,"⛔️ فقط مدیر در گفتگوی خصوصی مجاز است.",
+                                    [[("↩️ برنامه‌ها","apps_home")]])
+        if not self.enabled():
+            return await self._view(query,
+                "⛔️ افزودن سرور دستی هنوز در این نصب فعال نشده است.",
+                [[("↩️ مدیریت Edge","apps_cz_home")]])
+        try:
+            if data=="apps_edge_manual_home":
+                return await self._show(query,actor,chat)
+            if data=="apps_edge_manual_new":
+                if not self.form_url().startswith("https://"):
+                    raise ManualWizardHold("SECURE_WEB_FORM_NOT_CONFIGURED")
+                await asyncio.to_thread(self.preflight)
+                op=await asyncio.to_thread(self.journal.start,actor,chat)
+                nonce=self.form.issue(actor=actor,chat=chat,stage="server",op_id=op)
+                context.user_data["manual_edge_session"]={
+                    "actor":actor,"chat":chat,"op":op,"nonce":nonce,
+                    "stage":"server","expires":self.now()+180,
+                }
+                return await self._form_button(query,text=
+                    "۱/۴ · <b>مشخصات سرور</b>\n\n"
+                    "IP عمومی و پورت مدیریت SSH را وارد کنید. "
+                    "رمز فقط پس از تأیید هویت سرور دریافت می‌شود.",
+                    notice="📝 مشخصات سرور",nonce=nonce)
+            if data.startswith("apps_edge_manual_form_done_"):
+                sess=self._session(context,actor,chat)
+                nonce=data[len("apps_edge_manual_form_done_"):]
+                if nonce!=sess["nonce"]:
+                    raise ManualWizardHold("FORM_CHANGED")
+                value=self.form.consume(
+                    nonce,actor=actor,chat=chat,stage=sess["stage"],
+                    op_id=sess["op"])
+                context.user_data.pop("manual_edge_session",None)
+                if sess["stage"]=="server":
+                    await asyncio.to_thread(self.journal.set_server,sess["op"],
+                                            actor,chat,value["ip"],value["port"])
+                    return await self._view(query,
+                        "✅ مشخصات سرور ثبت شد.\n"
+                        "در مرحله بعد، هویت SSH را از کنسول معتبر سرور مقایسه کنید.",
+                        [[("🔐 بررسی هویت سرور",
+                           "apps_edge_manual_key_"+sess["op"])],
+                         [("↩️ وضعیت سرور","apps_edge_manual_home")]])
+                if sess["stage"]!="password":
+                    raise ManualWizardHold("FORM_STAGE_INVALID")
+                op=await asyncio.to_thread(self.journal.get,sess["op"])
+                if op["status"]!="READY_INSTALL" or sess["op"] in self.running:
+                    raise ManualWizardHold("INSTALL_NOT_READY")
+                self.running.add(sess["op"])
+                coro=self._install_task(app,sess["op"],actor,chat,value["password"])
+                try:
+                    app.create_task(coro)
+                except Exception:
+                    self.running.discard(sess["op"]);coro.close()
+                    raise
+                return await self._view(query,
+                    "⏳ <b>آماده‌سازی آغاز شد.</b>\n"
+                    "نتیجه از دفتر عملیات اعلام می‌شود؛ نصب را دوباره اجرا نکنید.",
+                    [[("🔄 وضعیت","apps_edge_manual_home")]])
+            if data.startswith("apps_edge_manual_key_"):
+                opid=data[len("apps_edge_manual_key_"):]
+                op=await asyncio.to_thread(self.journal.get,opid)
+                if not op or (op["actor"],op["chat"])!=(actor,chat) or op["status"]!="HOSTKEY_PENDING":
+                    raise ManualWizardHold("SSH_REVIEW_NOT_READY")
+                key_type,key_b64,fingerprint=await asyncio.to_thread(
+                    self.key_reader,op["ip"],op["admin_port"])
+                context.user_data["manual_edge_pin"]={
+                    "op":opid,"actor":actor,"chat":chat,
+                    "key":(key_type,key_b64,fingerprint),
+                    "expires":self.now()+180,
+                }
+                return await self._view(query,
+                    "۲/۴ · <b>تأیید هویت سرور</b>\n\n"
+                    f"IP: <code>{escape(op['ip'])}</code>\n"
+                    f"اثر انگشت: <code>{escape(fingerprint)}</code>\n\n"
+                    "این مقدار را با اثرانگشت SSH در کنسول مستقل VPS "
+                    "مقایسه کنید. بدون تطبیق، نصب را ادامه ندهید.",
+                    [[("✅ اثر انگشت را مستقل تأیید کردم",
+                       "apps_edge_manual_pin_"+opid)],
+                     [("↩️ وضعیت","apps_edge_manual_home")]])
+            if data.startswith("apps_edge_manual_pin_"):
+                opid=data[len("apps_edge_manual_pin_"):]
+                proof=context.user_data.pop("manual_edge_pin",None)
+                if (not isinstance(proof,dict) or proof["op"]!=opid
+                        or (proof["actor"],proof["chat"])!=(actor,chat)
+                        or self.now()>=proof["expires"]):
+                    raise ManualWizardHold("SSH_APPROVAL_EXPIRED")
+                op=await asyncio.to_thread(self.journal.get,opid)
+                observed=await asyncio.to_thread(
+                    self.key_reader,op["ip"],op["admin_port"])
+                if observed[:2]!=proof["key"][:2]:
+                    raise ManualWizardHold("HOST_KEY_CHANGED")
+                await asyncio.to_thread(self.journal.pin,opid,actor,chat,*proof["key"])
+                return await self._view(query,
+                    "✅ هویت سرور تأیید شد.\n"
+                    "اکنون رمز ورود SSH را در فرم امن ثبت کنید.",
+                    [[("🔐 ورود رمز و ادامه",
+                       "apps_edge_manual_password_"+opid)]])
+            if data.startswith("apps_edge_manual_password_"):
+                opid=data[len("apps_edge_manual_password_"):]
+                op=await asyncio.to_thread(self.journal.get,opid)
+                if not op or (op["actor"],op["chat"])!=(actor,chat) or op["status"]!="READY_INSTALL":
+                    raise ManualWizardHold("INSTALL_NOT_READY")
+                nonce=self.form.issue(actor=actor,chat=chat,stage="password",op_id=opid)
+                context.user_data["manual_edge_session"]={
+                    "actor":actor,"chat":chat,"op":opid,"nonce":nonce,
+                    "stage":"password","expires":self.now()+180,
+                }
+                return await self._form_button(query,text=
+                    "۳/۴ · <b>ورود امن رمز</b>\n"
+                    "رمز در پیام‌های تلگرام یا دیتابیس ذخیره نمی‌شود.",
+                    notice="🔐 ورود رمز SSH",nonce=nonce)
+            if data.startswith("apps_edge_manual_standby_"):
+                opid=data[len("apps_edge_manual_standby_"):]
+                op=await asyncio.to_thread(self.journal.get,opid)
+                if not op or (op["actor"],op["chat"])!=(actor,chat) or op["status"]!="EDGE_READY":
+                    raise ManualWizardHold("EDGE_NOT_READY")
+                port,pub=await asyncio.to_thread(self.preflight)
+                tls=await asyncio.to_thread(self._tls_port)
+                ok=await self.probe(op["ip"],port,op["admin_port"])
+                nat=await self.nat(op["ip"],op["admin_port"],port,tls,
+                                   (op["pin_type"],op["pin_base64"]))
+                if ok is not True or nat is not True:
+                    raise ManualWizardHold("STANDBY_NETWORK_UNVERIFIED")
+                await asyncio.to_thread(self.journal.mark_standby,opid,actor,chat)
+                return await self._view(query,
+                    "✅ <b>سرور در حالت آماده‌به‌کار قرار گرفت.</b>\n"
+                    "DNS و حساب‌های مشتری هنوز تغییر نکرده‌اند.",
+                    [[("🔁 بررسی انتقال کاربران",
+                       "apps_edge_manual_review_"+opid)],
+                     [("↩️ وضعیت","apps_edge_manual_home")]])
+            if data.startswith("apps_edge_manual_review_"):
+                opid=data[len("apps_edge_manual_review_"):]
+                candidate=await asyncio.to_thread(self.queue.manual_candidate,actor,chat)
+                if candidate[0]!=opid:
+                    raise ManualWizardHold("STANDBY_IDENTITY_CHANGED")
+                state=await asyncio.to_thread(self.queue.cz04b._state,candidate[1])
+                await self.queue.cz04b._fresh(state,check_provider=False)
+                snapshot=await asyncio.to_thread(self.queue.cz04b.dns.snapshot)
+                self.queue.cz04b._expect_dns(snapshot,state["source"])
+                nonce=secrets.token_hex(8)
+                context.user_data["manual_edge_route"]={
+                    "actor":actor,"chat":chat,"op":opid,"nonce":nonce,
+                    "source":state["source"],"target":candidate[1],
+                    "fingerprint":_digest(state["users"]),
+                    "count":len(state["users"]),"expires":self.now()+180,
+                }
+                return await self._view(query,
+                    "۴/۴ · <b>بررسی انتقال</b>\n\n"
+                    f"مبدأ: <code>{escape(state['source'])}</code>\n"
+                    f"مقصد: <code>{escape(state['target'])}</code>\n"
+                    f"حساب‌های فعال: <b>{len(state['users'])}</b>\n\n"
+                    "DNS با Cloudflare به‌صورت خودکار تغییر می‌کند. "
+                    "سپس فقط حساب‌های باقی‌مانده جابه‌جا می‌شوند. "
+                    "سرور قبلی حذف نمی‌شود. اتصال مشتری پیش از تأیید نهایی "
+                    "باید مستقل آزمایش شده باشد.",
+                    [[("✅ اتصال واقعی تأیید شد؛ آغاز انتقال",
+                       "apps_edge_manual_go_"+nonce)],
+                     [("انصراف","apps_edge_manual_home")]])
+            if data.startswith("apps_edge_manual_go_"):
+                sess=context.user_data.pop("manual_edge_route",None)
+                if (not isinstance(sess,dict)
+                        or (sess["actor"],sess["chat"])!=(actor,chat)
+                        or data!="apps_edge_manual_go_"+sess["nonce"]
+                        or self.now()>=sess["expires"]):
+                    raise ManualWizardHold("TRANSFER_CONFIRMATION_EXPIRED")
+                candidate=await asyncio.to_thread(
+                    self.queue.manual_candidate,actor,chat)
+                if (candidate[0],candidate[1])!=(sess["op"],sess["target"]):
+                    raise ManualWizardHold("TRANSFER_IDENTITY_CHANGED")
+                state=await asyncio.to_thread(self.queue.cz04b._state,candidate[1])
+                if (state["source"]!=sess["source"] or
+                        _digest(state["users"])!=sess["fingerprint"] or
+                        len(state["users"])!=sess["count"]):
+                    raise ManualWizardHold("TRANSFER_PREVIEW_EXPIRED")
+                await self.queue.cz04b._fresh(state,check_provider=False)
+                snap=await asyncio.to_thread(self.queue.cz04b.dns.snapshot)
+                self.queue.cz04b._expect_dns(snap,state["source"])
+                if not self.queue.enabled() or not self.queue.cz04b.enabled():
+                    raise ManualWizardHold("TRANSFER_ENGINE_DISABLED")
+                job=await asyncio.to_thread(
+                    self.queue.reserve,candidate,state["source"],actor=actor,
+                    chat=chat,expected_fp=sess["fingerprint"],
+                    expected_count=sess["count"])
+                await asyncio.to_thread(
+                    self.journal.bind_route,sess["op"],actor,chat,job)
+                self.queue.launch(app,job)
+                return await self._view(query,
+                    "⏳ <b>انتقال آغاز شد.</b>\n"
+                    "Cloudflare به‌صورت خودکار تغییر می‌کند. پیشرفت واقعی "
+                    "در دفتر انتقال ثبت می‌شود.",
+                    [[("🔄 وضعیت انتقال",
+                       "apps_edge_manual_progress_"+sess["op"])]])
+            if data.startswith("apps_edge_manual_progress_"):
+                opid=data[len("apps_edge_manual_progress_"):]
+                op=await asyncio.to_thread(self.journal.get,opid)
+                if not op or (op["actor"],op["chat"])!=(actor,chat) or not op["route_job"]:
+                    raise ManualWizardHold("ROUTE_JOB_NOT_FOUND")
+                rec=await asyncio.to_thread(self.queue.get,op["route_job"])
+                if rec is None:
+                    raise ManualWizardHold("ROUTE_JOB_NOT_FOUND")
+                if rec["status"] in ("VERIFYING","MOVED"):
+                    return await self._view(query,
+                        self._summary(op)+
+                        f"حساب‌های منتقل‌شده: <b>{rec['moved']}/{rec['total']}</b>\n"
+                        "برای ثبت تکمیل فنی، مسیر DNS و اتصال را دوباره بررسی کنید.",
+                        [[("✅ کنترل نهایی انتقال",
+                           "apps_edge_manual_finish_"+opid)],
+                         [("🔄 وضعیت","apps_edge_manual_home")]])
+                return await self._view(query,
+                    self._summary(op)+
+                    f"انتقال: <b>{rec['moved']}/{rec['total']}</b>\n"
+                    "وضعیت واقعی: <b>"+escape(rec["status"])+"</b>",
+                    [[("🔄 تازه‌سازی","apps_edge_manual_progress_"+opid)],
+                     [("📋 بررسی و بازیابی صف","apps_cz7_status")]])
+            if data.startswith("apps_edge_manual_finish_"):
+                opid=data[len("apps_edge_manual_finish_"):]
+                op=await asyncio.to_thread(self.journal.get,opid)
+                if not op or (op["actor"],op["chat"])!=(actor,chat):
+                    raise ManualWizardHold("OPERATOR_MISMATCH")
+                rec=await asyncio.to_thread(self.queue.get,op["route_job"])
+                if not rec or rec["status"] not in ("VERIFYING","MOVED"):
+                    raise ManualWizardHold("TRANSPORT_NOT_READY")
+                state=await asyncio.to_thread(
+                    self.queue.cz04b._ready_probe_state,
+                    rec["source"],rec["target"],rec["provider_id"])
+                await self.queue.cz04b._fresh(state,check_provider=False)
+                dns=await asyncio.to_thread(self.queue.cz04b.dns.snapshot)
+                self.queue.cz04b._expect_dns(dns,rec["target"])
+                if rec["status"]=="VERIFYING":
+                    await asyncio.to_thread(
+                        self.queue.complete_transport,rec["id"],
+                        actor=actor,chat=chat,expected_updated_at=rec["updated_at"])
+                await asyncio.to_thread(
+                    self.journal.finish,opid,actor,chat,rec["id"])
+                return await self._view(query,
+                    "✅ <b>رله جدید فعال شد.</b>\n"
+                    "تمام حساب‌های اولیه به مقصد جدید منتقل شده‌اند. "
+                    "تأیید مستقل ساخت/تمدید و اتصال مشتری همچنان لازم است. "
+                    "رله قبلی حذف نشده است.",
+                    [[("🔄 وضعیت سرور","apps_edge_manual_home")]])
+            if data=="apps_edge_manual_cancel":
+                op=await asyncio.to_thread(self.journal.latest,actor,chat)
+                if op and op["status"] in ("DRAFT","HOSTKEY_PENDING","READY_INSTALL"):
+                    await asyncio.to_thread(
+                        self.journal.cancel_draft,op["id"],actor,chat)
+                    context.user_data.pop("manual_edge_session",None)
+                    context.user_data.pop("manual_edge_pin",None)
+                    return await self._view(query,"✅ درخواست بدون تغییر سرور لغو شد.",
+                        [[("↩️ مدیریت Edge","apps_cz_home")]])
+                raise ManualWizardHold("CANCEL_REQUIRES_SAFE_RECONCILIATION")
+            return await self._show(query,actor,chat)
+        except Exception as exc:
+            code=str(exc) if isinstance(exc,(ManualWizardHold,ManualEdgeHold,IntakeHold)) else type(exc).__name__
+            return await self._view(query,
+                "⛔️ <b>عملیات متوقف شد.</b>\n"+
+                escape(FA.get(code,"وضعیت سرور یا مسیر نیازمند بررسی است. "
+                       "از انجام دوباره نصب یا تغییر DNS خودداری کنید.")),
+                [[("🔄 وضعیت سرور دستی","apps_edge_manual_home")],
+                 [("↩️ مدیریت Edge","apps_cz_home")]])
+
+    def _tls_port(self):
+        with self.db() as db:
+            row=db.execute("SELECT value FROM settings WHERE key='tls_port'").fetchone()
+            return int(row[0] if row else 2088)

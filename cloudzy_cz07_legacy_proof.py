@@ -11,6 +11,7 @@ from contextlib import closing
 import hashlib
 import json
 import os
+import pwd
 from pathlib import Path
 import sqlite3
 import stat
@@ -23,6 +24,12 @@ HISTORICAL_TOTAL = 468
 HISTORICAL_BATCH = 400
 HISTORICAL_EMERGENCY = 68
 OPT_IN_ENV = "NVL_CZ07_HISTORICAL_RECOVERY_A0B997_ENABLED"
+ONE_ABSENT_ACK_ENV = "NVL_CZ07_ONE_ABSENT_ACK_A0B997_ENABLED"
+# Pinned to the independently observed missing username, without publishing it.
+# This narrowly prevents *another* missing user from borrowing the exception.
+ONE_ABSENT_USERNAME_SHA256 = (
+    "60aebe96f658a6a09d6f4c6ff87bd605f85f24c3308566408f1a7899ab4fff18"
+)
 
 # The paths are pinned to existing operator-verified snapshots on this Core;
 # no user-supplied path or arbitrary operation may activate this exception.
@@ -86,6 +93,37 @@ def _snapshot(path):
     if len(names) != len(set(names)):
         _deny("EVIDENCE_DUPLICATE_USERNAME")
     return rows, set(names), sha.hexdigest()
+
+
+def _target_present_in_snapshot(path, username, expected_sha):
+    """Confirm transferred user exists on target in an immutable historical DB."""
+    file = Path(path)
+    try:
+        st = file.lstat()
+        if not stat.S_ISREG(st.st_mode):
+            _deny("EVIDENCE_POST_BATCH_FILE_UNSAFE")
+        with closing(sqlite3.connect(
+                "file:" + quote(str(file), safe="/") + "?mode=ro&immutable=1",
+                uri=True, timeout=5)) as db:
+            if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                _deny("EVIDENCE_POST_BATCH_SQLITE_INVALID")
+            present = db.execute(
+                "SELECT 1 FROM ssh_accounts WHERE username=? AND "
+                "service_type='ssh' AND host=? LIMIT 1",
+                (username, HISTORICAL_TARGET),
+            ).fetchone() is not None
+        sha = hashlib.sha256()
+        with file.open("rb") as handle:
+            for chunk in iter(lambda:handle.read(1024 * 1024), b""):
+                sha.update(chunk)
+        now = file.lstat()
+        if ((st.st_ino,st.st_dev,st.st_size,st.st_mtime_ns) !=
+                (now.st_ino,now.st_dev,now.st_size,now.st_mtime_ns) or
+                sha.hexdigest() != expected_sha):
+            _deny("EVIDENCE_POST_BATCH_SNAPSHOT_CHANGED")
+        return present
+    except (OSError,sqlite3.Error) as exc:
+        raise HistoricalProofHold("EVIDENCE_POST_BATCH_UNAVAILABLE") from exc
 
 
 def verify_historical_job(db, rec, *, snapshots=SNAPSHOTS):
@@ -170,8 +208,32 @@ def verify_historical_job(db, rec, *, snapshots=SNAPSHOTS):
         (HISTORICAL_TARGET,),
     ).fetchall()
     target_names = {name for (name,) in current}
-    if not initial.issubset(target_names):
-        _deny("EVIDENCE_ORIGINAL_ACCOUNT_NOT_AT_TARGET")
+    absent = initial - target_names
+    absent_hash = None
+    if absent:
+        if (len(absent) != 1 or
+                os.environ.get(ONE_ABSENT_ACK_ENV) != "1"):
+            _deny("EVIDENCE_ORIGINAL_ACCOUNT_NOT_AT_TARGET")
+        username = next(iter(absent))
+        absent_hash = hashlib.sha256(username.encode("utf-8")).hexdigest()
+        if (absent_hash != ONE_ABSENT_USERNAME_SHA256 or
+                username not in batch_names or username in missing):
+            _deny("EVIDENCE_UNEXPECTED_ABSENT_IDENTITY")
+        if db.execute(
+            "SELECT 1 FROM ssh_accounts WHERE username=? LIMIT 1",
+            (username,),
+        ).fetchone():
+            _deny("EVIDENCE_ACCOUNT_REASSIGNED")
+        if (not _target_present_in_snapshot(snapshots[1],username,batch_sha)
+                or not _target_present_in_snapshot(
+                    snapshots[2],username,emergency_sha)):
+            _deny("EVIDENCE_ABSENT_NOT_TRANSFERRED")
+        try:
+            pwd.getpwnam(username)
+        except KeyError:
+            pass
+        else:
+            _deny("EVIDENCE_ABSENT_LINUX_ACCOUNT_PRESENT")
     remaining_active = db.execute(
         "SELECT COUNT(*) FROM ssh_accounts WHERE service_type='ssh' "
         "AND (host=? OR host IS NULL OR host='') "
@@ -191,7 +253,8 @@ def verify_historical_job(db, rec, *, snapshots=SNAPSHOTS):
     proof_hash = hashlib.sha256(json.dumps(
         {"job":rec["id"],"fingerprint":rec["source_fingerprint"],
          "snapshots":hashes,"batches":HISTORICAL_BATCH,
-         "emergency":HISTORICAL_EMERGENCY},
+         "emergency":HISTORICAL_EMERGENCY,
+         "one_absent_sha256":absent_hash},
         sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")).hexdigest()
     return {
@@ -201,4 +264,6 @@ def verify_historical_job(db, rec, *, snapshots=SNAPSHOTS):
         "historical_proof_sha256":proof_hash,
         "historical_snapshots_sha256":hashes,
         "historical_identity_verified":True,
+        "one_absent_sha256":absent_hash,
+        "one_absent_acknowledged":bool(absent_hash),
     }

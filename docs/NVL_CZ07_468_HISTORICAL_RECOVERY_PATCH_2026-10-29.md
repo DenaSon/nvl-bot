@@ -24,6 +24,22 @@ Otherwise, the existing generic Recovery logic remains unchanged. `review_hold()
 
 There is **no** automatic repair, runtime account migration, DNS cutover, Cloudzy API call, provider purchase, or bulk user action in this patch.
 
+## One account absent after verified batch transfer (follow-up)
+
+2026-10-29 Core evidence showed that ONE originally included customer was present at the target in BOTH 09:17 and 09:22 backups, but absent from the live `ssh_accounts` roster and Linux Core passwd by the time the code was deployed. The account's original expiry was in the future, so **why it was removed is unknown**. This is not proof of a legitimate termination, connectivity, refund, or account restoration.
+
+A narrowly scoped one-time exception requires ALL:
+- Existing historical job ID/route/fingerprint, 400 distinct batch receipts, 68 emergency users, immutable emergency audit, and two verified backups as before.
+- Exactly one missing original username, explicitly pinned via SHA256 in source, and that account must be from the 400 successful batch receipts (not the 68 emergency).
+- The SAME original user must be recorded with `service_type='ssh'` and `host=144.172.69.61` in both after-batch historical snapshots.
+- The username must currently be absent from *all* `ssh_accounts` rows, including other hosts/service types, and absent from Core's Linux passwd database. **Any other missing/moved original account remains a hard HOLD.**
+- `NVL_CZ07_HISTORICAL_RECOVERY_A0B997_ENABLED=1` AND `NVL_CZ07_ONE_ABSENT_ACK_A0B997_ENABLED=1` are operator-approved in the bot process environment. Default OFF.
+- Admin preview must state that cause of deletion is **not proven**, show a specific warning and require the original owner/admin's nonce-bound, expiring confirmation. Any changed exception identity between preview/commit blocks the CAS.
+
+The original `HOLD→VERIFYING` transaction persists a second `cloudzy_cz07_absent_attestations` receipt with the pinned username SHA256, snapshot-bound combined proof hash, actor/chat, timestamp and reason `MISSING_AFTER_VERIFIED_BATCH_TRANSFER_DELETION_CAUSE_UNVERIFIED`. No user credentials or plaintext username are persisted. This receipt is not a blanket deletion approval.
+
+The exception does NOT create/delete any SSH account, modify billing, replay the migration, change DNS/WireGuard or auto-mark `MOVED/DONE`. Disable the second flag after completing this one historical reconciliation. Do not run a blind whole-release script to deploy this follow-up: the prior guarded publisher has a **pre-deploy baseline-hash stop condition** and is not designed to reapply on its own earlier release. Install only changed Python files using a separate verified, backup-first code-only patch procedure.
+
 ## Production preflight before any enablement
 
 1. Treat the three snapshot backups as forensic material. Store secure off-host backups and record their SHA256s before deployment. Do **not** overwrite originals or run SQLite write operations on them.

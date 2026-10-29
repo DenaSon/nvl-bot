@@ -60,6 +60,21 @@ def _provider_ipv4(obj):
     return None
 
 
+def ensure_cz04a_schema(db):
+    db.execute("""CREATE TABLE IF NOT EXISTS cloudzy_cz04a_actions (
+        id TEXT PRIMARY KEY, actor_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
+        provider_id TEXT NOT NULL, host TEXT NOT NULL, action TEXT NOT NULL,
+        status TEXT NOT NULL, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        note TEXT DEFAULT NULL
+    )""")
+    # A different VPS' historical HOLD must not fence this VPS.
+    db.execute("DROP INDEX IF EXISTS cloudzy_cz04a_one_pending")
+    db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS cloudzy_cz04a_pending_per_vps_v2
+        ON cloudzy_cz04a_actions(provider_id)
+        WHERE status NOT IN ('DONE','REJECTED')""")
+
+
+
 class Cloudzy04A:
     def __init__(self, *, conn_factory, guard, probe,
                  cloudzy_factory=CloudzyService, now=time.time):
@@ -70,17 +85,7 @@ class Cloudzy04A:
         self.now = now
 
     def _init(self, db):
-        db.execute("""CREATE TABLE IF NOT EXISTS cloudzy_cz04a_actions (
-            id TEXT PRIMARY KEY, actor_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
-            provider_id TEXT NOT NULL, host TEXT NOT NULL, action TEXT NOT NULL,
-            status TEXT NOT NULL, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-            note TEXT DEFAULT NULL
-        )""")
-        # A different VPS' historical HOLD must not fence this VPS.
-        db.execute("DROP INDEX IF EXISTS cloudzy_cz04a_one_pending")
-        db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS cloudzy_cz04a_pending_per_vps_v2
-            ON cloudzy_cz04a_actions(provider_id)
-            WHERE status NOT IN ('DONE','REJECTED')""")
+        ensure_cz04a_schema(db)
 
     def _read(self):
         """Only CZ03 completed, provider-bound NVL records are manageable."""

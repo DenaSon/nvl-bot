@@ -7382,6 +7382,38 @@ def _manual_edge_is_core_ip(ip):
     return str(ip) in {settings_ip, cached_ip}
 
 
+def _manual_edge_verify_ubuntu(ip, admin_port, password, pinned):
+    """Read-only Ubuntu 24.04 + root SSH check on the independently pinned key."""
+    if paramiko is None:
+        return False
+    try:
+        import base64
+        raw = base64.b64decode(pinned[1], validate=True)
+        host_key = paramiko.PKey.from_type_string(pinned[0], raw)
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        label = ip if int(admin_port)==22 else f"[{ip}]:{int(admin_port)}"
+        client.get_host_keys().add(label,pinned[0],host_key)
+        try:
+            client.connect(ip,port=int(admin_port),username="root",
+                           password=password,look_for_keys=False,
+                           allow_agent=False,timeout=10,banner_timeout=10,
+                           auth_timeout=10)
+            _stdin,stdout,_stderr=client.exec_command(
+                "cat /etc/os-release",timeout=10)
+            text=stdout.read(4096).decode("utf-8","replace")
+            attrs={}
+            for item in text.splitlines():
+                if "=" in item:
+                    k,v=item.split("=",1)
+                    attrs[k]=v.strip().strip('"').strip("'")
+            return attrs.get("ID")=="ubuntu" and attrs.get("VERSION_ID")=="24.04"
+        finally:
+            client.close()
+    except Exception:
+        return False
+
+
 _manual_edge = ManualEdgeWizard(
     db=db_conn,preflight=_cloudzy_quick_preflight,
     provision=_manual_edge_provision,verify=_manual_edge_verify,
@@ -7391,6 +7423,7 @@ _manual_edge = ManualEdgeWizard(
                      and _manual_form_ready,
     guard=_cloudzy_04a_guard,
     is_core_host=_manual_edge_is_core_ip,
+    os_check=_manual_edge_verify_ubuntu,
 )
 
 # Phase 7 is opt-in and strictly a read-only Rich admin view. No effectful

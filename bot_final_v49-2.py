@@ -7377,6 +7377,7 @@ _manual_edge = ManualEdgeWizard(
     enabled=lambda: os.environ.get("NVL_EDGE_MANUAL_ENABLED")=="1"
                      and _manual_form_ready,
     guard=_cloudzy_04a_guard,
+    is_core_host=_is_current_core_host,
 )
 
 # Phase 7 is opt-in and strictly a read-only Rich admin view. No effectful

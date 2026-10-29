@@ -138,21 +138,12 @@ class CloudzyAdminPanel:
             if data == "apps_cz_home":
                 await self._display(query,
                     "🌐 <b>مدیریت Edge</b>\n\n"
-                    "سرور را با Cloudzy یا به‌صورت دستی اضافه کنید. "
-                    "بعد از آماده‌شدن Standby، تغییر DNS از Cloudflare "
-                    "و انتقال کاربران با تأیید شما انجام می‌شود.",
+                    "سرورهای دستی را آماده کنید و IP اتصال کاربران را "
+                    "با یک تأیید و بررسی سلامت تغییر دهید.",
                     [
-                        [("☁️ افزودن با Cloudzy", "apps_cz6_start")],
-                        [("🛟 افزودن دستی (اضطراری)", "apps_edge_manual_home")],
-                        [("📦 انتقال کاربران SSH", "apps_cz7_home")],
-                        [("🌐 مدیریت Edge و Relay", "apps_cz_edge")],
-                        [("🖥 سرورهای Cloudzy · مدیریت و حذف", "apps_cz_servers_0")],
-                        [("🛠 مدیریت VPS", "apps_cz4_vps")],
-                        [("🌍 مناطق و پلن‌ها", "apps_cz_regions_0"),
-                         ("💰 موجودی", "apps_cz_balance")],
-                        [("👤 اطلاعات حساب", "apps_cz_account"),
-                         ("🔑 کلیدهای SSH", "apps_cz_keys_0")],
-                        [("📋 سوابق و وضعیت عملیات", "apps_cz_operations")],
+                        [("➕ افزودن Edge دستی", "apps_edge_manual_home")],
+                        [("🔁 تغییر IP کاربران", "apps_edge_quick_home")],
+                        [("🖥 سرورهای من", "hp_menu")],
                         [("↩️ برنامه‌ها", "apps_home")],
                     ], markup)
             elif data.startswith("apps_cz_servers_"):

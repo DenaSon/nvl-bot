@@ -137,8 +137,8 @@ class HistoricalSnapshotProofTests(unittest.TestCase):
         username = self.names[0]
         self.db.execute("DELETE FROM ssh_accounts WHERE username=?", (username,))
         with sqlite3.connect(self.after) as db:
-            db.execute("UPDATE ssh_accounts SET host=? WHERE username=?",
-                       (HISTORICAL_SOURCE, username))
+            db.execute("UPDATE ssh_accounts SET host=?,status='🔴 غیرفعال' "
+                       "WHERE username=?", (HISTORICAL_SOURCE, username))
         with patch.dict(os.environ,{ONE_ABSENT_ACK_ENV:"1"}), patch(
             "cloudzy_cz07_legacy_proof.ONE_ABSENT_USERNAME_SHA256",
             hashlib.sha256(username.encode()).hexdigest(),

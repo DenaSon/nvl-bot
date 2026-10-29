@@ -4218,7 +4218,9 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
         kb = (InlineKeyboardMarkup([[InlineKeyboardButton("⭐ این IP را پیش‌فرض کل سیستم کن", callback_data=f"hpdef_{edge_ip}")],
                                     [InlineKeyboardButton("🛡 وضعیت و مسدودسازی IPها", callback_data="hp_menu")]])
               if pool_active else InlineKeyboardMarkup(
-                  [[InlineKeyboardButton("📋 وضعیت خرید Cloudzy", callback_data="apps_cz_operations")]]))
+                  [[InlineKeyboardButton(
+                      "🛟 ادامه نصب دستی و بررسی Standby" if manual_safe_bootstrap else "📋 وضعیت خرید Cloudzy",
+                      callback_data="apps_edge_manual_home" if manual_safe_bootstrap else "apps_cz_operations")]]))
         await app.bot.send_message(
             chat_id,
             f"{'🎉 <b>Edge جدید با موفقیت راه‌اندازی شد</b>' if pool_active else '🛠 <b>ثبت اولیه Edge — در انتظار تأیید نهایی</b>'}\n\n"

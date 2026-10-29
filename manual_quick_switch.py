@@ -532,6 +532,7 @@ class ManualQuickSwitch:
                 or type(expected_active) is not int or expected_active < 1):
             raise QuickSwitchHold("EXTERNAL_WITNESS_REQUIRED")
         with self.db() as db:
+            self._conflicts(db,source,target)
             defaults = db.execute(
                 "SELECT host FROM host_pool WHERE active=1 AND is_default=1"
             ).fetchall()
@@ -594,6 +595,7 @@ class ManualQuickSwitch:
             self._init(db)
             db.execute("BEGIN IMMEDIATE")
             self.guard(db)
+            self._conflicts(db,source,target)
             # Snapshot must still be valid when attestation is appended.
             if db.execute(
                 "SELECT host FROM host_pool WHERE active=1 AND is_default=1"

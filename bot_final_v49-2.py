@@ -16708,6 +16708,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("mza_nodes_origin", None)
         await _show_admin_programs_hub(query, context)
         return
+    elif d == "apps_cz_home":
+        active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
+        await QuickSwitchUI(
+            engine=_manual_quick_switch,
+            token=context.application.bot.token,
+            db_conn=db_conn,
+        ).handle(
+            data="apps_edge_quick_home", query=query, context=context,
+            role=role, actor=update.effective_user.id,
+            chat=update.effective_chat.id,
+            is_private=(getattr(update.effective_chat,"type",None)=="private"),
+            active_admin_ids=active_admin_ids,
+        )
+        return
     elif d.startswith("apps_edge_quick_"):
         active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
         await QuickSwitchUI(

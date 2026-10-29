@@ -301,6 +301,20 @@ class QuickSwitchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.one(
             "SELECT status FROM cloudzy_cz07_jobs"),("HOLD",))
 
+    async def test_external_attestation_fails_during_any_active_route_lease(self):
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO failover_operations "
+                "(mode,status,source_host,target_host) "
+                "VALUES ('MANUAL','RUNNING',?,?)",
+                (OLD,NEW)
+            )
+        with self.assertRaisesRegex(QuickSwitchHold,"SHARED_6G_BUSY"):
+            await self.engine.record_external_cutover(
+                source=OLD,target=NEW,actor="telegram:7",
+                client_witness="real client accepted",expected_active=2
+            )
+
     async def test_production_probe_adapter_never_calls_cloudzy_provider(self):
         calls = []
         class ExistingLegacy:

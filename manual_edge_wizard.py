@@ -65,8 +65,8 @@ FA = {
 class ManualEdgeWizard:
     def __init__(self, *, db, preflight, provision, verify, probe, nat, queue,
                  form_store=None, now=time.time, key_reader=fingerprint_ssh,
-                 enabled=None, form_url=None):
-        self.journal=ManualEdgeJournal(db,now=now)
+                 enabled=None, form_url=None, guard=None):
+        self.journal=ManualEdgeJournal(db,now=now,guard=guard)
         self.db=db
         self.preflight=preflight
         self.provision=provision
@@ -431,7 +431,15 @@ class ManualEdgeWizard:
                 return await self._view(query,
                     self._summary(op)+
                     f"انتقال: <b>{rec['moved']}/{rec['total']}</b>\n"
-                    "وضعیت واقعی: <b>"+escape(rec["status"])+"</b>",
+                    "وضعیت: <b>"+escape({
+                        "QUEUED":"در انتظار شروع",
+                        "ROUTING":"در حال تغییر خودکار DNS",
+                        "MIGRATING":"در حال انتقال حساب‌ها",
+                        "PAUSED_SAFE":"توقف پس از مرحله جاری",
+                        "HOLD":"نیازمند بررسی",
+                        "VERIFYING":"در انتظار تأیید نهایی",
+                        "MOVED":"رله فعال، پذیرش مشتری در انتظار",
+                    }.get(rec["status"],"نیازمند بررسی"))+"</b>",
                     [[("🔄 تازه‌سازی","apps_edge_manual_progress_"+opid)],
                      [("📋 بررسی و بازیابی صف","apps_cz7_status")]])
             if data.startswith("apps_edge_manual_finish_"):

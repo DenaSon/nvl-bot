@@ -598,7 +598,8 @@ class DurableCutoverQueue:
 
         This does not mint CREATE, RENEW or affected-ISP evidence. The separate
         business acceptance remains pending. It never changes DNS or accounts.
-        Caller must have just performed fresh provider/SSH/NAT and live DNS GET.
+        Caller must have checked pinned SSH/WG/NAT and live DNS; no
+        Cloudzy GET is required after the original verified route cutover.
         """
         rec = self.get(job)
         if not rec or (actor, chat) != (rec["actor"], rec["chat"]):
@@ -812,11 +813,12 @@ class DurableCutoverQueue:
                     break
                 rows, moved = await asyncio.to_thread(self.remaining, job)
                 if not rows:
-                    # Confirm provider, current routing and NAT once more.
+                    # Confirm pinned SSH/WG/NAT and current routing, not Cloudzy.
+                    # This final check is provider-independent by design.
                     state = await asyncio.to_thread(
                         self.cz04b._ready_probe_state,
                         rec["source"], rec["target"], rec["provider_id"])
-                    await self.cz04b._fresh(state)
+                    await self.cz04b._fresh(state, check_provider=False)
                     dns = await asyncio.to_thread(self.cz04b.dns.snapshot)
                     self.cz04b._expect_dns(dns, rec["target"])
                     await asyncio.to_thread(self.complete_guard, job)
@@ -838,7 +840,8 @@ class DurableCutoverQueue:
                 names = [str(row[0]) for row in rows[:BATCH_SIZE]]
                 fp = _digest(rows)
                 started = time.monotonic()
-                count = await self.cz04b._run_users(rec["actor"], chat, names, fp)
+                count = await self.cz04b._run_users(
+                    rec["actor"], chat, names, fp, check_provider=False)
                 if count != len(names):
                     raise CZ07Hold("BATCH_ACK_MISMATCH")
                 fresh_rows, moved = await asyncio.to_thread(self.remaining, job)
@@ -968,7 +971,7 @@ class DurableCutoverQueue:
                 state = await asyncio.to_thread(
                     self.cz04b._ready_probe_state,
                     rec["source"], rec["target"], rec["provider_id"])
-                await self.cz04b._fresh(state)
+                await self.cz04b._fresh(state, check_provider=False)
                 dns = await asyncio.to_thread(self.cz04b.dns.snapshot)
                 self.cz04b._expect_dns(dns, rec["target"])
                 await asyncio.to_thread(
@@ -1014,7 +1017,7 @@ class DurableCutoverQueue:
                 state = await asyncio.to_thread(
                     self.cz04b._ready_probe_state,
                     rec["source"], rec["target"], rec["provider_id"])
-                await self.cz04b._fresh(state)
+                await self.cz04b._fresh(state, check_provider=False)
                 await asyncio.to_thread(
                     self.complete_transport, job_id, actor=actor, chat=chat,
                     expected_updated_at=session["updated_at"])

@@ -7,7 +7,7 @@ No host deletion, account rebuild, K2 mutation, paid Cloudzy action or blind
 route retry is implemented here.
 """
 from __future__ import annotations
-from manual_edge_identity import assert_ref as assert_edge_ref
+from manual_edge_identity import assert_ref as assert_edge_ref, assert_role_ref
 
 
 import asyncio
@@ -415,7 +415,7 @@ class DurableCutoverQueue:
             "SELECT active,is_default,is_standby,provider,provider_instance_id "
             "FROM host_pool WHERE host=?", (rec["target"],)
         ).fetchone()
-        assert_edge_ref(db,rec["target"],rec["provider_id"],
+        assert_role_ref(db,rec["target"],rec["provider_id"],
                         require_standby=True)
         if db.execute(
             "SELECT 1 FROM ssh_accounts WHERE host=? LIMIT 1",
@@ -597,7 +597,7 @@ class DurableCutoverQueue:
                 "SELECT host,active,is_default,is_standby,provider,provider_instance_id "
                 "FROM host_pool WHERE is_default=1"
             ).fetchall()
-            assert_edge_ref(
+            assert_role_ref(
                 db,row["target"],row["provider_id"],require_default=True)
             if len(defaults)!=1 or defaults[0][0]!=row["target"]:
                 raise CZ07Hold("RECOVERY_DEFAULT_CHANGED")

@@ -1404,8 +1404,17 @@ class JournalTests(unittest.TestCase):
 
     def test_historical_registered_hold_does_not_block_independent_purchase(self):
         first = self.reserve()
-        self.journal.change(first, "CREATING", "HOLD_PROVISION",
-                            hold_reason="PARTIAL_OR_UNVERIFIED_LEGACY_INSTALL")
+        # Recreate a historical persisted receipt (as observed on Core)
+        # without forging a new native UO transition from unverified CREATE.
+        with self.journal.db() as db:
+            db.execute(
+                "UPDATE cloudzy_edge_operations "
+                "SET status='HOLD_PROVISION',"
+                "provider_server_id='known-existing-vps',"
+                "public_ipv4='8.8.8.8',"
+                "hold_reason='PARTIAL_OR_UNVERIFIED_LEGACY_INSTALL' "
+                "WHERE id=? AND status='CREATING'", (first,)
+            )
         second = self.reserve()
         self.assertNotEqual(first, second)
         self.assertEqual(self.journal.get(first)["status"], "HOLD_PROVISION")

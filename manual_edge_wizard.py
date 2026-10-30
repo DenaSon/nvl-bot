@@ -11,7 +11,7 @@ import hashlib
 import logging
 from html import escape
 from contextvars import ContextVar
-from manual_edge_rich import ManualRichDelivery, render_manual_card
+from manual_edge_html import ManualHtmlDelivery
 import os
 import secrets
 import socket
@@ -25,7 +25,7 @@ from manual_edge_identity import assert_ref as assert_edge_ref
 from cloudzy_cz04b import _digest
 
 
-_RICH_SCOPE = ContextVar('manual_edge_rich_scope', default=None)
+_HTML_SCOPE = ContextVar('manual_edge_html_scope', default=None)
 log = logging.getLogger(__name__)
 
 
@@ -161,13 +161,12 @@ class ManualEdgeWizard:
         self.running=set()
 
     async def _view(self,query,text,rows):
-        # The central handler binds operator-specific context once per
-        # callback. ContextVar prevents cross-admin async state leakage.
-        scope = _RICH_SCOPE.get()
+        # Bot identity is task-local; no edit pointer or Rich delivery lock.
+        scope = _HTML_SCOPE.get()
         if not scope:
             raise ManualWizardHold("RICH_OPERATOR_UNAVAILABLE")
-        token, context, chat = scope
-        return await ManualRichDelivery(token).show(
+        bot, context, chat = scope
+        return await ManualHtmlDelivery(bot).show(
             chat=chat, context=context, text=text, rows=rows)
 
     async def _form_button(self,query,*,text,notice,nonce):
@@ -351,11 +350,10 @@ class ManualEdgeWizard:
             port,_pub=await asyncio.to_thread(self.preflight)
             await asyncio.to_thread(
                 self.journal.mark_edge_ready,op_id,actor,chat,port)
-            await ManualRichDelivery(app.bot.token).api.send(
-                chat_id=chat, rich_message=render_manual_card(
-                    "✅ نصب سرور تکمیل شد.\nبرای بررسی Standby، وضعیت را باز کنید.",
-                    [[("🟢 وضعیت سرور دستی", "apps_edge_manual_home")]],
-                ))
+            await ManualHtmlDelivery(app.bot).send(
+                chat=chat,
+                text="✅ نصب سرور تکمیل شد.\nبرای بررسی Standby، وضعیت را باز کنید.",
+                rows=[[("🟢 وضعیت سرور دستی", "apps_edge_manual_home")]])
         except Exception as exc:
             safe=str(exc) if isinstance(exc,(ManualEdgeHold,ManualWizardHold)) else type(exc).__name__
             log.error("Manual Edge install stopped op=%s code=%s "
@@ -375,12 +373,11 @@ class ManualEdgeWizard:
                     except Exception:
                         pass
             try:
-                await ManualRichDelivery(app.bot.token).api.send(
-                    chat_id=chat, rich_message=render_manual_card(
-                        "⛔️ آماده‌سازی به بررسی نیاز دارد.\n"
-                        "برای جلوگیری از تکرار نصب و قوانین شبکه، عملیات متوقف شد.",
-                        [[("🔄 وضعیت سرور دستی", "apps_edge_manual_home")]],
-                    ))
+                await ManualHtmlDelivery(app.bot).send(
+                    chat=chat,
+                    text=("⛔️ آماده‌سازی به بررسی نیاز دارد.\n"
+                          "برای جلوگیری از تکرار نصب و قوانین شبکه، عملیات متوقف شد."),
+                    rows=[[("🔄 وضعیت سرور دستی", "apps_edge_manual_home")]])
             except Exception:
                 # Telegram delivery failure must not replay an installer or
                 # undo the durable INSTALL_HOLD receipt.
@@ -390,22 +387,12 @@ class ManualEdgeWizard:
             password=None  # best effort only: Python strings cannot be zeroized
 
     async def handle(self,query,context,data,*,role,actor,chat,app):
-        # This is a UI-only task-local scope; never persist the bot token in
-        # user_data or a Telegram callback. No HTML screen fallback.
-        _RICH_SCOPE.set((app.bot.token,context,chat))
+        # Native HTML pages do not edit prior Rich or HTML messages.
+        # Preserve the same authorization and callback handlers.
+        _HTML_SCOPE.set((app.bot,context,chat))
         if role!="admin" or actor!=chat:
             return await self._view(query,"⛔️ فقط مدیر در گفتگوی خصوصی مجاز است.",
                                     [[("↩️ برنامه‌ها","apps_home")]])
-        # The installer publishes a *new* Rich completion receipt, while the
-        # wizard's user_data pointer still refers to an earlier message.
-        # Always edit the exact bot message carrying the clicked callback,
-        # not an unrelated stale Rich card higher up in chat history.
-        message=getattr(query,"message",None)
-        message_id=getattr(message,"message_id",None)
-        callback_chat=getattr(getattr(message,"chat",None),"id",None)
-        if (type(message_id) is int and message_id>0
-                and type(callback_chat) is int and callback_chat==chat):
-            context.user_data["manual_edge_rich_pointer"]=message_id
         try:
             if data=="apps_edge_manual_home":
                 return await self._show(query,actor,chat)
@@ -793,7 +780,7 @@ class ManualEdgeWizard:
         entering any password. The password message must be deleted before
         dispatch. No form server, Cloudzy API or runtime feature flag is used.
         """
-        _RICH_SCOPE.set((app.bot.token,context,chat))
+        _HTML_SCOPE.set((app.bot,context,chat))
         # Group -1 routing in bot_final_v49-2.py reaches this method even for
         # slash-prefixed root secrets, before ordinary CommandHandlers.
         # Delete ANY password-state message BEFORE checking owner/session/TTL.

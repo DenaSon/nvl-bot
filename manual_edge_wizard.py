@@ -300,8 +300,7 @@ class ManualEdgeWizard:
         warning=("\n⚠️ نصب قبلی را تکرار نکنید؛ وضعیت سرور باید مستقل بررسی شود."
                  if stage in ("INSTALL_HOLD","HOLD") else "")
         return await self._view(query,self._summary(op)+
-            "وضعیت فعلی: <b>"+escape(self._visible_status(stage,role))+"</b>\n"+
-            "پورت مدیریت: <code>"+str(int(op.get("admin_port") or 22))+"</code>"+warning,rows)
+            "وضعیت: <b>"+escape(self._visible_status(stage,role))+"</b>"+warning,rows)
 
     @staticmethod
     def _assert_management_port_safe(admin_port, customer_port, tls_port):

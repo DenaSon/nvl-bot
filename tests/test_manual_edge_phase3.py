@@ -206,7 +206,7 @@ class Phase3ManualTests(unittest.TestCase):
                 SimpleNamespace(),context,"apps_edge_manual_home",
                 role="admin",actor=77,chat=77,app=app))
             view=factory.return_value.show.call_args.kwargs
-            self.assertIn("افزودن Edge دستی",view["text"])
+            self.assertIn("مدیریت سرورها",view["text"])
             self.assertEqual(view["rows"][0][0][1],"apps_edge_manual_new")
             asyncio.run(wizard.handle(
                 SimpleNamespace(),context,"apps_edge_manual_new",

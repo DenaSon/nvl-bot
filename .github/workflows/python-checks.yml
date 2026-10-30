@@ -14,7 +14,7 @@ on:
         type: boolean
         default: true
   schedule:
-    - cron: "15 3 * * 0"
+    - cron: "15 1 * * *"
 
 # A superseded PR run need not finish both test suites. Never cancel a
 # master push or scheduled release gate mid-flight.
@@ -32,6 +32,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -48,8 +50,16 @@ jobs:
           python -m py_compile bot_final_v49-2.py v2ray_engine.py marzban_admin.py marzban_node_bootstrap.py marzban_node_install.py edge_observability.py checkhost_probe.py regional_probe_provider.py incident_observability.py standby_readiness.py marzban_asset_discovery.py marzban_local_health.py marzban_regional_filtering.py marzban_observability.py regional_filtering.py differential_filtering.py regional_probe_coordinator.py filtering_runtime.py safe_failover.py automatic_failover.py promote_standby_for_filtered_edge.py cloudflare_radar.py radar_context.py radar_runtime.py radar_notifications.py radar_ui.py incident_correlation.py
           python -m compileall -q server_migration
 
-      - name: Run complete unit and integration suite
-        run: python -m unittest discover -s tests -q
+      - name: Select impacted tests from PR / push diff
+        run: |
+          python -B -m ops.ci_test_selector plan \
+            --event "${{ github.event_name }}" \
+            --base "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            --head "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/nvl-ci-plan.json"
+
+      - name: Run impacted tests (full suite nightly and on demand)
+        run: python -B -m ops.ci_test_selector run --plan "$RUNNER_TEMP/nvl-ci-plan.json"
 
   root-release-safety:
     name: Release manifest and root safety
@@ -59,6 +69,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -69,6 +81,14 @@ jobs:
 
       - name: Install test dependencies
         run: python -m pip install --disable-pip-version-check aiohttp qrcode
+
+      - name: Select matching privileged safety tests
+        run: |
+          python -B -m ops.ci_test_selector plan \
+            --event "${{ github.event_name }}" \
+            --base "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            --head "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/nvl-ci-plan.json"
 
       - name: Build and verify the pinned source release
         run: |
@@ -83,33 +103,16 @@ jobs:
           cd "$NVL_STAGE/source"
           python -B -m ops.k2_release_bundle verify --directory . --commit "$NVL_COMMIT" --package-sha256 "$NVL_PACKAGE_SHA"
 
-      - name: Root permission and release safety tests
-        env:
-          FULL_ROOT: ${{ github.event_name == 'schedule' || inputs.full_root == true }}
+      - name: Run impacted privileged tests (full nightly)
         run: |
           cd "$NVL_STAGE/source"
-          sudo --preserve-env=FULL_ROOT "$(command -v python)" -B - <<'PY'
+          sudo env NVL_CI_PLAN="$RUNNER_TEMP/nvl-ci-plan.json" \
+            "$(command -v python)" -B - <<'PY'
           import os
-          import unittest
+          from ops.ci_test_selector import main
 
           os.umask(0o077)
-          loader = unittest.TestLoader()
-          if os.environ.get("FULL_ROOT") == "true":
-              suite = loader.discover("tests")
-          else:
-              # All tests ran in the parallel non-root job. Retain root
-              # coverage for packaging, file permission, route security and
-              # manual Edge authorization in every PR and master push.
-              patterns = (
-                  "test_edge_egress_k2_*.py",
-                  "test_edge_egress_provision.py",
-                  "test_core_migration_flow.py",
-                  "test_manual_edge_phase3.py",
-                  "test_manual_quick_switch.py",
-              )
-              suite = unittest.TestSuite()
-              for pattern in patterns:
-                  suite.addTests(loader.discover("tests", pattern=pattern))
-          result = unittest.TextTestRunner(verbosity=1).run(suite)
-          raise SystemExit(0 if result.wasSuccessful() else 1)
+          raise SystemExit(main([
+              "run", "--plan", os.environ["NVL_CI_PLAN"], "--root"
+          ]))
           PY

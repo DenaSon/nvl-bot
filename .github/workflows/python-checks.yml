@@ -7,13 +7,29 @@ on:
     branches:
       - master
       - "feature/**"
+  workflow_dispatch:
+    inputs:
+      full_root:
+        description: "Run the entire test suite again as root"
+        type: boolean
+        default: true
+  schedule:
+    - cron: "15 3 * * 0"
+
+# A superseded PR run need not finish both test suites. Never cancel a
+# master push or scheduled release gate mid-flight.
+concurrency:
+  group: python-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
   syntax-and-unit-tests:
+    name: Full Python suite (unprivileged)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,6 +38,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: .github/workflows/python-checks.yml
 
       - name: Install test dependencies
         run: python -m pip install --disable-pip-version-check aiohttp qrcode
@@ -31,17 +49,68 @@ jobs:
           python -m py_compile bot_final_v49-2.py v2ray_engine.py marzban_admin.py marzban_node_bootstrap.py marzban_node_install.py edge_observability.py checkhost_probe.py regional_probe_provider.py incident_observability.py standby_readiness.py marzban_asset_discovery.py marzban_local_health.py marzban_regional_filtering.py marzban_observability.py regional_filtering.py differential_filtering.py regional_probe_coordinator.py filtering_runtime.py safe_failover.py automatic_failover.py promote_standby_for_filtered_edge.py cloudflare_radar.py radar_context.py radar_runtime.py radar_notifications.py radar_ui.py incident_correlation.py
           python -m compileall -q server_migration
 
-      - name: Run unit tests
-        run: python -m unittest discover -s tests -v
+      - name: Run complete unit and integration suite
+        run: python -m unittest discover -s tests -q
 
-      - name: Test the extracted release as root with private deployment umask
+  root-release-safety:
+    name: Release manifest and root safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Independent of the main test job, for lower wall-clock latency.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: .github/workflows/python-checks.yml
+
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check aiohttp qrcode
+
+      - name: Build and verify the pinned source release
         run: |
           NVL_COMMIT=$(git rev-parse HEAD)
           NVL_STAGE=$(mktemp -d "$RUNNER_TEMP/nvl-release-XXXXXX")
+          echo "NVL_STAGE=$NVL_STAGE" >> "$GITHUB_ENV"
           python -B -m ops.k2_release_bundle build --repo . --commit "$NVL_COMMIT" --output "$NVL_STAGE/source.tar" | tee "$NVL_STAGE/build.log"
           NVL_PACKAGE_SHA=$(sed -n 's/^PACKAGE_MANIFEST_SHA256=//p' "$NVL_STAGE/build.log")
+          test -n "$NVL_PACKAGE_SHA"
           mkdir "$NVL_STAGE/source"
           tar -xf "$NVL_STAGE/source.tar" -C "$NVL_STAGE/source"
           cd "$NVL_STAGE/source"
           python -B -m ops.k2_release_bundle verify --directory . --commit "$NVL_COMMIT" --package-sha256 "$NVL_PACKAGE_SHA"
-          sudo "$(command -v python)" -B -c 'import os, unittest; os.umask(0o077); result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.discover("tests")); raise SystemExit(not result.wasSuccessful())'
+
+      - name: Root permission and release safety tests
+        working-directory: ${{ env.NVL_STAGE }}/source
+        env:
+          FULL_ROOT: ${{ github.event_name == 'schedule' || inputs.full_root == true }}
+        run: |
+          sudo --preserve-env=FULL_ROOT "$(command -v python)" -B - <<'PY'
+          import os
+          import unittest
+
+          os.umask(0o077)
+          loader = unittest.TestLoader()
+          if os.environ.get("FULL_ROOT") == "true":
+              suite = loader.discover("tests")
+          else:
+              # All tests ran in the parallel non-root job. Retain root
+              # coverage for packaging, file permission, route security and
+              # manual Edge authorization in every PR and master push.
+              patterns = (
+                  "test_edge_egress_k2_*.py",
+                  "test_edge_egress_provision.py",
+                  "test_core_migration_flow.py",
+                  "test_manual_edge_phase3.py",
+                  "test_manual_quick_switch.py",
+              )
+              suite = unittest.TestSuite()
+              for pattern in patterns:
+                  suite.addTests(loader.discover("tests", pattern=pattern))
+          result = unittest.TextTestRunner(verbosity=1).run(suite)
+          raise SystemExit(0 if result.wasSuccessful() else 1)
+          PY

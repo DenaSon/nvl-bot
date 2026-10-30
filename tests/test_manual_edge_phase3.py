@@ -423,7 +423,7 @@ class Phase3ManualTests(unittest.TestCase):
         asyncio.run(wizard.handle(SimpleNamespace(),context,
                 "apps_edge_manual_home",role="admin",actor=77,chat=77,app=app))
         text,rows=wizard._view.await_args.args[1:]
-        self.assertIn("سرورهای دستی",text)
+        self.assertIn("مدیریت سرورها",text)
         actions=[action for row in rows for _,action in row]
         self.assertIn("apps_edge_manual_new",actions)
         self.assertIn("apps_edge_manual_list_1",actions)
@@ -648,7 +648,7 @@ class Phase3ManualTests(unittest.TestCase):
         self.assertIn("عملیات متوقف شد",deny)
         self.assertIsNone(self.journal.get(op)["archived_at"])
         done,_=invoke("apps_edge_manual_archive_yes_"+op)
-        self.assertIn("سابقه از فهرست",done)
+        self.assertIn("سرور از فهرست بایگانی شد",done)
         self.assertIsNotNone(self.journal.get(op)["archived_at"])
 
 

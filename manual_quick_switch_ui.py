@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from html import escape
+import logging
 import os
 import secrets
 import threading
@@ -15,6 +16,7 @@ import time
 from manual_edge_html import ManualHtmlDelivery
 from manual_quick_switch import QuickSwitchHold
 
+log = logging.getLogger(__name__)
 PENDING_TTL = 180
 HISTORICAL_SOURCE = "153.75.87.190"
 HISTORICAL_TARGET = "45.59.126.73"
@@ -85,21 +87,21 @@ class ManualQuickSwitchUI:
     async def _home(self, context, chat):
         current,standby,count=await asyncio.to_thread(self._inventory)
         rec=await asyncio.to_thread(self.engine.latest)
-        text = ("🌐 <b>مدیریت Edge</b>\n\n"
-                f"Edge فعال: <code>{escape(current or 'نامشخص')}</code>\n"
-                f"کاربران SSH فعال: <b>{count}</b>\n"
-                f"Edgeهای دستی آماده: <b>{len(standby)}</b>\n\n"
-                "تغییر IP فقط پس از بررسی SSH/WG، DNS و تأیید شما انجام می‌شود.")
+        text = ("🖥 <b>مدیریت سرورها</b>\n\n"
+                f"🟢 رله اصلی: <code>{escape(current or 'نامشخص')}</code>\n"
+                f"👥 کاربران SSH: <b>{count}</b>\n"
+                f"🟡 آماده‌به‌کار: <b>{len(standby)}</b>")
         if not self.enabled():
-            text += "\n\n🟡 حالت آماده‌سازی: تغییر IP هنوز فعال نشده است."
+            text += "\n\n⚠️ انتقال کاربران فعلاً غیرفعال است."
         rows=[]
         if rec and rec["kind"]=="QUICK" and rec["status"] not in ("DONE","ABORTED"):
             rows.append([("⚠️ بررسی انتقال ناتمام","apps_edge_quick_status")])
         for ip in standby[:6]:
-            rows.append([("🔁 تغییر IP به "+ip, "apps_edge_quick_select_"+ip)])
+            rows.append([("🔁 انتقال کاربران و DNS به "+ip,
+                         "apps_edge_quick_select_"+ip)])
         rows.extend([
-            [("➕ افزودن Edge دستی","apps_edge_manual_home")],
-            [("🖥 وضعیت و سوابق","apps_edge_quick_status")],
+            [("🖥 مدیریت سرورها","apps_edge_manual_home")],
+            [("📋 وضعیت و سوابق انتقال","apps_edge_quick_status")],
         ])
         if current==HISTORICAL_TARGET:
             rows.append([("📋 ثبت بازیابی اضطراری قبلی","apps_edge_quick_attest")])
@@ -113,11 +115,10 @@ class ManualQuickSwitchUI:
         if not rec:
             return await self._view(
                 context,chat,"📋 <b>سوابق انتقال</b>\n\n"
-                "هنوز عملیات Quick Switch در Journal جدید ثبت نشده است.\n"
-                f"Edge فعال: <code>{escape(current or 'نامشخص')}</code>\n"
-                f"آخرین نتیجه: {escape(error or 'بدون عملیات جدید')}",
+                f"رله اصلی: <code>{escape(current or 'نامشخص')}</code>\n"
+                f"نتیجه: {escape(error or 'هنوز انتقالی ثبت نشده است')}",
                 [[("🔄 تازه‌سازی","apps_edge_quick_status")],
-                 [("↩️ مدیریت Edge","apps_edge_quick_home")]])
+                 [("↩️ مدیریت سرورها","apps_edge_quick_home")]])
         status=rec["status"]
         label={"DNS_INTENT":"در حال تغییر DNS","HOLD":"نیازمند بررسی",
                "DB_COMMITTED":"DNS و دیتابیس تغییر کرده؛ کنترل نهایی",
@@ -132,18 +133,102 @@ class ManualQuickSwitchUI:
                 rows.append([("⚠️ تلاش مجدد DNS با تأیید مدیر",
                              "apps_edge_quick_retry_review_"+rec["id"])])
         rows.extend([[("🔄 تازه‌سازی","apps_edge_quick_status")],
-                     [("↩️ مدیریت Edge","apps_edge_quick_home")]])
-        return await self._view(context,chat,
-            "📋 <b>وضعیت انتقال</b>\n\n"
-            f"مبدأ: <code>{escape(rec['source'])}</code>\n"
-            f"مقصد: <code>{escape(rec['target'])}</code>\n"
-            f"حساب‌های انتقال: <b>{rec['account_count']}</b>\n"
-            f"وضعیت: <b>{escape(label)}</b>\n"
-            f"جزئیات فنی: <code>{escape(rec['error_code'] or error or '—')}</code>\n\n"
-            "تکمیل فنی، جایگزین بررسی اتصال واقعی مشتری نیست.",
-            rows)
+                     [("↩️ مدیریت سرورها","apps_edge_quick_home")]])
+        title=("✅ <b>انتقال با موفقیت انجام شد</b>" if status=="DONE"
+               else "📋 <b>وضعیت انتقال</b>")
+        detail=(f"\nکد بررسی: <code>{escape(rec['error_code'] or error)}</code>"
+                if rec["error_code"] or (error and status!="DONE") else "")
+        message=(title+"\n\n"
+                 f"مبدأ: <code>{escape(rec['source'])}</code>\n"
+                 f"مقصد: <code>{escape(rec['target'])}</code>\n"
+                 f"حساب‌ها: <b>{rec['account_count']}</b>\n"
+                 f"وضعیت: <b>{escape(label)}</b>"+detail)
+        if status=="DONE":
+            message+="\n🌐 DNS: <b>تأییدشده</b>\n\n" \
+                     "اتصال واقعی مشتری را نیز بررسی کنید."
+        return await self._view(context,chat,message,rows)
 
-    async def _execute(self, *, plan=None, actor, job=None, retry_dns=False):
+    def _claim_done_notice(self, job, actor, chat):
+        """One durable send intent per verified DONE job; fail closed.
+
+        No retries after uncertain Telegram delivery, even across restarts.
+        Only the source-of-truth job journal can authorize a success message.
+        """
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rec=db.execute(
+                "SELECT kind,status,actor,source,target,account_count "
+                "FROM manual_quick_switch_jobs WHERE id=?", (job,)
+            ).fetchone()
+            if (not rec or rec[:3]!=("QUICK","DONE",str(actor))
+                    or type(chat) is not int or chat!=actor):
+                db.rollback()
+                return None
+            defaults=db.execute(
+                "SELECT host FROM host_pool WHERE active=1 AND is_default=1"
+            ).fetchall()
+            if defaults != [(rec[4],)]:
+                db.rollback()
+                return None
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS manual_quick_success_notices (
+                    job_id TEXT PRIMARY KEY,
+                    actor INTEGER NOT NULL,
+                    chat INTEGER NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN
+                        ('CLAIMED','SENT','UNCERTAIN')),
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+            """)
+            now=int(self.now())
+            claim=db.execute(
+                "INSERT OR IGNORE INTO manual_quick_success_notices "
+                "(job_id,actor,chat,status,created_at,updated_at) "
+                "VALUES (?,?,?,'CLAIMED',?,?)",
+                (job,actor,chat,now,now),
+            ).rowcount
+            db.commit()
+            return rec if claim==1 else None
+
+    def _settle_done_notice(self, job, status):
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "UPDATE manual_quick_success_notices SET status=?,"
+                "updated_at=? WHERE job_id=? AND status='CLAIMED'",
+                (status,int(self.now()),job),
+            )
+            db.commit()
+
+    async def _notify_done(self, *, job, actor, chat, bot):
+        rec=await asyncio.to_thread(
+            self._claim_done_notice,job,actor,chat)
+        if rec is None:
+            return False
+        text=("✅ <b>انتقال با موفقیت انجام شد</b>\n\n"
+              f"🟢 رله جدید: <code>{escape(rec[4])}</code>\n"
+              f"👥 حساب‌های منتقل‌شده: <b>{rec[5]}</b>\n"
+              "🌐 DNS: <b>تأییدشده</b>\n"
+              "وضعیت: <b>تکمیل فنی</b>\n\n"
+              "اتصال واقعی مشتری پس از انتقال نیز بررسی شود.")
+        rows=[[("📋 گزارش انتقال","apps_edge_quick_status")],
+              [("🖥 مدیریت سرورها","apps_edge_manual_home")]]
+        try:
+            await ManualHtmlDelivery(bot).send(
+                chat=chat,text=text,rows=rows)
+        except Exception:
+            # Telegram may have delivered the message before a timeout.
+            # Keep an UNCERTAIN durable receipt; never send a duplicate.
+            await asyncio.to_thread(
+                self._settle_done_notice,job,"UNCERTAIN")
+            log.warning("Manual Quick Switch DONE notice unconfirmed job=%s",job)
+            return False
+        await asyncio.to_thread(self._settle_done_notice,job,"SENT")
+        return True
+
+    async def _execute(self, *, plan=None, actor, job=None, retry_dns=False,
+                       chat=None, bot=None):
         def run():
             with self.effect_lock:
                 if job:
@@ -153,7 +238,7 @@ class ManualQuickSwitchUI:
                     plan,actor=actor,
                     client_witness="ADMIN_CONFIRMED_INDEPENDENT_NPV_ISP_E2E"))
         try:
-            await asyncio.to_thread(run)
+            receipt=await asyncio.to_thread(run)
         except Exception as exc:
             # Durable engine journal is the source of truth; no second DNS PUT.
             # Only a sanitized reason is retained for UI diagnostics.
@@ -162,6 +247,16 @@ class ManualQuickSwitchUI:
                 else type(exc).__name__)
         else:
             self.last_errors.pop(str(actor),None)
+            completed_job=job if job is not None else receipt
+            if isinstance(completed_job,str) and bot is not None and chat==actor:
+                try:
+                    await self._notify_done(
+                        job=completed_job,actor=actor,chat=chat,bot=bot)
+                except Exception:
+                    # Delivery cannot alter or replay the durable DNS/account
+                    # transfer. The status screen remains independently usable.
+                    log.exception("Manual Quick Switch notice check failed job=%s",
+                                  completed_job)
         finally:
             self.running.discard(str(actor))
 
@@ -186,14 +281,13 @@ class ManualQuickSwitchUI:
                                            "expires":self.now()+PENDING_TTL}
                 return await self._view(
                     context,chat,
-                    "🔁 <b>تأیید تغییر IP کاربران</b>\n\n"
+                    "🔁 <b>تأیید انتقال کاربران و DNS</b>\n\n"
                     f"از: <code>{escape(plan['source'])}</code>\n"
                     f"به: <code>{escape(plan['target'])}</code>\n"
-                    f"حساب‌های SSH تحت تأثیر: <b>{plan['count']}</b>\n\n"
-                    "هویت مقصد، WireGuard و مسیر مشتری بررسی شد.\n"
-                    "پیش از ادامه، با IP مقصد اتصال واقعی NPV Tunnel را "
-                    "مستقل آزمایش و تأیید کنید. Cloudflare خودکار تغییر می‌کند. "
-                    "حساب‌ها و رمزهای Core بازسازی نمی‌شوند.",
+                    f"حساب‌ها: <b>{plan['count']}</b>\n\n"
+                    "مسیر SSH/WireGuard بررسی شد. قبل از تأیید، "
+                    "اتصال واقعی NPV Tunnel را روی مقصد مستقل تست کنید. "
+                    "DNS به‌صورت خودکار تغییر می‌کند.",
                     [[("✅ تست اتصال واقعی انجام شد؛ تغییر IP",
                        "apps_edge_quick_confirm_"+nonce)],
                      [("انصراف","apps_edge_quick_home")]])
@@ -210,14 +304,14 @@ class ManualQuickSwitchUI:
                 self.running.add(str(actor))
                 try:
                     asyncio.create_task(self._execute(
-                        plan=pending["plan"],actor=actor))
+                        plan=pending["plan"],actor=actor,
+                        chat=chat,bot=context.application.bot))
                 except Exception:
                     self.running.discard(str(actor))
                     raise
                 return await self._view(
-                    context,chat,"⏳ <b>تغییر مسیر شروع شد.</b>\n\n"
-                    "نتیجه مراحل در Journal ذخیره می‌شود. برای بررسی یا "
-                    "بازیابی از دکمه وضعیت استفاده کنید.",
+                    context,chat,"⏳ <b>انتقال آغاز شد.</b>\n"
+                    "پس از تکمیل، نتیجه همین‌جا اعلام می‌شود.",
                     [[("🔄 وضعیت انتقال","apps_edge_quick_status")]])
             if data.startswith("apps_edge_quick_resume_"):
                 if not self.enabled():
@@ -226,11 +320,11 @@ class ManualQuickSwitchUI:
                 if str(actor) in self.running:
                     raise QuickSwitchHold("OPERATION_ALREADY_RUNNING")
                 self.running.add(str(actor))
-                asyncio.create_task(self._execute(job=job,actor=actor))
+                asyncio.create_task(self._execute(
+                    job=job,actor=actor,chat=chat,bot=context.application.bot))
                 return await self._view(
-                    context,chat,"🔎 <b>بررسی و بازیابی آغاز شد.</b>\n"
-                    "DNS فقط خوانده می‌شود؛ اگر قبلاً تغییر کرده باشد، "
-                    "عملیات از Journal ادامه می‌یابد.",
+                    context,chat,"🔎 <b>بازیابی آغاز شد.</b>\n"
+                    "انتقال بدون تکرار کورکورانه DNS بررسی می‌شود.",
                     [[("🔄 وضعیت انتقال","apps_edge_quick_status")]])
             if data.startswith("apps_edge_quick_retry_review_"):
                 job=data[len("apps_edge_quick_retry_review_"):]
@@ -242,9 +336,9 @@ class ManualQuickSwitchUI:
                                            "expires":self.now()+PENDING_TTL}
                 return await self._view(
                     context,chat,
-                    "⚠️ <b>بررسی تلاش مجدد Cloudflare</b>\n"
-                    "این گزینه ممکن است درخواست تغییر DNS جدیدی ارسال کند. "
-                    "فقط پس از بررسی وضعیت عمومی DNS و آماده‌بودن مقصد تأیید کنید.",
+                    "⚠️ <b>تأیید تلاش مجدد DNS</b>\n"
+                    "ممکن است درخواست جدیدی به Cloudflare ارسال شود. "
+                    "قبل از تأیید، DNS عمومی و سلامت مقصد را بررسی کنید.",
                     [[("✅ تلاش مجدد با بررسی تازه",
                        "apps_edge_quick_retry_yes_"+nonce)],
                      [("انصراف","apps_edge_quick_status")]])
@@ -261,10 +355,11 @@ class ManualQuickSwitchUI:
                     raise QuickSwitchHold("OPERATION_ALREADY_RUNNING")
                 self.running.add(str(actor))
                 asyncio.create_task(self._execute(
-                    job=pending["retry_job"],actor=actor,retry_dns=True))
+                    job=pending["retry_job"],actor=actor,retry_dns=True,
+                    chat=chat,bot=context.application.bot))
                 return await self._view(
                     context,chat,"⏳ <b>بازبینی DNS آغاز شد.</b>\n"
-                    "موتور فقط با شواهد معتبر درخواست جدید ارسال می‌کند.",
+                    "وضعیت را از گزارش انتقال دنبال کنید.",
                     [[("🔄 وضعیت انتقال","apps_edge_quick_status")]])
             if data=="apps_edge_quick_attest":
                 current,_,count=await asyncio.to_thread(self._inventory)
@@ -304,12 +399,12 @@ class ManualQuickSwitchUI:
                     f"شناسه: <code>{escape(job)}</code>\n"
                     "سوابق قبلی و حساب‌های کاربران تغییری نکردند.",
                     [[("📋 سوابق","apps_edge_quick_status")],
-                     [("↩️ مدیریت Edge","apps_edge_quick_home")]])
+                     [("↩️ مدیریت سرورها","apps_edge_quick_home")]])
             return await self._home(context,chat)
         except Exception as exc:
             return await self._view(
                 context,chat,"⛔️ <b>عملیات متوقف شد.</b>\n" +
                 escape(_message(exc)) +
-                "\nهیچ تغییر جدیدی را بدون بررسی وضعیت تکرار نکنید.",
+                "\nپیش از تلاش مجدد، وضعیت انتقال را بررسی کنید.",
                 [[("📋 وضعیت و بازیابی","apps_edge_quick_status")],
-                 [("↩️ مدیریت Edge","apps_edge_quick_home")]])
+                 [("↩️ مدیریت سرورها","apps_edge_quick_home")]])

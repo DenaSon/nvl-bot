@@ -206,7 +206,7 @@ class Phase3ManualTests(unittest.TestCase):
                 SimpleNamespace(),context,"apps_edge_manual_home",
                 role="admin",actor=77,chat=77,app=app))
             view=factory.return_value.show.call_args.kwargs
-            self.assertIn("افزودن Edge دستی",view["text"])
+            self.assertIn("مدیریت سرورها",view["text"])
             self.assertEqual(view["rows"][0][0][1],"apps_edge_manual_new")
             asyncio.run(wizard.handle(
                 SimpleNamespace(),context,"apps_edge_manual_new",
@@ -250,7 +250,7 @@ class Phase3ManualTests(unittest.TestCase):
         body=calls[0][1]
         self.assertEqual(body["parse_mode"],"HTML")
         self.assertEqual(body["chat_id"],77)
-        self.assertIn("افزودن Edge",body["text"])
+        self.assertIn("مدیریت سرورها",body["text"])
         self.assertEqual(context.user_data["manual_edge_rich_pointer"],101)
 
     def test_callback_pointer_is_not_rebound_from_another_chat(self):
@@ -423,7 +423,7 @@ class Phase3ManualTests(unittest.TestCase):
         asyncio.run(wizard.handle(SimpleNamespace(),context,
                 "apps_edge_manual_home",role="admin",actor=77,chat=77,app=app))
         text,rows=wizard._view.await_args.args[1:]
-        self.assertIn("سرورهای دستی",text)
+        self.assertIn("مدیریت سرورها",text)
         actions=[action for row in rows for _,action in row]
         self.assertIn("apps_edge_manual_new",actions)
         self.assertIn("apps_edge_manual_list_1",actions)
@@ -648,7 +648,7 @@ class Phase3ManualTests(unittest.TestCase):
         self.assertIn("عملیات متوقف شد",deny)
         self.assertIsNone(self.journal.get(op)["archived_at"])
         done,_=invoke("apps_edge_manual_archive_yes_"+op)
-        self.assertIn("سابقه از فهرست",done)
+        self.assertIn("سرور از فهرست بایگانی شد",done)
         self.assertIsNotNone(self.journal.get(op)["archived_at"])
 
 
@@ -763,7 +763,7 @@ class Phase3ManualTests(unittest.TestCase):
         self.assertIn("apps_edge_manual_rearm_yes_"+op,review)
         self.assertEqual(self.journal.get(op)["status"],"ACTIVE")
         text,actions=invoke("apps_edge_manual_rearm_yes_"+op)
-        self.assertIn("دوباره Standby شد",text)
+        self.assertIn("سرور آماده‌به‌کار شد",text)
         self.assertIn("apps_edge_quick_select_8.8.8.8",actions)
         self.assertEqual(self.journal.get(op)["status"],"STANDBY")
         key.assert_called_once_with("8.8.8.8",2299)

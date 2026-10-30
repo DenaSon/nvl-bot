@@ -27,7 +27,6 @@ permissions:
 
 jobs:
   syntax-and-unit-tests:
-    name: Full Python suite (unprivileged)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

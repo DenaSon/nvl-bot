@@ -85,10 +85,10 @@ jobs:
           python -B -m ops.k2_release_bundle verify --directory . --commit "$NVL_COMMIT" --package-sha256 "$NVL_PACKAGE_SHA"
 
       - name: Root permission and release safety tests
-        working-directory: ${{ env.NVL_STAGE }}/source
         env:
           FULL_ROOT: ${{ github.event_name == 'schedule' || inputs.full_root == true }}
         run: |
+          cd "$NVL_STAGE/source"
           sudo --preserve-env=FULL_ROOT "$(command -v python)" -B - <<'PY'
           import os
           import unittest

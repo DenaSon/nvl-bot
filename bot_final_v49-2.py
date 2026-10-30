@@ -7521,6 +7521,22 @@ def _cloudzy_markup(rows):
     ])
 
 
+from denaprobe_telegram import (
+    denaprobe_command as _denaprobe_command_view,
+    denaprobe_callback as _denaprobe_callback_view,
+)
+
+
+async def _denaprobe_command_handler(update, context):
+    admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
+    await _denaprobe_command_view(update, context, active_admin_ids=admin_ids)
+
+
+async def _denaprobe_callback_handler(update, context):
+    admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
+    await _denaprobe_callback_view(update, context, active_admin_ids=admin_ids)
+
+
 def _build_admin_programs_kb(*, actor=None, chat=None, active_admin_ids=()):
     """Infrastructure and operational tools available only to NVL administrators."""
     rows = [
@@ -7532,6 +7548,7 @@ def _build_admin_programs_kb(*, actor=None, chat=None, active_admin_ids=()):
             InlineKeyboardButton("🚚 انتقال Marzban", callback_data="apps_marzban_transfer"),
             InlineKeyboardButton("🛰 مانیتورینگ", callback_data="apps_marzban_monitor"),
         ],
+        [InlineKeyboardButton("📡 DenaProbe | پایش شبکه", callback_data="apps_denaprobe")],
         [InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")],
     ]
     # Only current private-chat admins see the active Edge entry.
@@ -7568,7 +7585,8 @@ async def _show_admin_programs_hub(target, context):
         "🖥 <b>نودها</b> — وضعیت، تنظیمات، راه‌اندازی و اتصال Node\n"
         "🌐 <b>هاست‌ها</b> — Inboundها و Public Hostها\n"
         "🚚 <b>انتقال</b> — مهاجرت کنترل‌شده سرور اصلی Marzban\n"
-        "🛰 <b>مانیتورینگ</b> — سلامت و وضعیت دارایی‌های Marzban"
+        "🛰 <b>مانیتورینگ</b> — سلامت و وضعیت دارایی‌های Marzban\n"
+        "📡 <b>DenaProbe</b> — گزارش مستقل سنجش مسیر Edge"
     )
     active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
     markup = InlineKeyboardMarkup(_build_admin_programs_kb(
@@ -31064,8 +31082,11 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("marzban_monitor", cmd_marzban_monitor))
+    app.add_handler(CommandHandler("denaprobe", _denaprobe_command_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    app.add_handler(CallbackQueryHandler(
+        _denaprobe_callback_handler, pattern=r"^apps_denaprobe(?:_refresh)?$"))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_error_handler(error_handler)
     print(f"🏷️ نسخهٔ در حال اجرا: {BOT_VERSION_TAG}")

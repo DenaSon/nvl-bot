@@ -1,0 +1,25 @@
+[Unit]
+Description=NVL DenaProbe local-only telemetry ingest
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nvlprobe
+Group=nvlprobe
+WorkingDirectory=/opt/nvl-denaprobe
+EnvironmentFile=/etc/nvlbot/denaprobe.env
+ExecStart=/usr/bin/python3 /opt/nvl-denaprobe/denaprobe_ingest.py
+Restart=on-failure
+RestartSec=5
+UMask=0077
+StateDirectory=nvl-denaprobe
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/nvl-denaprobe
+
+[Install]
+WantedBy=multi-user.target

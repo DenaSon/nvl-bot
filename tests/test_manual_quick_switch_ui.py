@@ -18,8 +18,8 @@ ROOT=Path(__file__).resolve().parents[1]
 class FakeHtml:
     cards=[]
 
-    def __init__(self,token):
-        assert token=="test-token"
+    def __init__(self,bot):
+        assert bot.token=="test-token"
 
     async def show(self,*,chat,context,text,rows):
         self.cards.append((text,rows))

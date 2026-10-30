@@ -250,7 +250,7 @@ class Phase3ManualTests(unittest.TestCase):
         body=calls[0][1]
         self.assertEqual(body["parse_mode"],"HTML")
         self.assertEqual(body["chat_id"],77)
-        self.assertIn("افزودن Edge",body["text"])
+        self.assertIn("مدیریت سرورها",body["text"])
         self.assertEqual(context.user_data["manual_edge_rich_pointer"],101)
 
     def test_callback_pointer_is_not_rebound_from_another_chat(self):
@@ -763,7 +763,7 @@ class Phase3ManualTests(unittest.TestCase):
         self.assertIn("apps_edge_manual_rearm_yes_"+op,review)
         self.assertEqual(self.journal.get(op)["status"],"ACTIVE")
         text,actions=invoke("apps_edge_manual_rearm_yes_"+op)
-        self.assertIn("دوباره Standby شد",text)
+        self.assertIn("سرور آماده‌به‌کار شد",text)
         self.assertIn("apps_edge_quick_select_8.8.8.8",actions)
         self.assertEqual(self.journal.get(op)["status"],"STANDBY")
         key.assert_called_once_with("8.8.8.8",2299)

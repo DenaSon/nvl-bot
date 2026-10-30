@@ -96,7 +96,7 @@ FA = {
     "LEGACY_INSTALL_OR_TUNNEL_FAILED":"راه‌اندازی Relay یا تونل WireGuard تأیید نشد؛ نصب را تکرار نکنید.",
     "LEGACY_EDGE_POSTCHECK_FAILED":"نصب تمام شده اما آزمون نهایی ارتباط Edge موفق نبود؛ نصب را تکرار نکنید.",
     "HOST_KEY_CHANGED_AFTER_INSTALL":"اثر انگشت SSH بعد از نصب تغییر کرده؛ ادامه عملیات مجاز نیست.",
-    "OLD_WEBAPP_CALLBACK_DISABLED":"این دکمه قدیمی غیرفعال است؛ از منوی سرورهای دستی استفاده کنید.",
+    "OLD_WEBAPP_CALLBACK_DISABLED":"این دکمه قدیمی غیرفعال است؛ از مدیریت سرورها وارد شوید.",
     "SSH_REVIEW_NOT_READY":"پرونده هنوز آماده تأیید هویت SSH نیست.",
     "SSH_APPROVAL_EXPIRED":"زمان تأیید اثر انگشت تمام شده؛ مجدداً بررسی کنید.",
     "STANDBY_IDENTITY_CHANGED":"هویت سرور انتخاب‌شده تغییر کرده؛ پیش‌نمایش را دوباره باز کنید.",
@@ -191,7 +191,7 @@ class ManualEdgeWizard:
 
     @staticmethod
     def _summary(op):
-        return ("🛟 <b>سرور دستی</b>\n\n"
+        return ("🖥 <b>جزئیات سرور</b>\n\n"
                 f"IP: <code>{escape(str(op.get('ip') or '—'))}</code>\n"
                 f"پورت SSH: <b>{int(op.get('admin_port') or 22)}</b>\n")
 
@@ -226,11 +226,10 @@ class ManualEdgeWizard:
         latest=await asyncio.to_thread(self.journal.latest,actor,chat)
         if latest is None:
             return await self._view(query,
-                "🛟 <b>افزودن Edge دستی</b>\n\n"
-                "سرور خودتان را به‌صورت دستی اضافه کنید. "
-                "تغییر DNS پس از آماده‌سازی فقط از طریق Cloudflare انجام می‌شود.",
+                "🖥 <b>مدیریت سرورها</b>\n\n"
+                "برای شروع، یک سرور اضافه کنید.",
                 [[("➕ افزودن سرور", "apps_edge_manual_new")],
-                 [("↩️ مدیریت Edge","apps_cz_home")]])
+                 [("↩️ مدیریت سرورها","apps_cz_home")]])
         if type(page) is not int or not 0<=page<=10000:
             raise ManualWizardHold("INVALID_PAGE")
         items=await asyncio.to_thread(
@@ -255,12 +254,11 @@ class ManualEdgeWizard:
             rows.append(pager)
         rows.extend([
             [("🔄 تازه‌سازی","apps_edge_manual_list_"+str(page))],
-            [("↩️ مدیریت Edge","apps_cz_home")],
+            [("↩️ مدیریت سرورها","apps_cz_home")],
         ])
         return await self._view(query,
-            "🛟 <b>سرورهای دستی</b>\n\n"
-            "هر سرور پرونده و وضعیت مستقل دارد. آماده‌به‌کارها با افزودن "
-            "سرور جدید حذف یا جابه‌جا نمی‌شوند.",rows)
+            "🖥 <b>مدیریت سرورها</b>\n\n"
+            "سرور موردنظر را انتخاب کنید.",rows)
 
     async def _detail(self,query,actor,chat,opid):
         op=await asyncio.to_thread(self.journal.get,opid)
@@ -297,13 +295,13 @@ class ManualEdgeWizard:
         rows.extend([
             [("➕ افزودن سرور جدید","apps_edge_manual_new")],
             [("↩️ همه سرورها","apps_edge_manual_home")],
-            [("↩️ مدیریت Edge","apps_cz_home")],
+            [("↩️ مدیریت سرورها","apps_cz_home")],
         ])
         warning=("\n⚠️ نصب قبلی را تکرار نکنید؛ وضعیت سرور باید مستقل بررسی شود."
                  if stage in ("INSTALL_HOLD","HOLD") else "")
         return await self._view(query,self._summary(op)+
             "وضعیت فعلی: <b>"+escape(self._visible_status(stage,role))+"</b>\n"+
-            "مرحله پرونده: <code>"+escape(stage)+"</code>"+warning,rows)
+            "پورت مدیریت: <code>"+str(int(op.get("admin_port") or 22))+"</code>"+warning,rows)
 
     @staticmethod
     def _assert_management_port_safe(admin_port, customer_port, tls_port):
@@ -377,7 +375,7 @@ class ManualEdgeWizard:
                     chat=chat,
                     text=("⛔️ آماده‌سازی به بررسی نیاز دارد.\n"
                           "برای جلوگیری از تکرار نصب و قوانین شبکه، عملیات متوقف شد."),
-                    rows=[[("🔄 وضعیت سرور دستی", "apps_edge_manual_home")]])
+                    rows=[[("🔄 وضعیت سرور", "apps_edge_manual_home")]])
             except Exception:
                 # Telegram delivery failure must not replay an installer or
                 # undo the durable INSTALL_HOLD receipt.
@@ -411,11 +409,10 @@ class ManualEdgeWizard:
                 log.info("Manual Edge entry removed from list op=%s ip=%s",
                          opid,archived["ip"])
                 return await self._view(query,
-                    "✅ <b>سابقه از فهرست سرورها حذف شد.</b>\n\n"
+                    "✅ <b>سرور از فهرست بایگانی شد.</b>\n"
                     "IP: <code>"+escape(archived["ip"])+"</code>\n"
-                    "پرونده و گزارش‌ها در دیتابیس محفوظ‌اند. هیچ VPS، "
-                    "WireGuard، DNS، رکورد host_pool یا حسابی حذف نشده است.",
-                    [[("↩️ سرورهای دستی","apps_edge_manual_home")]])
+                    "فقط نمایش فهرست تغییر کرد؛ تنظیمات شبکه و حساب‌ها محفوظ‌اند.",
+                    [[("↩️ مدیریت سرورها","apps_edge_manual_home")]])
             if data.startswith("apps_edge_manual_archive_"):
                 opid=data[len("apps_edge_manual_archive_"):]
                 proof=await asyncio.to_thread(
@@ -423,11 +420,8 @@ class ManualEdgeWizard:
                 return await self._view(query,
                     "🗂 <b>تأیید حذف از فهرست</b>\n\n"
                     "سرور: <code>"+escape(proof["ip"])+"</code>\n"
-                    "فقط کارت سرور از فهرست عادی مخفی می‌شود و "
-                    "سابقه با ثبت رویداد باقی می‌ماند.\n"
-                    "این اقدام VPS، Peer، DNS، حساب‌ها یا فهرست فنی "
-                    "host_pool را حذف نمی‌کند. برای جمع‌آوری واقعی سرور "
-                    "فرایند جداگانه لازم است.",
+                    "فقط نمایش سرور از فهرست مخفی می‌شود. "
+                    "VPS، WireGuard، DNS، حساب‌ها و سوابق حذف نمی‌شوند.",
                     [[("✅ حذف فقط از فهرست",
                        "apps_edge_manual_archive_yes_"+opid)],
                      [("انصراف","apps_edge_manual_detail_"+opid)]])
@@ -475,13 +469,12 @@ class ManualEdgeWizard:
                 log.info("Manual former Edge rearmed to Standby op=%s ip=%s",
                          opid,proof["ip"])
                 return await self._view(query,
-                    "✅ <b>رله سابق دوباره Standby شد.</b>\n"
-                    "سرور: <code>"+escape(proof["ip"])+"</code>\n"
-                    "هیچ حساب یا DNS تغییر نکرده است. برای انتقال همه کاربران "
-                    "و تغییر خودکار Cloudflare، مرحله بعد را انتخاب کنید.",
+                    "✅ <b>سرور آماده‌به‌کار شد.</b>\n"
+                    "IP: <code>"+escape(proof["ip"])+"</code>\n"
+                    "حساب‌ها و DNS هنوز تغییر نکرده‌اند.",
                     [[("🚀 تبدیل به رله اصلی (کاربران + DNS)",
                        "apps_edge_quick_select_"+proof["ip"])],
-                     [("↩️ سرورهای دستی","apps_edge_manual_home")]])
+                     [("↩️ مدیریت سرورها","apps_edge_manual_home")]])
             if data.startswith("apps_edge_manual_rearm_"):
                 opid=data[len("apps_edge_manual_rearm_"):]
                 port,_=await asyncio.to_thread(self.preflight)
@@ -491,9 +484,8 @@ class ManualEdgeWizard:
                     "🔄 <b>آماده‌سازی رله سابق</b>\n\n"
                     "سرور سابق: <code>"+escape(proof["ip"])+"</code>\n"
                     "رله اصلی کنونی: <code>"+escape(proof["source"])+"</code>\n\n"
-                    "کلید SSH، مسیر Core، WireGuard و NAT مجدداً بررسی می‌شوند. "
-                    "فقط در صورت تأیید همه شروط، سرور Standby می‌شود. "
-                    "در این مرحله هیچ حساب یا DNS تغییر نمی‌کند.",
+                    "هویت SSH و مسیر شبکه دوباره بررسی می‌شوند. "
+                    "این مرحله حساب‌ها و DNS را تغییر نمی‌دهد.",
                     [[("✅ بررسی مجدد و تبدیل به Standby",
                        "apps_edge_manual_rearm_yes_"+opid)],
                      [("انصراف","apps_edge_manual_detail_"+opid)]])
@@ -507,9 +499,8 @@ class ManualEdgeWizard:
                 context.user_data["state"]="MANUAL_EDGE_IP"
                 return await self._view(query,
                     "۱/۴ · <b>سرور جدید</b>\n\n"
-                    "IP عمومی VPS خام (Ubuntu 24.04) را در همین گفتگوی خصوصی "
-                    "ارسال کنید. این مسیر هیچ API کلودزی یا HTTPS جداگانه‌ای ندارد. "
-                    "برای لغو /cancel بفرستید.",
+                    "IP عمومی سرور Ubuntu 24.04 را در این گفتگوی خصوصی ارسال کنید.\n"
+                    "لغو: /cancel",
                     [[("↩️ وضعیت","apps_edge_manual_home")]])
             if data.startswith("apps_edge_manual_form_done_"):
                 raise ManualWizardHold("OLD_WEBAPP_CALLBACK_DISABLED")
@@ -529,8 +520,8 @@ class ManualEdgeWizard:
                     "۲/۴ · <b>تأیید هویت سرور</b>\n\n"
                     f"IP: <code>{escape(op['ip'])}</code>\n"
                     f"اثر انگشت: <code>{escape(fingerprint)}</code>\n\n"
-                    "این مقدار را با اثرانگشت SSH در کنسول مستقل VPS "
-                    "مقایسه کنید. بدون تطبیق، نصب را ادامه ندهید.",
+                    "اثر انگشت SSH را در کنسول مستقل سرور تطبیق دهید. "
+                    "فقط در صورت یکسان‌بودن تأیید کنید.",
                     [[("✅ اثر انگشت را مستقل تأیید کردم",
                        "apps_edge_manual_pin_"+opid)],
                      [("↩️ وضعیت","apps_edge_manual_home")]])
@@ -549,9 +540,8 @@ class ManualEdgeWizard:
                 await asyncio.to_thread(self.journal.pin,opid,actor,chat,*proof["key"])
                 return await self._view(query,
                     "✅ هویت سرور تأیید شد.\n"
-                    "اکنون رمز Root را فقط در گفتگوی خصوصی بات ارسال کنید. "
-                    "بات پیام رمز را پیش از نصب حذف می‌کند؛ تلگرام جایگزین "
-                    "یک کانال محرمانهٔ مستقل نیست.",
+                    "رمز Root را فقط در چت خصوصی بفرستید. "
+                    "پیام رمز پیش از نصب حذف می‌شود؛ تلگرام کانال محرمانه کامل نیست.",
                     [[("🔐 ورود رمز و ادامه",
                        "apps_edge_manual_password_"+opid)]])
             if data.startswith("apps_edge_manual_password_"):
@@ -567,10 +557,9 @@ class ManualEdgeWizard:
                 context.user_data["state"]="MANUAL_EDGE_PASSWORD"
                 return await self._view(query,
                     "۳/۴ · <b>رمز Root</b>\n\n"
-                    "رمز SSH را فقط در چت خصوصی همین بات ارسال کنید. "
-                    "پیش از استفاده، پیام حذف می‌شود؛ رمز در دیتابیس یا "
-                    "user_data ذخیره نمی‌شود. اگر امکان حذف پیام نباشد "
-                    "نصب انجام نمی‌شود. این روش به اندازه فرم HTTPS امن نیست.",
+                    "رمز Root را در چت خصوصی ارسال کنید. "
+                    "قبل از نصب پیام حذف می‌شود و رمز ذخیره نخواهد شد. "
+                    "اگر حذف ممکن نباشد، نصب متوقف می‌شود.",
                     [[("↩️ وضعیت","apps_edge_manual_home")]])
             if data.startswith("apps_edge_manual_standby_"):
                 opid=data[len("apps_edge_manual_standby_"):]
@@ -608,8 +597,8 @@ class ManualEdgeWizard:
                     raise ManualWizardHold("STANDBY_NAT_UNVERIFIED")
                 await asyncio.to_thread(self.journal.mark_standby,opid,actor,chat)
                 return await self._view(query,
-                    "✅ <b>سرور در حالت آماده‌به‌کار قرار گرفت.</b>\n"
-                    "DNS و حساب‌های مشتری هنوز تغییر نکرده‌اند.",
+                    "✅ <b>سرور آماده‌به‌کار شد.</b>\n"
+                    "حساب‌ها و DNS بدون تغییرند.",
                     [[("🔁 بررسی انتقال کاربران",
                        "apps_edge_quick_select_"+op["ip"])],
                      [("↩️ وضعیت","apps_edge_manual_home")]])
@@ -634,10 +623,9 @@ class ManualEdgeWizard:
                     f"مبدأ: <code>{escape(state['source'])}</code>\n"
                     f"مقصد: <code>{escape(state['target'])}</code>\n"
                     f"حساب‌های فعال: <b>{len(state['users'])}</b>\n\n"
-                    "DNS با Cloudflare به‌صورت خودکار تغییر می‌کند. "
-                    "سپس فقط حساب‌های باقی‌مانده جابه‌جا می‌شوند. "
-                    "سرور قبلی حذف نمی‌شود. اتصال مشتری پیش از تأیید نهایی "
-                    "باید مستقل آزمایش شده باشد.",
+                    "DNS و حساب‌های مشمول به‌صورت خودکار منتقل می‌شوند. "
+                    "پیش از تأیید، اتصال واقعی مشتری را مستقل تست کنید. "
+                    "رله قبلی حذف نمی‌شود.",
                     [[("✅ اتصال واقعی تأیید شد؛ آغاز انتقال",
                        "apps_edge_manual_go_"+nonce)],
                      [("انصراف","apps_edge_manual_home")]])
@@ -671,8 +659,7 @@ class ManualEdgeWizard:
                 self.queue.launch(app,job)
                 return await self._view(query,
                     "⏳ <b>انتقال آغاز شد.</b>\n"
-                    "Cloudflare به‌صورت خودکار تغییر می‌کند. پیشرفت واقعی "
-                    "در دفتر انتقال ثبت می‌شود.",
+                    "نتیجه را از «وضعیت انتقال» دنبال کنید.",
                     [[("🔄 وضعیت انتقال",
                        "apps_edge_manual_progress_"+sess["op"])]])
             if data.startswith("apps_edge_manual_progress_"):
@@ -727,9 +714,8 @@ class ManualEdgeWizard:
                     self.journal.finish,opid,actor,chat,rec["id"])
                 return await self._view(query,
                     "✅ <b>رله جدید فعال شد.</b>\n"
-                    "تمام حساب‌های اولیه به مقصد جدید منتقل شده‌اند. "
-                    "تأیید مستقل ساخت/تمدید و اتصال مشتری همچنان لازم است. "
-                    "رله قبلی حذف نشده است.",
+                    "DNS و حساب‌های مشمول منتقل شدند. "
+                    "اتصال واقعی مشتری را پس از انتقال نیز بررسی کنید.",
                     [[("🔄 وضعیت سرور","apps_edge_manual_home")]])
             if data=="apps_edge_manual_cancel" or data.startswith("apps_edge_manual_cancel_"):
                 if data=="apps_edge_manual_cancel":
@@ -769,8 +755,8 @@ class ManualEdgeWizard:
                 escape(FA.get(code,"خطای پیش‌بینی‌نشده در عملیات Edge رخ داد. "
                        "به‌جای تکرار نصب، لاگ فنی Core را بررسی کنید."))+
                 diagnostic,
-                [[("🔄 وضعیت سرور دستی","apps_edge_manual_home")],
-                 [("↩️ مدیریت Edge","apps_cz_home")]])
+                [[("🔄 وضعیت سرور","apps_edge_manual_home")],
+                 [("↩️ مدیریت سرورها","apps_cz_home")]])
 
 
     async def receive_text(self,update,context,state,text,*,actor,chat,app,role):
@@ -851,7 +837,7 @@ class ManualEdgeWizard:
                     "اثر انگشت SSH سرور را مستقلاً تأیید کنید.",
                     [[("🔐 بررسی اثر انگشت SSH",
                        "apps_edge_manual_key_"+opid)],
-                     [("↩️ وضعیت Edge","apps_edge_manual_home")]])
+                     [("↩️ مدیریت سرورها","apps_edge_manual_home")]])
             if state=="MANUAL_EDGE_PASSWORD" and sess["stage"]=="password":
                 # Password was already deleted before session/TTL validation.
                 # NEVER put it in context.user_data (persistent) or any log.
@@ -875,7 +861,7 @@ class ManualEdgeWizard:
                 return await self._view(None,
                     "⏳ <b>راه‌اندازی Edge آغاز شد.</b>\n"
                     "نتیجه در همین چت اعلام می‌شود. نصب را دوباره اجرا نکنید.",
-                    [[("🔄 وضعیت Edge","apps_edge_manual_home")]])
+                    [[("🔄 وضعیت سرور","apps_edge_manual_home")]])
             raise ManualWizardHold("TEXT_STAGE_CHANGED")
         except (ManualEdgeHold,ManualWizardHold,IntakeHold,ValueError) as exc:
             code=str(exc)

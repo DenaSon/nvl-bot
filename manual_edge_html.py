@@ -6,7 +6,7 @@ All callbacks and WebApp URL constraints use the existing audited validator.
 """
 from __future__ import annotations
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 from manual_edge_rich import render_manual_card
 
@@ -30,7 +30,7 @@ class ManualHtmlDelivery:
                     buttons.append(InlineKeyboardButton(label, callback_data=action))
                 else:
                     buttons.append(InlineKeyboardButton(
-                        label, web_app=action["web_app"]))
+                        label, web_app=WebAppInfo(url=action["web_app"]["url"])))
             keyboard.append(buttons)
         return InlineKeyboardMarkup(keyboard) if keyboard else None
 

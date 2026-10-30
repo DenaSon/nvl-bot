@@ -31,7 +31,7 @@ class ManualEdgeEntryTests(unittest.TestCase):
     def test_owner_sees_new_wizard_even_when_legacy_flag_disabled(self):
         w=self.wizard()
         (q,txt,rows),_=self.invoke(w,"apps_edge_manual_home")
-        self.assertIn("افزودن Edge دستی",txt)
+        self.assertIn("مدیریت سرورها",txt)
         self.assertEqual(rows[0][0][1],"apps_edge_manual_new")
         rendered=render_manual_card(txt,rows)
         self.assertNotIn("web_app",str(rendered))

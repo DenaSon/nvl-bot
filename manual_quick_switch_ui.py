@@ -138,19 +138,15 @@ class ManualQuickSwitchUI:
                else "📋 <b>وضعیت انتقال</b>")
         detail=(f"\nکد بررسی: <code>{escape(rec['error_code'] or error)}</code>"
                 if rec["error_code"] or (error and status!="DONE") else "")
-        return await self._view(context,chat,
-            title+"\n\n"
-            f"مبدأ: <code>{escape(rec['source'])}</code>\n"
-            f"مقصد: <code>{escape(rec['target'])}</code>\n"
-            f"حساب‌ها: <b>{rec['account_count']}</b>\n"
-            f"وضعیت: <b>{escape(label)}</b>"+detail+"\n\n"
-            "اتصال واقعی مشتری را نیز بررسی کنید." if status=="DONE"
-            else title+"\n\n"
-            f"مبدأ: <code>{escape(rec['source'])}</code>\n"
-            f"مقصد: <code>{escape(rec['target'])}</code>\n"
-            f"حساب‌ها: <b>{rec['account_count']}</b>\n"
-            f"وضعیت: <b>{escape(label)}</b>"+detail,
-            rows)
+        message=(title+"\n\n"
+                 f"مبدأ: <code>{escape(rec['source'])}</code>\n"
+                 f"مقصد: <code>{escape(rec['target'])}</code>\n"
+                 f"حساب‌ها: <b>{rec['account_count']}</b>\n"
+                 f"وضعیت: <b>{escape(label)}</b>"+detail)
+        if status=="DONE":
+            message+="\n🌐 DNS: <b>تأییدشده</b>\n\n" \
+                     "اتصال واقعی مشتری را نیز بررسی کنید."
+        return await self._view(context,chat,message,rows)
 
     def _claim_done_notice(self, job, actor, chat):
         """One durable send intent per verified DONE job; fail closed.

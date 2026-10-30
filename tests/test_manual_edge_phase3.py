@@ -218,10 +218,11 @@ class Phase3ManualTests(unittest.TestCase):
             self.assertNotIn("password",str(context.user_data).lower())
 
     def test_html_navigation_uses_new_message_without_old_rich_pointer(self):
-        """Old Rich cards remain harmless; HTML navigation never tries to edit."""
+        """Old Rich cards remain harmless; ordinary HTML never edits them."""
         import asyncio
         from types import SimpleNamespace
-        from unittest.mock import AsyncMock
+        from unittest.mock import patch
+        from manual_edge_html import ManualHtmlDelivery, ManualHtmlBotAPI
         from manual_edge_wizard import ManualEdgeWizard
 
         def no_network(*args):
@@ -230,19 +231,26 @@ class Phase3ManualTests(unittest.TestCase):
             db=self.db,preflight=lambda:(2252,"ssh-pub"),
             provision=no_network,verify=no_network,probe=no_network,
             nat=no_network,queue=SimpleNamespace())
-        send=AsyncMock(return_value=SimpleNamespace(message_id=903))
-        bot=SimpleNamespace(token="123:TEST_TOKEN",send_message=send)
+        calls=[]
+        def transport(method,body):
+            calls.append((method,body))
+            return {"message_id":903}
+        def delivery(bot):
+            return ManualHtmlDelivery(bot,api_factory=lambda token:
+                ManualHtmlBotAPI(token,transport=transport))
+        bot=SimpleNamespace(token="123:TEST_TOKEN")
         context=SimpleNamespace(user_data={"manual_edge_rich_pointer":101})
         query=SimpleNamespace(message=SimpleNamespace(
             message_id=902,chat=SimpleNamespace(id=77)))
-        asyncio.run(wizard.handle(
-            query,context,"apps_edge_manual_home",role="admin",
-            actor=77,chat=77,app=SimpleNamespace(bot=bot)))
-        self.assertEqual(send.await_count,1)
-        kw=send.await_args.kwargs
-        self.assertEqual(kw["parse_mode"],"HTML")
-        self.assertEqual(kw["chat_id"],77)
-        self.assertIn("افزودن Edge",kw["text"])
+        with patch("manual_edge_wizard.ManualHtmlDelivery",side_effect=delivery):
+            asyncio.run(wizard.handle(
+                query,context,"apps_edge_manual_home",role="admin",
+                actor=77,chat=77,app=SimpleNamespace(bot=bot)))
+        self.assertEqual([method for method,_ in calls],["sendMessage"])
+        body=calls[0][1]
+        self.assertEqual(body["parse_mode"],"HTML")
+        self.assertEqual(body["chat_id"],77)
+        self.assertIn("افزودن Edge",body["text"])
         self.assertEqual(context.user_data["manual_edge_rich_pointer"],101)
 
     def test_callback_pointer_is_not_rebound_from_another_chat(self):

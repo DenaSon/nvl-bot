@@ -89,6 +89,9 @@ def decide(changed, available):
             if test not in available:
                 return "full", sorted(available), sorted(available), "test removed: " + name
             selected.add(test)
+            for domain, patterns in ROOT_DOMAIN.items():
+                if test in patterns:
+                    domains.add(domain)
             continue
         if name.startswith("ops/"):
             # Ops scripts affect the release, provisioning or privileged host.
@@ -100,9 +103,12 @@ def decide(changed, available):
             if any(name.startswith(p) for p in prefixes):
                 matched = True
                 domains.add(("manual", "egress", "cloudzy", "marzban", "radar")[i])
-                for pattern in patterns:
-                    selected.update(x for x in available
-                                    if Path(x).match(pattern))
+                group = {x for x in available for pattern in patterns
+                         if Path(x).match(pattern)}
+                if not group:
+                    return ("full", sorted(available), sorted(available),
+                            "missing domain tests: " + name)
+                selected.update(group)
                 break
         if not matched:
             return "full", sorted(available), sorted(available), "unknown module: " + name

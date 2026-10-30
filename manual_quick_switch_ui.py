@@ -1,4 +1,4 @@
-"""Admin-only Rich UI for Manual Edge Quick Switch.
+"""Admin-only native HTML UI for Manual Edge Quick Switch.
 
 The Cloudzy engine remains installed; no Cloudzy provider calls are made.
 Callbacks never accept an arbitrary account destination or migration status.
@@ -12,7 +12,7 @@ import secrets
 import threading
 import time
 
-from manual_edge_rich import ManualRichDelivery
+from manual_edge_html import ManualHtmlDelivery
 from manual_quick_switch import QuickSwitchHold
 
 PENDING_TTL = 180
@@ -59,7 +59,7 @@ class ManualQuickSwitchUI:
         self.effect_lock = threading.Lock()
 
     async def _view(self, context, chat, text, rows):
-        return await ManualRichDelivery(context.application.bot.token).show(
+        return await ManualHtmlDelivery(context.application.bot).show(
             chat=chat, context=context, text=text, rows=rows)
 
     def _inventory(self):

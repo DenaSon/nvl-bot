@@ -15,11 +15,11 @@ from manual_edge_rich import render_manual_card
 ROOT=Path(__file__).resolve().parents[1]
 
 
-class FakeRich:
+class FakeHtml:
     cards=[]
 
-    def __init__(self,token):
-        assert token=="test-token"
+    def __init__(self,bot):
+        assert bot.token=="test-token"
 
     async def show(self,*,chat,context,text,rows):
         self.cards.append((text,rows))
@@ -98,10 +98,10 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
         self.context=SimpleNamespace(
             application=SimpleNamespace(bot=SimpleNamespace(token="test-token")),
             user_data={})
-        self.patch=patch("manual_quick_switch_ui.ManualRichDelivery",FakeRich)
+        self.patch=patch("manual_quick_switch_ui.ManualHtmlDelivery",FakeHtml)
         self.patch.start()
         self.addCleanup(self.patch.stop)
-        FakeRich.cards=[]
+        FakeHtml.cards=[]
 
     async def cb(self,data,role="admin",actor=7,chat=7,private=True):
         return await self.ui.handle(None,self.context,data,
@@ -110,7 +110,7 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
 
     async def test_home_contains_only_manual_edge_navigation(self):
         await self.cb("apps_edge_quick_home")
-        text,rows=FakeRich.cards[-1]
+        text,rows=FakeHtml.cards[-1]
         self.assertIn("مدیریت Edge",text)
         callbacks=[d for row in rows for _,d in row]
         self.assertIn("apps_edge_manual_home",callbacks)
@@ -120,16 +120,16 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_home_redirect_shows_new_ui(self):
         await self.cb("apps_cz_home")
-        self.assertIn("مدیریت Edge",FakeRich.cards[-1][0])
-        self.assertNotIn("Cloudzy",FakeRich.cards[-1][0])
+        self.assertIn("مدیریت Edge",FakeHtml.cards[-1][0])
+        self.assertNotIn("Cloudzy",FakeHtml.cards[-1][0])
 
     async def test_mutation_is_not_released_by_default(self):
         self.ui.enabled=lambda:False
         await self.cb("apps_edge_quick_select_45.59.126.73")
-        confirm=next(d for row in FakeRich.cards[-1][1] for _,d in row
+        confirm=next(d for row in FakeHtml.cards[-1][1] for _,d in row
                      if d.startswith("apps_edge_quick_confirm_"))
         await self.cb(confirm)
-        self.assertIn("فعال نشده",FakeRich.cards[-1][0])
+        self.assertIn("فعال نشده",FakeHtml.cards[-1][0])
         self.assertFalse(any(e[0]=="start" for e in self.engine.events))
 
     async def test_admin_must_be_active_and_private(self):
@@ -137,7 +137,7 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
                        {"actor":7,"chat":8},{"private":False}):
             with self.subTest(kwargs=kwargs):
                 await self.cb("apps_edge_quick_select_45.59.126.73",**kwargs)
-                self.assertIn("فقط مدیر",FakeRich.cards[-1][0])
+                self.assertIn("فقط مدیر",FakeHtml.cards[-1][0])
         self.assertEqual(self.engine.events,[])
 
     async def test_disabled_release_blocks_resume_and_dns_retry(self):
@@ -148,17 +148,17 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
             "error_code":"DNS_WRITE_RESULT_UNCERTAIN",
         }
         await self.cb("apps_edge_quick_resume_deadbeef")
-        self.assertIn("فعال نشده",FakeRich.cards[-1][0])
+        self.assertIn("فعال نشده",FakeHtml.cards[-1][0])
         await self.cb("apps_edge_quick_retry_review_deadbeef")
-        yes=next(d for row in FakeRich.cards[-1][1] for _,d in row
+        yes=next(d for row in FakeHtml.cards[-1][1] for _,d in row
                  if d.startswith("apps_edge_quick_retry_yes_"))
         await self.cb(yes)
-        self.assertIn("فعال نشده",FakeRich.cards[-1][0])
+        self.assertIn("فعال نشده",FakeHtml.cards[-1][0])
         self.assertEqual(self.engine.events,[])
 
     async def test_preview_and_one_use_confirm_never_persist_roster(self):
         await self.cb("apps_edge_quick_select_45.59.126.73")
-        text,rows=FakeRich.cards[-1]
+        text,rows=FakeHtml.cards[-1]
         self.assertIn("446",text)
         confirm=next(d for row in rows for _,d in row
                      if d.startswith("apps_edge_quick_confirm_"))
@@ -172,7 +172,7 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(e[0]=="start" for e in self.engine.events),1)
         await self.cb(confirm)
         self.assertEqual(sum(e[0]=="start" for e in self.engine.events),1)
-        self.assertIn("متوقف",FakeRich.cards[-1][0])
+        self.assertIn("متوقف",FakeHtml.cards[-1][0])
 
     async def test_recovery_preserves_explicit_retry_confirmation(self):
         self.engine.rec={
@@ -181,11 +181,11 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
             "error_code":"DNS_WRITE_RESULT_UNCERTAIN",
         }
         await self.cb("apps_edge_quick_status")
-        rows=FakeRich.cards[-1][1]
+        rows=FakeHtml.cards[-1][1]
         self.assertIn("apps_edge_quick_resume_deadbeef",
                       [d for row in rows for _,d in row])
         await self.cb("apps_edge_quick_retry_review_deadbeef")
-        confirm=next(d for row in FakeRich.cards[-1][1] for _,d in row
+        confirm=next(d for row in FakeHtml.cards[-1][1] for _,d in row
                      if d.startswith("apps_edge_quick_retry_yes_"))
         self.assertEqual(self.engine.events,[])
         await self.cb(confirm)

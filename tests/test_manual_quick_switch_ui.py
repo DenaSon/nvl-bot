@@ -111,7 +111,7 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
     async def test_home_contains_only_manual_edge_navigation(self):
         await self.cb("apps_edge_quick_home")
         text,rows=FakeHtml.cards[-1]
-        self.assertIn("مدیریت Edge",text)
+        self.assertIn("مدیریت سرورها",text)
         callbacks=[d for row in rows for _,d in row]
         self.assertIn("apps_edge_manual_home",callbacks)
         self.assertIn("apps_edge_quick_select_45.59.126.73",callbacks)
@@ -120,7 +120,7 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_home_redirect_shows_new_ui(self):
         await self.cb("apps_cz_home")
-        self.assertIn("مدیریت Edge",FakeHtml.cards[-1][0])
+        self.assertIn("مدیریت سرورها",FakeHtml.cards[-1][0])
         self.assertNotIn("Cloudzy",FakeHtml.cards[-1][0])
 
     async def test_mutation_is_not_released_by_default(self):
@@ -199,7 +199,7 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
 class Phase3RichCardTests(unittest.TestCase):
     def test_quick_callback_stays_native_rich_without_cloudzy_actions(self):
         card=render_manual_card(
-            "🌐 <b>مدیریت Edge</b>\\nانتقال SSH",
+            "🌐 <b>مدیریت سرورها</b>\\nانتقال SSH",
             [[("🔁 تغییر IP", "apps_edge_quick_home")],
              [("↩️ برنامه‌ها", "apps_home")]],
         )

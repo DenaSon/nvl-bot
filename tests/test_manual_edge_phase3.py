@@ -185,7 +185,7 @@ class Phase3ManualTests(unittest.TestCase):
                 "SELECT active,is_standby,is_default FROM host_pool "
                 "WHERE host='8.8.8.8'").fetchone(),(1,1,0))
 
-    def test_wizard_callbacks_use_rich_native_telegram_without_webapp(self):
+    def test_wizard_callbacks_keep_html_navigation_without_webapp(self):
         import asyncio
         from types import SimpleNamespace
         from unittest.mock import AsyncMock,patch
@@ -200,7 +200,7 @@ class Phase3ManualTests(unittest.TestCase):
             form_url=lambda:"")
         context=SimpleNamespace(user_data={})
         app=SimpleNamespace(bot=SimpleNamespace(token="123:TEST_TOKEN"))
-        with patch("manual_edge_wizard.ManualRichDelivery") as factory:
+        with patch("manual_edge_wizard.ManualHtmlDelivery") as factory:
             factory.return_value.show=AsyncMock(return_value=44)
             asyncio.run(wizard.handle(
                 SimpleNamespace(),context,"apps_edge_manual_home",
@@ -217,42 +217,33 @@ class Phase3ManualTests(unittest.TestCase):
             self.assertNotIn("web_app",str(view["rows"]))
             self.assertNotIn("password",str(context.user_data).lower())
 
-    def test_install_completion_callback_edits_clicked_rich_message(self):
-        """A background install receipt is a new Rich message, not the old pointer."""
+    def test_html_navigation_uses_new_message_without_old_rich_pointer(self):
+        """Old Rich cards remain harmless; HTML navigation never tries to edit."""
         import asyncio
         from types import SimpleNamespace
-        from unittest.mock import patch
-        from cloudzy_rich_transport import RichBotAPI
-        from manual_edge_rich import ManualRichDelivery
+        from unittest.mock import AsyncMock
         from manual_edge_wizard import ManualEdgeWizard
 
         def no_network(*args):
             raise AssertionError("NO_REMOTE_EFFECTS")
-
         wizard=ManualEdgeWizard(
             db=self.db,preflight=lambda:(2252,"ssh-pub"),
             provision=no_network,verify=no_network,probe=no_network,
-            nat=no_network,queue=SimpleNamespace(),
-            enabled=lambda:False,form_url=lambda:"")
+            nat=no_network,queue=SimpleNamespace())
+        send=AsyncMock(return_value=SimpleNamespace(message_id=903))
+        bot=SimpleNamespace(token="123:TEST_TOKEN",send_message=send)
         context=SimpleNamespace(user_data={"manual_edge_rich_pointer":101})
         query=SimpleNamespace(message=SimpleNamespace(
             message_id=902,chat=SimpleNamespace(id=77)))
-        app=SimpleNamespace(bot=SimpleNamespace(token="123:TEST_TOKEN"))
-        calls=[]
-        def transport(method,body):
-            calls.append((method,body))
-            return {"message_id":902}
-        def delivery(token):
-            return ManualRichDelivery(token,api_factory=lambda t:
-                                      RichBotAPI(t,transport=transport))
-
-        with patch("manual_edge_wizard.ManualRichDelivery",side_effect=delivery):
-            asyncio.run(wizard.handle(
-                query,context,"apps_edge_manual_home",role="admin",
-                actor=77,chat=77,app=app))
-        self.assertEqual(context.user_data["manual_edge_rich_pointer"],902)
-        self.assertEqual([method for method,_ in calls],["editMessageText"])
-        self.assertEqual(calls[0][1]["message_id"],902)
+        asyncio.run(wizard.handle(
+            query,context,"apps_edge_manual_home",role="admin",
+            actor=77,chat=77,app=SimpleNamespace(bot=bot)))
+        self.assertEqual(send.await_count,1)
+        kw=send.await_args.kwargs
+        self.assertEqual(kw["parse_mode"],"HTML")
+        self.assertEqual(kw["chat_id"],77)
+        self.assertIn("افزودن Edge",kw["text"])
+        self.assertEqual(context.user_data["manual_edge_rich_pointer"],101)
 
     def test_callback_pointer_is_not_rebound_from_another_chat(self):
         import asyncio
@@ -269,7 +260,7 @@ class Phase3ManualTests(unittest.TestCase):
         app=SimpleNamespace(bot=SimpleNamespace(token="123:TEST_TOKEN"))
         wrong=SimpleNamespace(message=SimpleNamespace(
             message_id=902,chat=SimpleNamespace(id=88)))
-        with patch("manual_edge_wizard.ManualRichDelivery") as delivery:
+        with patch("manual_edge_wizard.ManualHtmlDelivery") as delivery:
             delivery.return_value.show=AsyncMock(return_value=101)
             asyncio.run(wizard.handle(
                 wrong,context,"apps_edge_manual_home",role="admin",
@@ -315,7 +306,7 @@ class Phase3ManualTests(unittest.TestCase):
             provision=prohibited,verify=prohibited,
             probe=prohibited,nat=prohibited,queue=SimpleNamespace(),
             enabled=lambda:True)
-        with patch("manual_edge_wizard.ManualRichDelivery") as rich:
+        with patch("manual_edge_wizard.ManualHtmlDelivery") as rich:
             rich.return_value.show=AsyncMock(return_value=99)
             asyncio.run(wizard.handle(
                 SimpleNamespace(),SimpleNamespace(user_data={}),

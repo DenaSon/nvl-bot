@@ -1,6 +1,8 @@
 # DenaProbe R2-B — isolated Core collector, DPT/1
 
-**Source only** · 2026-10-31 · **Domain:** board.nvlsup.online · **Source branch:** feature/dpt-r2b-core-collector-20261031
+**Source PR #262 open/unmerged; operator-staged Collector live** · 2026-10-31 · **Domain:** board.nvlsup.online · **Source branch:** feature/dpt-r2b-core-collector-20261031
+
+**Field status:** R2-B isolated ingestion installed on Core and verified externally; R2-C signed hardware ACK and SQLite storage **PASS**. Live-state continuity remains **OPEN** (`monitoring_gap=1`, `https_sequence=NULL` in later snapshot); **R2-C Hardening not started**. See [DenaProbe R2-C field handoff](https://github.com/DenaSon/DenaProbe/blob/feature/r2a-dpt1-telemetry-sender-20261031/docs/013-R2C-DPT1-HARDWARE-CORE-FIELD-VALIDATION-2026-10-31.md).
 
 ## Scope and production fence
 
@@ -14,11 +16,13 @@ It never imports bot_final_v49-2.py or opens /root/master_bot.db.
 Contract authority: DenaSon/DenaProbe docs/008-DPT-TELEMETRY-CONTRACT-V1.md
 and contracts/dpt/v1/*.json. No DPT/2 or batch messages.
 
-**Do not call source merge a live deployment.** Requires operator-run SSH
-staging, independent telemetry flash, live Cloudflare Tunnel switch, replay
-tests and reversible signoff. Never deploy by overwriting the Core /root/
-runtime or restarting nvlbot.service. Existing working Tunnel route remains
-http://127.0.0.1:18080 until explicit switch.
+**Source merge is distinct from runtime installation.** The operator has
+already installed and started this isolated Collector, switched the Cloudflare
+Tunnel published application origin from 18080 to **18081**, and flashed a
+live ESP32 sender. The release is still **experimental**, not a complete
+replay/adverse-network/live-state/retention acceptance. These instructions
+retain initial installation and rollback details for reproducibility; do not
+re-run provisioning, replace the Core /root/ runtime, or restart nvlbot.service.
 
 ## Isolation
 
@@ -28,8 +32,10 @@ http://127.0.0.1:18080 until explicit switch.
 - Database /var/lib/denaprobe/telemetry.sqlite3, WAL, synchronous=FULL,
   BEGIN IMMEDIATE and UNIQUE(device_id,boot_id,sequence)
 - Private file /var/lib/denaprobe/devices.json (0600, owned by denaprobe)
-- Existing Cloudflare Tunnel board.nvlsup.online -> 127.0.0.1:18080
-  **unchanged** until the new endpoint is tested locally
+- **Current field route:** existing Cloudflare Tunnel `denaprobe-core` for
+  `board.nvlsup.online` -> `http://127.0.0.1:18081` after successful
+  local test. Temporary `127.0.0.1:18080` healthz service retained for
+  reversible routing rollback (presence should be reconfirmed before use).
 - Protected 443 continues to belong to GOST (its expired unrelated certificate
   is a separate operations issue, not addressed here).
 
@@ -80,19 +86,32 @@ Validate the monitored Edge hostname/port against the existing private
 firmware config and independently confirmed target registry. The target
 revision is stored per event; never silently relabel earlier samples.
 
-Register a distinct device identity and **random** 256-bit HMAC secret:
+**Observed operator provisioning:** device `dp-mci-01`, target `1`, initially
+key ID `k1`. The initial 256-bit `SECRET_HEX` was subsequently pasted into
+conversation text and is **compromised**. A replacement key ID `k2` was
+provisioned and its authenticated hardware delivery passed, but evidence that
+`k1` was actually revoked has **not** been provided. Verify key **IDs only**
+without printing values, and revoke `k1` if still present:
 
-    runuser -u denaprobe -- python3 /opt/nvl-dpt-collector/denaprobe_ingest/collector.py \
-      provision --id dp-mci-01 --key-id k1 --target-id 1
-
-**SECRET_HEX** is shown once for secure transfer to the ignored local
-ESP32 file (never paste it into ChatGPT/Telegram/logs/Git). For rotation
-provision a NEW key-id. Revoke a single key without touching other devices:
+    runuser -u denaprobe -- python3 - <<'PY'
+    import json
+    from pathlib import Path
+    d = json.loads(Path('/var/lib/denaprobe/devices.json').read_text())['devices'].get('dp-mci-01', {})
+    keys = d.get('keys', {})
+    print('device_enabled=', d.get('enabled'))
+    print('k1_revoked=', 'k1' not in keys)
+    print('k2_present=', 'k2' in keys)
+    PY
 
     runuser -u denaprobe -- python3 /opt/nvl-dpt-collector/denaprobe_ingest/collector.py \
       revoke --id dp-mci-01 --key-id k1
 
-Never use the public frozen fixture HMAC key on a real device.
+Only execute `revoke` if the inspection says k1 remains. A `provision` command
+prints its secret and **must not be re-run for an existing key ID**. On any
+new/rotated key, capture the output into a root-owned `0600` private file with
+terminal echo/redirection controls and put its value only in the gitignored
+ESP32 config. Never paste private keys into ChatGPT, Telegram, logs or Git.
+Never use public fixture keys on actual hardware.
 
 Install/start a separate systemd service; verify local requests first:
 
@@ -107,10 +126,12 @@ Install/start a separate systemd service; verify local requests first:
 
 The last unauthenticated request must be **403**, not 200.
 
-After local validation, switch *only* the existing Cloudflare Tunnel
-Published Application origin for board.nvlsup.online from
-http://127.0.0.1:18080 to http://127.0.0.1:18081.
-Do not alter the public DNS hostname, the tunnel itself, GOST or 443.
+**Cutover was performed and verified on 2026-10-31:** the operator edited
+*only* the existing Cloudflare Tunnel **Published Application** origin for
+`board.nvlsup.online`, from `http://127.0.0.1:18080` to
+`http://127.0.0.1:18081`. Neither public DNS hostname nor the tunnel,
+GOST or 443 was changed. The general Zero Trust mesh/CIDR **Routes** screen
+is **not** the Published Application route editor.
 From Windows PowerShell validate:
 
     curl.exe -v https://board.nvlsup.online/healthz
@@ -118,21 +139,30 @@ From Windows PowerShell validate:
       -H "Content-Type: application/json" --data "{}" \
       https://board.nvlsup.online/api/dpt/v1/telemetry
 
-Expected: 200 and 403 respectively. A 403 proves public auth gate only,
-not live firmware delivery or a secure device provision.
+**Observed externally:** 200 with `{"status":"ok","service":"denaprobe-core"}`
+and 403 with `{"error":"request_rejected"}` on 2026-10-31. The signed
+firmware test later separately confirmed real delivery and durable ACK.
 
-With the board clock issue independently fixed, configure board:
-PROBE_DPT_ENABLED=1, PROBE_DPT_OFFLINE_SMOKE_TEST=0,
-PROBE_DPT_DEVICE_ID="dp-mci-01", PROBE_DPT_TARGET_ID=1,
-PROBE_DPT_KEY_ID="k1", PROBE_DPT_SECRET_HEX=(provisioned key),
-PROBE_DPT_API_URL="https://board.nvlsup.online/api/dpt/v1/telemetry",
-PROBE_DPT_CA_PEM=(verified CA trust anchor). Keep this file ignored.
+**Observed flashed private board config:** `PROBE_DPT_ENABLED=1`,
+`PROBE_DPT_OFFLINE_SMOKE_TEST=0`, `PROBE_DPT_DEVICE_ID="dp-mci-01"`,
+`PROBE_DPT_TARGET_ID=1`, `PROBE_DPT_KEY_ID="k2"`, verified private HMAC secret,
+`PROBE_DPT_API_URL="https://board.nvlsup.online/api/dpt/v1/telemetry"`, and
+public `GTS Root R4` PEM in an ESP32 C++ raw string literal. The file
+`include/telemetry_private.h` is gitignored and must never be logged or
+committed. The public certificate chain was reported as domain -> WE1 ->
+GTS Root R4 (cross-signed by GlobalSign). No TLS verification bypass was used.
+SNTP was initially not ready after Wi-Fi, then `ready=YES` roughly 41 seconds
+after boot in the field run; independent proof of UDP/123 was not collected.
 
-A *live* R2-C test must show signed BOOT q=1 -> ACK 0, real probes ->
-ACK 0, byte-identical retry -> ACK 1, changed body same identity ->
-HTTP 409, post-reboot new boot identity, and valid history_only=1 for
-stale/out-of-order. Verify real sequence and time without claiming NPV
-application health or filtering.
+**Partially completed R2-C hardware smoke (2026-10-31):** sender reported
+`[dpt] READY | ... mode=HTTPS_SENDER`; a signed BOOT q=1 returned
+`ACCEPTED`, `http=200`, and later normal/local observations returned
+`ACCEPTED` and `HISTORY_ONLY`, `http=200`. Core `check` advanced from
+`EVENT_COUNT=0` to **8** with `DPT_CHECK=ok`. Multiple events were stored
+as historical-only after out-of-order delivery. Live exact-duplicate ACK
+(`r=1`), tampered body/identity 409, reboot, 429/5xx retry, queue overflow,
+24h stability and adverse-network tests **remain open**. No NPV data-path,
+filtering, alert or failover outcome has been measured.
 
 Local read-only history and integrity checks:
 
@@ -165,6 +195,24 @@ retention; a policy is required before production historical collection.
 - A signed uptime is sender-reported, not trusted UTC. Replay protection
   uses immutable identity + boot history + sequence and conservative
   latest-state gating. No server-side "filtering" verdict is computed.
-- Existing SSH pin, NTP CLOCK_NOT_READY and public 64KiB HTTPS probe
-  issues are separate R2-C field gates; collector cannot resolve them.
+- Existing SSH host pin and public 64KiB HTTPS probe both passed in the
+  observed healthy field run. NTP `CLOCK_NOT_READY` was transient and later
+  resolved to `ready=YES`; negative-path evidence remains open.
+- **Critical live-state consistency gap observed:** `device_latest_state`
+  showed `ssh_sequence=12`, `https_sequence=NULL`, `last_event_sequence=12`,
+  `monitoring_gap=1`. Firmware newest/urgent-first backlog dispatch conflicts
+  with the Collector's strict sequential fresh-state admission, causing
+  `HISTORY_ONLY` for older results; history must be retained, not promoted
+  unsafely into current status. Design and test FIFO/urgent reconciliation
+  only in the later **R2-C Hardening** phase. No alert job until resolved.
 - No production retention/notification thresholds are implicitly approved.
+
+## Operator field snapshot and handoff (freeze before R2-C Hardening)
+
+- **Core code provenance:** separate staging checkout `/root/nvl-dpt-r2b-stage`, pinned commit `7386ac3b0ab306ef772273bd74fb33f4385d75c4`; 10/10 standalone collector unit tests passed, Python compile passed, PR #262 open/unmerged at writing.
+- **Service:** `systemctl is-enabled denaprobe-collector` => `enabled`, `systemctl is-active denaprobe-collector` => `active`, `ss -lntp` => bound to `127.0.0.1:18081` (not public listener); no NVLBot/GOST restarts observed in reported commands.
+- **Collector and device:** `TARGET_REVISION=1`, HMAC device `dp-mci-01`, current key ID `k2`; private device secret not included in documentation.
+- **Public API:** `GET /healthz` => 200; unsigned `POST /api/dpt/v1/telemetry` => 403; signed ESP32 POST => accepted 200 with matching ACK.
+- **Persistence:** `DPT_CHECK= ok EVENT_COUNT= 8` at first completed live test, later current-state read `ssh_sequence=12`, `https_sequence=NULL`, `last_event_sequence=12`, `monitoring_gap=1` (not an atomic snapshot of eight events).
+- **Outstanding before hardening:** verify `k1` revoked without printing keys, ordered current-state acceptance with fresh HTTPS sample, ACK duplicate/tamper/replay cases, transient network/overflow/reboot tests, retention, production monitoring/alert policy. No automatic Telegram alert or route mutator is implemented or approved.
+- **Further evidence:** [DenaProbe R2-C field report](https://github.com/DenaSon/DenaProbe/blob/feature/r2a-dpt1-telemetry-sender-20261031/docs/013-R2C-DPT1-HARDWARE-CORE-FIELD-VALIDATION-2026-10-31.md).

@@ -323,13 +323,19 @@ def store(db_path: Path, payload: dict, raw: bytes, sent: int,
                     h.get("u") if h else None, sent, age, h_age, now,
                     1 if history else 0, 1 if unknown else 0, digest, raw))
         if eligible:
-            # A registered, recent, consecutive observation is safe to expose as
-            # latest raw evidence, NOT a validated filtering verdict.
+            # Fresh delivery alone does not close a previous sequence gap or
+            # establish confidence immediately after a reboot. Require two
+            # consecutive recent observations to clear the monitoring gap.
+            latest = db.execute("""SELECT last_event_sequence FROM device_latest_state
+                                   WHERE device_id=? AND boot_id=?""",
+                                (device, boot)).fetchone()
+            continuity = bool(latest and latest["last_event_sequence"] == q - 1)
+            monitoring_gap = 0 if continuity and q >= 3 else 1
             db.execute("""UPDATE device_latest_state SET ssh_sequence=?,
                           ssh_received_ms=?,https_sequence=CASE WHEN ? THEN ? ELSE https_sequence END,
                           https_received_ms=CASE WHEN ? THEN ? ELSE https_received_ms END,
-                          last_event_sequence=?,monitoring_gap=0 WHERE device_id=? AND boot_id=?""",
-                       (q, now, bool(h), q, bool(h), now, q, device, boot))
+                          last_event_sequence=?,monitoring_gap=? WHERE device_id=? AND boot_id=?""",
+                       (q, now, bool(h), q, bool(h), now, q, monitoring_gap, device, boot))
         elif kind == 2 and not history and boot == current_boot:
             db.execute("""UPDATE device_latest_state SET last_event_sequence=?,
                           monitoring_gap=1 WHERE device_id=? AND boot_id=?""",
@@ -397,6 +403,11 @@ class CollectorHandler(BaseHTTPRequestHandler):
         length_str = self.headers.get("Content-Length", "")
         if not DIGITS_RE.fullmatch(length_str):
             self.respond(400)
+            return
+        # Bound numeric parsing before int(); Python guards huge integers and
+        # should not throw an uncaught exception on untrusted header content.
+        if len(length_str) > 4:
+            self.respond(413)
             return
         length = int(length_str)
         if length > MAX_BODY:

@@ -323,14 +323,21 @@ def store(db_path: Path, payload: dict, raw: bytes, sent: int,
                     h.get("u") if h else None, sent, age, h_age, now,
                     1 if history else 0, 1 if unknown else 0, digest, raw))
         if eligible:
-            # Fresh delivery alone does not close a previous sequence gap or
-            # establish confidence immediately after a reboot. Require two
-            # consecutive recent observations to clear the monitoring gap.
-            latest = db.execute("""SELECT last_event_sequence FROM device_latest_state
+            # Two *actual, eligible SSH observations* must be consecutive to
+            # clear a gap. A BOOT or DEVICE_EVENT before the first SSH must
+            # never count as the first healthy probe; neither may an old
+            # replayed/history-only result establish continuity.
+            latest = db.execute("""SELECT ssh_sequence,ssh_received_ms
+                                   FROM device_latest_state
                                    WHERE device_id=? AND boot_id=?""",
                                 (device, boot)).fetchone()
-            continuity = bool(latest and latest["last_event_sequence"] == q - 1)
-            monitoring_gap = 0 if continuity and q >= 3 else 1
+            continuity = bool(
+                latest and latest["ssh_sequence"] is not None
+                and latest["ssh_sequence"] == q - 1
+                and latest["ssh_received_ms"] is not None
+                and 0 <= now - latest["ssh_received_ms"] <= SSH_MAX_AGE_MS
+            )
+            monitoring_gap = 0 if continuity else 1
             db.execute("""UPDATE device_latest_state SET ssh_sequence=?,
                           ssh_received_ms=?,https_sequence=CASE WHEN ? THEN ? ELSE https_sequence END,
                           https_received_ms=CASE WHEN ? THEN ? ELSE https_received_ms END,

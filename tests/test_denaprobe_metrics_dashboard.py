@@ -11,7 +11,13 @@ import unittest
 
 from denaprobe_ingest import collector
 from denaprobe_ingest.metrics import build_report
-from denaprobe_admin_dashboard import authorized, render, handle_dashboard
+from denaprobe_admin_dashboard import (
+    authorized, render, render_guide, handle_dashboard, _coverage_status,
+    REPORT_24, REPORT_168, GUIDE_24, GUIDE_168,
+)
+from unittest.mock import patch
+import os
+import re
 
 ID = "dp-mci-01"
 BOOT = "57fce203c6e94baf8d32749c11f0a65d"
@@ -138,6 +144,118 @@ class MetricsTest(unittest.TestCase):
             self.assertFalse(authorized(**args))
         self.assertFalse(authorized(role="admin", actor=True, chat=True,
                                     is_private=True, active_admin_ids={True}))
+
+    def test_polished_summary_is_interpretable(self):
+        self.started()
+        self.put(probe(2, 5000, h={
+            "c": 1, "u": 6500, "n": 65536, "bt": 2624, "ms": 5000,
+            "hc": 200
+        }), when=self.now - 20000, sent=7000)
+        self.put(probe(3, 20000), when=self.now - 10000)
+        report = build_report(self.db, ID, 24, self.now)
+        summary = render(report)
+        for label in ("راهنمای سریع تفسیر", "ارزیابی وضعیت داده‌ها",
+                      "تازه و پیوسته", "سن ارسال", "تاریخی",
+                      "شکاف", "P50 / P95", "Service Accept"):
+            self.assertIn(label, summary)
+        self.assertIn("<code>#3</code>", summary)
+        self.assertIn("موفق: <b>2</b> از <b>2</b> نمونه", summary)
+        self.assertNotIn("n1.nvlsup.com", summary)
+        self.assertNotIn('"raw_json"', summary)
+        self.assertLess(len(re.sub(r"<[^>]*>", "", summary)), 4096)
+        report["truncated"] = True
+        self.assertIn("ممکن است ناقص", render(report))
+
+    def test_live_labels_never_declare_network_healthy_when_stale(self):
+        ok = {"delivery_freshness": "FRESH", "ssh_freshness": "FRESH",
+              "monitoring_gap": 0}
+        self.assertIn("داده SSH تازه و پیوسته", _coverage_status(ok))
+        self.assertNotIn("اینترنت سالم", _coverage_status(ok))
+        for changes, expected in [
+            ({"delivery_freshness": "STALE"}, "دریافت داده تازه تأیید نشده"),
+            ({"ssh_freshness": "STALE"}, "نمونه تازه SSH در دسترس نیست"),
+            ({"monitoring_gap": 1}, "پیوستگی نمونه‌های SSH تأیید نشده"),
+        ]:
+            modified = {**ok, **changes}
+            self.assertIn(expected, _coverage_status(modified))
+
+    def test_guide_covers_all_visible_metric_families(self):
+        explanation = render_guide()
+        for label in ("دریافت از برد", "SSH تازه", "HTTPS تازه",
+                      "شکاف پایش زنده", "شماره #", "رویداد ثبت‌شده",
+                      "شکاف شماره‌ها", "History Only", "سن ارسال",
+                      "کد ناشناخته", "P50", "P95", "Transport",
+                      "Service Accept", "DNS", "خطای اعتماد",
+                      "غیرقابل‌اندازه‌گیری", "دریافت بدنه"):
+            self.assertIn(label, explanation)
+        self.assertIn("ورود کاربر یا VPN آزمایش نشده", explanation)
+        self.assertIn("فیلترینگ", explanation)
+        self.assertLess(len(re.sub(r"<[^>]*>", "", explanation)), 4096)
+
+    def test_private_guide_navigation_keeps_window_and_never_reads_db(self):
+        from telegram import InlineKeyboardMarkup
+
+        class Query:
+            def __init__(self):
+                self.message = self
+                self.edits = []
+                self.replies = []
+            async def edit_message_text(self, content, **kwargs):
+                self.edits.append((content, kwargs))
+            async def reply_text(self, content):
+                self.replies.append(content)
+
+        for data, target in ((GUIDE_24, REPORT_24), (GUIDE_168, REPORT_168)):
+            q = Query()
+            with patch("denaprobe_admin_dashboard.build_report",
+                       side_effect=AssertionError("guide must not read DB")):
+                self.assertTrue(asyncio.run(handle_dashboard(
+                    q, data=data, role="admin", actor=12, chat=12,
+                    is_private=True, active_admin_ids={12})))
+            self.assertEqual(len(q.edits), 1)
+            content, extras = q.edits[0]
+            self.assertIn("راهنمای تفسیر", content)
+            keyboard = extras["reply_markup"]
+            self.assertIsInstance(keyboard, InlineKeyboardMarkup)
+            callbacks = [button.callback_data for row in keyboard.inline_keyboard
+                         for button in row]
+            self.assertIn(target, callbacks)
+            self.assertIn("apps_home", callbacks)
+            self.assertNotIn("apps_dpt_help_24", callbacks)
+
+        q = Query()
+        self.assertTrue(asyncio.run(handle_dashboard(
+            q, data=GUIDE_24, role="admin", actor=12, chat=13,
+            is_private=True, active_admin_ids={12})))
+        self.assertEqual(len(q.edits), 0)
+        self.assertEqual(len(q.replies), 1)
+
+    def test_report_navigation_and_window_callbacks(self):
+        from telegram import InlineKeyboardMarkup
+        self.started()
+
+        class Query:
+            def __init__(self):
+                self.message = self
+                self.edits = []
+            async def edit_message_text(self, content, **kwargs):
+                self.edits.append((content, kwargs))
+        q = Query()
+        with patch.dict(os.environ, {
+            "DENAPROBE_TELEMETRY_DB": str(self.db),
+            "DENAPROBE_DASHBOARD_DEVICE_ID": ID,
+        }):
+            self.assertTrue(asyncio.run(handle_dashboard(
+                q, data=REPORT_168, role="admin", actor=12, chat=12,
+                is_private=True, active_admin_ids={12})))
+        text, extras = q.edits[0]
+        self.assertIn("۷ روز گذشته", text)
+        keyboard = extras["reply_markup"]
+        self.assertIsInstance(keyboard, InlineKeyboardMarkup)
+        callbacks = [button.callback_data for row in keyboard.inline_keyboard
+                     for button in row]
+        self.assertEqual(callbacks, [REPORT_24, REPORT_168,
+                                     GUIDE_168, REPORT_168, "apps_home"])
 
     def test_denied_callback_never_reads_db(self):
         class Message:

@@ -80,7 +80,7 @@ class MetricsTest(unittest.TestCase):
         self.assertEqual(result["live"]["delivery_freshness"], "FRESH")
         self.assertEqual(result["live"]["https_freshness"], "FRESH")
         self.assertIn("DenaProbe", render(result))
-        self.assertIn("24 ساعت", render(result))
+        self.assertIn("۲۴ ساعت", render(result))
         self.assertNotIn("n1.nvlsup.com", render(result))
 
     def test_sequence_gap_is_observable_not_cross_boot_loss(self):

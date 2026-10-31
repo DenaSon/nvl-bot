@@ -121,7 +121,9 @@ class TestDptIngest(unittest.TestCase):
         self.assertEqual(self.submit(probe(q=2)), 2)  # old sample
         self.assertEqual(self.submit(probe(q=5)), 0)  # contiguous from 4
         with dpt.connect_db(self.db) as db:
-            self.assertEqual(db.execute("SELECT ssh_sequence FROM device_latest_state").fetchone()[0], 5)
+            latest = db.execute("SELECT ssh_sequence,monitoring_gap FROM device_latest_state").fetchone()
+            self.assertEqual(latest["ssh_sequence"], 5)
+            self.assertEqual(latest["monitoring_gap"], 1)  # prior sequence gap not erased
         self.assertEqual(self.submit(probe(q=6, u=8000), sent=100000), 2)
         self.assertEqual(self.submit(probe(q=7, s=199, p=199)), 2)
         with dpt.connect_db(self.db) as db:
@@ -144,6 +146,15 @@ class TestDptIngest(unittest.TestCase):
         self.assertEqual(self.submit(probe(2, boot=OTHER_BOOT), allowed=[]), 2)
         with dpt.connect_db(self.db) as db:
             self.assertEqual(db.execute("SELECT ssh_sequence FROM device_latest_state").fetchone()[0], None)
+
+    def test_two_fresh_results_reestablish_continuity(self):
+        self.assertEqual(self.submit(boot()), 0)
+        self.assertEqual(self.submit(probe(q=2)), 0)
+        with dpt.connect_db(self.db) as db:
+            self.assertEqual(db.execute("SELECT monitoring_gap FROM device_latest_state").fetchone()[0], 1)
+        self.assertEqual(self.submit(probe(q=3, u=9000)), 0)
+        with dpt.connect_db(self.db) as db:
+            self.assertEqual(db.execute("SELECT monitoring_gap FROM device_latest_state").fetchone()[0], 0)
 
     def test_device_event_does_not_override_ssh(self):
         self.assertEqual(self.submit(boot()), 0)

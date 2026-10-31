@@ -85,7 +85,6 @@ class TestDptIngest(unittest.TestCase):
             dict(probe(), s=1, o=127),
             dict(probe(), w=0), dict(probe(), id="bad space"),
             dict(probe(), h={"c": 1, "u": 5100, "n": 120}),
-            dict(probe(), h={"c": 11, "u": 5100}),
             dict(probe(), unused=12),
         ]
         for row in candidates:

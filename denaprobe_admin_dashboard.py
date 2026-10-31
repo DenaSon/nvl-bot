@@ -100,12 +100,18 @@ async def handle_dashboard(query, *, data: str, role: str | None,
     else:
         content = render(report)
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram.error import BadRequest
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("۲۴ ساعت", callback_data="apps_dpt_24"),
          InlineKeyboardButton("۷ روز", callback_data="apps_dpt_168")],
         [InlineKeyboardButton("🔄 بروزرسانی", callback_data=data)],
         [InlineKeyboardButton("↩️ برنامه‌ها", callback_data="apps_home")],
     ])
-    await query.edit_message_text(
-        content, parse_mode="HTML", reply_markup=keyboard)
+    try:
+        await query.edit_message_text(
+            content, parse_mode="HTML", reply_markup=keyboard)
+    except BadRequest as exc:
+        # Two immediate refresh taps can produce identical text/markup.
+        if "Message is not modified" not in str(exc):
+            raise
     return True

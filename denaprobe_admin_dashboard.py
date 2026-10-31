@@ -87,6 +87,8 @@ def render(report: dict) -> str:
                  if report["truncated"] else "")
     unknown = (f"\n• کدهای ناشناخته: <b>{events['unknown_codes']:,}</b>"
                if events["unknown_codes"] else "")
+    history_note = ("⚠️ بعضی گزارش‌ها برای وضعیت زنده قابل‌استفاده نبوده‌اند.\n"
+                    if history else "")
     return (
         "📡 <b>DenaProbe | کیفیت پایش</b>\n"
         f"برد: <code>{device}</code>\n"
@@ -103,7 +105,7 @@ def render(report: dict) -> str:
         f"• رویداد تاریخی (غیرزنده): <b>{history:,}</b>\n"
         f"• سن ارسال P50 / P95: {_p(report['sender_age'])}"
         f"{unknown}\n"
-        f"{('⚠️ بعضی گزارش‌ها برای وضعیت زنده قابل‌استفاده نبوده‌اند.\n' if history else '')}\n"
+        f"{history_note}\n"
         "🔐 <b>کیفیت SSH (نمونه‌های معتبر)</b>\n"
         f"• موفق: <b>{ssh['pass']:,}</b> از <b>{usable_ssh:,}</b> نمونه\n"
         f"• نتیجه ناموفق مسیر: <b>{ssh['path_nonpass']:,}</b>\n"

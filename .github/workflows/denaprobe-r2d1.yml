@@ -1,0 +1,47 @@
+name: DenaProbe R2-D1 quality/dashboard checks
+
+on:
+  pull_request:
+    paths:
+      - "denaprobe_ingest/**"
+      - "denaprobe_admin_dashboard.py"
+      - "bot_final_v49-2.py"
+      - "tests/test_denaprobe_*.py"
+      - ".github/workflows/denaprobe-r2d1.yml"
+  push:
+    branches:
+      - "feature/r2d1-*"
+    paths:
+      - "denaprobe_ingest/**"
+      - "denaprobe_admin_dashboard.py"
+      - "bot_final_v49-2.py"
+      - "tests/test_denaprobe_*.py"
+      - ".github/workflows/denaprobe-r2d1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  metrics-and-dashboard:
+    name: Metrics / Collector / Bot syntax (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Metrics / collector / dashboard syntax (Python 3.11 and 3.12)
+        run: python -m py_compile denaprobe_ingest/metrics.py denaprobe_ingest/collector.py denaprobe_admin_dashboard.py
+      - name: NVLBot syntax (Python 3.12; existing code uses PEP 701 f-strings)
+        if: matrix.python-version == '3.12'
+        run: python -m py_compile bot_final_v49-2.py
+      - name: Collector signed-ingest regressions
+        run: python -m unittest discover -s tests -p "test_denaprobe_collector.py" -v
+      - name: R2-D1 query-only metrics and admin authorization regressions
+        run: python -m unittest discover -s tests -p "test_denaprobe_metrics_dashboard.py" -v

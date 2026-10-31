@@ -16705,7 +16705,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ---------------- Programs / operational tools ----------------
     # R2-D1: DenaProbe metrics are read-only; every callback revalidates the
     # active admin ID and private-chat actor, never relying on persisted role.
-    if d in ("apps_dpt_24", "apps_dpt_168"):
+    if d in ("apps_dpt_24", "apps_dpt_168", "apps_dpt_help_24", "apps_dpt_help_168"):
         from denaprobe_admin_dashboard import handle_dashboard as _handle_dpt_dashboard
         active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
         await _handle_dpt_dashboard(

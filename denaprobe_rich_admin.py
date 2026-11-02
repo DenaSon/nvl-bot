@@ -57,6 +57,8 @@ def _rich(blocks):
 
 def _state(model):
     active = model["active"]
+    if active and model["stale"]:
+        return "🟠 اختلال قبلی · تازگی پایش نامشخص"
     if active:
         return "🔴 اختلال احتمالی"
     if not model["states"] or model["stale"]:
@@ -78,6 +80,8 @@ def render_home(model):
             ("بردهای تازه", model["fresh"]),
             ("بردهای قدیمی/نامشخص", model["stale"]),
             ("آخرین داده", _age(latest, model["now"])),
+            ("اپراتور (اعلام‌شده)", "، ".join(sorted(set(
+                model.get("operators", {}).values()))) or "ثبت نشده"),
             ("ارزیابی فیلترینگ", "مشکوک؛ منشأ تأییدنشده" if active else "نامشخص"),
         ]),
         {"type": "divider"},
@@ -111,7 +115,8 @@ def render_history(model, page=0):
     rows = [
         (f"رله {x['target_id']} · {_time(x['opened_at'])}",
          (CLASSES.get(x["observed_class"], "نامشخص") +
-          (" · بازیابی" if x["recovered_at"] else " · فعال")))
+          (" · بازیابی" if x["recovered_at"] else
+           " · مقصد تغییر کرده" if x["superseded_at"] else " · فعال")))
         for x in batch
     ]
     controls = [("↩️ داشبورد", "dp3:home")]
@@ -140,6 +145,13 @@ def render_detail(model, identifier):
                   s["device_id"] == record["device_id"] and
                   s["target_id"] == record["target_id"] and
                   s["revision"] == record["revision"]), None)
+    key = (record["device_id"], record["target_id"], record["revision"])
+    sample = model.get("samples", {}).get(key, {})
+    first, second = sample.get("first") or {}, sample.get("second") or {}
+    def count(piece):
+        if not piece:
+            return "اندازه‌گیری نشد"
+        return f"{piece.get('n', 0)}/{piece.get('r', 0)} بایت · کد {piece.get('s', 90)}"
     stale = (not state or state["observation"] == detector.UNKNOWN or
              model["now"] - state["last_received_at"] > detector.FRESH_MS)
     return _rich([
@@ -150,13 +162,23 @@ def render_detail(model, identifier):
             ("کد", record["id"][:12]),
             ("رله", record["target_id"]),
             ("نسخه مقصد", record["revision"]),
+            ("اپراتور (اعلام‌شده)", model.get("operators", {}).get(
+                record["device_id"], "ثبت نشده")),
             ("نوع", CLASSES.get(record["observed_class"], "نامشخص")),
             ("اطمینان", "مشکوک" if record["confidence"] == detector.SUSPECTED else
                          "قابل قضاوت نیست"),
             ("شواهد", record["reason"]),
+            ("TCP (کد / ms)", f"{sample.get('tcp_code', '—')} / {sample.get('tcp_ms', '—')}"),
+            ("احراز هویت (ms)", sample.get("auth_ms") if sample.get("auth_ms") is not None else "اندازه‌گیری نشد"),
+            ("نشست (ms)", sample.get("session_ms") if sample.get("session_ms") is not None else "اندازه‌گیری نشد"),
+            ("انتقال اول", count(first)),
+            ("انتقال دوم", count(second)),
+            ("HTTPS مستقیم", sample.get("direct_code") if sample.get("direct_code") is not None else "اندازه‌گیری نشد"),
+            ("دریافت سرور", _time(sample.get("received_at"))),
             ("شروع", _time(record["opened_at"])),
             ("آخرین شاهد", _time(record["last_evidence_at"])),
             ("بازیابی", _time(record["recovered_at"]) if record["recovered_at"] else "ثبت نشده"),
+            ("جایگزینی مقصد", _time(record["superseded_at"]) if record["superseded_at"] else "—"),
             ("تازگی پایش", "نامشخص / قدیمی" if stale else
                             _age(state["last_received_at"], model["now"])),
         ]),
@@ -181,6 +203,8 @@ def render_transition(model, entry):
         _table([
             ("شناسه", incident["id"][:12]),
             ("رله", incident["target_id"]),
+            ("اپراتور (اعلام‌شده)", model.get("operators", {}).get(
+                incident["device_id"], "ثبت نشده")),
             ("نوع", CLASSES.get(entry["observed_class"], "بازیابی")),
             ("اطمینان", "مشکوک؛ نیازمند تأیید مستقل"
                         if kind != "RECOVERED" else "دو آزمون سالم جدید"),

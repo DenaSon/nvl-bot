@@ -153,8 +153,8 @@ class ManualQuickSwitchUI:
             message+="\n🌐 DNS: <b>تأییدشده</b>\n\n" \
                      "اتصال واقعی مشتری را نیز بررسی کنید."
         elif status=="ABORTED" and rec.get("error_code")=="ADMIN_FORCE_ABORT_UNRECONCILED":
-            message+="\n\n⚠️ فقط پرونده و قفل عملیات آزاد شده‌اند؛ "
-                     "DNS و حساب‌های کاربران تغییر نکرده‌اند."
+            message+=("\n\n⚠️ فقط پرونده و قفل عملیات آزاد شده‌اند؛ "
+                      "DNS و حساب‌های کاربران تغییر نکرده‌اند.")
         return await self._view(context,chat,message,rows)
 
     def _claim_done_notice(self, job, actor, chat):

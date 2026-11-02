@@ -1,0 +1,42 @@
+name: DenaProbe R3 incident and Rich admin
+
+on:
+  push:
+    branches:
+      - "feature/r3-phase3-*"
+      - master
+    paths:
+      - "denaprobe_ingest/**"
+      - "denaprobe_alerts.py"
+      - "denaprobe_rich_admin.py"
+      - "bot_final_v49-2.py"
+      - "tests/test_denaprobe_phase3.py"
+      - ".github/workflows/denaprobe-r3-phase3.yml"
+  pull_request:
+    paths:
+      - "denaprobe_ingest/**"
+      - "denaprobe_alerts.py"
+      - "denaprobe_rich_admin.py"
+      - "bot_final_v49-2.py"
+      - "tests/test_denaprobe_phase3.py"
+      - ".github/workflows/denaprobe-r3-phase3.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  phase3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile bot and isolated R3 modules
+        run: python -m py_compile bot_final_v49-2.py denaprobe_alerts.py denaprobe_rich_admin.py denaprobe_ingest/detector.py
+      - name: R3 E2E and unchanged DPT1/DPT2 regression
+        run: |
+          python -m unittest discover -s tests -p 'test_denaprobe*.py' -v
+          python -m unittest discover -s tests -p 'test_cloudzy_rich_bridge_phase7.py' -v

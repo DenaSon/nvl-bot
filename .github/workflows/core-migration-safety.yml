@@ -39,6 +39,6 @@ jobs:
           rsync -az --prune-empty-dirs \
             --exclude='__pycache__/' --exclude='.git/' --include='*/' \
             --include='*.py' --include='*.sh' --include='requirements.txt' --exclude='*' \
-            ./*.py ./*.sh requirements.txt ops server_migration "$stage/"
+            ./*.py ./*.sh requirements.txt ops server_migration denaprobe_ingest "$stage/"
           cd "$stage"
           PYTHONPATH= "$RUNNER_TEMP/nvl-import-venv/bin/python" bot_import_preflight.py bot_final_v49-2.py

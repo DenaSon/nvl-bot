@@ -7513,6 +7513,38 @@ from cloudzy_rich_bridge import (
     handle_rich_admin_callback as _cloudzy_rich_admin_callback,
 )
 
+# DenaProbe R3: optional, native Telegram Rich Message integration only.
+# The DPT Collector remains a separate DB/service; this bot is the sole
+# Telegram poller. Explicit operator activation is required after field E2E.
+from cloudzy_rich_transport import RichBotAPI as _DenaProbeRichBotAPI
+from denaprobe_rich_admin import (
+    ENTRY as _DP3_ENTRY, handle_callback as _dp3_handle_callback,
+)
+from denaprobe_alerts import tick as _dp3_alert_tick
+
+_DP3_ENABLED = os.environ.get("NVL_DENAPROBE_R3_ENABLED", "0") == "1"
+_DP3_DB_PATH = os.environ.get(
+    "NVL_DENAPROBE_DB_PATH", "/var/lib/denaprobe/telemetry.sqlite3")
+
+
+async def _dp3_monitor_loop(app):
+    """Read-only evidence -> durable incident/outbox, existing bot only."""
+    while True:
+        try:
+            recipients = await asyncio.to_thread(_db_get_admin_chat_ids)
+            outcome = await _dp3_alert_tick(
+                _DP3_DB_PATH, recipients, _DenaProbeRichBotAPI(app.bot.token))
+            log.info("DenaProbe R3 detector round sent=%s held=%s",
+                     outcome["sent"], outcome["held"])
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # No fail-open network actions, customer mutations or secrets.
+            log.warning("DenaProbe R3 detector round held (%s)",
+                        type(exc).__name__)
+        await asyncio.sleep(30)
+
+
 
 def _cloudzy_markup(rows):
     return InlineKeyboardMarkup([
@@ -7541,6 +7573,9 @@ def _build_admin_programs_kb(*, actor=None, chat=None, active_admin_ids=()):
             and actor > 0 and actor == chat and actor in active_admin_ids):
         rows.insert(0,[InlineKeyboardButton(
             "🌐 مدیریت Edge", callback_data="apps_edge_quick_home")])
+        if _DP3_ENABLED:
+            rows.insert(1,[InlineKeyboardButton(
+                "📡 پایش DenaProbe", callback_data=_DP3_ENTRY)])
     return rows
 
 
@@ -16729,6 +16764,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat=update.effective_chat.id,
             is_private=(getattr(update.effective_chat,"type",None)=="private"),
         )
+        return
+    if d == _DP3_ENTRY or d.startswith("dp3:"):
+        # Always revalidate private-chat and live admin membership.
+        # Existing bot authentication already ran at callback entry.
+        if _DP3_ENABLED:
+            active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
+            result = await _dp3_handle_callback(
+                data=d, query=query, context=context, db_path=_DP3_DB_PATH,
+                role=role, actor=update.effective_user.id,
+                chat=update.effective_chat.id,
+                is_private=(getattr(update.effective_chat, "type", None) == "private"),
+                active_admin_ids=active_admin_ids,
+            )
+            if result in ("RICH_UNAVAILABLE", "STALE_OR_FORWARDED_CARD"):
+                log.warning("DenaProbe R3 dashboard hold code=%s", result)
         return
     if d in ("apps_cz_rich_home", "apps_cz_rich_migration") or d.startswith("u7:"):
         active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
@@ -30966,6 +31016,10 @@ async def cmd_marzban_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def _post_init(app):
+    if _DP3_ENABLED:
+        # No new poller or systemd unit. Opt-in only AFTER hardware/Core E2E.
+        app.bot_data["dp3_monitor_task"] = asyncio.create_task(
+            _dp3_monitor_loop(app))
     # K2 Single shares this application's existing root process and 6G.
     # Missing release profile is OFF; a failed optional startup must not
     # prevent the existing bot and its legacy features from starting.
@@ -31023,7 +31077,7 @@ async def _post_shutdown(app):
     # قلم افتاده بود — پس هیچ‌وقت cancel نمی‌شد و روی asyncio.sleep(...) منتظر می‌ماند، پروسه
     # واقعاً خارج نمی‌شد تا systemd صبرش تمام شود و به‌زور بکشدش (که همان قطعیِ طولانی و نیازِ
     # نماینده‌ها به ورودِ مجدد را رقم می‌زد).
-    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 V119A Regional Filter Monitor'), ('radar_monitor_task', '🌐 Cloudflare Radar Network Context'), ('fast_default_sentinel_task', '⚡ V119A Fast Default Sentinel'), ('standby_readiness_task', '🛟 V119C Warm Standby Watchdog'), ('marzban_asset_discovery_task', '🧭 V120A Marzban Asset Discovery'), ('marzban_local_health_task', '🩺 V120B Marzban Local Health'), ('marzban_regional_task', '🌍 V120C Marzban Regional Filtering'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار')):
+    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 V119A Regional Filter Monitor'), ('radar_monitor_task', '🌐 Cloudflare Radar Network Context'), ('fast_default_sentinel_task', '⚡ V119A Fast Default Sentinel'), ('standby_readiness_task', '🛟 V119C Warm Standby Watchdog'), ('marzban_asset_discovery_task', '🧭 V120A Marzban Asset Discovery'), ('marzban_local_health_task', '🩺 V120B Marzban Local Health'), ('marzban_regional_task', '🌍 V120C Marzban Regional Filtering'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار'), ('dp3_monitor_task', '📡 DenaProbe R3')):
         task = app.bot_data.get(key)
         if task and not task.done():
             task.cancel()

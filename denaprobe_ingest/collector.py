@@ -559,6 +559,8 @@ def main() -> None:
     target.add_argument("--port", type=int, required=True)
     recent = sub.add_parser("recent")
     recent.add_argument("--limit", type=int, default=20)
+    recent2 = sub.add_parser("recent-v2")
+    recent2.add_argument("--limit", type=int, default=20)
     sub.add_parser("check")
     serve = sub.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
@@ -605,6 +607,15 @@ def main() -> None:
             for row in db.execute("""SELECT device_id,boot_id,sequence,event_kind,
                         ssh_code,stop_stage,https_code,sender_age_ms,
                         history_only,received_at_ms FROM telemetry_events
+                        ORDER BY received_at_ms DESC,sequence DESC LIMIT ?""",
+                                  (max(1, min(args.limit, 100)),)):
+                print(dict(row))
+    elif args.action == "recent-v2":
+        with connect_db(args.db) as db:
+            for row in db.execute("""SELECT device_id,boot_id,sequence,kind,
+                        tcp_code,deep_code,first_code,second_code,https_code,
+                        target_revision,sender_age_ms,history_only,received_at_ms
+                        FROM dpt2_events
                         ORDER BY received_at_ms DESC,sequence DESC LIMIT ?""",
                                   (max(1, min(args.limit, 100)),)):
                 print(dict(row))

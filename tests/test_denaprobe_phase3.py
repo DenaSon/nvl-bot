@@ -83,6 +83,9 @@ class TestPhase3(unittest.TestCase):
             pass
         else:
             raise ValueError(kind)
+        if wifi == 0:
+            # DPT/1 inherited semantics forbid Wi-Fi RSSI when down.
+            body.pop("r", None)
         if direct:
             body["h"] = {"u": u+21000, "c": 1, "n": 65536, "bt": 2200}
         signed_uptime = max(u, body.get("h", {}).get("u", 0),

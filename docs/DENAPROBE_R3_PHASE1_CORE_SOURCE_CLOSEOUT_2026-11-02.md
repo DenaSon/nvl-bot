@@ -1,5 +1,5 @@
 # DenaProbe R3 Phase 1 — independent Core Collector source closeout
-**Date:** 2026-11-02 | **Scope:** DPT/1 only, no DPT/2 endpoint/incident engine/bot notifications | **Field status:** operator deployment/physical acceptance unverified.
+**Date:** 2026-11-02 | **Scope:** DPT/1 only, no DPT/2 endpoint/incident engine/bot notifications | **Status:** SOURCE-MERGED to `master` (NVLBot PR #263 -> PR #262; master merge `f68f51e008f41d1e893cfa9df4c6156add3cbd19`), PR-head Python checks and Legacy Core safety passed; **live isolated Collector replacement / ESP32 field acceptance NOT VERIFIED**, post-merge master CI separate.
 **Paired firmware:** DenaProbe `feature/r2c-hardening-fifo-20261031`, parent R2-A. Previous live experimental collector on `127.0.0.1:18081` was verified 2026-10-31 *before hardening*; do not assume the installed SHA matches source.
 
 ## Reliable live-state invariants

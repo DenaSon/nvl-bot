@@ -127,6 +127,20 @@ class TestDpt2(unittest.TestCase):
         with self.assertRaises(v1.DptError):
             dpt2.validate(dict(boot(), c={"u": 300, "s": 1}), 1200)
 
+    def test_hotspot_loss_during_deep_witness_is_history_only(self):
+        self.assertEqual(self.accept(boot()), 0)
+        lost = probe(q=2, w=0, z={"u": 2800, "s": 90})
+        lost.pop("r")
+        self.assertEqual(self.accept(lost), 2)
+        with v1.connect_db(self.db) as db:
+            event = db.execute(
+                "SELECT history_only,wifi_code,deep_code FROM dpt2_events "
+                "WHERE sequence=2"
+            ).fetchone()
+            self.assertEqual(tuple(event), (1, 0, 90))
+            self.assertIsNone(db.execute(
+                "SELECT ssh_sequence FROM dpt2_latest").fetchone()[0])
+
     def test_unknown_and_expired_cannot_be_promoted(self):
         self.assertEqual(self.accept(boot()), 0)
         self.assertEqual(self.accept(probe(q=2, c={"u": 1800, "s": 777})), 2)

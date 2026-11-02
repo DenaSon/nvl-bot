@@ -7574,7 +7574,7 @@ def _build_admin_programs_kb(*, actor=None, chat=None, active_admin_ids=()):
             and actor > 0 and actor == chat and actor in active_admin_ids):
         rows.insert(0,[InlineKeyboardButton(
             "🌐 مدیریت Edge", callback_data="apps_edge_quick_home")])
-        if _DP3_ENABLED:
+        if globals().get("_DP3_ENABLED", False):
             rows.insert(1,[InlineKeyboardButton(
                 "📡 پایش DenaProbe", callback_data=_DP3_ENTRY)])
     return rows
@@ -16766,10 +16766,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             is_private=(getattr(update.effective_chat,"type",None)=="private"),
         )
         return
-    if d == _DP3_ENTRY or d.startswith("dp3:"):
+    if d == "apps_dp3_home" or d.startswith("dp3:"):
         # Always revalidate private-chat and live admin membership.
         # Existing bot authentication already ran at callback entry.
-        if _DP3_ENABLED:
+        if globals().get("_DP3_ENABLED", False):
             active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
             result = await _dp3_handle_callback(
                 data=d, query=query, context=context, db_path=_DP3_DB_PATH,
@@ -31017,7 +31017,7 @@ async def cmd_marzban_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def _post_init(app):
-    if _DP3_ENABLED:
+    if globals().get("_DP3_ENABLED", False):
         # No new poller or systemd unit. Opt-in only AFTER hardware/Core E2E.
         app.bot_data["dp3_monitor_task"] = asyncio.create_task(
             _dp3_monitor_loop(app))

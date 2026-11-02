@@ -382,6 +382,23 @@ class ManualEdgeJournal:
                     or pool[5] != customer_port or pool[6] != row[1]):
                 raise ManualEdgeHold("MANUAL_HOST_POOL_MISMATCH")
 
+    def blocking_by_owner(self, actor, chat):
+        """Find the actual exclusive intake/install for recovery navigation."""
+        if type(actor) is not int or type(chat) is not int or actor<=0 or chat!=actor:
+            raise ManualEdgeHold("ADMIN_IDENTITY_INVALID")
+        with self.db() as db:
+            self.initialize(db)
+            db.row_factory=sqlite3.Row
+            row=db.execute(
+                "SELECT id,ip,status FROM manual_edge_operations "
+                "WHERE actor=? AND chat=? AND status IN "
+                "('DRAFT','IDENTITY_PENDING','HOSTKEY_PENDING',"
+                "'READY_INSTALL','INSTALLING') "
+                "ORDER BY updated_at DESC,rowid DESC LIMIT 1",
+                (actor,chat),
+            ).fetchone()
+            return dict(row) if row else None
+
     def start(self, actor, chat):
         if type(actor) is not int or type(chat) is not int or actor <= 0 or chat <= 0:
             raise ManualEdgeHold("ADMIN_IDENTITY_INVALID")

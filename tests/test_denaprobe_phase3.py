@@ -203,6 +203,70 @@ class TestPhase3(unittest.TestCase):
         query.message.message_id = 10
         self.assertEqual(asyncio.run(open_card("dp3:home")), "STALE_OR_FORWARDED_CARD")
 
+    def test_silent_interval_resets_pending_evidence_streak(self):
+        self.ready()
+        self.submit("d0"); self.evaluate()
+        # The old D0 confirmation cannot survive monitoring silence.
+        self.assertEqual(self.evaluate(extra=190000), [])
+        with collector.connect_db(self.db) as db:
+            state = db.execute(
+                "SELECT streak,observation FROM dp3_states").fetchone()
+            self.assertEqual(tuple(state), (0, detector.UNKNOWN))
+        self.submit("d0")
+        self.assertFalse(self.evaluate())
+        self.submit("d0")
+        self.assertEqual(self.evaluate()[0]["kind"], "OPEN")
+
+    def test_skipped_q_cannot_complete_pending_streak(self):
+        self.ready()
+        self.submit("d0"); self.evaluate()
+        self.submit("healthy")  # ingestion succeeded but skipped by classifier
+        self.submit("d0")
+        self.assertFalse(self.evaluate())
+        self.submit("d0")
+        self.assertEqual(self.evaluate()[0]["kind"], "OPEN")
+
+    def test_historical_limit_never_hides_old_active_incident(self):
+        self.ready()
+        active_id = "a"*24
+        with collector.connect_db(self.db) as db:
+            db.execute(
+                "INSERT INTO dp3_incidents(id,device_id,target_id,revision,"
+                "observed_class,confidence,reason,opened_at,last_evidence_at,last_sequence) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (active_id,DEVICE,1,1,detector.D0,"SUSPECTED",
+                 "TEST_OPEN", NOW-999000,NOW-999000,1))
+            for i in range(60):
+                db.execute(
+                    "INSERT INTO dp3_incidents(id,device_id,target_id,revision,"
+                    "observed_class,confidence,reason,opened_at,last_evidence_at,"
+                    "last_sequence,recovered_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (f"{i:024x}",DEVICE,1,1,detector.D1,"INCONCLUSIVE",
+                     "TEST_RECOVERED",NOW+i,NOW+i,2,NOW+i+1))
+        model=self.dashboard()
+        self.assertEqual(len(model["active"]), 1)
+        self.assertEqual(model["active"][0]["id"], active_id)
+        self.assertEqual(render_home(model)["blocks"][1]["text"], "🔴 اختلال احتمالی")
+
+    def test_revoked_admin_never_receives_queued_rich_alert(self):
+        self.ready()
+        self.submit("d0"); self.evaluate()
+        self.submit("d0"); self.evaluate()
+        with collector.connect_db(self.db) as db:
+            trans = db.execute("SELECT id FROM dp3_transitions").fetchone()[0]
+            db.execute(
+                "INSERT INTO dp3_delivery(transition_id,recipient_id,status,updated_at)"
+                " VALUES(?,9,'READY',?)", (trans,self.now))
+        api = FakeRichAPI()
+        result=asyncio.run(tick(self.db, [7], api, now_ms=self.now+1000))
+        self.assertEqual(result["sent"],1)
+        self.assertEqual([x[0] for x in api.sent],[7])
+        with collector.connect_db(self.db) as db:
+            status=db.execute(
+                "SELECT status FROM dp3_delivery WHERE recipient_id=9"
+            ).fetchone()[0]
+            self.assertEqual(status,"REVOKED")
+
     def test_outbox_dedup_sent_and_uncertain_no_duplicate_retry(self):
         self.ready()
         self.submit("d0"); self.evaluate()

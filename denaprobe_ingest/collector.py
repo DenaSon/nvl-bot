@@ -363,10 +363,16 @@ class CollectorHTTP(ThreadingHTTPServer):
     allow_reuse_address = True
     max_handlers = 12  # Strictly below the systemd TasksMax=24 limit.
 
-    def __init__(self, bind: tuple[str, int], db: Path, keys: Path):
+    def __init__(self, bind: tuple[str, int], db: Path, keys: Path,
+                 enable_v2: bool = False):
         super().__init__(bind, CollectorHandler)
         self.db_path = db
         self.keys_path = keys
+        self.enable_v2 = enable_v2
+        if enable_v2:
+            # Explicitly gated and isolated from legacy DPT/1 storage.
+            from denaprobe_ingest import dpt2
+            dpt2.initialize(db)
         self._handler_slots = threading.BoundedSemaphore(self.max_handlers)
 
     def process_request(self, request, client_address) -> None:
@@ -435,7 +441,12 @@ class CollectorHandler(BaseHTTPRequestHandler):
         self.respond(200, {"status": "ok", "service": "denaprobe-core"})
 
     def do_POST(self) -> None:
-        if self.path != ENDPOINT:
+        from denaprobe_ingest import dpt2
+        if self.path != ENDPOINT and self.path != dpt2.ENDPOINT:
+            self.respond(404)
+            return
+        is_v2 = self.path == dpt2.ENDPOINT
+        if is_v2 and not self.server.enable_v2:
             self.respond(404)
             return
         if self.headers.get("Transfer-Encoding") or self.headers.get("Content-Encoding"):
@@ -471,14 +482,24 @@ class CollectorHandler(BaseHTTPRequestHandler):
             for key in ("x-dpt-device", "x-dpt-key-id", "x-dpt-sent-uptime-ms", "x-dpt-signature"):
                 headers[key] = self.headers.get_all(key, [])
             config = load_devices(self.server.keys_path)
-            device, sent = authenticate(raw, headers, config)
+            if is_v2:
+                device, sent = dpt2.authenticate(raw, headers, config)
+            else:
+                device, sent = authenticate(raw, headers, config)
             body = json_body(raw)
             if body.get("id") != device:
                 raise DptError(403, "unauthorized")
-            kind, _ = validate(body, sent)
             allowed = config[device].get("targets", [])
-            outcome = store(self.server.db_path, body, raw, sent, allowed_targets=allowed)
-            self.respond(200, {"v": 1, "b": body["b"], "q": body["q"], "ack": {"r": outcome}})
+            if is_v2:
+                dpt2.validate(body, sent)
+                outcome = dpt2.store(self.server.db_path, body, raw, sent,
+                                     allowed_targets=allowed)
+            else:
+                validate(body, sent)
+                outcome = store(self.server.db_path, body, raw, sent,
+                                allowed_targets=allowed)
+            self.respond(200, {"v": 2 if is_v2 else 1,
+                               "b": body["b"], "q": body["q"], "ack": {"r": outcome}})
         except DptError as exc:
             # Avoid leaking anything identifying device/secret/signature.
             self.respond(exc.http_status)
@@ -542,6 +563,8 @@ def main() -> None:
     serve = sub.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=18081)
+    serve.add_argument("--enable-v2", action="store_true",
+                       help="Explicit staging-only DPT/2 gate (default OFF)")
     args = parser.parse_args()
     if args.action == "init":
         initialize(args.db)
@@ -599,7 +622,8 @@ def main() -> None:
         load_devices(args.keys)
         with connect_db(args.db) as db:
             db.execute("SELECT 1 FROM telemetry_events LIMIT 1")
-        server = CollectorHTTP((args.host, args.port), args.db, args.keys)
+        server = CollectorHTTP((args.host, args.port), args.db, args.keys,
+                               enable_v2=args.enable_v2)
         print("DPT_COLLECTOR_READY loopback_only=YES detection=DISABLED", flush=True)
         try:
             server.serve_forever(poll_interval=0.4)

@@ -248,6 +248,24 @@ class TestPhase3(unittest.TestCase):
         self.assertEqual(model["active"][0]["id"], active_id)
         self.assertEqual(render_home(model)["blocks"][1]["text"], "🔴 اختلال احتمالی")
 
+    def test_superseded_target_never_sends_delayed_outage_alert(self):
+        self.ready()
+        self.submit("d0"); self.evaluate()
+        self.submit("d0"); self.evaluate()
+        collector.register_target(self.db, 1, "new.target.test.invalid", 2252)
+        self.submit("healthy"); self.evaluate()
+        self.submit("healthy"); self.evaluate()
+        self.assertFalse(self.dashboard()["active"])
+        api=FakeRichAPI()
+        result=asyncio.run(tick(self.db, [7], api, now_ms=self.now+1000))
+        self.assertEqual(result["sent"],0)
+        with collector.connect_db(self.db) as db:
+            row=db.execute(
+                "SELECT superseded_at,recovered_at FROM dp3_incidents"
+            ).fetchone()
+            self.assertIsNotNone(row[0])
+            self.assertIsNone(row[1])
+
     def test_revoked_admin_never_receives_queued_rich_alert(self):
         self.ready()
         self.submit("d0"); self.evaluate()

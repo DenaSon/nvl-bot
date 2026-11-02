@@ -4,6 +4,10 @@ import hmac
 import base64
 import http.client
 import json
+import socket
+import subprocess
+import sys
+import time
 from pathlib import Path
 import tempfile
 import threading
@@ -140,6 +144,50 @@ class TestDpt2(unittest.TestCase):
         with v1.connect_db(self.db) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM dpt2_events").fetchone()[0], 2)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM telemetry_events").fetchone()[0], 0)
+
+    def test_systemd_direct_script_mode_keeps_v1_and_v2_error_types(self):
+        # Match the existing systemd ExecStart: python /opt/.../collector.py.
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+        script = Path(__file__).resolve().parents[1] / "denaprobe_ingest/collector.py"
+        command = [sys.executable, str(script), "--db", str(self.db),
+                   "--keys", str(self.keys), "serve",
+                   "--host", "127.0.0.1", "--port", str(port), "--enable-v2"]
+        process = subprocess.Popen(command, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL)
+        try:
+            available = False
+            for _ in range(35):
+                if process.poll() is not None:
+                    self.fail("direct-script Collector exited unexpectedly")
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                        available = True
+                        break
+                except (ConnectionRefusedError, TimeoutError):
+                    time.sleep(0.05)
+            self.assertTrue(available)
+            for path, expected in (("/healthz", 200),
+                                   (v1.ENDPOINT, 403),
+                                   (dpt2.ENDPOINT, 403)):
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+                if path == "/healthz":
+                    conn.request("GET", path)
+                else:
+                    conn.request("POST", path, body=b"{}",
+                                 headers={"Content-Type": "application/json"})
+                response = conn.getresponse()
+                self.assertEqual(response.status, expected, path)
+                response.read()
+                conn.close()
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
 
     def test_http_disabled_default_enabled_auth_and_signed_ack(self):
         def server(enable):

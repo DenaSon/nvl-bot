@@ -27,10 +27,25 @@ def _reserve(path, recipient_ids, *, now_ms):
         return []
     with collector.connect_db(Path(path)) as db:
         db.execute("BEGIN IMMEDIATE")
+        # Never replay a large historical backlog when notifications are first
+        # enabled or an administrator joins. Existing incidents remain visible
+        # in the dashboard; only recent transitions produce proactive alerts.
         transitions = db.execute(
-            "SELECT id FROM dp3_transitions ORDER BY id DESC LIMIT 80"
+            "SELECT id,incident_id,kind,occurred_at FROM dp3_transitions "
+            "WHERE occurred_at>=? ORDER BY id DESC LIMIT 80",
+            (now_ms-300000,)
         ).fetchall()
         for tr in transitions:
+            # Material class changes use a 120-second notification cooldown
+            # after the preceding incident transition. Do not suppress the
+            # stored transition or incident history.
+            if tr["kind"] == "CHANGE":
+                earlier = db.execute(
+                    "SELECT occurred_at FROM dp3_transitions WHERE "
+                    "incident_id=? AND id<? ORDER BY id DESC LIMIT 1",
+                    (tr["incident_id"],tr["id"])).fetchone()
+                if earlier and now_ms - earlier["occurred_at"] < 120000:
+                    continue
             for recipient in recipients:
                 db.execute(
                     "INSERT OR IGNORE INTO dp3_delivery "

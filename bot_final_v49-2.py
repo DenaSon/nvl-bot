@@ -7516,15 +7516,16 @@ from cloudzy_rich_bridge import (
 # DenaProbe R3: optional, native Telegram Rich Message integration only.
 # The DPT Collector remains a separate DB/service; this bot is the sole
 # Telegram poller. Explicit operator activation is required after field E2E.
-from cloudzy_rich_transport import RichBotAPI as _DenaProbeRichBotAPI
-from denaprobe_rich_admin import (
-    ENTRY as _DP3_ENTRY, handle_callback as _dp3_handle_callback,
-)
-from denaprobe_alerts import tick as _dp3_alert_tick
-
 _DP3_ENABLED = os.environ.get("NVL_DENAPROBE_R3_ENABLED", "0") == "1"
 _DP3_DB_PATH = os.environ.get(
     "NVL_DENAPROBE_DB_PATH", "/var/lib/denaprobe/telemetry.sqlite3")
+_DP3_ENTRY = "apps_dp3_home"
+# Do NOT import experimental DPT packages when this opt-in feature is OFF.
+# Older promoted Cores and standby code snapshots must keep starting safely.
+if _DP3_ENABLED:
+    from cloudzy_rich_transport import RichBotAPI as _DenaProbeRichBotAPI
+    from denaprobe_rich_admin import handle_callback as _dp3_handle_callback
+    from denaprobe_alerts import tick as _dp3_alert_tick
 
 
 async def _dp3_monitor_loop(app):

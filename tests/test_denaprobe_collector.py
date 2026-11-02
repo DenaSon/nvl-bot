@@ -231,6 +231,68 @@ class TestDptIngest(unittest.TestCase):
             self.assertEqual(row["ssh_sequence"], 2)
             self.assertEqual(row["monitoring_gap"], 1)
 
+    def test_stale_local_event_cannot_modify_live_monitoring_gap(self):
+        self.assertEqual(self.submit(boot()), 0)
+        self.assertEqual(self.submit(probe(q=2)), 0)
+        self.assertEqual(self.submit(probe(q=3, u=9000)), 0)
+        event = {"v": 1, "id": DEVICE, "b": BOOT, "q": 4,
+                 "u": 10000, "k": 2, "s": 96, "w": 0}
+        self.assertEqual(self.submit(event, sent=120000), 2)
+        with dpt.connect_db(self.db) as db:
+            history = db.execute(
+                "SELECT history_only FROM telemetry_events WHERE sequence=4"
+            ).fetchone()[0]
+            latest = db.execute(
+                "SELECT ssh_sequence,monitoring_gap,last_event_sequence "
+                "FROM device_latest_state"
+            ).fetchone()
+            self.assertEqual(history, 1)
+            self.assertEqual((latest["ssh_sequence"], latest["monitoring_gap"],
+                              latest["last_event_sequence"]), (3, 0, 3))
+
+    def test_unknown_local_event_is_history_not_live(self):
+        self.assertEqual(self.submit(boot()), 0)
+        event = {"v": 1, "id": DEVICE, "b": BOOT, "q": 2,
+                 "u": 2000, "k": 2, "s": 110, "w": 1}
+        self.assertEqual(self.submit(event), 2)
+        with dpt.connect_db(self.db) as db:
+            row = db.execute(
+                "SELECT history_only,unknown_code FROM telemetry_events "
+                "WHERE sequence=2"
+            ).fetchone()
+            self.assertEqual(tuple(row), (1, 1))
+
+    def test_bounded_collector_rejects_when_handler_capacity_full(self):
+        srv = dpt.CollectorHTTP(("127.0.0.1", 0), self.db, self.keys)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (srv.shutdown(), srv.server_close(),
+                                 thread.join(timeout=3)))
+        # Hold the exact handler admission budget without creating
+        # network threads; the next connection must return 503.
+        for _ in range(srv.max_handlers):
+            self.assertTrue(srv._handler_slots.acquire(blocking=False))
+        conn = http.client.HTTPConnection("127.0.0.1",
+                                          srv.server_address[1], timeout=3)
+        try:
+            conn.request("GET", "/healthz")
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 503)
+            self.assertEqual(resp.getheader("Retry-After"), "5")
+            self.assertEqual(resp.read(), b"")
+        finally:
+            conn.close()
+            for _ in range(srv.max_handlers):
+                srv._handler_slots.release()
+        # Slots were recovered; an ordinary health check now succeeds.
+        conn2 = http.client.HTTPConnection("127.0.0.1",
+                                           srv.server_address[1], timeout=3)
+        try:
+            conn2.request("GET", "/healthz")
+            self.assertEqual(conn2.getresponse().status, 200)
+        finally:
+            conn2.close()
+
     def test_key_permissions_and_rotation(self):
         self.keys.chmod(0o644)
         with self.assertRaises(ValueError):

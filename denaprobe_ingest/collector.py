@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import threading
 import sqlite3
 import stat
 import tempfile
@@ -308,8 +309,12 @@ def store(db_path: Path, payload: dict, raw: bytes, sent: int,
         ordered = (q == prev_sequence + 1) and bool(prior and prior["registered"])
         eligible = (kind == 1 and boot == current_boot and ordered and fresh
                     and not unknown and allowed and revision is not None)
-        history = kind == 1 and not eligible or kind == 2 and (boot != current_boot or
-                  q != prev_sequence + 1) or kind == 3 and not can_activate
+        # Delayed or unknown local events remain historical evidence. They
+        # must not disturb a newer live SSH continuity state or trigger alarms.
+        history = (kind == 1 and not eligible or
+                   kind == 2 and (boot != current_boot or not ordered or
+                                  age > SSH_MAX_AGE_MS or unknown) or
+                   kind == 3 and not can_activate)
         db.execute("""INSERT INTO telemetry_events(
                     device_id,boot_id,sequence,event_kind,ssh_code,stop_stage,observed_bits,
                     target_id,target_revision,wifi_code,wifi_rssi,https_code,
@@ -353,13 +358,45 @@ def store(db_path: Path, payload: dict, raw: bytes, sent: int,
 
 class CollectorHTTP(ThreadingHTTPServer):
     daemon_threads = True
-    request_queue_size = 32
+    # Queue depth does not limit threads created by ThreadingMixIn.
+    request_queue_size = 16
     allow_reuse_address = True
+    max_handlers = 12  # Strictly below the systemd TasksMax=24 limit.
 
     def __init__(self, bind: tuple[str, int], db: Path, keys: Path):
         super().__init__(bind, CollectorHandler)
         self.db_path = db
         self.keys_path = keys
+        self._handler_slots = threading.BoundedSemaphore(self.max_handlers)
+
+    def process_request(self, request, client_address) -> None:
+        # Admission before creating a handler thread: partial/unauthenticated
+        # requests must never consume unbounded tasks.
+        if not self._handler_slots.acquire(blocking=False):
+            try:
+                request.settimeout(0.2)
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\\r\\n"
+                    b"Content-Length: 0\\r\\n"
+                    b"Retry-After: 5\\r\\n"
+                    b"Connection: close\\r\\n\\r\\n"
+                )
+            except OSError:
+                pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._handler_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._handler_slots.release()
 
 
 class CollectorHandler(BaseHTTPRequestHandler):

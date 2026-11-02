@@ -95,20 +95,19 @@ def _direct_control(db: sqlite3.Connection, latest: sqlite3.Row,
     h = body.get("h")
     if not h:
         return False, None, "DIRECT_HTTPS_NOT_MEASURED"
-    age = body["u"]  # never infer direct age from SSH pre-auth uptime
-    del age
-    sender_age = (body.get("ts") if False else 0)  # no wallclock claim
-    del sender_age
-    # Body has only per-stage uptime; sender's sent_uptime_ms in stored event
-    # is needed for its own transfer age, not the newest SSH event.
-    stored = db.execute(
-        "SELECT sent_uptime_ms FROM dpt2_events WHERE 0"
-    ).fetchone() if False else None
-    del stored
-    # R2 DPT/2 persists sender_age_ms = sent - max(completions), not sent-h.u.
-    # Conservatively derive only receiver freshness; do not promote a stale
-    # control via a q on an old boot or a record beyond HTTPS_FRESH_MS.
-    if not _fresh(now, int(row["received_at_ms"]), 0, HTTPS_FRESH_MS):
+    # DPT/2 persists sent - max(completion uptimes). Recover the signed
+    # sender uptime conservatively and use the actual direct HTTPS age.
+    last_completed = max(body["u"], body.get("h", {}).get("u", 0),
+                         body.get("c", {}).get("u", 0),
+                         body.get("z", {}).get("u", 0))
+    stored_age = db.execute(
+        "SELECT sender_age_ms FROM dpt2_events WHERE "
+        "device_id=? AND boot_id=? AND sequence=?",
+        (device, latest["boot_id"], q)
+    ).fetchone()["sender_age_ms"]
+    direct_sender_age = last_completed + stored_age - h["u"]
+    if not _fresh(now, int(row["received_at_ms"]),
+                  int(direct_sender_age), HTTPS_FRESH_MS):
         return False, int(row["received_at_ms"]), "DIRECT_HTTPS_STALE"
     if h.get("c") != 1 or h.get("n") != 65536:
         return False, int(row["received_at_ms"]), "DIRECT_HTTPS_NOT_PASS"
@@ -204,6 +203,15 @@ def evaluate(db_path: Path, *, now_ms: int | None = None) -> list[dict]:
                             int(row["sender_age_ms"]), FRESH_MS))
             direct_ok, control_at, reason = _direct_control(db, latest, device, now)
             body = json.loads(row["raw_json"])
+            # Old stage data transmitted later is historical, even if a newer
+            # HTTPS submeasurement made the event look fresh as a whole.
+            z = body.get("z")
+            if z is not None:
+                latest_completed = max(body["u"], body.get("h", {}).get("u", 0),
+                                       body.get("c", {}).get("u", 0), z["u"])
+                deep_age = int(row["sender_age_ms"]) + latest_completed - z["u"]
+                fresh = fresh and _fresh(
+                    now, int(row["received_at_ms"]), deep_age, FRESH_MS)
             observed, detail = classify(body, direct_ok=bool(fresh and direct_ok))
             if not fresh:
                 observed, detail = UNKNOWN, "STALE_OR_CONTINUITY_GAP"

@@ -238,16 +238,25 @@ def evaluate(db_path: Path, *, now_ms: int | None = None) -> list[dict]:
             old_q = prev["last_seq"] if prev["boot_id"] == latest["boot_id"] else 0
             if row["sequence"] <= old_q:
                 # Even when the collector goes silent, reveal unknown state.
-                if observed == UNKNOWN and prev["observation"] != UNKNOWN:
+                if observed == UNKNOWN and (
+                    prev["observation"] != UNKNOWN or prev["streak"]):
+                    # Lost freshness/gap invalidates a prior pending streak.
+                    # It must not confirm an outage/recovery after reconnect.
                     db.execute(
-                        "UPDATE dp3_states SET observation=?,updated_at=? WHERE "
+                        "UPDATE dp3_states SET observation=?,candidate='',"
+                        "streak=0,updated_at=? WHERE "
                         "device_id=? AND target_id=? AND revision=?",
                         (UNKNOWN, now, device, target, revision))
                 continue
             candidate = observed if observed != UNKNOWN else ""
-            streak = (prev["streak"] + 1 if prev["candidate"] == candidate and
-                      prev["boot_id"] == latest["boot_id"] and candidate else
-                      1 if candidate else 0)
+            # A skipped q, stale interval, reboot, or last UNKNOWN breaks
+            # evidence continuity. Never combine one old and one new sample.
+            consecutive = (prev["boot_id"] == latest["boot_id"] and
+                           row["sequence"] == old_q + 1 and
+                           0 <= row["received_at_ms"]-prev["last_received_at"] <= FRESH_MS and
+                           prev["observation"] != UNKNOWN)
+            streak = (prev["streak"] + 1 if candidate and consecutive and
+                      prev["candidate"] == candidate else 1 if candidate else 0)
             effective = prev["effective"]
             incident = prev["open_incident"]
             if streak >= CONFIRM:
@@ -312,8 +321,14 @@ def read_dashboard(db_path: Path, *, now_ms: int | None = None) -> dict:
             "JOIN (SELECT target_id,MAX(revision) AS revision FROM targets "
             "GROUP BY target_id) t ON t.target_id=s.target_id "
             "AND t.revision=s.revision ORDER BY s.updated_at DESC LIMIT 50")]
-        incidents = [dict(r) for r in db.execute(
+        history = [dict(r) for r in db.execute(
             "SELECT * FROM dp3_incidents ORDER BY opened_at DESC LIMIT 50")]
+        active = [dict(r) for r in db.execute(
+            "SELECT * FROM dp3_incidents WHERE recovered_at IS NULL "
+            "AND superseded_at IS NULL ORDER BY opened_at DESC LIMIT 200")]
+        # Active incidents cannot disappear when history rotates past 50.
+        seen = {i["id"] for i in history}
+        incidents = history + [i for i in active if i["id"] not in seen]
         operators = {r["device_id"]: r["declared_operator"][:32]
                      for r in db.execute("SELECT * FROM dp3_operator_labels")}
         samples = {}
@@ -335,8 +350,6 @@ def read_dashboard(db_path: Path, *, now_ms: int | None = None) -> dict:
                     "second": z.get("g"), "direct_code": h.get("c"),
                     "received_at": row["received_at_ms"],
                 }
-    active = [i for i in incidents if i["recovered_at"] is None and
-              i["superseded_at"] is None]
     fresh = [st for st in states if st["observation"] != UNKNOWN and
              0 <= now - st["last_received_at"] <= FRESH_MS]
     return {"states": states, "incidents": incidents, "active": active,

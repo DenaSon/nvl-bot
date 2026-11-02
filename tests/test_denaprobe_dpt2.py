@@ -16,7 +16,7 @@ DEVICE = "dp-lab-01"
 BOOT = "0123456789abcdef0123456789abcdef"
 KEY = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 GOLDEN = '{"v":2,"id":"dp-lab-01","b":"0123456789abcdef0123456789abcdef","q":5,"u":120000,"k":1,"t":1,"w":1,"r":-48,"s":1,"p":52,"o":255,"d":12,"x":3200,"a":140,"c":{"u":119000,"s":1,"ms":150},"z":{"u":151500,"s":1,"am":400,"sm":25500,"f":{"s":1,"r":65536,"n":65536,"ms":600},"g":{"s":1,"r":65536,"n":65536,"ms":700}},"h":{"c":1,"u":155000,"n":65536,"bt":2500,"ms":4900}}'
-SIGNATURE = "bOVcMQ_VBaf5Fu2RgZmlwGubhM47QsxhDRgcSZ3LYFc"
+SIGNATURE = "qostz2A9qpH5g_SWdMfHB4F9vJlq10-Xd4QpAfYbd4g"
 
 
 def encode(body):
@@ -58,7 +58,7 @@ class TestDpt2(unittest.TestCase):
         raw = GOLDEN.encode()
         self.assertEqual(hashlib.sha256(raw).hexdigest(),
                          "01c3b4075cacf88c899e7652a360b5fae7b75863812da23b17c4a4e94b4d5889")
-        self.assertEqual(dpt2.sign(raw, DEVICE, "k-test", "156000", KEY), SIGNATURE)
+        self.assertEqual(dpt2.sign(raw, DEVICE, "v2-test", "156000", KEY), SIGNATURE)
         headers = {"x-dpt-device": [DEVICE], "x-dpt-key-id": ["v2-k1"],
                    "x-dpt-sent-uptime-ms": ["156000"],
                    "x-dpt-signature": [dpt2.sign(raw, DEVICE, "v2-k1", "156000", KEY)]}

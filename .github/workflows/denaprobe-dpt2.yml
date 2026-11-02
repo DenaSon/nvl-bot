@@ -8,6 +8,8 @@ on:
     paths:
       - "denaprobe_ingest/**"
       - "tests/test_denaprobe_dpt2.py"
+      - "tests/test_denaprobe_responder.py"
+      - "ops/denaprobe_static_responder.py"
       - "tests/test_denaprobe_collector.py"
       - ".github/workflows/denaprobe-dpt2.yml"
   pull_request:

@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS dp3_incidents(
  revision INTEGER NOT NULL, observed_class TEXT NOT NULL,
  confidence TEXT NOT NULL, reason TEXT NOT NULL,
  opened_at INTEGER NOT NULL, last_evidence_at INTEGER NOT NULL,
- last_sequence INTEGER NOT NULL, recovered_at INTEGER
+ last_sequence INTEGER NOT NULL, recovered_at INTEGER,
+ superseded_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_dp3_incidents_active
  ON dp3_incidents(recovered_at,opened_at DESC);
@@ -67,6 +68,9 @@ CREATE TABLE IF NOT EXISTS dp3_delivery(
 CREATE TABLE IF NOT EXISTS dp3_rich_cards(
  chat_id INTEGER PRIMARY KEY, actor INTEGER NOT NULL,
  message_id INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS dp3_operator_labels(
+ device_id TEXT PRIMARY KEY, declared_operator TEXT NOT NULL
 );
 """
 
@@ -216,6 +220,12 @@ def evaluate(db_path: Path, *, now_ms: int | None = None) -> list[dict]:
             if not fresh:
                 observed, detail = UNKNOWN, "STALE_OR_CONTINUITY_GAP"
             if not prev:
+                # A target revision change is NOT a recovery event.
+                db.execute(
+                    "UPDATE dp3_incidents SET superseded_at=? "
+                    "WHERE device_id=? AND target_id=? AND revision!=? "
+                    "AND recovered_at IS NULL AND superseded_at IS NULL",
+                    (now, device, target, revision))
                 db.execute(
                     "INSERT INTO dp3_states "
                     "(device_id,target_id,revision,boot_id,last_seq,updated_at) "
@@ -292,16 +302,43 @@ def evaluate(db_path: Path, *, now_ms: int | None = None) -> list[dict]:
 
 
 def read_dashboard(db_path: Path, *, now_ms: int | None = None) -> dict:
+    """Read-only, bounded snapshot. Never exposes raw signed JSON to Telegram."""
     now = int(time.time() * 1000) if now_ms is None else now_ms
     uri = f"file:{Path(db_path).resolve()}?mode=ro"
     with sqlite3.connect(uri, uri=True, timeout=2) as db:
         db.row_factory = sqlite3.Row
         states = [dict(r) for r in db.execute(
-            "SELECT * FROM dp3_states ORDER BY updated_at DESC LIMIT 50")]
+            "SELECT s.* FROM dp3_states AS s "
+            "JOIN (SELECT target_id,MAX(revision) AS revision FROM targets "
+            "GROUP BY target_id) t ON t.target_id=s.target_id "
+            "AND t.revision=s.revision ORDER BY s.updated_at DESC LIMIT 50")]
         incidents = [dict(r) for r in db.execute(
             "SELECT * FROM dp3_incidents ORDER BY opened_at DESC LIMIT 50")]
-    active = [i for i in incidents if i["recovered_at"] is None]
-    fresh = [s for s in states if s["observation"] != UNKNOWN and
-             0 <= now - s["last_received_at"] <= FRESH_MS]
+        operators = {r["device_id"]: r["declared_operator"][:32]
+                     for r in db.execute("SELECT * FROM dp3_operator_labels")}
+        samples = {}
+        for state in states:
+            row = db.execute(
+                "SELECT raw_json,received_at_ms FROM dpt2_events WHERE "
+                "device_id=? AND boot_id=? AND sequence=? AND target_id=? "
+                "AND target_revision=? AND history_only=0",
+                (state["device_id"], state["boot_id"], state["last_seq"],
+                 state["target_id"], state["revision"])).fetchone()
+            if row:
+                b = json.loads(row["raw_json"])
+                z, c, h = b.get("z", {}), b.get("c", {}), b.get("h", {})
+                samples[(state["device_id"], state["target_id"],
+                         state["revision"])] = {
+                    "tcp_code": c.get("s"), "tcp_ms": c.get("ms"),
+                    "auth_ms": z.get("am"), "session_ms": z.get("sm"),
+                    "deep_code": z.get("s"), "first": z.get("f"),
+                    "second": z.get("g"), "direct_code": h.get("c"),
+                    "received_at": row["received_at_ms"],
+                }
+    active = [i for i in incidents if i["recovered_at"] is None and
+              i["superseded_at"] is None]
+    fresh = [st for st in states if st["observation"] != UNKNOWN and
+             0 <= now - st["last_received_at"] <= FRESH_MS]
     return {"states": states, "incidents": incidents, "active": active,
-            "fresh": len(fresh), "stale": len(states) - len(fresh), "now": now}
+            "fresh": len(fresh), "stale": len(states)-len(fresh), "now": now,
+            "samples": samples, "operators": operators}

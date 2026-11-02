@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import sys
 import threading
 import sqlite3
 import stat
@@ -356,6 +357,18 @@ def store(db_path: Path, payload: dict, raw: bytes, sent: int,
     return 2 if history else 0
 
 
+def load_dpt2():
+    # Invocation may be "python path/to/collector.py" (production systemd),
+    # "python -m denaprobe_ingest.collector" or a normal imported module.
+    # Always hand v2 the SAME running Collector module and DptError class.
+    if __package__:
+        from . import dpt2
+    else:
+        import dpt2
+    dpt2.bind_collector(sys.modules[__name__])
+    return dpt2
+
+
 class CollectorHTTP(ThreadingHTTPServer):
     daemon_threads = True
     # Queue depth does not limit threads created by ThreadingMixIn.
@@ -371,8 +384,7 @@ class CollectorHTTP(ThreadingHTTPServer):
         self.enable_v2 = enable_v2
         if enable_v2:
             # Explicitly gated and isolated from legacy DPT/1 storage.
-            from denaprobe_ingest import dpt2
-            dpt2.initialize(db)
+            load_dpt2().initialize(db)
         self._handler_slots = threading.BoundedSemaphore(self.max_handlers)
 
     def process_request(self, request, client_address) -> None:
@@ -441,14 +453,15 @@ class CollectorHandler(BaseHTTPRequestHandler):
         self.respond(200, {"status": "ok", "service": "denaprobe-core"})
 
     def do_POST(self) -> None:
-        from denaprobe_ingest import dpt2
-        if self.path != ENDPOINT and self.path != dpt2.ENDPOINT:
+        # Avoid importing even the new module on legacy v1 requests.
+        is_v2 = self.path == "/api/dpt/v2/telemetry"
+        if self.path != ENDPOINT and not is_v2:
             self.respond(404)
             return
-        is_v2 = self.path == dpt2.ENDPOINT
         if is_v2 and not self.server.enable_v2:
             self.respond(404)
             return
+        dpt2 = load_dpt2() if is_v2 else None
         if self.headers.get("Transfer-Encoding") or self.headers.get("Content-Encoding"):
             self.respond(400)
             return

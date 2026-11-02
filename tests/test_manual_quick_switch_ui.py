@@ -53,6 +53,14 @@ class FakeEngine:
     def latest(self):
         return self.rec
 
+    def force_abort(self,job,*,actor):
+        self.events.append(("force_abort",job,actor))
+        assert self.rec and self.rec["id"]==job and self.rec["actor"]==str(actor)
+        assert self.rec["status"]=="HOLD"
+        self.rec["status"]="ABORTED"
+        self.rec["error_code"]="ADMIN_FORCE_ABORT_UNRECONCILED"
+        return "ABORTED"
+
     async def record_external_cutover(self,**kwargs):
         self.events.append(("attest",kwargs))
         return "external-receipt-123"
@@ -194,6 +202,49 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
                 break
             await asyncio.sleep(.01)
         self.assertEqual(self.engine.events,[("resume","deadbeef",7,True)])
+
+
+    async def test_force_abort_hold_from_status_requires_explicit_confirmation(self):
+        self.engine.rec={
+            "id":"deadbeef","kind":"QUICK","status":"HOLD",
+            "actor":"7","source":"153.75.87.190",
+            "target":"45.59.126.73","account_count":446,
+            "error_code":"DB_COMMIT_REVIEW_REQUIRED",
+        }
+        await self.cb("apps_edge_quick_status")
+        actions=[d for row in FakeHtml.cards[-1][1] for _,d in row]
+        self.assertIn("apps_edge_quick_force_review_deadbeef",actions)
+        await self.cb("apps_edge_quick_force_review_deadbeef")
+        body,rows=FakeHtml.cards[-1]
+        self.assertIn("فقط پرونده و قفل",body)
+        yes=next(d for row in rows for _,d in row
+                 if d.startswith("apps_edge_quick_force_yes_"))
+        self.assertEqual(self.engine.events,[])
+        await self.cb(yes)
+        self.assertEqual(self.engine.events,[("force_abort","deadbeef",7)])
+        self.assertEqual(self.engine.rec["status"],"ABORTED")
+        self.assertIn("هیچ حساب، DNS یا رله‌ای تغییر نکرد",
+                      FakeHtml.cards[-1][0])
+        await self.cb(yes)
+        self.assertEqual(len(self.engine.events),1)
+        self.assertIn("منقضی شده",FakeHtml.cards[-1][0])
+        await self.cb("apps_edge_quick_status")
+        self.assertIn("فقط پرونده و قفل عملیات آزاد شده‌اند",
+                      FakeHtml.cards[-1][0])
+
+    async def test_force_abort_unauthorized_actor_and_non_hold_cannot_mutate(self):
+        self.engine.rec={
+            "id":"deadbeef","kind":"QUICK","status":"HOLD",
+            "actor":"7","source":"old","target":"new",
+            "account_count":2,"error_code":"DB_COMMIT_REVIEW_REQUIRED",
+        }
+        await self.cb("apps_edge_quick_force_review_deadbeef",
+                      actor=8,chat=8)
+        self.assertEqual(self.engine.events,[])
+        self.engine.rec["status"]="DONE"
+        await self.cb("apps_edge_quick_force_review_deadbeef")
+        self.assertEqual(self.engine.events,[])
+        self.assertIn("متوقف",FakeHtml.cards[-1][0])
 
 
 class Phase3RichCardTests(unittest.TestCase):

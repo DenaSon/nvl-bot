@@ -382,6 +382,23 @@ class ManualEdgeJournal:
                     or pool[5] != customer_port or pool[6] != row[1]):
                 raise ManualEdgeHold("MANUAL_HOST_POOL_MISMATCH")
 
+    def blocking_by_owner(self, actor, chat):
+        """Find the actual exclusive intake/install for recovery navigation."""
+        if type(actor) is not int or type(chat) is not int or actor<=0 or chat!=actor:
+            raise ManualEdgeHold("ADMIN_IDENTITY_INVALID")
+        with self.db() as db:
+            self.initialize(db)
+            db.row_factory=sqlite3.Row
+            row=db.execute(
+                "SELECT id,ip,status FROM manual_edge_operations "
+                "WHERE actor=? AND chat=? AND status IN "
+                "('DRAFT','IDENTITY_PENDING','HOSTKEY_PENDING',"
+                "'READY_INSTALL','INSTALLING') "
+                "ORDER BY updated_at DESC,rowid DESC LIMIT 1",
+                (actor,chat),
+            ).fetchone()
+            return dict(row) if row else None
+
     def start(self, actor, chat):
         if type(actor) is not int or type(chat) is not int or actor <= 0 or chat <= 0:
             raise ManualEdgeHold("ADMIN_IDENTITY_INVALID")
@@ -626,3 +643,85 @@ class ManualEdgeJournal:
                 raise ManualEdgeHold("CANCEL_REQUIRES_SAFE_RECONCILIATION")
             self._cas(db,op_id,actor,chat,rec[0],"CANCELLED",
                       "NO_EXTERNAL_EFFECT_CANCELLED")
+
+    def force_cancel(self, op_id, actor, chat):
+        """Operator override: close a stale intake/install journal, not an Edge.
+
+        Never delete host_pool, WG, routes, SSH accounts, DNS or a route job.
+        For INSTALLING, acquire the same OS mutex as the actual installer
+        before committing the override. A live installer cannot be cancelled
+        underneath its external side effects.
+        """
+        if type(actor) is not int or type(chat) is not int or actor<=0 or actor!=chat:
+            raise ManualEdgeHold("ADMIN_IDENTITY_INVALID")
+
+        def commit():
+            with self.db() as db:
+                self.initialize(db)
+                db.execute("BEGIN IMMEDIATE")
+                row=db.execute(
+                    "SELECT status,ip,route_job,archived_at "
+                    "FROM manual_edge_operations "
+                    "WHERE id=? AND actor=? AND chat=?",
+                    (op_id,actor,chat),
+                ).fetchone()
+                if not row:
+                    raise ManualEdgeHold("OPERATOR_MISMATCH")
+                status,ip,route_job,archived_at=row
+                if archived_at is not None or route_job is not None or status not in (
+                        "DRAFT","IDENTITY_PENDING","HOSTKEY_PENDING",
+                        "READY_INSTALL","INSTALLING","INSTALL_HOLD","HOLD"):
+                    raise ManualEdgeHold("FORCE_CANCEL_REQUIRES_MANUAL_REVIEW")
+                if status=="INSTALLING" and not installer_locked:
+                    raise ManualEdgeHold("CORE_WG_INSTALL_BUSY")
+                count=db.execute(
+                    "UPDATE manual_edge_operations SET status='CANCELLED',"
+                    "reason='ADMIN_FORCE_CANCELLED',updated_at=? "
+                    "WHERE id=? AND actor=? AND chat=? AND status=? "
+                    "AND route_job IS NULL AND archived_at IS NULL",
+                    (int(self.now()),op_id,actor,chat,status),
+                ).rowcount
+                if count!=1:
+                    raise ManualEdgeHold("MANUAL_CAS_FAILED")
+                self._log(db,op_id,actor,"CANCELLED","ADMIN_FORCE_CANCELLED")
+                return {"id":op_id,"ip":ip,"previous_status":status}
+
+        # For an INSTALLING state, use the installer's real shared flock.
+        # Check it even when the original process is no longer alive; this
+        # prevents closing an in-flight peer installation with a click.
+        with self.db() as db:
+            self.initialize(db)
+            row=db.execute(
+                "SELECT status FROM manual_edge_operations "
+                "WHERE id=? AND actor=? AND chat=?",
+                (op_id,actor,chat),
+            ).fetchone()
+        if not row:
+            raise ManualEdgeHold("OPERATOR_MISMATCH")
+        installer_locked=False
+        if row[0]!="INSTALLING":
+            return commit()
+
+        import fcntl, os, stat
+        flags=os.O_RDWR|os.O_CREAT|getattr(os,"O_CLOEXEC",0)
+        flags |= getattr(os,"O_NOFOLLOW",0)
+        try:
+            fd=os.open(self.install_lock_path,flags,0o600)
+        except OSError as exc:
+            raise ManualEdgeHold("CORE_WG_INSTALL_LOCK_UNAVAILABLE") from exc
+        try:
+            st=os.fstat(fd)
+            if (not stat.S_ISREG(st.st_mode) or st.st_uid!=os.geteuid()
+                    or stat.S_IMODE(st.st_mode)&0o077):
+                raise ManualEdgeHold("CORE_WG_INSTALL_LOCK_UNTRUSTED")
+            try:
+                fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise ManualEdgeHold("CORE_WG_INSTALL_BUSY") from exc
+            try:
+                installer_locked=True
+                return commit()
+            finally:
+                fcntl.flock(fd,fcntl.LOCK_UN)
+        finally:
+            os.close(fd)

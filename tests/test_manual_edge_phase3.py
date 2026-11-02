@@ -813,5 +813,106 @@ class Phase3ManualTests(unittest.TestCase):
              for _,action in row])
 
 
+    def test_force_cancel_abandoned_draft_unblocks_new_registration(self):
+        op=self.journal.start(77,77)
+        self.assertEqual(self.journal.blocking_by_owner(77,77)["id"],op)
+        with self.assertRaisesRegex(ManualEdgeHold,"ACTIVE_MANUAL_OPERATION_EXISTS"):
+            self.journal.start(77,77)
+        with self.assertRaisesRegex(ManualEdgeHold,"OPERATOR_MISMATCH"):
+            self.journal.force_cancel(op,78,78)
+        cancelled=self.journal.force_cancel(op,77,77)
+        self.assertEqual(cancelled["previous_status"],"DRAFT")
+        self.assertEqual(self.journal.get(op)["status"],"CANCELLED")
+        self.assertIsNone(self.journal.blocking_by_owner(77,77))
+        self.assertNotEqual(self.journal.start(77,77),op)
+        with self.db() as db:
+            self.assertEqual(db.execute(
+                "SELECT code FROM manual_edge_events WHERE op_id=? "
+                "ORDER BY seq DESC LIMIT 1",(op,)
+            ).fetchone()[0],"ADMIN_FORCE_CANCELLED")
+            self.assertEqual(db.execute(
+                "SELECT host FROM host_pool WHERE is_default=1"
+            ).fetchone()[0],"1.1.1.1")
+
+    def test_force_cancel_failed_install_keeps_existing_host_and_core(self):
+        op=self.journal.start(77,77)
+        self.journal.set_server(op,77,77,"8.8.8.8",2299)
+        self.journal.pin(op,77,77,*self.fake_key())
+        self.journal.begin_install(op,77,77)
+        with self.db() as db:
+            db.execute(
+                "INSERT INTO host_pool(host,active,is_default,is_standby,"
+                "provider,service_port,admin_ssh_port) VALUES (?,?,?,?,?,?,?)",
+                ("8.8.8.8",0,0,0,"manual",2222,2299)
+            )
+        self.journal.install_hold(op,77,77,"FAILED_AFTER_REMOTE_STEP")
+        result=self.journal.force_cancel(op,77,77)
+        self.assertEqual(result["previous_status"],"INSTALL_HOLD")
+        self.assertEqual(self.journal.get(op)["status"],"CANCELLED")
+        with self.db() as db:
+            self.assertEqual(db.execute(
+                "SELECT host FROM host_pool WHERE host='8.8.8.8'"
+            ).fetchone(),("8.8.8.8",))
+            self.assertEqual(db.execute(
+                "SELECT value FROM settings WHERE key='hosts'"
+            ).fetchone(),("1.1.1.1",))
+        self.journal.start(77,77)
+
+    def test_force_cancel_live_installer_mutex_and_standby_stay_protected(self):
+        import fcntl
+        op=self.journal.start(77,77)
+        self.journal.set_server(op,77,77,"8.8.8.8",2299)
+        self.journal.pin(op,77,77,*self.fake_key())
+        self.journal.begin_install(op,77,77)
+        fd=os.open(self.journal.install_lock_path,os.O_RDWR)
+        try:
+            fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            with self.assertRaisesRegex(ManualEdgeHold,"CORE_WG_INSTALL_BUSY"):
+                self.journal.force_cancel(op,77,77)
+            self.assertEqual(self.journal.get(op)["status"],"INSTALLING")
+        finally:
+            fcntl.flock(fd,fcntl.LOCK_UN)
+            os.close(fd)
+        self.journal.force_cancel(op,77,77)
+        self.assertEqual(self.journal.get(op)["status"],"CANCELLED")
+
+        standby=self.prepare("8.8.4.4",port=2298)
+        self.journal.mark_standby(standby,77,77)
+        with self.assertRaisesRegex(ManualEdgeHold,"FORCE_CANCEL_REQUIRES_MANUAL_REVIEW"):
+            self.journal.force_cancel(standby,77,77)
+        self.assertEqual(self.journal.get(standby)["status"],"STANDBY")
+
+    def test_force_cancel_ui_is_two_step_and_replays_are_denied(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from manual_edge_wizard import ManualEdgeWizard
+        op=self.journal.start(77,77)
+        wizard=ManualEdgeWizard(db=self.db,preflight=lambda:(2222,"pub"),
+            provision=AsyncMock(),verify=AsyncMock(),probe=AsyncMock(),
+            nat=AsyncMock(),queue=SimpleNamespace(),now=lambda:10000)
+        wizard._view=AsyncMock(return_value=42)
+        ctx=SimpleNamespace(user_data={})
+        app=SimpleNamespace(bot=SimpleNamespace(token="123:TEST"))
+        async def tap(action):
+            return await wizard.handle(SimpleNamespace(),ctx,action,
+                role="admin",actor=77,chat=77,app=app)
+        asyncio.run(tap("apps_edge_manual_new"))
+        self.assertIn("پرونده ثبت سرور باز",wizard._view.await_args.args[1])
+        asyncio.run(tap("apps_edge_manual_detail_"+op))
+        self.assertIn("apps_edge_manual_force_review_"+op,
+            [x for row in wizard._view.await_args.args[2] for _,x in row])
+        asyncio.run(tap("apps_edge_manual_force_review_"+op))
+        yes=next(x for row in wizard._view.await_args.args[2] for _,x in row
+                 if x.startswith("apps_edge_manual_force_yes_"))
+        self.assertEqual(self.journal.get(op)["status"],"DRAFT")
+        asyncio.run(tap(yes))
+        self.assertIn("پرونده به درخواست مدیر بسته شد",
+                      wizard._view.await_args.args[1])
+        self.assertEqual(self.journal.get(op)["status"],"CANCELLED")
+        asyncio.run(tap(yes))
+        self.assertIn("تأیید لغو منقضی",wizard._view.await_args.args[1])
+
+
 if __name__=="__main__":
     unittest.main()

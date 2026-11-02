@@ -66,7 +66,9 @@ FA = {
     "SSH_MANAGEMENT_PORT_CONFLICT":"پورت SSH مدیریت با پورت اتصال مشتری یا TLS یکسان است. پورت دیگری انتخاب کنید.",
     "EDGE_IP_ALREADY_REGISTERED":"این IP قبلاً در فهرست سرورها وجود دارد.",
     "EDGE_IP_HAS_CLOUDZY_RECEIPT":"این IP متعلق به پرونده Cloudzy موجود است.",
-    "ACTIVE_MANUAL_OPERATION_EXISTS":"ورود اطلاعات یا نصب یک سرور دیگر هنوز در جریان است. همان مرحله را تکمیل یا ورود اطلاعات را لغو کنید.",
+    "FORCE_CONFIRMATION_EXPIRED":"تأیید لغو منقضی شد؛ دوباره پرونده را باز کنید.",
+    "FORCE_CANCEL_REQUIRES_MANUAL_REVIEW":"این پرونده در مسیر انتقال یا مرحله غیرقابل لغو است.",
+    "ACTIVE_MANUAL_OPERATION_EXISTS":"یک پرونده ثبت سرور باز است؛ آن را ادامه دهید یا لغو اجباری کنید.",
     "OPERATOR_MISMATCH":"این پرونده متعلق به گفتگوی مدیر فعلی نیست.",
     "EDGE_NOT_READY":"این سرور هنوز در مرحله آماده‌سازی تأییدشده قرار ندارد.",
     "INSTALL_NOT_READY":"شروع نصب برای این پرونده مجاز نیست؛ وضعیت را دوباره بررسی کنید.",
@@ -288,6 +290,10 @@ class ManualEdgeWizard:
                          "apps_edge_manual_progress_"+opid)])
         if stage in ("DRAFT","HOSTKEY_PENDING","READY_INSTALL"):
             rows.append([("❌ لغو درخواست","apps_edge_manual_cancel_"+opid)])
+        if stage in ("DRAFT","IDENTITY_PENDING","HOSTKEY_PENDING",
+                     "READY_INSTALL","INSTALLING","INSTALL_HOLD","HOLD") and not op.get("route_job"):
+            rows.append([("⛔ لغو اجباری پرونده",
+                         "apps_edge_manual_force_review_"+opid)])
         if stage in ("ACTIVE","EDGE_READY") and role in (
                 "FORMER","EDGE_READY","POOL_MISSING"):
             rows.append([("🗂 حذف از فهرست (بایگانی)",
@@ -401,6 +407,55 @@ class ManualEdgeWizard:
             if data.startswith("apps_edge_manual_detail_"):
                 opid=data[len("apps_edge_manual_detail_"):]
                 return await self._detail(query,actor,chat,opid)
+            if data.startswith("apps_edge_manual_force_yes_"):
+                nonce=data[len("apps_edge_manual_force_yes_"):]
+                pending=context.user_data.pop("manual_edge_force",None)
+                if (not isinstance(pending,dict)
+                        or pending.get("nonce")!=nonce
+                        or (pending.get("actor"),pending.get("chat"))!=(actor,chat)
+                        or self.now()>=pending.get("expires",0)):
+                    raise ManualWizardHold("FORCE_CONFIRMATION_EXPIRED")
+                opid=pending["op"]
+                if opid in self.running:
+                    raise ManualWizardHold("CORE_WG_INSTALL_BUSY")
+                result=await asyncio.to_thread(
+                    self.journal.force_cancel,opid,actor,chat)
+                session=context.user_data.get("manual_edge_session")
+                if isinstance(session,dict) and session.get("op")==opid:
+                    for key in ("state","manual_edge_session",
+                                "manual_edge_candidate_ip","manual_edge_pin"):
+                        context.user_data.pop(key,None)
+                return await self._view(query,
+                    "✅ <b>پرونده به درخواست مدیر بسته شد.</b>\n"
+                    "وضعیت قبلی: <b>"+escape(result["previous_status"])+"</b>\n"
+                    "فقط پرونده تغییر کرد؛ حساب‌ها، DNS و شبکه دست‌نخورده‌اند.",
+                    [[("➕ افزودن سرور جدید","apps_edge_manual_new")],
+                     [("🖥 مدیریت سرورها","apps_edge_manual_home")]])
+            if data.startswith("apps_edge_manual_force_review_"):
+                opid=data[len("apps_edge_manual_force_review_"):]
+                op=await asyncio.to_thread(self.journal.get,opid)
+                if (not op or (op["actor"],op["chat"])!=(actor,chat)
+                        or op.get("archived_at") is not None
+                        or op.get("route_job") is not None
+                        or op["status"] not in (
+                            "DRAFT","IDENTITY_PENDING","HOSTKEY_PENDING",
+                            "READY_INSTALL","INSTALLING","INSTALL_HOLD","HOLD")):
+                    raise ManualWizardHold("FORCE_CANCEL_REQUIRES_MANUAL_REVIEW")
+                nonce=secrets.token_hex(8)
+                context.user_data["manual_edge_force"]={
+                    "nonce":nonce,"op":opid,"actor":actor,"chat":chat,
+                    "expires":self.now()+180,
+                }
+                return await self._view(query,
+                    "⚠️ <b>لغو اجباری پرونده</b>\n\n"
+                    "IP: <code>"+escape(op.get("ip") or "ثبت نشده")+"</code>\n"
+                    "وضعیت: <b>"+escape(op["status"])+"</b>\n\n"
+                    "فقط پرونده ثبت/نصب بسته می‌شود. عملیات احتمالی روی VPS "
+                    "یا WireGuard برگردانده نمی‌شود. "
+                    "اگر نصب هنوز اجرا شود، لغو مسدود خواهد شد.",
+                    [[("⛔ تأیید لغو اجباری",
+                       "apps_edge_manual_force_yes_"+nonce)],
+                     [("انصراف","apps_edge_manual_detail_"+opid)]])
             if data.startswith("apps_edge_manual_archive_yes_"):
                 opid=data[len("apps_edge_manual_archive_yes_"):]
                 archived=await asyncio.to_thread(
@@ -490,7 +545,23 @@ class ManualEdgeWizard:
                      [("انصراف","apps_edge_manual_detail_"+opid)]])
             if data=="apps_edge_manual_new":
                 await asyncio.to_thread(self.preflight)
-                op=await asyncio.to_thread(self.journal.start,actor,chat)
+                try:
+                    op=await asyncio.to_thread(self.journal.start,actor,chat)
+                except ManualEdgeHold as exc:
+                    if str(exc)!="ACTIVE_MANUAL_OPERATION_EXISTS":
+                        raise
+                    pending=await asyncio.to_thread(
+                        self.journal.blocking_by_owner,actor,chat)
+                    if not pending:
+                        raise
+                    return await self._view(query,
+                        "⚠️ <b>یک پرونده ثبت سرور باز است.</b>\n"
+                        "وضعیت: <b>"+escape(pending["status"])+"</b>\n"
+                        "برای افزودن سرور جدید، ابتدا پرونده قبلی "
+                        "را ادامه دهید یا لغو اجباری کنید.",
+                        [[("📋 پرونده ناتمام",
+                           "apps_edge_manual_detail_"+pending["id"])],
+                         [("🖥 مدیریت سرورها","apps_edge_manual_home")]])
                 context.user_data["manual_edge_session"]={
                     "actor":actor,"chat":chat,"op":op,
                     "stage":"server_ip","expires":self.now()+600,

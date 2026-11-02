@@ -314,6 +314,60 @@ class ManualQuickSwitch:
                 ).fetchone()
             return dict(row) if row else None
 
+    def force_abort(self, job, *, actor):
+        """Explicitly abandon a HOLD journal and release ONLY its own 6G lease.
+
+        This is not a transfer success or DNS/account rollback. Do not modify
+        customers, host_pool, settings, Cloudflare or unrelated leases.
+        """
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not _has(db,"manual_quick_switch_jobs"):
+                raise QuickSwitchHold("FORCE_ABORT_JOB_UNAVAILABLE")
+            row=db.execute(
+                "SELECT kind,status,actor,source,target,lease_id "
+                "FROM manual_quick_switch_jobs WHERE id=?", (job,)
+            ).fetchone()
+            if not row or row[0]!="QUICK" or row[2]!=str(actor):
+                raise QuickSwitchHold("OPERATOR_OR_JOB_MISMATCH")
+            if row[1]=="ABORTED":
+                return "ABORTED"
+            if row[1]!="HOLD":
+                raise QuickSwitchHold("FORCE_ABORT_ONLY_HOLD")
+            if not _has(db,"failover_operations") or row[5] is None:
+                raise QuickSwitchHold("LEASE_IDENTITY_UNVERIFIED")
+            lease=db.execute(
+                "SELECT status,source_host,target_host,detail_json "
+                "FROM failover_operations WHERE id=?", (row[5],)
+            ).fetchone()
+            if not lease or lease[:3]!=("RUNNING",row[3],row[4]):
+                raise QuickSwitchHold("LEASE_OWNERSHIP_LOST")
+            try:
+                details=json.loads(lease[3] or "{}")
+            except (ValueError,TypeError):
+                raise QuickSwitchHold("LEASE_IDENTITY_UNVERIFIED") from None
+            if details.get("job")!=job or details.get("component")!="MANUAL_QUICK_SWITCH":
+                raise QuickSwitchHold("LEASE_IDENTITY_UNVERIFIED")
+            now=int(self.now())
+            stamp=time.strftime("%Y-%m-%d %H:%M:%S")
+            changed=db.execute(
+                "UPDATE manual_quick_switch_jobs SET status='ABORTED',"
+                "error_code='ADMIN_FORCE_ABORT_UNRECONCILED',updated_at=? "
+                "WHERE id=? AND actor=? AND status='HOLD'",
+                (now,job,str(actor)),
+            ).rowcount
+            if changed!=1:
+                raise QuickSwitchHold("JOURNAL_CHANGED")
+            released=db.execute(
+                "UPDATE failover_operations SET status='ABORTED',"
+                "updated_at=?,finished_at=? WHERE id=? AND status='RUNNING'",
+                (stamp,stamp,row[5]),
+            ).rowcount
+            if released!=1:
+                raise QuickSwitchHold("LEASE_OWNERSHIP_LOST")
+            self._log(db,job,"ABORTED","ADMIN_FORCE_ABORT_UNRECONCILED")
+            return "ABORTED"
+
     def _hold(self, job, code):
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")

@@ -33,4 +33,4 @@ jobs:
       - name: Compile isolated collector modules
         run: python -m py_compile denaprobe_ingest/collector.py denaprobe_ingest/dpt2.py
       - name: Verify original DPT1 and opt-in DPT2 regressions
-        run: python -m unittest -v tests.test_denaprobe_collector tests.test_denaprobe_dpt2
+        run: python -m unittest discover -s tests -p 'test_denaprobe*.py' -v

@@ -6,6 +6,7 @@ Exactly-once intent; uncertain Telegram delivery is held for manual review.
 """
 from __future__ import annotations
 
+from contextlib import closing
 import asyncio
 from pathlib import Path
 import secrets
@@ -23,7 +24,7 @@ def _reserve(path, recipient_ids, *, now_ms):
     recipients = sorted(set(
         x for x in recipient_ids if type(x) is int and x > 0
     ))[:30]
-    with collector.connect_db(Path(path)) as db:
+    with closing(collector.connect_db(Path(path))) as db:
         db.execute("BEGIN IMMEDIATE")
         if recipients:
             marks = ",".join("?" for _ in recipients)
@@ -89,7 +90,7 @@ def _reserve(path, recipient_ids, *, now_ms):
 
 
 def _finish(path, row, attempt, *, status, reason, message_id=None, now_ms):
-    with collector.connect_db(Path(path)) as db:
+    with closing(collector.connect_db(Path(path))) as db:
         db.execute("BEGIN IMMEDIATE")
         db.execute(
             "UPDATE dp3_delivery SET status=?,reason=?,message_id=?,"

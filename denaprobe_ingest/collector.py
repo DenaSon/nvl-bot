@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import threading
 import sqlite3
 import stat
 import tempfile
@@ -308,8 +309,12 @@ def store(db_path: Path, payload: dict, raw: bytes, sent: int,
         ordered = (q == prev_sequence + 1) and bool(prior and prior["registered"])
         eligible = (kind == 1 and boot == current_boot and ordered and fresh
                     and not unknown and allowed and revision is not None)
-        history = kind == 1 and not eligible or kind == 2 and (boot != current_boot or
-                  q != prev_sequence + 1) or kind == 3 and not can_activate
+        # Delayed or unknown local events remain historical evidence. They
+        # must not disturb a newer live SSH continuity state or trigger alarms.
+        history = (kind == 1 and not eligible or
+                   kind == 2 and (boot != current_boot or not ordered or
+                                  age > SSH_MAX_AGE_MS or unknown) or
+                   kind == 3 and not can_activate)
         db.execute("""INSERT INTO telemetry_events(
                     device_id,boot_id,sequence,event_kind,ssh_code,stop_stage,observed_bits,
                     target_id,target_revision,wifi_code,wifi_rssi,https_code,
@@ -323,14 +328,21 @@ def store(db_path: Path, payload: dict, raw: bytes, sent: int,
                     h.get("u") if h else None, sent, age, h_age, now,
                     1 if history else 0, 1 if unknown else 0, digest, raw))
         if eligible:
-            # Fresh delivery alone does not close a previous sequence gap or
-            # establish confidence immediately after a reboot. Require two
-            # consecutive recent observations to clear the monitoring gap.
-            latest = db.execute("""SELECT last_event_sequence FROM device_latest_state
+            # Two *actual, eligible SSH observations* must be consecutive to
+            # clear a gap. A BOOT or DEVICE_EVENT before the first SSH must
+            # never count as the first healthy probe; neither may an old
+            # replayed/history-only result establish continuity.
+            latest = db.execute("""SELECT ssh_sequence,ssh_received_ms
+                                   FROM device_latest_state
                                    WHERE device_id=? AND boot_id=?""",
                                 (device, boot)).fetchone()
-            continuity = bool(latest and latest["last_event_sequence"] == q - 1)
-            monitoring_gap = 0 if continuity and q >= 3 else 1
+            continuity = bool(
+                latest and latest["ssh_sequence"] is not None
+                and latest["ssh_sequence"] == q - 1
+                and latest["ssh_received_ms"] is not None
+                and 0 <= now - latest["ssh_received_ms"] <= SSH_MAX_AGE_MS
+            )
+            monitoring_gap = 0 if continuity else 1
             db.execute("""UPDATE device_latest_state SET ssh_sequence=?,
                           ssh_received_ms=?,https_sequence=CASE WHEN ? THEN ? ELSE https_sequence END,
                           https_received_ms=CASE WHEN ? THEN ? ELSE https_received_ms END,
@@ -346,13 +358,45 @@ def store(db_path: Path, payload: dict, raw: bytes, sent: int,
 
 class CollectorHTTP(ThreadingHTTPServer):
     daemon_threads = True
-    request_queue_size = 32
+    # Queue depth does not limit threads created by ThreadingMixIn.
+    request_queue_size = 16
     allow_reuse_address = True
+    max_handlers = 12  # Strictly below the systemd TasksMax=24 limit.
 
     def __init__(self, bind: tuple[str, int], db: Path, keys: Path):
         super().__init__(bind, CollectorHandler)
         self.db_path = db
         self.keys_path = keys
+        self._handler_slots = threading.BoundedSemaphore(self.max_handlers)
+
+    def process_request(self, request, client_address) -> None:
+        # Admission before creating a handler thread: partial/unauthenticated
+        # requests must never consume unbounded tasks.
+        if not self._handler_slots.acquire(blocking=False):
+            try:
+                request.settimeout(0.2)
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Content-Length: 0\r\n"
+                    b"Retry-After: 5\r\n"
+                    b"Connection: close\r\n\r\n"
+                )
+            except OSError:
+                pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._handler_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._handler_slots.release()
 
 
 class CollectorHandler(BaseHTTPRequestHandler):

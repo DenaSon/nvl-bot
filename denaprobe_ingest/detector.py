@@ -5,6 +5,7 @@ The caller explicitly enables evaluation only after staged field acceptance.
 """
 from __future__ import annotations
 
+from contextlib import closing
 import json
 from pathlib import Path
 import secrets
@@ -176,7 +177,7 @@ def evaluate(db_path: Path, *, now_ms: int | None = None) -> list[dict]:
     """
     now = int(time.time() * 1000) if now_ms is None else now_ms
     changed = []
-    with collector.connect_db(db_path) as db:
+    with closing(collector.connect_db(db_path)) as db:
         db.execute("PRAGMA synchronous=FULL")
         initialize(db)
         db.execute("BEGIN IMMEDIATE")
@@ -314,7 +315,7 @@ def read_dashboard(db_path: Path, *, now_ms: int | None = None) -> dict:
     """Read-only, bounded snapshot. Never exposes raw signed JSON to Telegram."""
     now = int(time.time() * 1000) if now_ms is None else now_ms
     uri = f"file:{Path(db_path).resolve()}?mode=ro"
-    with sqlite3.connect(uri, uri=True, timeout=2) as db:
+    with closing(sqlite3.connect(uri, uri=True, timeout=2)) as db:
         db.row_factory = sqlite3.Row
         states = [dict(r) for r in db.execute(
             "SELECT s.* FROM dp3_states AS s "

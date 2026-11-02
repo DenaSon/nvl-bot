@@ -342,5 +342,59 @@ class QuickSwitchTests(unittest.IsolatedAsyncioTestCase):
                 client_witness="test",expected_active=446)
 
 
+    async def test_force_abort_hold_releases_only_owned_lease_without_dns_or_user_changes(self):
+        plan=await self.engine.preview(NEW)
+        job=self.engine._reserve(plan,actor="7",evidence="verified")
+        self.engine._hold(job,"DB_COMMIT_REVIEW_REQUIRED")
+        before={
+            "dns":self.dns.snapshot(),
+            "users":self.one(
+                "SELECT COUNT(*) FROM ssh_accounts WHERE host=?",(OLD,)),
+            "default":self.one("SELECT host FROM host_pool WHERE is_default=1"),
+            "hosts":self.one("SELECT value FROM settings WHERE key='hosts'"),
+        }
+        with self.assertRaisesRegex(QuickSwitchHold,"OPERATOR_OR_JOB_MISMATCH"):
+            self.engine.force_abort(job,actor="8")
+        self.assertEqual(self.engine.force_abort(job,actor="7"),"ABORTED")
+        self.assertEqual(self.engine.force_abort(job,actor="7"),"ABORTED")
+        self.assertEqual(self.engine.get(job)["status"],"ABORTED")
+        self.assertEqual(self.one(
+            "SELECT status FROM failover_operations WHERE id="
+            "(SELECT lease_id FROM manual_quick_switch_jobs WHERE id=?)",
+            job),("ABORTED",))
+        self.assertEqual(self.one(
+            "SELECT error_code FROM manual_quick_switch_jobs WHERE id=?",job),
+            ("ADMIN_FORCE_ABORT_UNRECONCILED",))
+        self.assertEqual(self.one(
+            "SELECT COUNT(*) FROM manual_quick_switch_events "
+            "WHERE job_id=? AND code='ADMIN_FORCE_ABORT_UNRECONCILED'",job),(1,))
+        self.assertEqual(self.dns.snapshot(),before["dns"])
+        self.assertEqual(self.dns.writes,0)
+        self.assertEqual(self.one(
+            "SELECT COUNT(*) FROM ssh_accounts WHERE host=?",OLD),before["users"])
+        self.assertEqual(self.one(
+            "SELECT host FROM host_pool WHERE is_default=1"),before["default"])
+        self.assertEqual(self.one(
+            "SELECT value FROM settings WHERE key='hosts'"),before["hosts"])
+        # This remains a new independent transfer, no replay of the aborted job.
+        self.assertEqual((await self.engine.preview(NEW))["target"],NEW)
+
+    async def test_force_abort_rejects_active_or_already_committed_and_wrong_lease(self):
+        plan=await self.engine.preview(NEW)
+        job=self.engine._reserve(plan,actor="7",evidence="test")
+        with self.assertRaisesRegex(QuickSwitchHold,"FORCE_ABORT_ONLY_HOLD"):
+            self.engine.force_abort(job,actor="7")
+        self.engine._hold(job,"DB_COMMIT_REVIEW_REQUIRED")
+        with self.connect() as db:
+            db.execute("UPDATE failover_operations SET detail_json=? "
+                       "WHERE id=(SELECT lease_id FROM manual_quick_switch_jobs WHERE id=?)",
+                       ('{"component":"OTHER","job":"unrelated"}',job))
+        with self.assertRaisesRegex(QuickSwitchHold,"LEASE_IDENTITY_UNVERIFIED"):
+            self.engine.force_abort(job,actor="7")
+        self.assertEqual(self.engine.get(job)["status"],"HOLD")
+        self.assertEqual(self.one(
+            "SELECT status FROM failover_operations"),("RUNNING",))
+
+
 if __name__ == "__main__":
     unittest.main()

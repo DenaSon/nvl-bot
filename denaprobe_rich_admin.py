@@ -5,6 +5,7 @@ fallback, no customer identifiers, no credentials, no network mutation.
 """
 from __future__ import annotations
 
+from contextlib import closing
 import asyncio
 from datetime import datetime
 from pathlib import Path
@@ -225,7 +226,7 @@ def _open_readonly(path):
 
 
 def _pointer(path, chat):
-    with _open_readonly(path) as db:
+    with closing(_open_readonly(path)) as db:
         row = db.execute(
             "SELECT actor,message_id FROM dp3_rich_cards WHERE chat_id=?",
             (chat,)).fetchone()
@@ -233,13 +234,14 @@ def _pointer(path, chat):
 
 
 def _set_pointer(path, actor, chat, message_id, now):
-    with sqlite3.connect(path, timeout=4) as db:
+    with closing(sqlite3.connect(path, timeout=4)) as db:
         db.execute(
             "INSERT INTO dp3_rich_cards(chat_id,actor,message_id,updated_at)"
             " VALUES(?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET "
             "actor=excluded.actor,message_id=excluded.message_id,"
             "updated_at=excluded.updated_at",
             (chat, actor, message_id, now))
+        db.commit()
 
 
 def _render(data, model):

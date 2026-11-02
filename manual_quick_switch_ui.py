@@ -37,6 +37,10 @@ _MESSAGES = {
     "ACCOUNT_OR_ROUTE_CHANGED": "حساب‌ها یا مسیر پس از پیش‌نمایش تغییر کرده‌اند.",
     "PREVIEW_CHANGED": "اطلاعات تغییر کرده است؛ پیش‌نمایش تازه بگیرید.",
     "EXTERNAL_ROUTE_UNVERIFIED": "شواهد انتقال اضطراری قبلی کامل نیستند.",
+    "FORCE_ABORT_ONLY_HOLD": "لغو اجباری فقط برای انتقال متوقف‌شده (HOLD) مجاز است.",
+    "FORCE_CONFIRMATION_EXPIRED": "تأیید لغو منقضی شده؛ دوباره بررسی کنید.",
+    "LEASE_OWNERSHIP_LOST": "قفل ثبت‌شده متعلق به این انتقال نیست؛ بررسی لازم است.",
+    "LEASE_IDENTITY_UNVERIFIED": "هویت قفل انتقال تأیید نشد؛ لغو مجاز نیست.",
 }
 
 def _message(error):
@@ -132,6 +136,8 @@ class ManualQuickSwitchUI:
             if status=="HOLD":
                 rows.append([("⚠️ تلاش مجدد DNS با تأیید مدیر",
                              "apps_edge_quick_retry_review_"+rec["id"])])
+                rows.append([("⛔ لغو اجباری انتقال",
+                             "apps_edge_quick_force_review_"+rec["id"])])
         rows.extend([[("🔄 تازه‌سازی","apps_edge_quick_status")],
                      [("↩️ مدیریت سرورها","apps_edge_quick_home")]])
         title=("✅ <b>انتقال با موفقیت انجام شد</b>" if status=="DONE"
@@ -146,6 +152,9 @@ class ManualQuickSwitchUI:
         if status=="DONE":
             message+="\n🌐 DNS: <b>تأییدشده</b>\n\n" \
                      "اتصال واقعی مشتری را نیز بررسی کنید."
+        elif status=="ABORTED" and rec.get("error_code")=="ADMIN_FORCE_ABORT_UNRECONCILED":
+            message+="\n\n⚠️ فقط پرونده و قفل عملیات آزاد شده‌اند؛ "
+                     "DNS و حساب‌های کاربران تغییر نکرده‌اند."
         return await self._view(context,chat,message,rows)
 
     def _claim_done_notice(self, job, actor, chat):
@@ -273,6 +282,55 @@ class ManualQuickSwitchUI:
                 return await self._home(context,chat)
             if data=="apps_edge_quick_status":
                 return await self._status(context,chat)
+            if data.startswith("apps_edge_quick_force_yes_"):
+                nonce=data[len("apps_edge_quick_force_yes_"):]
+                pending=self.pending.pop((actor,chat),None)
+                if (not isinstance(pending,dict)
+                        or pending.get("nonce")!=nonce
+                        or not pending.get("force_job")
+                        or self.now()>pending.get("expires",0)):
+                    raise QuickSwitchHold("FORCE_CONFIRMATION_EXPIRED")
+                if str(actor) in self.running:
+                    raise QuickSwitchHold("OPERATION_ALREADY_RUNNING")
+                job=pending["force_job"]
+                def abort():
+                    # Same local mutex as the background Cloudflare worker:
+                    # do not race this button with an actual transfer.
+                    with self.effect_lock:
+                        return self.engine.force_abort(job,actor=actor)
+                await asyncio.to_thread(abort)
+                return await self._view(
+                    context,chat,
+                    "✅ <b>انتقال با لغو اجباری بسته شد.</b>\n\n"
+                    "پرونده و Lease همین انتقال آزاد شدند. "
+                    "هیچ حساب، DNS یا رله‌ای تغییر نکرد.\n"
+                    "⚠️ پیش از انتقال بعدی، وضعیت واقعی DNS و مسیر را بررسی کنید.",
+                    [[("📋 وضعیت و سوابق","apps_edge_quick_status")],
+                     [("🖥 مدیریت سرورها","apps_edge_manual_home")]])
+            if data.startswith("apps_edge_quick_force_review_"):
+                job=data[len("apps_edge_quick_force_review_"):]
+                rec=await asyncio.to_thread(self.engine.get,job)
+                if (not rec or rec.get("kind")!="QUICK"
+                        or rec.get("status")!="HOLD"
+                        or rec.get("actor")!=str(actor)):
+                    raise QuickSwitchHold("FORCE_ABORT_ONLY_HOLD")
+                nonce=secrets.token_hex(8)
+                self.pending[(actor,chat)]={
+                    "force_job":job,"nonce":nonce,
+                    "expires":self.now()+PENDING_TTL,
+                }
+                return await self._view(
+                    context,chat,
+                    "⚠️ <b>لغو اجباری انتقال</b>\n\n"
+                    f"مبدأ: <code>{escape(rec['source'])}</code>\n"
+                    f"مقصد: <code>{escape(rec['target'])}</code>\n"
+                    f"حساب‌ها: <b>{rec['account_count']}</b>\n\n"
+                    "فقط پرونده و قفل همین عملیات بسته می‌شوند؛ "
+                    "DNS، تنظیمات مسیر و حساب‌ها برگردانده نمی‌شوند. "
+                    "اگر Cloudflare قبلاً تغییر کرده باشد، باید مسیر را جداگانه بررسی کنید.",
+                    [[("⛔ تأیید لغو اجباری",
+                       "apps_edge_quick_force_yes_"+nonce)],
+                     [("انصراف","apps_edge_quick_status")]])
             if data.startswith("apps_edge_quick_select_"):
                 ip=data[len("apps_edge_quick_select_"):]
                 plan=await self.engine.preview(ip)

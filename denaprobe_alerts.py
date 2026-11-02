@@ -23,10 +23,20 @@ def _reserve(path, recipient_ids, *, now_ms):
     recipients = sorted(set(
         x for x in recipient_ids if type(x) is int and x > 0
     ))[:30]
-    if not recipients:
-        return []
     with collector.connect_db(Path(path)) as db:
         db.execute("BEGIN IMMEDIATE")
+        if recipients:
+            marks = ",".join("?" for _ in recipients)
+            db.execute(
+                f"UPDATE dp3_delivery SET status='REVOKED',updated_at=? "
+                f"WHERE status='READY' AND recipient_id NOT IN ({marks})",
+                (now_ms, *recipients))
+        else:
+            db.execute(
+                "UPDATE dp3_delivery SET status='REVOKED',updated_at=? "
+                "WHERE status='READY'", (now_ms,))
+            db.commit()
+            return []
         # Never replay a large historical backlog when notifications are first
         # enabled or an administrator joins. Existing incidents remain visible
         # in the dashboard; only recent transitions produce proactive alerts.
@@ -53,13 +63,17 @@ def _reserve(path, recipient_ids, *, now_ms):
                     "VALUES(?,?,'READY',?)",
                     (tr["id"],recipient,now_ms)
                 )
+        # Only CURRENT authorized admins can ever be selected. Queued
+        # messages for revoked recipients were retired above.
+        marks = ",".join("?" for _ in recipients)
         ready = db.execute(
             "SELECT d.transition_id,d.recipient_id,t.incident_id,t.kind,"
             "t.observed_class,t.confidence,t.occurred_at,t.evidence_sequence "
             "FROM dp3_delivery AS d JOIN dp3_transitions AS t "
             "ON t.id=d.transition_id "
-            "WHERE d.status='READY' ORDER BY d.transition_id,d.recipient_id LIMIT ?",
-            (MAX_PER_TICK,)
+            f"WHERE d.status='READY' AND d.recipient_id IN ({marks}) "
+            "ORDER BY d.transition_id,d.recipient_id LIMIT ?",
+            (*recipients, MAX_PER_TICK)
         ).fetchall()
         out = []
         for r in ready:

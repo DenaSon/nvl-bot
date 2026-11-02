@@ -13,7 +13,16 @@ import re
 import sqlite3
 import time
 
-from . import collector as v1
+# Direct-script and package module startup both remain supported. The running
+# Collector explicitly binds its own module to avoid duplicated DptError types.
+try:
+    from . import collector as v1
+except ImportError:
+    import collector as v1
+
+def bind_collector(module):
+    global v1
+    v1 = module
 
 ENDPOINT = "/api/dpt/v2/telemetry"
 MAX_BODY = 1024

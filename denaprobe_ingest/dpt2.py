@@ -214,6 +214,7 @@ def store(db_path, body: dict, raw: bytes, sent: int, allowed_targets=None, now_
         allowed = allowed_targets is None or target in allowed_targets
         eligible = (
             kind == 1 and current_boot == boot_id and ordered and not unknown
+            and body.get("w") == 1  # lost/unknown hotspot cannot advance live
             and ssh_age <= v1.SSH_MAX_AGE_MS and
             https_age <= v1.HTTPS_MAX_AGE_MS and
             tcp_age <= v1.SSH_MAX_AGE_MS and

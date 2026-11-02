@@ -41,9 +41,24 @@ def _reserve(path, recipient_ids, *, now_ms):
         # Never replay a large historical backlog when notifications are first
         # enabled or an administrator joins. Existing incidents remain visible
         # in the dashboard; only recent transitions produce proactive alerts.
+        # Retired targets must never produce delayed notifications. A new
+        # administrator should not receive an obsolete OPEN if the incident
+        # was already recovered before their first alert cycle.
+        db.execute(
+            "UPDATE dp3_delivery SET status='SUPERSEDED',updated_at=? "
+            "WHERE status='READY' AND EXISTS "
+            "(SELECT 1 FROM dp3_transitions t "
+            "JOIN dp3_incidents i ON i.id=t.incident_id "
+            "WHERE t.id=dp3_delivery.transition_id AND "
+            "(i.superseded_at IS NOT NULL OR "
+            "(i.recovered_at IS NOT NULL AND t.kind!='RECOVERED')))",
+            (now_ms,))
         transitions = db.execute(
-            "SELECT id,incident_id,kind,occurred_at FROM dp3_transitions "
-            "WHERE occurred_at>=? ORDER BY id DESC LIMIT 80",
+            "SELECT t.id,t.incident_id,t.kind,t.occurred_at FROM dp3_transitions t "
+            "JOIN dp3_incidents i ON i.id=t.incident_id "
+            "WHERE t.occurred_at>=? AND i.superseded_at IS NULL "
+            "AND (i.recovered_at IS NULL OR t.kind='RECOVERED') "
+            "ORDER BY t.id DESC LIMIT 80",
             (now_ms-300000,)
         ).fetchall()
         for tr in transitions:
@@ -72,7 +87,10 @@ def _reserve(path, recipient_ids, *, now_ms):
             "t.observed_class,t.confidence,t.occurred_at,t.evidence_sequence "
             "FROM dp3_delivery AS d JOIN dp3_transitions AS t "
             "ON t.id=d.transition_id "
+            "JOIN dp3_incidents AS i ON i.id=t.incident_id "
             f"WHERE d.status='READY' AND d.recipient_id IN ({marks}) "
+            "AND i.superseded_at IS NULL "
+            "AND (i.recovered_at IS NULL OR t.kind='RECOVERED') "
             "ORDER BY d.transition_id,d.recipient_id LIMIT ?",
             (*recipients, MAX_PER_TICK)
         ).fetchall()

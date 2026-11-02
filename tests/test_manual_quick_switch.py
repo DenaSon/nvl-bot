@@ -349,7 +349,7 @@ class QuickSwitchTests(unittest.IsolatedAsyncioTestCase):
         before={
             "dns":self.dns.snapshot(),
             "users":self.one(
-                "SELECT COUNT(*) FROM ssh_accounts WHERE host=?",(OLD,)),
+                "SELECT COUNT(*) FROM ssh_accounts WHERE host=?",OLD),
             "default":self.one("SELECT host FROM host_pool WHERE is_default=1"),
             "hosts":self.one("SELECT value FROM settings WHERE key='hosts'"),
         }

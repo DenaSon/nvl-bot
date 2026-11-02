@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import sys
 import threading
 import sqlite3
 import stat
@@ -356,6 +357,18 @@ def store(db_path: Path, payload: dict, raw: bytes, sent: int,
     return 2 if history else 0
 
 
+def load_dpt2():
+    # Invocation may be "python path/to/collector.py" (production systemd),
+    # "python -m denaprobe_ingest.collector" or a normal imported module.
+    # Always hand v2 the SAME running Collector module and DptError class.
+    if __package__:
+        from . import dpt2
+    else:
+        import dpt2
+    dpt2.bind_collector(sys.modules[__name__])
+    return dpt2
+
+
 class CollectorHTTP(ThreadingHTTPServer):
     daemon_threads = True
     # Queue depth does not limit threads created by ThreadingMixIn.
@@ -363,10 +376,15 @@ class CollectorHTTP(ThreadingHTTPServer):
     allow_reuse_address = True
     max_handlers = 12  # Strictly below the systemd TasksMax=24 limit.
 
-    def __init__(self, bind: tuple[str, int], db: Path, keys: Path):
+    def __init__(self, bind: tuple[str, int], db: Path, keys: Path,
+                 enable_v2: bool = False):
         super().__init__(bind, CollectorHandler)
         self.db_path = db
         self.keys_path = keys
+        self.enable_v2 = enable_v2
+        if enable_v2:
+            # Explicitly gated and isolated from legacy DPT/1 storage.
+            load_dpt2().initialize(db)
         self._handler_slots = threading.BoundedSemaphore(self.max_handlers)
 
     def process_request(self, request, client_address) -> None:
@@ -435,9 +453,15 @@ class CollectorHandler(BaseHTTPRequestHandler):
         self.respond(200, {"status": "ok", "service": "denaprobe-core"})
 
     def do_POST(self) -> None:
-        if self.path != ENDPOINT:
+        # Avoid importing even the new module on legacy v1 requests.
+        is_v2 = self.path == "/api/dpt/v2/telemetry"
+        if self.path != ENDPOINT and not is_v2:
             self.respond(404)
             return
+        if is_v2 and not self.server.enable_v2:
+            self.respond(404)
+            return
+        dpt2 = load_dpt2() if is_v2 else None
         if self.headers.get("Transfer-Encoding") or self.headers.get("Content-Encoding"):
             self.respond(400)
             return
@@ -471,14 +495,24 @@ class CollectorHandler(BaseHTTPRequestHandler):
             for key in ("x-dpt-device", "x-dpt-key-id", "x-dpt-sent-uptime-ms", "x-dpt-signature"):
                 headers[key] = self.headers.get_all(key, [])
             config = load_devices(self.server.keys_path)
-            device, sent = authenticate(raw, headers, config)
+            if is_v2:
+                device, sent = dpt2.authenticate(raw, headers, config)
+            else:
+                device, sent = authenticate(raw, headers, config)
             body = json_body(raw)
             if body.get("id") != device:
                 raise DptError(403, "unauthorized")
-            kind, _ = validate(body, sent)
             allowed = config[device].get("targets", [])
-            outcome = store(self.server.db_path, body, raw, sent, allowed_targets=allowed)
-            self.respond(200, {"v": 1, "b": body["b"], "q": body["q"], "ack": {"r": outcome}})
+            if is_v2:
+                dpt2.validate(body, sent)
+                outcome = dpt2.store(self.server.db_path, body, raw, sent,
+                                     allowed_targets=allowed)
+            else:
+                validate(body, sent)
+                outcome = store(self.server.db_path, body, raw, sent,
+                                allowed_targets=allowed)
+            self.respond(200, {"v": 2 if is_v2 else 1,
+                               "b": body["b"], "q": body["q"], "ack": {"r": outcome}})
         except DptError as exc:
             # Avoid leaking anything identifying device/secret/signature.
             self.respond(exc.http_status)
@@ -538,10 +572,14 @@ def main() -> None:
     target.add_argument("--port", type=int, required=True)
     recent = sub.add_parser("recent")
     recent.add_argument("--limit", type=int, default=20)
+    recent2 = sub.add_parser("recent-v2")
+    recent2.add_argument("--limit", type=int, default=20)
     sub.add_parser("check")
     serve = sub.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=18081)
+    serve.add_argument("--enable-v2", action="store_true",
+                       help="Explicit staging-only DPT/2 gate (default OFF)")
     args = parser.parse_args()
     if args.action == "init":
         initialize(args.db)
@@ -585,6 +623,15 @@ def main() -> None:
                         ORDER BY received_at_ms DESC,sequence DESC LIMIT ?""",
                                   (max(1, min(args.limit, 100)),)):
                 print(dict(row))
+    elif args.action == "recent-v2":
+        with connect_db(args.db) as db:
+            for row in db.execute("""SELECT device_id,boot_id,sequence,kind,
+                        tcp_code,deep_code,first_code,second_code,https_code,
+                        target_revision,sender_age_ms,history_only,received_at_ms
+                        FROM dpt2_events
+                        ORDER BY received_at_ms DESC,sequence DESC LIMIT ?""",
+                                  (max(1, min(args.limit, 100)),)):
+                print(dict(row))
     elif args.action == "check":
         with connect_db(args.db) as db:
             result = db.execute("PRAGMA quick_check").fetchone()
@@ -599,7 +646,8 @@ def main() -> None:
         load_devices(args.keys)
         with connect_db(args.db) as db:
             db.execute("SELECT 1 FROM telemetry_events LIMIT 1")
-        server = CollectorHTTP((args.host, args.port), args.db, args.keys)
+        server = CollectorHTTP((args.host, args.port), args.db, args.keys,
+                               enable_v2=args.enable_v2)
         print("DPT_COLLECTOR_READY loopback_only=YES detection=DISABLED", flush=True)
         try:
             server.serve_forever(poll_interval=0.4)

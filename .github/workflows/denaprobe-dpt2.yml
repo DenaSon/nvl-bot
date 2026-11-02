@@ -1,0 +1,38 @@
+name: DenaProbe DPT2 isolated contract
+
+on:
+  push:
+    branches:
+      - "feature/r3-phase2-dpt2-collector-*"
+      - master
+    paths:
+      - "denaprobe_ingest/**"
+      - "tests/test_denaprobe_dpt2.py"
+      - "tests/test_denaprobe_responder.py"
+      - "ops/denaprobe_static_responder.py"
+      - "tests/test_denaprobe_collector.py"
+      - ".github/workflows/denaprobe-dpt2.yml"
+  pull_request:
+    paths:
+      - "denaprobe_ingest/**"
+      - "tests/test_denaprobe_dpt2.py"
+      - "tests/test_denaprobe_collector.py"
+      - ".github/workflows/denaprobe-dpt2.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dpt-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile isolated collector modules
+        run: python -m py_compile denaprobe_ingest/collector.py denaprobe_ingest/dpt2.py
+      - name: Verify original DPT1 and opt-in DPT2 regressions
+        run: python -m unittest discover -s tests -p 'test_denaprobe*.py' -v

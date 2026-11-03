@@ -102,3 +102,59 @@ or unredacted configuration into GitHub, docs, logs or chat.
   DB access, then explicitly activate flags and test native Rich interactions
   and controlled D0/recovery Telegram delivery. Do not reload bot or
   activate notifications during this source-only phase.
+
+## Fast TCP early-warning sensitivity — 2026-11-03
+
+- On the owner's field-test request, the first **fresh, signed, current-boot,
+  nonhistorical** failed TCP probe (`c.s=20/21/22`) now opens a single **early
+  observation** notification when Wi-Fi remains connected and sequence
+  continuity is valid. The primary goal is earliest useful warning, not a
+  censorship verdict. Repeated failed samples within an episode are deduplicated.
+- Direct HTTPS control PASS is **not a gate for the early notification**:
+  SLOW, absent or failed direct control must not mask an observed failed TCP
+  probe. The message explicitly calls the cause uncertain (DNS, target or
+  network) and does not claim that the VPN tunnel has failed.
+- A subsequent independent valid TCP failure upgrades evidence internally;
+  authenticated D1/D2 still require two consecutive samples. A D0 recovery
+  still requires **two** fresh consecutive TCP/SSH preauth success samples.
+- Wi-Fi-down, unknown/unsupported TCP codes, stale events, history-only
+  samples, failed continuity and contradictory SSH success do **not** trigger
+  this fast warning. A successful telegram delivery is recorded once per
+  transition and admin recipient. The existing `NVL_DENAPROBE_R3_ALERTS_ENABLED`
+  remains the delivery gate; no additional env flag is required.
+- The detector reads only the last eligible SSH result once per 30-second bot
+  cycle. Fast alerts are bounded by that schedule and actual board sample
+  delivery, never guaranteed real time. DNS propagation and measurement cadence
+  can delay recovery beyond the two-sample confirmation logic.
+
+- For an existing D0, two new signed TCP+SSH preauth PASS samples can
+  establish recovery of the **initial tested path** even while independent
+  HTTPS is SLOW/unavailable. This does not recover D1/D2 or claim full
+  VPN-path health; it avoids stale HTTPS controls artificially delaying TCP
+  recovery. No recovery follows silence, skipped history or Wi-Fi loss.
+
+## Fast-alert-only code update on an existing R3 Core bot
+
+This is an **incremental** release: the existing Core already has R3 deployed,
+so do **not** re-run the initial full Core R3 code publisher (it intentionally
+refuses already-integrated bots), the old one-shot Core publisher, or any ad-hoc
+text merge. Only the two changed runtime modules are allowlisted:
+`/root/denaprobe_ingest/detector.py` and `/root/denaprobe_rich_admin.py`.
+
+Use the **exact merged master SHA**, not the branch PR SHA. With the clean,
+separate checkout at `/root/nvlbot-r3-source`, fetch/checkout that SHA, then:
+
+```bash
+SRC=/root/nvlbot-r3-source
+SHA=<exact-merged-40-character-commit>
+python3 "$SRC/ops/denaprobe_r3_fast_alert_publish.py" --src "$SRC" --sha "$SHA"
+# Only if PREFLIGHT_PASS: repeat with --apply to back up, atomically replace
+# both files, verify imports in live /root, restart only nvlbot and auto-revert
+# those files if the reload fails.
+```
+
+This does not modify `nvlbot.env`, `bot_final_v49-2.py`, existing SQLite
+records or schema, Collector or firmware. The already-configured
+`NVL_DENAPROBE_R3_ALERTS_ENABLED=1` remains required for actual Telegram
+notification delivery. Verify the *running bot's* environment, not just the
+env file, and confirm a fresh real DPT2 failure and recovery separately.

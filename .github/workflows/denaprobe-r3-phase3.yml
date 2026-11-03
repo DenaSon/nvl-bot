@@ -13,6 +13,8 @@ on:
       - "tests/test_denaprobe_phase3.py"
       - "ops/denaprobe_r3_stage_bot.py"
       - "tests/test_denaprobe_stage_bot.py"
+      - "ops/denaprobe_r3_publish_core.py"
+      - "tests/test_denaprobe_r3_publish_core.py"
       - ".github/workflows/denaprobe-r3-phase3.yml"
   pull_request:
     paths:
@@ -23,6 +25,8 @@ on:
       - "tests/test_denaprobe_phase3.py"
       - "ops/denaprobe_r3_stage_bot.py"
       - "tests/test_denaprobe_stage_bot.py"
+      - "ops/denaprobe_r3_publish_core.py"
+      - "tests/test_denaprobe_r3_publish_core.py"
       - ".github/workflows/denaprobe-r3-phase3.yml"
   workflow_dispatch:
 

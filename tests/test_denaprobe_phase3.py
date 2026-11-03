@@ -50,7 +50,8 @@ class TestPhase3(unittest.TestCase):
         self.assertEqual(dpt2.store(self.db, body, raw, 700,
                                     now_ms=self.now), 0)
 
-    def submit(self, kind, *, direct=True, wifi=1, revision=None, https_code=1):
+    def submit(self, kind, *, direct=True, wifi=1, revision=None,
+               https_code=1, tcp_code=20):
         del revision
         self.q += 1
         self.now += 30000
@@ -69,7 +70,7 @@ class TestPhase3(unittest.TestCase):
                          "f": complete, "g": complete}
         elif kind == "d0":
             body.update(s=30, p=30, o=0)
-            body["c"]["s"] = 20
+            body["c"]["s"] = tcp_code
             body.pop("a")
         elif kind == "d1":
             body["z"] = {"u": u+20000, "s": 20, "am": 350, "sm": 19000,
@@ -134,6 +135,16 @@ class TestPhase3(unittest.TestCase):
         self.submit("d0", direct=False)
         self.assertFalse(self.evaluate())  # still one active incident
         self.assertEqual(len(self.dashboard()["active"]), 1)
+
+    def test_real_field_tcp_22_and_slow_https_raise_early_d0(self):
+        # Operator field evidence: c.s=22 while direct HTTPS reported SLOW=2.
+        self.ready()
+        self.assertEqual(self.submit("d0", tcp_code=22, https_code=2), 0)
+        changes = self.evaluate()
+        self.assertEqual(changes[0]["kind"], "OPEN")
+        self.assertEqual(self.dashboard()["active"][0]["confidence"], detector.EARLY)
+        self.assertEqual(self.dashboard()["probes"][0]["tcp_code"], 22)
+        self.assertEqual(self.dashboard()["probes"][0]["https_code"], 2)
 
     def test_first_signed_tcp_failure_sends_rich_alert_and_two_passes_recover(self):
         self.ready()

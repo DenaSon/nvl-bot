@@ -11,6 +11,8 @@ on:
       - "denaprobe_rich_admin.py"
       - "bot_final_v49-2.py"
       - "tests/test_denaprobe_phase3.py"
+      - "ops/denaprobe_r3_stage_bot.py"
+      - "tests/test_denaprobe_stage_bot.py"
       - ".github/workflows/denaprobe-r3-phase3.yml"
   pull_request:
     paths:
@@ -19,6 +21,8 @@ on:
       - "denaprobe_rich_admin.py"
       - "bot_final_v49-2.py"
       - "tests/test_denaprobe_phase3.py"
+      - "ops/denaprobe_r3_stage_bot.py"
+      - "tests/test_denaprobe_stage_bot.py"
       - ".github/workflows/denaprobe-r3-phase3.yml"
   workflow_dispatch:
 

@@ -58,6 +58,31 @@ class PublisherTests(unittest.TestCase):
                    and name not in publisher.ALLOWED_BOT_CHANGES]
         self.assertEqual(changed, ["foo"])
 
+    def test_known_live_r2_baseline_is_compatible_with_r3_release(self):
+        release = (ROOT / "bot_final_v49-2.py").read_text(encoding="utf-8")
+        live = release
+        a = live.index("# DenaProbe R3: optional admin dashboard")
+        b = live.index("def _cloudzy_markup(rows):", a)
+        live = live[:a] + live[b:]
+        a = live.index('        if globals().get("_DP3_ENABLED", False):')
+        b = live.index("    return rows", a)
+        live = live[:a] + live[b:]
+        a = live.index('    if d == "apps_dp3_home" or d.startswith("dp3:"):')
+        b = live.index('    if d in ("apps_cz_rich_home", ', a)
+        live = live[:a] + live[b:]
+        a = live.index("async def _post_init(app):\n")
+        b = live.index(
+            "    # K2 Single shares this application's existing root process",
+            a,
+        )
+        live = live[:a] + "async def _post_init(app):\n" + live[b:]
+        live = live.replace(
+            ", ('dp3_monitor_task', '📡 DenaProbe R3')", "", 1
+        )
+        self.assertNotIn("NVL_DENAPROBE_R3_ENABLED", live)
+        self.assertIn("apps_dpt_24", live)
+        publisher.verify_compatible(live, release)
+
     def test_env_is_idempotent_and_preserves_unrelated_settings(self):
         original = (b"FOO=safe\nNVL_DENAPROBE_R3_ENABLED=0\n"
                     b"NVL_DENAPROBE_DB_PATH=/old/db\nBAR=present\n")

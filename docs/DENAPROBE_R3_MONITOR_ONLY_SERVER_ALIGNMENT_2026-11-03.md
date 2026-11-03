@@ -28,11 +28,13 @@ delivery or VPN health.
 ## Minimal classifier alignment
 
 - A signed, current DPT2 measurement with `c.s=1`, pre-auth `s=1`,
-  healthy direct HTTPS control and **no `z`** is
-  `PREAUTH_REACHABLE` (server-only classification; not a new wire field).
-- Such measurements are **not** `HEALTHY` and can never open D1/D2 or
-  recover an already-open D1/D2. Deep channel/data evidence is still
-  required for those classes.
+  fresh independent HTTPS and **no `z`** is only
+  `PREAUTH_REACHABLE` **for recovery of an already-confirmed D0 incident**
+  (internal classifier value; not a new DPT wire field).
+- With no active D0, pre-auth success still reports `MONITORING_UNKNOWN`
+  for full service health: it never becomes `HEALTHY`, opens D1/D2, or
+  recovers an existing D1/D2. Deep evidence is required for those classes.
+  Loss of hotspot Wi-Fi remains unmeasurable, never a healthy state.
 - Two distinct, sequential, fresh `PREAUTH_REACHABLE` observations can
   close an active **D0 TCP unreachable** incident, because they establish
   recovery of the tested initial path only. A RECOVERED Rich Message must

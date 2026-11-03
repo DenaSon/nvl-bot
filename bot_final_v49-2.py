@@ -7578,6 +7578,9 @@ def _build_admin_programs_kb(*, actor=None, chat=None, active_admin_ids=()):
             and actor > 0 and actor == chat and actor in active_admin_ids):
         rows.insert(0,[InlineKeyboardButton(
             "🌐 مدیریت Edge", callback_data="apps_edge_quick_home")])
+        # Retain the existing DPT/1 historical quality reports.
+        rows.insert(1,[InlineKeyboardButton(
+            "📊 گزارش DenaProbe", callback_data="apps_dpt_24")])
         if globals().get("_DP3_ENABLED", False):
             rows.insert(1,[InlineKeyboardButton(
                 "📡 پایش DenaProbe", callback_data=_DP3_ENTRY)])
@@ -7608,7 +7611,8 @@ async def _show_admin_programs_hub(target, context):
         "🖥 <b>نودها</b> — وضعیت، تنظیمات، راه‌اندازی و اتصال Node\n"
         "🌐 <b>هاست‌ها</b> — Inboundها و Public Hostها\n"
         "🚚 <b>انتقال</b> — مهاجرت کنترل‌شده سرور اصلی Marzban\n"
-        "🛰 <b>مانیتورینگ</b> — سلامت و وضعیت دارایی‌های Marzban"
+        "🛰 <b>مانیتورینگ</b> — سلامت و وضعیت دارایی‌های Marzban\n"
+        "📡 <b>DenaProbe</b> — وضعیت اتصال و گزارش"
     )
     active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
     markup = InlineKeyboardMarkup(_build_admin_programs_kb(
@@ -16768,6 +16772,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             query,context,d,role=role,actor=update.effective_user.id,
             chat=update.effective_chat.id,
             is_private=(getattr(update.effective_chat,"type",None)=="private"),
+        )
+        return
+    if d in ("apps_dpt_24", "apps_dpt_168", "apps_dpt_help_24", "apps_dpt_help_168"):
+        from denaprobe_admin_dashboard import handle_dashboard as _handle_dpt_dashboard
+        active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
+        # Existing callbacks from older cards remain authorized and replay-safe.
+        normalized = ("apps_dpt_168" if d.endswith("_168") else "apps_dpt_24")
+        await _handle_dpt_dashboard(
+            query, data=normalized, role=role, actor=update.effective_user.id,
+            chat=update.effective_chat.id,
+            is_private=(getattr(update.effective_chat, "type", None) == "private"),
+            active_admin_ids=active_admin_ids,
         )
         return
     if d == "apps_dp3_home" or d.startswith("dp3:"):

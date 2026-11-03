@@ -224,6 +224,12 @@ def evaluate(db_path: Path, *, now_ms: int | None = None) -> list[dict]:
             observed, detail = classify(body, direct_ok=bool(fresh and direct_ok))
             if not fresh:
                 observed, detail = UNKNOWN, "STALE_OR_CONTINUITY_GAP"
+            elif observed == PREAUTH_REACHABLE and not (
+                prev and prev["effective"] == D0 and prev["open_incident"]
+            ):
+                # Normal preauth reachability never announces full health.
+                # It is only sufficient to resolve a previously confirmed D0.
+                observed, detail = UNKNOWN, "AUTHENTICATED_DATA_NOT_MEASURED"
             if not prev:
                 # A target revision change is NOT a recovery event.
                 db.execute(
@@ -309,8 +315,6 @@ def evaluate(db_path: Path, *, now_ms: int | None = None) -> list[dict]:
                         changed.append({"incident": incident, "kind": "RECOVERED"})
                         incident = None
                     effective = observed
-                elif observed == PREAUTH_REACHABLE and not incident:
-                    effective = PREAUTH_REACHABLE
             db.execute(
                 "UPDATE dp3_states SET boot_id=?,last_seq=?,candidate=?,streak=?,"
                 "effective=?,observation=?,open_incident=?,last_received_at=?,"

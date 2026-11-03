@@ -248,7 +248,7 @@ def render_transition(model, entry):
     kind = entry["kind"]
     tcp_only = incident["observed_class"] == detector.D0
     if kind == "RECOVERED":
-        title = ("🟢 DenaProbe | اتصال اولیه بازیابی شد" if tcp_only
+        title = ("🟢 DenaProbe | اتصال TCP/SSH اولیه بازیابی شد" if tcp_only
                  else "🟢 DenaProbe | ارتباط بازیابی شد")
     elif kind == "OPEN":
         title = "🔴 DenaProbe | اختلال احتمالی اتصال"

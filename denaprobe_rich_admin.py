@@ -64,7 +64,9 @@ def _state(model):
         return "🔴 اختلال احتمالی"
     if not model["states"] or model["stale"]:
         return "⚪ پایش نامشخص"
-    return "🟢 بدون اختلال تأییدشده"
+    if all(s["effective"] == detector.PREAUTH_REACHABLE for s in model["states"]):
+        return "🟢 TCP/SSH اولیه در دسترس · سلامت NPV بررسی نشده"
+    return "🟢 اختلال تأییدشده‌ای در مسیرهای اندازه‌گیری‌شده نیست"
 
 
 def render_home(model):
@@ -182,6 +184,10 @@ def render_detail(model, identifier):
             ("جایگزینی مقصد", _time(record["superseded_at"]) if record["superseded_at"] else "—"),
             ("تازگی پایش", "نامشخص / قدیمی" if stale else
                             _age(state["last_received_at"], model["now"])),
+            ("محدوده بازیابی",
+             "TCP/SSH اولیه؛ نه تونل NPV" if record["recovered_at"] and
+             record["observed_class"] == detector.D0 else
+             "براساس شواهد ثبت‌شده" if record["recovered_at"] else "—"),
         ]),
         {"type": "paragraph", "text":
             "💡 موفقیت TCP یا SSH اولیه به‌تنهایی سلامت اتصال کاربران NPV را ثابت نمی‌کند."},
@@ -197,8 +203,11 @@ def render_transition(model, entry):
     if not incident:
         raise ValueError("MISSING_INCIDENT")
     kind = entry["kind"]
-    title = "🟢 اتصال بازیابی شد" if kind == "RECOVERED" else (
-        "🔴 هشدار اختلال احتمالی" if kind == "OPEN" else "🟠 تغییر نوع اختلال")
+    title = ("🟢 دسترسی TCP/SSH اولیه بازیابی شد"
+             if kind == "RECOVERED" and incident["observed_class"] == detector.D0
+             else "🟢 آزمون انتقال SSH بازیابی شد" if kind == "RECOVERED"
+             else "🔴 هشدار اختلال احتمالی" if kind == "OPEN"
+             else "🟠 تغییر نوع اختلال")
     return _rich([
         {"type": "heading", "size": 3, "text": title},
         _table([
@@ -208,7 +217,10 @@ def render_transition(model, entry):
                 incident["device_id"], "ثبت نشده")),
             ("نوع", CLASSES.get(entry["observed_class"], "بازیابی")),
             ("اطمینان", "مشکوک؛ نیازمند تأیید مستقل"
-                        if kind != "RECOVERED" else "دو آزمون سالم جدید"),
+                        if kind != "RECOVERED" else
+                        "دو مشاهدهٔ جدید TCP/SSH؛ سلامت NPV نامشخص"
+                        if incident["observed_class"] == detector.D0 else
+                        "دو مشاهدهٔ جدید انتقال SSH احرازشده"),
             ("زمان", _time(entry["occurred_at"])),
             ("نمونهٔ تأیید", entry["evidence_sequence"]),
         ]),

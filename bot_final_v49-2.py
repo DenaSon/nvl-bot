@@ -7541,6 +7541,8 @@ def _build_admin_programs_kb(*, actor=None, chat=None, active_admin_ids=()):
             and actor > 0 and actor == chat and actor in active_admin_ids):
         rows.insert(0,[InlineKeyboardButton(
             "🌐 مدیریت Edge", callback_data="apps_edge_quick_home")])
+        rows.insert(1,[InlineKeyboardButton(
+            "📡 پایش DenaProbe", callback_data="apps_dpt_24")])
     return rows
 
 
@@ -7568,7 +7570,8 @@ async def _show_admin_programs_hub(target, context):
         "🖥 <b>نودها</b> — وضعیت، تنظیمات، راه‌اندازی و اتصال Node\n"
         "🌐 <b>هاست‌ها</b> — Inboundها و Public Hostها\n"
         "🚚 <b>انتقال</b> — مهاجرت کنترل‌شده سرور اصلی Marzban\n"
-        "🛰 <b>مانیتورینگ</b> — سلامت و وضعیت دارایی‌های Marzban"
+        "🛰 <b>مانیتورینگ</b> — سلامت و وضعیت دارایی‌های Marzban\n"
+        "📡 <b>DenaProbe</b> — کیفیت SSH و قابلیت اطمینان ارسال داده‌ها"
     )
     active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
     markup = InlineKeyboardMarkup(_build_admin_programs_kb(
@@ -16700,6 +16703,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     # ---------------- Programs / operational tools ----------------
+    # R2-D1: DenaProbe metrics are read-only; every callback revalidates the
+    # active admin ID and private-chat actor, never relying on persisted role.
+    if d in ("apps_dpt_24", "apps_dpt_168"):
+        from denaprobe_admin_dashboard import handle_dashboard as _handle_dpt_dashboard
+        active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
+        await _handle_dpt_dashboard(
+            query, data=d, role=role, actor=update.effective_user.id,
+            chat=update.effective_chat.id,
+            is_private=(getattr(update.effective_chat, "type", None) == "private"),
+            active_admin_ids=active_admin_ids,
+        )
+        return
+
     # Read-only Rich card entry/refresh/details. Recheck live active-admin
     # membership, private chat, original journal owner and message pointer.
     # The input never reaches Cloudzy purchase/DNS, CZ07 mutation or K2.

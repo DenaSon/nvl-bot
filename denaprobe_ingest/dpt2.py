@@ -5,6 +5,7 @@ versioned raw evidence in independent tables, never touches customer/bot state.
 """
 from __future__ import annotations
 
+from contextlib import closing
 import base64
 import hashlib
 import hmac
@@ -60,7 +61,7 @@ CREATE TABLE IF NOT EXISTS dpt2_latest (
 """
 
 def initialize(db_path):
-    with v1.connect_db(db_path) as db:
+    with closing(v1.connect_db(db_path)) as db:
         db.executescript(DDL)
 
 
@@ -168,7 +169,7 @@ def store(db_path, body: dict, raw: bytes, sent: int, allowed_targets=None, now_
     tcp_age = sent - body.get("c", {}).get("u", sent)
     deep_age = sent - body.get("z", {}).get("u", sent)
     sha = hashlib.sha256(raw).hexdigest()
-    with v1.connect_db(db_path) as db:
+    with closing(v1.connect_db(db_path)) as db:
         db.execute("BEGIN IMMEDIATE")
         existing = db.execute(
             "SELECT body_sha256 FROM dpt2_events WHERE device_id=? AND boot_id=? AND sequence=?",

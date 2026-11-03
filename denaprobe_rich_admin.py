@@ -204,13 +204,17 @@ def render_detail(model, identifier):
     if operator:
         rows.insert(2, ("اپراتور (اعلام‌شده)", operator))
     if sample:
+        tcp = sample.get("tcp_code")
+        tcp_label = ("موفق" if tcp == 1 else "ناموفق" if tcp in (20, 21, 22)
+                     else "اندازه‌گیری نشده")
         rows += [
-            ("اتصال TCP", "موفق" if sample.get("tcp_code") == 1 else "ناموفق"),
+            ("اتصال TCP", tcp_label),
             ("زمان TCP", str(sample["tcp_ms"]) + " ms"
              if sample.get("tcp_ms") is not None else "اندازه‌گیری نشده"),
-            ("HTTPS مستقیم", {1: "موفق", 2: "کند"}.get(
+            ("HTTPS فعلی", {1: "موفق", 2: "کند"}.get(
                 sample.get("direct_code"), "نامشخص")),
             ("آخرین دریافت", _time(sample.get("received_at"))),
+            ("تازگی داده", _age(sample.get("received_at"), model["now"])),
         ]
         if sample.get("deep_code") is not None:
             for label, field in (("احراز هویت", "auth_ms"),

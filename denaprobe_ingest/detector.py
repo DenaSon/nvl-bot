@@ -16,6 +16,8 @@ from . import collector
 
 UNKNOWN = "MONITORING_UNKNOWN"
 HEALTHY = "HEALTHY"
+# Observed reachability only: no SSH login, tunnel or NPV data-plane test.
+PREAUTH_REACHABLE = "PREAUTH_REACHABLE"
 D0 = "D0_TCP_UNREACHABLE"
 D1 = "D1_SESSION_FAILURE"
 D2 = "D2_DATA_DEGRADED"
@@ -137,7 +139,9 @@ def classify(body: dict, *, direct_ok: bool) -> tuple[str, str]:
         return UNKNOWN, "SSH_PREAUTH_UNAVAILABLE"
     z = body.get("z")
     if not isinstance(z, dict):
-        return UNKNOWN, "AUTHENTICATED_DATA_NOT_MEASURED"
+        # Basic monitor uses no SSH credentials or relay-local responder.
+        # This is not FULL HEALTHY and never clears D1/D2 data-plane incidents.
+        return PREAUTH_REACHABLE, "TCP_SSH_PREAUTH_PASS_DEEP_NOT_MEASURED"
     code = z.get("s")
     if code in (20, 21, 30, 31):
         return D1, "AUTHENTICATED_SSH_SESSION_OR_CHANNEL_FAILED"
@@ -220,6 +224,12 @@ def evaluate(db_path: Path, *, now_ms: int | None = None) -> list[dict]:
             observed, detail = classify(body, direct_ok=bool(fresh and direct_ok))
             if not fresh:
                 observed, detail = UNKNOWN, "STALE_OR_CONTINUITY_GAP"
+            elif observed == PREAUTH_REACHABLE and not (
+                prev and prev["effective"] == D0 and prev["open_incident"]
+            ):
+                # Normal preauth reachability never announces full health.
+                # It is only sufficient to resolve a previously confirmed D0.
+                observed, detail = UNKNOWN, "AUTHENTICATED_DATA_NOT_MEASURED"
             if not prev:
                 # A target revision change is NOT a recovery event.
                 db.execute(
@@ -289,7 +299,12 @@ def evaluate(db_path: Path, *, now_ms: int | None = None) -> list[dict]:
                             "UPDATE dp3_incidents SET last_evidence_at=?,last_sequence=? "
                             "WHERE id=? AND recovered_at IS NULL",
                             (now,row["sequence"],incident))
-                elif observed == HEALTHY:
+                elif observed == HEALTHY or (
+                    observed == PREAUTH_REACHABLE and effective == D0
+                ):
+                    # A D0 TCP outage can be resolved by two fresh TCP/SSH
+                    # preauth passes, but this says nothing about NPV traffic.
+                    # Existing D1/D2 incidents require full Deep evidence.
                     if incident:
                         db.execute(
                             "UPDATE dp3_incidents SET recovered_at=?,last_evidence_at=?,"
@@ -299,7 +314,7 @@ def evaluate(db_path: Path, *, now_ms: int | None = None) -> list[dict]:
                                     INCONCLUSIVE, now, row["sequence"])
                         changed.append({"incident": incident, "kind": "RECOVERED"})
                         incident = None
-                    effective = HEALTHY
+                    effective = observed
             db.execute(
                 "UPDATE dp3_states SET boot_id=?,last_seq=?,candidate=?,streak=?,"
                 "effective=?,observation=?,open_incident=?,last_received_at=?,"

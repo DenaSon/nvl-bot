@@ -56,8 +56,17 @@ def integrate(live: str, release: str) -> str:
     )
     if "apps_edge_quick_home" not in old_menu:
         raise IntegrationError("live admin programs lack expected Edge entry")
-    if "📡 پایش DenaProbe" in old_menu:
-        raise IntegrationError("live admin programs already have a DenaProbe label; inspect callback")
+    # An older admin entry may use the same Persian label with a different
+    # callback. Preserve it and give R3 a distinct, user-facing name rather
+    # than overwriting the legacy action or adding duplicate labels.
+    r3_label = "📡 پایش DenaProbe"
+    if r3_label in old_menu:
+        r3_label = "📡 وضعیت اتصال"
+        if r3_label in old_menu:
+            raise IntegrationError(
+                "both DenaProbe menu labels already exist; review live callbacks"
+            )
+        addition = addition.replace("📡 پایش DenaProbe", r3_label, 1)
     if old_menu.count("    return rows\n") != 1:
         raise IntegrationError("live admin programs return anchor is ambiguous")
     updated_menu = old_menu.replace("    return rows\n", addition + "    return rows\n", 1)
@@ -105,7 +114,7 @@ def integrate(live: str, release: str) -> str:
     }
     expected = {
         "_dp3_monitor_loop": ["_DP3_ALERTS_ENABLED"],
-        "_build_admin_programs_kb": ["📡 پایش DenaProbe", "_DP3_ENTRY"],
+        "_build_admin_programs_kb": [r3_label, "_DP3_ENTRY"],
         "callback_handler": ["_dp3_handle_callback", "apps_dp3_home"],
         "_post_init": ['app.bot_data["dp3_monitor_task"]'],
         "_post_shutdown": ['app.bot_data.get("dp3_monitor_task")'],

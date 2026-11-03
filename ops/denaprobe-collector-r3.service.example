@@ -1,0 +1,32 @@
+[Unit]
+Description=DenaProbe R3 isolated DPT/1+DPT/2 Collector (operator-opt-in)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=denaprobe
+Group=denaprobe
+WorkingDirectory=/opt/nvl-dpt-collector
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=/etc/denaprobe/collector-r3.env
+ExecStart=/usr/bin/python3 /opt/nvl-dpt-collector/denaprobe_ingest/collector.py --db ${DENAPROBE_DB_PATH} --keys ${DENAPROBE_KEYS_PATH} serve --host 127.0.0.1 --port 18081 --enable-v2
+Restart=on-failure
+RestartSec=3
+UMask=0077
+StateDirectory=denaprobe
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/denaprobe
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=128M
+TasksMax=24
+
+[Install]
+WantedBy=multi-user.target

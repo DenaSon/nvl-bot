@@ -50,6 +50,31 @@ class TestStageBot(unittest.TestCase):
         self.assertIn('if d == "apps_dp3_home"', merged)
         self.assertNotIn("<<<<<<<", merged)
 
+    def test_existing_legacy_dena_probe_menu_entry_is_preserved(self):
+        old = self.legacy_sample()
+        menu_start = old.index("def _build_admin_programs_kb(")
+        menu_end = old.index("async def _show_admin_programs_hub", menu_start)
+        menu = old[menu_start:menu_end]
+        anchor = "    return rows\n"
+        self.assertEqual(menu.count(anchor), 1)
+        legacy = (
+            '    rows.insert(1, [InlineKeyboardButton('
+            '"📡 پایش DenaProbe", callback_data="legacy_probe_status")])\n'
+        )
+        menu = menu.replace(anchor, legacy + anchor, 1)
+        old = old[:menu_start] + menu + old[menu_end:]
+        merged = integrate(old, self.release)
+        segment = merged[
+            merged.index("def _build_admin_programs_kb("):
+            merged.index("async def _show_admin_programs_hub")
+        ]
+        self.assertIn('callback_data="legacy_probe_status"', segment)
+        self.assertIn('"📡 پایش DenaProbe"', segment)
+        self.assertIn('"📡 وضعیت اتصال"', segment)
+        self.assertIn("callback_data=_DP3_ENTRY", segment)
+        self.assertEqual(segment.count('"📡 پایش DenaProbe"'), 1)
+        self.assertEqual(segment.count('"📡 وضعیت اتصال"'), 1)
+
     def test_existing_r3_is_rejected(self):
         with self.assertRaises(IntegrationError):
             integrate(self.release, self.release)

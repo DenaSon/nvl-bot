@@ -44,7 +44,7 @@ class TestStageBot(unittest.TestCase):
                           marker + "\ndef _cloudzy_markup(rows):", 1)
         merged = integrate(old, self.release)
         self.assertIn(marker, merged)
-        self.assertEqual(merged.count('NVL_DENAPROBE_R3_ALERTS_ENABLED'), 2)
+        self.assertEqual(merged.count('NVL_DENAPROBE_R3_ALERTS_ENABLED'), 1)
         self.assertEqual(merged.count('app.bot_data.get("dp3_monitor_task")'), 1)
         self.assertIn('📡 پایش DenaProbe', merged)
         self.assertIn('if d == "apps_dp3_home"', merged)

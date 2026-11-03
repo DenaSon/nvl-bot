@@ -9,7 +9,7 @@ import unittest
 from denaprobe_ingest import collector, dpt2, detector
 from denaprobe_alerts import tick
 from denaprobe_rich_admin import (ENTRY, render_home, render_detail, render_active,
-                                  render_history, handle_callback)
+                                  render_history, render_transition, handle_callback)
 from cloudzy_rich_transport import RichDeliveryHold
 
 DEVICE = "dp-lab-01"
@@ -142,11 +142,51 @@ class TestPhase3(unittest.TestCase):
         self.submit("preauth"); self.evaluate()
         self.submit("preauth"); self.evaluate()
         model = self.dashboard()
-        self.assertEqual(model["states"][0]["observation"], detector.UNKNOWN)
+        self.assertEqual(model["states"][0]["observation"], detector.PREAUTH_REACHABLE)
+        self.assertNotEqual(model["states"][0]["effective"], detector.HEALTHY)
         self.assertFalse(model["active"])
         self.submit("d1", wifi=0)
         self.assertFalse(self.evaluate())
         self.assertEqual(self.dashboard()["stale"], 1)
+
+    def test_monitor_only_d0_opens_and_preauth_recovers_with_clear_scope(self):
+        # Normal ESP32 DPT2 has c (TCP) and s (preauth) but no z/Deep.
+        self.submit("preauth"); self.evaluate()
+        self.submit("preauth"); self.evaluate()
+        self.assertFalse(self.dashboard()["active"])
+        self.submit("d0"); self.evaluate()
+        self.submit("d0")
+        self.assertEqual(self.evaluate()[0]["kind"], "OPEN")
+        incident_id = self.dashboard()["active"][0]["id"]
+
+        self.submit("preauth")
+        self.assertFalse(self.evaluate())  # One pass is not recovery.
+        self.assertEqual(len(self.dashboard()["active"]), 1)
+        self.submit("preauth")
+        self.assertEqual(self.evaluate()[0]["kind"], "RECOVERED")
+        model = self.dashboard()
+        self.assertFalse(model["active"])
+        self.assertEqual(model["states"][0]["effective"],
+                         detector.PREAUTH_REACHABLE)
+        self.assertNotEqual(model["states"][0]["effective"], detector.HEALTHY)
+        card = render_transition(
+            model, {"incident_id": incident_id, "kind": "RECOVERED",
+                    "occurred_at": self.now, "evidence_sequence": self.q,
+                    "observed_class": detector.RECOVERED})
+        self.assertIn("TCP/SSH اولیه", card["blocks"][0]["text"])
+        self.assertIn("سلامت NPV نامشخص", str(card))
+
+    def test_monitor_only_pass_cannot_recover_deep_d1_incident(self):
+        self.ready()
+        self.submit("d1"); self.evaluate()
+        self.submit("d1")
+        self.assertEqual(self.evaluate()[0]["kind"], "OPEN")
+        self.submit("preauth"); self.assertFalse(self.evaluate())
+        self.submit("preauth"); self.assertFalse(self.evaluate())
+        model = self.dashboard()
+        self.assertEqual(len(model["active"]), 1)
+        self.assertEqual(model["active"][0]["observed_class"], detector.D1)
+        self.assertIsNone(model["active"][0]["recovered_at"])
 
     def test_auth_config_and_missing_direct_are_not_filtering(self):
         self.ready()

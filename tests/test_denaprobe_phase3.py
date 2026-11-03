@@ -50,7 +50,7 @@ class TestPhase3(unittest.TestCase):
         self.assertEqual(dpt2.store(self.db, body, raw, 700,
                                     now_ms=self.now), 0)
 
-    def submit(self, kind, *, direct=True, wifi=1, revision=None):
+    def submit(self, kind, *, direct=True, wifi=1, revision=None, https_code=1):
         del revision
         self.q += 1
         self.now += 30000
@@ -87,7 +87,7 @@ class TestPhase3(unittest.TestCase):
             # DPT/1 inherited semantics forbid Wi-Fi RSSI when down.
             body.pop("r", None)
         if direct:
-            body["h"] = {"u": u+21000, "c": 1, "n": 65536, "bt": 2200}
+            body["h"] = {"u": u+21000, "c": https_code, "n": 65536, "bt": 2200}
         signed_uptime = max(u, body.get("h", {}).get("u", 0),
                             body.get("z", {}).get("u", 0)) + 100
         raw = json.dumps(body, separators=(",", ":")).encode()
@@ -229,6 +229,64 @@ class TestPhase3(unittest.TestCase):
             self.assertTrue(any("💡" in str(b) for b in card["blocks"]))
             self.assertTrue(any(b["type"] == "buttons" for b in card["blocks"]))
             self.assertFalse(any(b.get("type") == "html" for b in card["blocks"]))
+
+    def test_lite_board_is_fresh_despite_unknown_full_tunnel_health(self):
+        self.submit("preauth"); self.evaluate()
+        self.submit("preauth"); self.evaluate()
+        model = self.dashboard()
+        self.assertEqual(model["states"][0]["observation"], detector.UNKNOWN)
+        self.assertEqual((model["fresh"], model["stale"]), (1, 0))
+        self.assertEqual(len(model["probes"]), 1)
+        probe = model["probes"][0]
+        self.assertTrue(probe["ssh_fresh"] and probe["https_fresh"])
+        self.assertEqual((probe["tcp_code"], probe["ssh_code"],
+                          probe["https_code"]), (1, 1, 1))
+        card = render_home(model)
+        self.assertIn("اتصال اولیه برقرار", card["blocks"][1]["text"])
+        self.assertIn("بردهای با داده تازه", str(card))
+        self.assertIn("HTTPS مستقیم", str(card))
+        self.assertIn("تونل VPN", str(card))
+        self.assertNotIn("DPT/2", str(card))
+        self.assertNotIn("R3", str(card))
+
+    def test_slow_direct_https_is_visible_not_mislabeled_healthy(self):
+        self.submit("preauth", https_code=2); self.evaluate()
+        self.submit("preauth", https_code=2); self.evaluate()
+        model = self.dashboard()
+        self.assertEqual(model["fresh"], 1)
+        self.assertEqual(model["probes"][0]["https_code"], 2)
+        self.assertIn("کند", str(render_home(model)))
+        self.assertEqual(model["states"][0]["observation"], detector.UNKNOWN)
+
+    def test_monitor_only_incident_and_recovery_messages_are_brief(self):
+        self.ready()
+        self.submit("d0"); self.evaluate()
+        self.submit("d0"); self.evaluate()
+        opened = self.dashboard()
+        incident = opened["active"][0]
+        entry = {"incident_id": incident["id"], "kind": "OPEN",
+                 "observed_class": detector.D0, "occurred_at": self.now,
+                 "evidence_sequence": self.q}
+        card = render_transition(opened, entry)
+        self.assertEqual(len(card["blocks"]), 4)
+        self.assertIn("DenaProbe", card["blocks"][0]["text"])
+        self.assertIn("دو بررسی متوالی", str(card))
+        self.assertNotIn("R3", str(card))
+        self.assertNotIn("DPT/2", str(card))
+        self.assertNotIn("INDEPENDENT_TCP_CONNECT_FAILURE", str(card))
+        self.submit("preauth"); self.evaluate()
+        self.submit("preauth"); self.evaluate()
+        entry["kind"] = "RECOVERED"
+        card = render_transition(self.dashboard(), entry)
+        self.assertIn("TCP/SSH اولیه", str(card))
+        self.assertIn("سلامت NPV نامشخص", str(card))
+
+    def test_bot_dashboard_and_notifications_are_separate_opt_ins(self):
+        main = (Path(__file__).resolve().parents[1] /
+                "bot_final_v49-2.py").read_text(encoding="utf-8")
+        self.assertIn('NVL_DENAPROBE_R3_ALERTS_ENABLED", "0"', main)
+        self.assertIn("if _DP3_ALERTS_ENABLED:", main)
+        self.assertIn("await asyncio.to_thread(_dp3_evaluate,", main)
 
     def test_dashboard_live_admin_and_message_origin_guard(self):
         self.ready()

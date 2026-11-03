@@ -7513,38 +7513,42 @@ from cloudzy_rich_bridge import (
     handle_rich_admin_callback as _cloudzy_rich_admin_callback,
 )
 
-# DenaProbe R3: optional, native Telegram Rich Message integration only.
-# The DPT Collector remains a separate DB/service; this bot is the sole
-# Telegram poller. Explicit operator activation is required after field E2E.
+# DenaProbe R3: optional admin dashboard and independently gated alerts.
+# Both run in the existing bot; the Collector remains isolated.
 _DP3_ENABLED = os.environ.get("NVL_DENAPROBE_R3_ENABLED", "0") == "1"
+_DP3_ALERTS_ENABLED = (_DP3_ENABLED and
+    os.environ.get("NVL_DENAPROBE_R3_ALERTS_ENABLED", "0") == "1")
 _DP3_DB_PATH = os.environ.get(
-    "NVL_DENAPROBE_DB_PATH", "/var/lib/denaprobe/telemetry.sqlite3")
+    "NVL_DENAPROBE_DB_PATH", "/var/lib/denaprobe/telemetry-r3.sqlite3")
 _DP3_ENTRY = "apps_dp3_home"
-# Do NOT import experimental DPT packages when this opt-in feature is OFF.
-# Older promoted Cores and standby code snapshots must keep starting safely.
 if _DP3_ENABLED:
-    from cloudzy_rich_transport import RichBotAPI as _DenaProbeRichBotAPI
+    from pathlib import Path as _DenaProbePath
+    from denaprobe_ingest.detector import evaluate as _dp3_evaluate
     from denaprobe_rich_admin import handle_callback as _dp3_handle_callback
-    from denaprobe_alerts import tick as _dp3_alert_tick
+    if _DP3_ALERTS_ENABLED:
+        from cloudzy_rich_transport import RichBotAPI as _DenaProbeRichBotAPI
+        from denaprobe_alerts import tick as _dp3_alert_tick
 
 
 async def _dp3_monitor_loop(app):
-    """Read-only evidence -> durable incident/outbox, existing bot only."""
+    """Refresh incident evidence every 30s; send only with alert opt-in."""
     while True:
         try:
-            recipients = await asyncio.to_thread(_db_get_admin_chat_ids)
-            outcome = await _dp3_alert_tick(
-                _DP3_DB_PATH, recipients, _DenaProbeRichBotAPI(app.bot.token))
-            log.info("DenaProbe R3 detector round sent=%s held=%s",
-                     outcome["sent"], outcome["held"])
+            if _DP3_ALERTS_ENABLED:
+                recipients = await asyncio.to_thread(_db_get_admin_chat_ids)
+                outcome = await _dp3_alert_tick(
+                    _DP3_DB_PATH, recipients, _DenaProbeRichBotAPI(app.bot.token))
+                if outcome["sent"] or outcome["held"]:
+                    log.info("DenaProbe alert delivery sent=%s held=%s",
+                             outcome["sent"], outcome["held"])
+            else:
+                await asyncio.to_thread(_dp3_evaluate, _DenaProbePath(_DP3_DB_PATH))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            # No fail-open network actions, customer mutations or secrets.
-            log.warning("DenaProbe R3 detector round held (%s)",
+            log.warning("DenaProbe monitor check unavailable (%s)",
                         type(exc).__name__)
         await asyncio.sleep(30)
-
 
 
 def _cloudzy_markup(rows):

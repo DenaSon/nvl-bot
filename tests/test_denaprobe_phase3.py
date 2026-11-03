@@ -142,7 +142,7 @@ class TestPhase3(unittest.TestCase):
         self.submit("preauth"); self.evaluate()
         self.submit("preauth"); self.evaluate()
         model = self.dashboard()
-        self.assertEqual(model["states"][0]["observation"], detector.PREAUTH_REACHABLE)
+        self.assertEqual(model["states"][0]["observation"], detector.UNKNOWN)
         self.assertNotEqual(model["states"][0]["effective"], detector.HEALTHY)
         self.assertFalse(model["active"])
         self.submit("d1", wifi=0)
@@ -175,6 +175,11 @@ class TestPhase3(unittest.TestCase):
                     "observed_class": detector.RECOVERED})
         self.assertIn("TCP/SSH اولیه", card["blocks"][0]["text"])
         self.assertIn("سلامت NPV نامشخص", str(card))
+        # Once a D0 is resolved, a later Wi-Fi outage must not be mistaken
+        # for continued healthy baseline monitoring.
+        self.submit("preauth", wifi=0)
+        self.assertFalse(self.evaluate())
+        self.assertEqual(self.dashboard()["stale"], 1)
 
     def test_monitor_only_pass_cannot_recover_deep_d1_incident(self):
         self.ready()

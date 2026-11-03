@@ -5,6 +5,7 @@ remote commands, GOST/WireGuard/DNS mutations, or public read API.
 """
 from __future__ import annotations
 
+from contextlib import closing
 import argparse
 import base64
 import hashlib
@@ -230,7 +231,7 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
 
 def initialize(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    with connect_db(db_path) as db:
+    with closing(connect_db(db_path)) as db:
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA synchronous=FULL")
         db.executescript(DDL)
@@ -240,7 +241,7 @@ def initialize(db_path: Path) -> None:
 def register_target(db_path: Path, target: int, hostname: str, port: int) -> int:
     if not integer(target, 1, 65535) or not hostname or len(hostname) > 253 or not integer(port, 1, 65535):
         raise ValueError("invalid target")
-    with connect_db(db_path) as db:
+    with closing(connect_db(db_path)) as db:
         db.execute("BEGIN IMMEDIATE")
         row = db.execute("SELECT COALESCE(MAX(revision),0) FROM targets WHERE target_id=?", (target,)).fetchone()
         revision = row[0] + 1
@@ -260,7 +261,7 @@ def store(db_path: Path, payload: dict, raw: bytes, sent: int,
     age = sent - payload["u"]
     h = payload.get("h")
     h_age = sent - h["u"] if h else None
-    with connect_db(db_path) as db:
+    with closing(connect_db(db_path)) as db:
         db.execute("PRAGMA synchronous=FULL")
         db.execute("BEGIN IMMEDIATE")
         old = db.execute("SELECT body_sha256 FROM telemetry_events WHERE device_id=? AND boot_id=? AND sequence=?",
@@ -444,7 +445,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
             self.respond(404)
             return
         try:
-            with connect_db(self.server.db_path) as db:
+            with closing(connect_db(self.server.db_path)) as db:
                 db.execute("SELECT 1 FROM telemetry_events LIMIT 1")
             load_devices(self.server.keys_path)
         except (OSError, sqlite3.Error, ValueError):
@@ -616,7 +617,7 @@ def main() -> None:
     elif args.action == "target":
         print("TARGET_REVISION=", register_target(args.db, args.id, args.host, args.port))
     elif args.action == "recent":
-        with connect_db(args.db) as db:
+        with closing(connect_db(args.db)) as db:
             for row in db.execute("""SELECT device_id,boot_id,sequence,event_kind,
                         ssh_code,stop_stage,https_code,sender_age_ms,
                         history_only,received_at_ms FROM telemetry_events
@@ -624,7 +625,7 @@ def main() -> None:
                                   (max(1, min(args.limit, 100)),)):
                 print(dict(row))
     elif args.action == "recent-v2":
-        with connect_db(args.db) as db:
+        with closing(connect_db(args.db)) as db:
             for row in db.execute("""SELECT device_id,boot_id,sequence,kind,
                         tcp_code,deep_code,first_code,second_code,https_code,
                         target_revision,sender_age_ms,history_only,received_at_ms
@@ -633,7 +634,7 @@ def main() -> None:
                                   (max(1, min(args.limit, 100)),)):
                 print(dict(row))
     elif args.action == "check":
-        with connect_db(args.db) as db:
+        with closing(connect_db(args.db)) as db:
             result = db.execute("PRAGMA quick_check").fetchone()
             count = db.execute("SELECT count(*) FROM telemetry_events").fetchone()[0]
         load_devices(args.keys)
@@ -644,7 +645,7 @@ def main() -> None:
         if not 1024 <= args.port <= 65535:
             parser.error("invalid port")
         load_devices(args.keys)
-        with connect_db(args.db) as db:
+        with closing(connect_db(args.db)) as db:
             db.execute("SELECT 1 FROM telemetry_events LIMIT 1")
         server = CollectorHTTP((args.host, args.port), args.db, args.keys,
                                enable_v2=args.enable_v2)

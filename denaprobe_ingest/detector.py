@@ -326,8 +326,84 @@ def evaluate(db_path: Path, *, now_ms: int | None = None) -> list[dict]:
     return changed
 
 
+def _live_probe(db: sqlite3.Connection, latest: sqlite3.Row, now: int) -> dict:
+    """Current-boot signed evidence, not a tunnel-health verdict."""
+    device, boot = latest["device_id"], latest["boot_id"]
+    result = {
+        "device_id": device, "target_id": None, "revision": None,
+        "ssh_sequence": latest["ssh_sequence"],
+        "https_sequence": latest["https_sequence"],
+        "monitoring_gap": bool(latest["monitoring_gap"]),
+        "last_received_at": 0, "ssh_fresh": False, "https_fresh": False,
+        "tcp_code": None, "ssh_code": None, "wifi_code": None,
+        "https_code": None, "https_received_at": None,
+    }
+    if latest["ssh_sequence"] is None:
+        return result
+    row = db.execute(
+        "SELECT * FROM dpt2_events WHERE device_id=? AND boot_id=? "
+        "AND sequence=? AND kind=1 AND history_only=0",
+        (device, boot, latest["ssh_sequence"]),
+    ).fetchone()
+    if row is None:
+        return result
+    body = json.loads(row["raw_json"])
+    last_completed = max(
+        body["u"], body.get("c", {}).get("u", 0),
+        body.get("z", {}).get("u", 0), body.get("h", {}).get("u", 0))
+    ssh_age = int(row["sender_age_ms"]) + last_completed - body["u"]
+    # A newer signed Wi-Fi-down observation invalidates a prior live result,
+    # although it must never promote an outage or claim filtering.
+    last_event = db.execute(
+        "SELECT wifi_code,received_at_ms FROM dpt2_events "
+        "WHERE device_id=? AND boot_id=? AND kind=1 "
+        "ORDER BY sequence DESC LIMIT 1", (device, boot),
+    ).fetchone()
+    wifi_down = bool(
+        last_event and last_event["wifi_code"] == 0 and
+        0 <= now - last_event["received_at_ms"] <= FRESH_MS)
+    fresh = (
+        not latest["monitoring_gap"] and not wifi_down and
+        body.get("w") == 1 and
+        _fresh(now, int(row["received_at_ms"]), ssh_age, FRESH_MS)
+    )
+    result.update(
+        target_id=row["target_id"], revision=row["target_revision"],
+        last_received_at=row["received_at_ms"], ssh_fresh=fresh,
+        wifi_code=0 if wifi_down else body.get("w"),
+        tcp_code=body.get("c", {}).get("s") if fresh else None,
+        ssh_code=body.get("s") if fresh else None,
+    )
+    if latest["https_sequence"] is None:
+        return result
+    control = db.execute(
+        "SELECT raw_json,sender_age_ms,received_at_ms FROM dpt2_events "
+        "WHERE device_id=? AND boot_id=? AND sequence=? "
+        "AND kind=1 AND history_only=0",
+        (device, boot, latest["https_sequence"]),
+    ).fetchone()
+    if control is None:
+        return result
+    control_body = json.loads(control["raw_json"])
+    h = control_body.get("h")
+    if not isinstance(h, dict) or "u" not in h:
+        return result
+    control_last = max(
+        control_body["u"], control_body.get("c", {}).get("u", 0),
+        control_body.get("z", {}).get("u", 0), h["u"])
+    control_age = int(control["sender_age_ms"]) + control_last - h["u"]
+    direct_fresh = _fresh(
+        now, int(control["received_at_ms"]), control_age, HTTPS_FRESH_MS)
+    result.update(
+        https_fresh=direct_fresh,
+        https_code=h.get("c") if direct_fresh else None,
+        https_received_at=control["received_at_ms"],
+    )
+    return result
+
+
 def read_dashboard(db_path: Path, *, now_ms: int | None = None) -> dict:
-    """Read-only, bounded snapshot. Never exposes raw signed JSON to Telegram."""
+    """Read-only operator snapshot. Link freshness != full NPV health."""
     now = int(time.time() * 1000) if now_ms is None else now_ms
     uri = f"file:{Path(db_path).resolve()}?mode=ro"
     with closing(sqlite3.connect(uri, uri=True, timeout=2)) as db:
@@ -342,13 +418,19 @@ def read_dashboard(db_path: Path, *, now_ms: int | None = None) -> dict:
         active = [dict(r) for r in db.execute(
             "SELECT * FROM dp3_incidents WHERE recovered_at IS NULL "
             "AND superseded_at IS NULL ORDER BY opened_at DESC LIMIT 200")]
-        # Active incidents cannot disappear when history rotates past 50.
         seen = {i["id"] for i in history}
         incidents = history + [i for i in active if i["id"] not in seen]
         operators = {r["device_id"]: r["declared_operator"][:32]
                      for r in db.execute("SELECT * FROM dp3_operator_labels")}
+        probes = [_live_probe(db, row, now) for row in db.execute(
+            "SELECT * FROM dpt2_latest ORDER BY device_id LIMIT 50")]
+        probe_by_key = {
+            (p["device_id"], p["target_id"], p["revision"]): p
+            for p in probes
+        }
         samples = {}
         for state in states:
+            key = (state["device_id"], state["target_id"], state["revision"])
             row = db.execute(
                 "SELECT raw_json,received_at_ms FROM dpt2_events WHERE "
                 "device_id=? AND boot_id=? AND sequence=? AND target_id=? "
@@ -357,17 +439,18 @@ def read_dashboard(db_path: Path, *, now_ms: int | None = None) -> dict:
                  state["target_id"], state["revision"])).fetchone()
             if row:
                 b = json.loads(row["raw_json"])
-                z, c, h = b.get("z", {}), b.get("c", {}), b.get("h", {})
-                samples[(state["device_id"], state["target_id"],
-                         state["revision"])] = {
+                z, c = b.get("z") or {}, b.get("c") or {}
+                probe = probe_by_key.get(key, {})
+                samples[key] = {
                     "tcp_code": c.get("s"), "tcp_ms": c.get("ms"),
                     "auth_ms": z.get("am"), "session_ms": z.get("sm"),
                     "deep_code": z.get("s"), "first": z.get("f"),
-                    "second": z.get("g"), "direct_code": h.get("c"),
+                    "second": z.get("g"),
+                    "direct_code": probe.get("https_code"),
                     "received_at": row["received_at_ms"],
                 }
-    fresh = [st for st in states if st["observation"] != UNKNOWN and
-             0 <= now - st["last_received_at"] <= FRESH_MS]
+    # These counters are transport freshness, never a classifier verdict.
+    fresh = sum(bool(p["ssh_fresh"]) for p in probes)
     return {"states": states, "incidents": incidents, "active": active,
-            "fresh": len(fresh), "stale": len(states)-len(fresh), "now": now,
-            "samples": samples, "operators": operators}
+            "fresh": fresh, "stale": len(probes) - fresh, "now": now,
+            "probes": probes, "samples": samples, "operators": operators}

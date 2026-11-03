@@ -37,6 +37,7 @@ class TestCleanR3Schema(unittest.TestCase):
         schema_audit.fresh_prepare(self.new)
         with self.assertRaises(FileExistsError):
             schema_audit.fresh_prepare(self.new)
+        collector.initialize(self.previous)
         with self.assertRaises(FileExistsError):
             schema_audit.fresh_prepare(self.previous)
 

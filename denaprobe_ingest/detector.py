@@ -143,17 +143,18 @@ def classify(body: dict, *, direct_ok: bool) -> tuple[str, str]:
         reason = ("INDEPENDENT_TCP_CONNECT_FAILURE" if direct_ok else
                   "TCP_FAILURE_DIRECT_CONTROL_UNVERIFIED")
         return D0, reason
-    if not direct_ok:
-        return UNKNOWN, "DIRECT_CONTROL_UNAVAILABLE"
     if tcp != 1:
         return UNKNOWN, "UNSUPPORTED_TCP_CODE"
     if body.get("s") != 1:
         return UNKNOWN, "SSH_PREAUTH_UNAVAILABLE"
     z = body.get("z")
     if not isinstance(z, dict):
-        # Basic monitor uses no SSH credentials or relay-local responder.
-        # This is not FULL HEALTHY and never clears D1/D2 data-plane incidents.
+        # Direct signed TCP+SSH preauth success verifies the previously failed
+        # tested path, even if unrelated HTTPS is SLOW/not measured. This
+        # never declares end-to-end NPV/VPN health.
         return PREAUTH_REACHABLE, "TCP_SSH_PREAUTH_PASS_DEEP_NOT_MEASURED"
+    if not direct_ok:
+        return UNKNOWN, "DIRECT_CONTROL_UNAVAILABLE_FOR_DEEP"
     code = z.get("s")
     if code in (20, 21, 30, 31):
         return D1, "AUTHENTICATED_SSH_SESSION_OR_CHANNEL_FAILED"

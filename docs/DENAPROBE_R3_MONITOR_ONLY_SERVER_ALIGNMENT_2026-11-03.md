@@ -126,3 +126,9 @@ or unredacted configuration into GitHub, docs, logs or chat.
   cycle. Fast alerts are bounded by that schedule and actual board sample
   delivery, never guaranteed real time. DNS propagation and measurement cadence
   can delay recovery beyond the two-sample confirmation logic.
+
+- For an existing D0, two new signed TCP+SSH preauth PASS samples can
+  establish recovery of the **initial tested path** even while independent
+  HTTPS is SLOW/unavailable. This does not recover D1/D2 or claim full
+  VPN-path health; it avoids stale HTTPS controls artificially delaying TCP
+  recovery. No recovery follows silence, skipped history or Wi-Fi loss.

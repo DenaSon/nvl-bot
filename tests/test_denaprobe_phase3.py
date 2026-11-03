@@ -142,12 +142,13 @@ class TestPhase3(unittest.TestCase):
         r = asyncio.run(tick(self.db, [7], api, now_ms=self.now+1000))
         self.assertEqual(r["sent"], 1)
         self.assertIn("هشدار سریع اتصال TCP", str(api.sent[0][1]))
-        self.assertIn("یک اندازه‌گیری تازه ناموفق", str(api.sent[0][1]))
+        self.assertEqual(api.sent[0][1]["blocks"][1]["cells"][-1][1]["text"],
+                         "یک اندازه‌گیری تازه ناموفق")
         self.assertEqual(asyncio.run(tick(
             self.db, [7], api, now_ms=self.now+1001))["sent"], 0)
-        self.submit("preauth"); self.evaluate()
+        self.submit("preauth", https_code=2); self.evaluate()
         self.assertEqual(len(self.dashboard()["active"]), 1)
-        self.submit("preauth")
+        self.submit("preauth", https_code=2)
         r = asyncio.run(tick(self.db, [7], api, now_ms=self.now+1000))
         self.assertEqual(r["sent"], 1)
         self.assertEqual(len(api.sent), 2)

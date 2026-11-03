@@ -102,3 +102,27 @@ or unredacted configuration into GitHub, docs, logs or chat.
   DB access, then explicitly activate flags and test native Rich interactions
   and controlled D0/recovery Telegram delivery. Do not reload bot or
   activate notifications during this source-only phase.
+
+## Fast TCP early-warning sensitivity — 2026-11-03
+
+- On the owner's field-test request, the first **fresh, signed, current-boot,
+  nonhistorical** failed TCP probe (`c.s=20/21/22`) now opens a single **early
+  observation** notification when Wi-Fi remains connected and sequence
+  continuity is valid. The primary goal is earliest useful warning, not a
+  censorship verdict. Repeated failed samples within an episode are deduplicated.
+- Direct HTTPS control PASS is **not a gate for the early notification**:
+  SLOW, absent or failed direct control must not mask an observed failed TCP
+  probe. The message explicitly calls the cause uncertain (DNS, target or
+  network) and does not claim that the VPN tunnel has failed.
+- A subsequent independent valid TCP failure upgrades evidence internally;
+  authenticated D1/D2 still require two consecutive samples. A D0 recovery
+  still requires **two** fresh consecutive TCP/SSH preauth success samples.
+- Wi-Fi-down, unknown/unsupported TCP codes, stale events, history-only
+  samples, failed continuity and contradictory SSH success do **not** trigger
+  this fast warning. A successful telegram delivery is recorded once per
+  transition and admin recipient. The existing `NVL_DENAPROBE_R3_ALERTS_ENABLED`
+  remains the delivery gate; no additional env flag is required.
+- The detector reads only the last eligible SSH result once per 30-second bot
+  cycle. Fast alerts are bounded by that schedule and actual board sample
+  delivery, never guaranteed real time. DNS propagation and measurement cadence
+  can delay recovery beyond the two-sample confirmation logic.

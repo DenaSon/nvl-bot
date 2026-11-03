@@ -27,6 +27,10 @@ FRESH_MS = 90_000
 HTTPS_FRESH_MS = 360_000
 # Two DISTINCT, eligible, recent measurements, not two scheduler ticks.
 CONFIRM = 2
+# Fast TCP alert after the FIRST eligible current-boot observation.
+# These are early, uncorroborated warnings; consecutive samples are still
+# required to classify an incident as corroborated and to recover it.
+EARLY = "EARLY_OBSERVATION"
 # This classifier cannot attest a carrier, relay health or DPI from one board.
 SUSPECTED = "SUSPECTED"
 INCONCLUSIVE = "INCONCLUSIVE"
@@ -123,8 +127,8 @@ def _direct_control(db: sqlite3.Connection, latest: sqlite3.Row,
 
 def classify(body: dict, *, direct_ok: bool) -> tuple[str, str]:
     """Observational failure class, not attribution to a filtering actor."""
-    if body.get("w") != 1 or not direct_ok:
-        return UNKNOWN, "LOCAL_WIFI_OR_DIRECT_CONTROL_UNAVAILABLE"
+    if body.get("w") != 1:
+        return UNKNOWN, "LOCAL_WIFI_UNAVAILABLE"
     c = body.get("c")
     if not isinstance(c, dict) or c.get("s") == 90:
         return UNKNOWN, "INDEPENDENT_TCP_NOT_MEASURED"
@@ -132,7 +136,15 @@ def classify(body: dict, *, direct_ok: bool) -> tuple[str, str]:
     if tcp in (20, 21, 22):
         if body.get("s") == 1:
             return UNKNOWN, "TCP_SSH_OBSERVATION_CONFLICT"
-        return D0, "INDEPENDENT_TCP_CONNECT_FAILURE"
+        # A fresh signed TCP failure is itself actionable. The separately
+        # sampled HTTPS control may be slow, absent or failing during an
+        # actual outage. Do not suppress the early notification for that.
+        # No provider/filtering attribution follows from this observation.
+        reason = ("INDEPENDENT_TCP_CONNECT_FAILURE" if direct_ok else
+                  "TCP_FAILURE_DIRECT_CONTROL_UNVERIFIED")
+        return D0, reason
+    if not direct_ok:
+        return UNKNOWN, "DIRECT_CONTROL_UNAVAILABLE"
     if tcp != 1:
         return UNKNOWN, "UNSUPPORTED_TCP_CODE"
     if body.get("s") != 1:
@@ -270,8 +282,14 @@ def evaluate(db_path: Path, *, now_ms: int | None = None) -> list[dict]:
                       prev["candidate"] == candidate else 1 if candidate else 0)
             effective = prev["effective"]
             incident = prev["open_incident"]
-            if streak >= CONFIRM:
+            # D0 is a *rapid observation warning*: one eligible signed
+            # sample is enough. D1/D2 and recovery retain two independent
+            # current-boot observations to prevent incorrect escalation.
+            threshold = 1 if observed == D0 else CONFIRM
+            if streak >= threshold:
                 if observed in EVENT_TYPES:
+                    confidence = (EARLY if observed == D0 and streak == 1
+                                  else SUSPECTED)
                     if not incident:
                         incident = secrets.token_hex(12)
                         effective = observed
@@ -280,25 +298,25 @@ def evaluate(db_path: Path, *, now_ms: int | None = None) -> list[dict]:
                             "(id,device_id,target_id,revision,observed_class,confidence,"
                             "reason,opened_at,last_evidence_at,last_sequence) "
                             "VALUES(?,?,?,?,?,?,?,?,?,?)",
-                            (incident,device,target,revision,observed,SUSPECTED,detail,
+                            (incident,device,target,revision,observed,confidence,detail,
                              now,now,row["sequence"]))
-                        _transition(db, incident, "OPEN", observed, SUSPECTED,
+                        _transition(db, incident, "OPEN", observed, confidence,
                                     now, row["sequence"])
                         changed.append({"incident": incident, "kind": "OPEN"})
                     elif effective != observed:
                         effective = observed
                         db.execute(
-                            "UPDATE dp3_incidents SET observed_class=?,reason=?,"
+                            "UPDATE dp3_incidents SET observed_class=?,confidence=?,reason=?,"
                             "last_evidence_at=?,last_sequence=? WHERE id=? AND recovered_at IS NULL",
-                            (observed, detail, now, row["sequence"], incident))
-                        _transition(db, incident, "CHANGE", observed, SUSPECTED,
+                            (observed, confidence, detail, now, row["sequence"], incident))
+                        _transition(db, incident, "CHANGE", observed, confidence,
                                     now, row["sequence"])
                         changed.append({"incident": incident, "kind": "CHANGE"})
                     else:
                         db.execute(
-                            "UPDATE dp3_incidents SET last_evidence_at=?,last_sequence=? "
+                            "UPDATE dp3_incidents SET confidence=?,last_evidence_at=?,last_sequence=? "
                             "WHERE id=? AND recovered_at IS NULL",
-                            (now,row["sequence"],incident))
+                            (confidence,now,row["sequence"],incident))
                 elif observed == HEALTHY or (
                     observed == PREAUTH_REACHABLE and effective == D0
                 ):

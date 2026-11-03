@@ -255,7 +255,9 @@ def render_transition(model, entry):
         title = ("🟢 DenaProbe | اتصال TCP/SSH اولیه بازیابی شد" if tcp_only
                  else "🟢 DenaProbe | ارتباط بازیابی شد")
     elif kind == "OPEN":
-        title = "🔴 DenaProbe | اختلال احتمالی اتصال"
+        title = ("🔴 DenaProbe | هشدار سریع اتصال TCP"
+                 if tcp_only and entry.get("confidence") == detector.EARLY
+                 else "🔴 DenaProbe | اختلال احتمالی اتصال")
     else:
         title = "🟠 DenaProbe | تغییر وضعیت اتصال"
     rows = [
@@ -269,12 +271,16 @@ def render_transition(model, entry):
     if kind == "RECOVERED":
         rows.append(("نتیجه", "دو بررسی متوالی موفق"))
     elif kind == "OPEN":
-        rows.append(("شواهد", "دو بررسی متوالی ناموفق"))
+        rows.append(("شواهد", "یک اندازه‌گیری تازه ناموفق"
+                     if entry.get("confidence") == detector.EARLY
+                     else "دو بررسی متوالی ناموفق"))
     else:
         rows.append(("نتیجه", "تغییر وضعیت تأیید شد"))
     foot = ("💡 دسترسی TCP/SSH اولیه بازیابی شده؛ سلامت NPV نامشخص است."
             if kind == "RECOVERED" and tcp_only else
-            "💡 این گزارش فقط مسیر اندازه‌گیری‌شده را پوشش می‌دهد؛ منشأ اختلال قطعی نیست.")
+            "💡 این هشدار اولیه است؛ خطای DNS یا شبکه هم ممکن است. علت قطعی مشخص نیست."
+            if kind == "OPEN" and tcp_only and entry.get("confidence") == detector.EARLY
+            else "💡 این گزارش فقط مسیر اندازه‌گیری‌شده را پوشش می‌دهد؛ منشأ اختلال قطعی نیست.")
     return _rich([
         {"type": "heading", "size": 3, "text": title},
         _table(rows),

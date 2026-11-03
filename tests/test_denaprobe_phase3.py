@@ -110,17 +110,48 @@ class TestPhase3(unittest.TestCase):
             self.assertEqual(db.execute(
                 "SELECT monitoring_gap FROM dpt2_latest").fetchone()[0], 0)
 
-    def test_d0_requires_two_distinct_fresh_samples_and_no_duplicates(self):
+    def test_fast_d0_opens_on_first_fresh_tcp_failure_no_duplicate(self):
         self.ready()
-        self.assertEqual(self.submit("d0"), 0)
-        self.assertFalse(self.evaluate())
-        self.assertFalse(self.evaluate())  # same q cannot count twice
         self.assertEqual(self.submit("d0"), 0)
         self.assertEqual(self.evaluate()[0]["kind"], "OPEN")
         self.assertEqual(self.dashboard()["active"][0]["observed_class"], detector.D0)
-        self.assertFalse(self.evaluate())
+        self.assertEqual(self.dashboard()["active"][0]["confidence"], detector.EARLY)
+        self.assertFalse(self.evaluate())  # same q cannot count twice
+        self.assertEqual(self.submit("d0"), 0)
+        self.assertFalse(self.evaluate())  # corroboration is NOT another alert
+        self.assertEqual(self.dashboard()["active"][0]["confidence"], detector.SUSPECTED)
         with collector.connect_db(self.db) as db:
             self.assertEqual(db.execute("SELECT count(*) FROM dp3_transitions").fetchone()[0], 1)
+
+    def test_fast_tcp_alarm_with_slow_or_missing_direct_https(self):
+        self.ready()
+        self.assertEqual(self.submit("d0", https_code=2), 0)
+        self.assertEqual(self.evaluate()[0]["kind"], "OPEN")
+        with collector.connect_db(self.db) as db:
+            self.assertEqual(db.execute("SELECT reason FROM dp3_incidents").fetchone()[0],
+                             "TCP_FAILURE_DIRECT_CONTROL_UNVERIFIED")
+        self.assertFalse(self.evaluate())  # not two alerts per slow sample
+        self.submit("d0", direct=False)
+        self.assertFalse(self.evaluate())  # still one active incident
+        self.assertEqual(len(self.dashboard()["active"]), 1)
+
+    def test_first_signed_tcp_failure_sends_rich_alert_and_two_passes_recover(self):
+        self.ready()
+        api = FakeRichAPI()
+        self.submit("d0", https_code=2)
+        r = asyncio.run(tick(self.db, [7], api, now_ms=self.now+1000))
+        self.assertEqual(r["sent"], 1)
+        self.assertIn("هشدار سریع اتصال TCP", str(api.sent[0][1]))
+        self.assertIn("یک اندازه‌گیری تازه ناموفق", str(api.sent[0][1]))
+        self.assertEqual(asyncio.run(tick(
+            self.db, [7], api, now_ms=self.now+1001))["sent"], 0)
+        self.submit("preauth"); self.evaluate()
+        self.assertEqual(len(self.dashboard()["active"]), 1)
+        self.submit("preauth")
+        r = asyncio.run(tick(self.db, [7], api, now_ms=self.now+1000))
+        self.assertEqual(r["sent"], 1)
+        self.assertEqual(len(api.sent), 2)
+        self.assertIn("بازیابی", str(api.sent[1][1]))
 
     def test_d1_then_d2_then_recovery_and_no_stale_recovery(self):
         self.ready()
@@ -154,9 +185,10 @@ class TestPhase3(unittest.TestCase):
         self.submit("preauth"); self.evaluate()
         self.submit("preauth"); self.evaluate()
         self.assertFalse(self.dashboard()["active"])
-        self.submit("d0"); self.evaluate()
         self.submit("d0")
         self.assertEqual(self.evaluate()[0]["kind"], "OPEN")
+        self.submit("d0")
+        self.assertFalse(self.evaluate())
         incident_id = self.dashboard()["active"][0]["id"]
 
         self.submit("preauth")
@@ -198,7 +230,8 @@ class TestPhase3(unittest.TestCase):
         self.submit("auth_failure"); self.evaluate()
         self.submit("auth_failure"); self.evaluate()
         self.assertFalse(self.dashboard()["active"])
-        # Complete direct control can become stale even if SSH has a new q.
+        # Fresh signed TCP failures are actionable even if independent HTTPS
+        # control is missing. But *stale* readings are not actionable.
         self.submit("d0", direct=False); self.evaluate(extra=500000)
         self.submit("d0", direct=False); self.evaluate(extra=500000)
         self.assertFalse(self.dashboard()["active"])
@@ -308,8 +341,9 @@ class TestPhase3(unittest.TestCase):
 
     def test_silent_interval_resets_pending_evidence_streak(self):
         self.ready()
-        self.submit("d0"); self.evaluate()
-        # The old D0 confirmation cannot survive monitoring silence.
+        self.submit("d0")
+        self.assertEqual(self.evaluate()[0]["kind"], "OPEN")
+        # Silence must not auto-recover or create a duplicate incident.
         self.assertEqual(self.evaluate(extra=190000), [])
         with collector.connect_db(self.db) as db:
             state = db.execute(
@@ -318,16 +352,21 @@ class TestPhase3(unittest.TestCase):
         self.submit("d0")
         self.assertFalse(self.evaluate())
         self.submit("d0")
-        self.assertEqual(self.evaluate()[0]["kind"], "OPEN")
+        self.assertFalse(self.evaluate())
+        self.assertEqual(len(self.dashboard()["active"]), 1)
 
     def test_skipped_q_cannot_complete_pending_streak(self):
         self.ready()
-        self.submit("d0"); self.evaluate()
+        self.submit("d0")
+        self.assertEqual(self.evaluate()[0]["kind"], "OPEN")
         self.submit("healthy")  # ingestion succeeded but skipped by classifier
         self.submit("d0")
         self.assertFalse(self.evaluate())
         self.submit("d0")
-        self.assertEqual(self.evaluate()[0]["kind"], "OPEN")
+        self.assertFalse(self.evaluate())
+        with collector.connect_db(self.db) as db:
+            self.assertEqual(db.execute(
+                "SELECT count(*) FROM dp3_transitions").fetchone()[0], 1)
 
     def test_historical_limit_never_hides_old_active_incident(self):
         self.ready()

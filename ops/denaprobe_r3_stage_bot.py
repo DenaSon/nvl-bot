@@ -104,7 +104,7 @@ def integrate(live: str, release: str) -> str:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     expected = {
-        "_dp3_monitor_loop": ["NVL_DENAPROBE_R3_ALERTS_ENABLED"] ,
+        "_dp3_monitor_loop": ["_DP3_ALERTS_ENABLED"],
         "_build_admin_programs_kb": ["📡 پایش DenaProbe", "_DP3_ENTRY"],
         "callback_handler": ["_dp3_handle_callback", "apps_dp3_home"],
         "_post_init": ['app.bot_data["dp3_monitor_task"]'],

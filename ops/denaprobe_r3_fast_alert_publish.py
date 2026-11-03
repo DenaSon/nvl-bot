@@ -153,9 +153,12 @@ def main():
     try:
         require(os.geteuid() == 0, "must run as root")
         src, root = args.src.resolve(), args.root.resolve()
-        validate(src, root, args.sha, args.python.resolve())
+        # Preserve the venv entrypoint symlink. Path.resolve() can point to
+        # /usr/bin/python3 and silently drop the /root/venv site-packages.
+        python = args.python.absolute()
+        validate(src, root, args.sha, python)
         if args.apply:
-            publish(src, root, args.python.resolve())
+            publish(src, root, python)
         else:
             print("STAGE_ONLY=YES; no changes to Core", flush=True)
     except Exception as exc:

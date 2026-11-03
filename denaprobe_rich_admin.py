@@ -59,42 +59,89 @@ def _rich(blocks):
 def _state(model):
     active = model["active"]
     if active and model["stale"]:
-        return "🟠 اختلال قبلی · تازگی پایش نامشخص"
+        return "🟠 اختلال ثبت‌شده · داده تازه در دسترس نیست"
     if active:
         return "🔴 اختلال احتمالی"
-    if not model["states"] or model["stale"]:
+    probes = model.get("probes", [])
+    if not probes or not model["fresh"]:
         return "⚪ پایش نامشخص"
-    if all(s["effective"] == detector.PREAUTH_REACHABLE for s in model["states"]):
-        return "🟢 TCP/SSH اولیه در دسترس · سلامت NPV بررسی نشده"
-    return "🟢 اختلال تأییدشده‌ای در مسیرهای اندازه‌گیری‌شده نیست"
+    if any(p["ssh_fresh"] and p["tcp_code"] in (20, 21, 22) for p in probes):
+        return "🟠 اتصال اولیه نیازمند بررسی"
+    if any(p["ssh_fresh"] and p["tcp_code"] == 1
+           and p["ssh_code"] == 1 for p in probes):
+        return "🟢 اتصال اولیه برقرار"
+    return "⚪ وضعیت اتصال نامشخص"
+
+
+def _tcp_status(probe):
+    if not probe["ssh_fresh"]:
+        return "داده تازه ندارد"
+    if probe["tcp_code"] == 1:
+        return "✅ برقرار"
+    if probe["tcp_code"] in (20, 21, 22):
+        return "🔴 ناموفق"
+    return "نامشخص"
+
+
+def _ssh_status(probe):
+    if not probe["ssh_fresh"]:
+        return "داده تازه ندارد"
+    if probe["ssh_code"] == 1:
+        return "✅ پاسخ دریافت شد"
+    return "ناموفق / نامشخص"
+
+
+def _https_status(probe):
+    if not probe["https_fresh"]:
+        return "قدیمی / اندازه‌گیری نشده"
+    return {
+        1: "✅ موفق",
+        2: "🟠 کند",
+        10: "وای‌فای قطع",
+        11: "ساعت نامعتبر",
+        12: "منابع ناکافی",
+    }.get(probe["https_code"], "ناموفق / نامشخص")
 
 
 def render_home(model):
-    states = model["states"]
+    probes = model.get("probes", [])
     active = model["active"]
-    latest = max((r["last_received_at"] for r in states), default=0)
-    status = _state(model)
+    latest = max((p["last_received_at"] for p in probes), default=0)
+    rows = [
+        ("بردهای با داده تازه", f"{model['fresh']} از {len(probes)}"),
+        ("اختلال فعال", len(active)),
+        ("آخرین داده", _age(latest, model["now"])),
+    ]
+    if len(probes) == 1:
+        p = probes[0]
+        rows += [
+            ("مقصد", p["target_id"] if p["target_id"] is not None else "نامشخص"),
+            ("اتصال TCP", _tcp_status(p)),
+            ("پاسخ SSH اولیه", _ssh_status(p)),
+            ("HTTPS مستقیم", _https_status(p)),
+            ("پیوستگی داده", "برقرار" if p["ssh_fresh"] and
+             not p["monitoring_gap"] else "نامشخص / دارای وقفه"),
+            ("تونل VPN", "اندازه‌گیری نشده"),
+        ]
+        operator = model.get("operators", {}).get(p["device_id"])
+        if operator:
+            rows.insert(4, ("اپراتور (اعلام‌شده)", operator))
+    elif len(probes) > 1:
+        for index, p in enumerate(probes[:4], 1):
+            rows.append((f"برد {index} · مقصد {p['target_id'] or '—'}",
+                         f"TCP {_tcp_status(p)} · HTTPS {_https_status(p)}"))
+        if len(probes) > 4:
+            rows.append(("سایر بردها", len(probes) - 4))
     return _rich([
-        {"type": "heading", "size": 3, "text": "📡 پایش اتصال · DenaProbe"},
-        {"type": "paragraph", "text": status},
-        _table([
-            ("رله‌های ثبت‌شده", len({(s["target_id"], s["revision"]) for s in states})),
-            ("اختلال فعال", len(active)),
-            ("بردهای تازه", model["fresh"]),
-            ("بردهای قدیمی/نامشخص", model["stale"]),
-            ("آخرین داده", _age(latest, model["now"])),
-            ("اپراتور (اعلام‌شده)", "، ".join(sorted(set(
-                model.get("operators", {}).values()))) or "ثبت نشده"),
-            ("ارزیابی فیلترینگ", "مشکوک؛ منشأ تأییدنشده" if active else "نامشخص"),
-        ]),
-        {"type": "divider"},
+        {"type": "heading", "size": 3, "text": "📡 DenaProbe | پایش اتصال"},
+        {"type": "paragraph", "text": _state(model)},
+        _table(rows),
         {"type": "paragraph", "text":
-            "💡 آخرین وضعیت فقط از داده‌های معتبر DPT/2 خوانده می‌شود؛ قطع پایش به معنی فیلترینگ نیست."},
+            "💡 پاسخ SSH اولیه به معنی سلامت تونل VPN نیست."},
         _controls(("🔴 اختلال‌های فعال", "dp3:active"),
                   ("📋 تاریخچه", "dp3:history:0"),
                   ("🔄 بروزرسانی", "dp3:home")),
     ])
-
 
 def render_active(model):
     active = model["active"]
@@ -144,53 +191,49 @@ def render_detail(model, identifier):
     record = next((r for r in model["incidents"] if r["id"] == identifier), None)
     if record is None:
         raise ValueError("INCIDENT_NOT_FOUND")
-    state = next((s for s in model["states"] if
-                  s["device_id"] == record["device_id"] and
-                  s["target_id"] == record["target_id"] and
-                  s["revision"] == record["revision"]), None)
     key = (record["device_id"], record["target_id"], record["revision"])
     sample = model.get("samples", {}).get(key, {})
-    first, second = sample.get("first") or {}, sample.get("second") or {}
-    def count(piece):
-        if not piece:
-            return "اندازه‌گیری نشد"
-        return f"{piece.get('n', 0)}/{piece.get('r', 0)} بایت · کد {piece.get('s', 90)}"
-    stale = (not state or state["observation"] == detector.UNKNOWN or
-             model["now"] - state["last_received_at"] > detector.FRESH_MS)
+    rows = [
+        ("شناسه", record["id"][:12]),
+        ("مقصد", record["target_id"]),
+        ("نوع", CLASSES.get(record["observed_class"], "نامشخص")),
+        ("زمان شروع", _time(record["opened_at"])),
+        ("آخرین شاهد", _time(record["last_evidence_at"])),
+    ]
+    operator = model.get("operators", {}).get(record["device_id"])
+    if operator:
+        rows.insert(2, ("اپراتور (اعلام‌شده)", operator))
+    if sample:
+        rows += [
+            ("اتصال TCP", "موفق" if sample.get("tcp_code") == 1 else "ناموفق"),
+            ("زمان TCP", str(sample["tcp_ms"]) + " ms"
+             if sample.get("tcp_ms") is not None else "اندازه‌گیری نشده"),
+            ("HTTPS مستقیم", {1: "موفق", 2: "کند"}.get(
+                sample.get("direct_code"), "نامشخص")),
+            ("آخرین دریافت", _time(sample.get("received_at"))),
+        ]
+        if sample.get("deep_code") is not None:
+            for label, field in (("احراز هویت", "auth_ms"),
+                                 ("نشست", "session_ms")):
+                if sample.get(field) is not None:
+                    rows.append((label, str(sample[field]) + " ms"))
+            for label, field in (("انتقال اول", "first"),
+                                 ("انتقال دوم", "second")):
+                transfer = sample.get(field)
+                if transfer:
+                    rows.append((label,
+                        f"{transfer.get('n', 0)}/{transfer.get('r', 0)} بایت"))
+    if record["recovered_at"]:
+        rows.append(("زمان بازیابی", _time(record["recovered_at"])))
+    if record["superseded_at"]:
+        rows.append(("وضعیت مقصد", "تغییر کرده"))
     return _rich([
         {"type": "heading", "size": 3, "text":
-            ("🟢 بازیابی اتصال" if record["recovered_at"] else "🔴 اختلال احتمالی") +
-            " · DenaProbe"},
-        _table([
-            ("کد", record["id"][:12]),
-            ("رله", record["target_id"]),
-            ("نسخه مقصد", record["revision"]),
-            ("اپراتور (اعلام‌شده)", model.get("operators", {}).get(
-                record["device_id"], "ثبت نشده")),
-            ("نوع", CLASSES.get(record["observed_class"], "نامشخص")),
-            ("اطمینان", "مشکوک" if record["confidence"] == detector.SUSPECTED else
-                         "قابل قضاوت نیست"),
-            ("شواهد", record["reason"]),
-            ("TCP (کد / ms)", f"{sample.get('tcp_code', '—')} / {sample.get('tcp_ms', '—')}"),
-            ("احراز هویت (ms)", sample.get("auth_ms") if sample.get("auth_ms") is not None else "اندازه‌گیری نشد"),
-            ("نشست (ms)", sample.get("session_ms") if sample.get("session_ms") is not None else "اندازه‌گیری نشد"),
-            ("انتقال اول", count(first)),
-            ("انتقال دوم", count(second)),
-            ("HTTPS مستقیم", sample.get("direct_code") if sample.get("direct_code") is not None else "اندازه‌گیری نشد"),
-            ("دریافت سرور", _time(sample.get("received_at"))),
-            ("شروع", _time(record["opened_at"])),
-            ("آخرین شاهد", _time(record["last_evidence_at"])),
-            ("بازیابی", _time(record["recovered_at"]) if record["recovered_at"] else "ثبت نشده"),
-            ("جایگزینی مقصد", _time(record["superseded_at"]) if record["superseded_at"] else "—"),
-            ("تازگی پایش", "نامشخص / قدیمی" if stale else
-                            _age(state["last_received_at"], model["now"])),
-            ("محدوده بازیابی",
-             "TCP/SSH اولیه؛ نه تونل NPV" if record["recovered_at"] and
-             record["observed_class"] == detector.D0 else
-             "براساس شواهد ثبت‌شده" if record["recovered_at"] else "—"),
-        ]),
+            "🟢 DenaProbe | بازیابی اتصال" if record["recovered_at"]
+            else "🔴 DenaProbe | جزئیات اختلال"},
+        _table(rows),
         {"type": "paragraph", "text":
-            "💡 موفقیت TCP یا SSH اولیه به‌تنهایی سلامت اتصال کاربران NPV را ثابت نمی‌کند."},
+            "💡 نتیجه فقط به مسیرهای اندازه‌گیری‌شده مربوط است؛ سلامت VPN قطعی نیست."},
         _controls(("↩️ داشبورد", "dp3:home"),
                   ("📋 تاریخچه", "dp3:history:0"),
                   ("🔄 بروزرسانی", f"dp3:detail:{identifier}")),
@@ -200,35 +243,40 @@ def render_detail(model, identifier):
 def render_transition(model, entry):
     incident = next((x for x in model["incidents"]
                      if x["id"] == entry["incident_id"]), None)
-    if not incident:
+    if incident is None:
         raise ValueError("MISSING_INCIDENT")
     kind = entry["kind"]
-    title = ("🟢 دسترسی TCP/SSH اولیه بازیابی شد"
-             if kind == "RECOVERED" and incident["observed_class"] == detector.D0
-             else "🟢 آزمون انتقال SSH بازیابی شد" if kind == "RECOVERED"
-             else "🔴 هشدار اختلال احتمالی" if kind == "OPEN"
-             else "🟠 تغییر نوع اختلال")
+    tcp_only = incident["observed_class"] == detector.D0
+    if kind == "RECOVERED":
+        title = ("🟢 DenaProbe | اتصال اولیه بازیابی شد" if tcp_only
+                 else "🟢 DenaProbe | ارتباط بازیابی شد")
+    elif kind == "OPEN":
+        title = "🔴 DenaProbe | اختلال احتمالی اتصال"
+    else:
+        title = "🟠 DenaProbe | تغییر وضعیت اتصال"
+    rows = [
+        ("مقصد", incident["target_id"]),
+        ("مسیر", CLASSES.get(incident["observed_class"], "ارتباط شبکه")),
+        ("زمان", _time(entry["occurred_at"])),
+    ]
+    operator = model.get("operators", {}).get(incident["device_id"])
+    if operator:
+        rows.insert(1, ("اپراتور (اعلام‌شده)", operator))
+    if kind == "RECOVERED":
+        rows.append(("نتیجه", "دو بررسی متوالی موفق"))
+    elif kind == "OPEN":
+        rows.append(("شواهد", "دو بررسی متوالی ناموفق"))
+    else:
+        rows.append(("نتیجه", "تغییر وضعیت تأیید شد"))
+    foot = ("💡 دسترسی TCP/SSH اولیه بازیابی شده؛ سلامت NPV نامشخص است."
+            if kind == "RECOVERED" and tcp_only else
+            "💡 این گزارش فقط مسیر اندازه‌گیری‌شده را پوشش می‌دهد؛ منشأ اختلال قطعی نیست.")
     return _rich([
         {"type": "heading", "size": 3, "text": title},
-        _table([
-            ("شناسه", incident["id"][:12]),
-            ("رله", incident["target_id"]),
-            ("اپراتور (اعلام‌شده)", model.get("operators", {}).get(
-                incident["device_id"], "ثبت نشده")),
-            ("نوع", CLASSES.get(entry["observed_class"], "بازیابی")),
-            ("اطمینان", "مشکوک؛ نیازمند تأیید مستقل"
-                        if kind != "RECOVERED" else
-                        "دو مشاهدهٔ جدید TCP/SSH؛ سلامت NPV نامشخص"
-                        if incident["observed_class"] == detector.D0 else
-                        "دو مشاهدهٔ جدید انتقال SSH احرازشده"),
-            ("زمان", _time(entry["occurred_at"])),
-            ("نمونهٔ تأیید", entry["evidence_sequence"]),
-        ]),
-        {"type": "paragraph", "text":
-            "💡 این پیام از دادهٔ پایش خودکار تهیه شده است؛ تغییر خودکار رله انجام نشده."},
-        _controls(("📡 داشبورد پایش", ENTRY)),
+        _table(rows),
+        {"type": "paragraph", "text": foot},
+        _controls(("📡 مشاهده وضعیت", ENTRY)),
     ])
-
 
 def _open_readonly(path):
     conn = sqlite3.connect(f"file:{Path(path).resolve()}?mode=ro",

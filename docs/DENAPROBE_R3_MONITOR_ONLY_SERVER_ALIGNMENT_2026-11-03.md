@@ -64,3 +64,41 @@ delivery or VPN health.
 
 `devices.json` contains secrets. Never paste HMAC keys, SSH private keys,
 or unredacted configuration into GitHub, docs, logs or chat.
+
+
+## Phase A: live-board Rich dashboard and incident notification polish
+
+- The dashboard reads latest accepted current-boot DPT/2 SSH and independent
+  HTTPS observations. Board freshness is derived from signed measurement age
+  and server receipt time, **not** from the classifier's full-tunnel-health
+  result. Local Wi-Fi-down observations and monitoring gaps never masquerade
+  as a healthy link.
+- One-board cards show initial TCP/SSH reachability, independent HTTPS
+  PASS/SLOW/unknown, live-data continuity, last receipt, and the explicit
+  unmeasured VPN data path. Compact Persian labels and a contextual footer;
+  no implementation notes, internal class names or raw JSON in Telegram.
+- Rich incident/recovery notifications report only confirmed transitions:
+  two distinct current, ordered observations, then a brief target/route/time
+  message with a scoped explanatory tip. Existing SQLite outbox deduplicates
+  by transition/recipient, and historical backlogs do not trigger fresh alerts.
+- The existing bot owns both tasks, with independent flags:
+  `NVL_DENAPROBE_R3_ENABLED=1` enables the admin-only
+  dashboard and 30s detector loop; `NVL_DENAPROBE_R3_ALERTS_ENABLED=1`
+  enables delivery of incident/recovery notifications. Both default OFF.
+  Set alerts ON only with dashboard ON. Disabling alerts leaves live dashboard
+  evaluation running without Telegram sends.
+- No change to Collector wire formats, firmware, network routing, existing
+  DPT/2 database schema or private device secrets. No migration required.
+- Core operator preflight (2026-11-03): Collector service path
+  `/opt/nvl-dpt-collector-r3` and DB
+  `/var/lib/denaprobe/telemetry-r3.sqlite3` reported schema PASS,
+  WAL, quick_check OK and 87 DPT/2 events. Current bot
+  `/root/bot_final_v49-2.py` has the dashboard flag OFF and does
+  not yet contain `denaprobe_rich_admin.py` or
+  `denaprobe_alerts.py` on disk; source updates alone are not
+  deployment.
+- Next operator release: stage exact bot main + R3 modules under
+  `/root`, keep isolated Collector running, audit live
+  DB access, then explicitly activate flags and test native Rich interactions
+  and controlled D0/recovery Telegram delivery. Do not reload bot or
+  activate notifications during this source-only phase.

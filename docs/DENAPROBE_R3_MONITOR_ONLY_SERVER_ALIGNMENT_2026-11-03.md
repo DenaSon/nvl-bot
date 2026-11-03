@@ -132,3 +132,29 @@ or unredacted configuration into GitHub, docs, logs or chat.
   HTTPS is SLOW/unavailable. This does not recover D1/D2 or claim full
   VPN-path health; it avoids stale HTTPS controls artificially delaying TCP
   recovery. No recovery follows silence, skipped history or Wi-Fi loss.
+
+## Fast-alert-only code update on an existing R3 Core bot
+
+This is an **incremental** release: the existing Core already has R3 deployed,
+so do **not** re-run the initial full Core R3 code publisher (it intentionally
+refuses already-integrated bots), the old one-shot Core publisher, or any ad-hoc
+text merge. Only the two changed runtime modules are allowlisted:
+`/root/denaprobe_ingest/detector.py` and `/root/denaprobe_rich_admin.py`.
+
+Use the **exact merged master SHA**, not the branch PR SHA. With the clean,
+separate checkout at `/root/nvlbot-r3-source`, fetch/checkout that SHA, then:
+
+```bash
+SRC=/root/nvlbot-r3-source
+SHA=<exact-merged-40-character-commit>
+python3 "$SRC/ops/denaprobe_r3_fast_alert_publish.py" --src "$SRC" --sha "$SHA"
+# Only if PREFLIGHT_PASS: repeat with --apply to back up, atomically replace
+# both files, verify imports in live /root, restart only nvlbot and auto-revert
+# those files if the reload fails.
+```
+
+This does not modify `nvlbot.env`, `bot_final_v49-2.py`, existing SQLite
+records or schema, Collector or firmware. The already-configured
+`NVL_DENAPROBE_R3_ALERTS_ENABLED=1` remains required for actual Telegram
+notification delivery. Verify the *running bot's* environment, not just the
+env file, and confirm a fresh real DPT2 failure and recovery separately.

@@ -8,6 +8,7 @@ from __future__ import annotations
 from contextlib import closing
 import base64
 import hashlib
+import ipaddress
 import hmac
 import json
 import re
@@ -33,8 +34,10 @@ TRANSFER_CODES = frozenset((1, 2, 20, 21, 22, 23, 90))
 TCP_FIELDS = frozenset(("u", "s", "ms"))
 # Optional authenticated route tag: 1=CORE_LOOPBACK, never NPV egress.
 DEEP_FIELDS = frozenset(("u", "s", "am", "sm", "f", "g", "rt"))
+AUTH_FIELDS = frozenset(("u", "s", "ms"))
+AUTH_CODES = frozenset((1, 10, 11, 12, 90))
 TRANSFER_FIELDS = frozenset(("s", "r", "n", "ms"))
-FIELDS = v1.FIELDS | frozenset(("c", "z"))
+FIELDS = v1.FIELDS | frozenset(("c", "z", "j", "ei"))
 
 DDL = """
 CREATE TABLE IF NOT EXISTS dpt2_events (
@@ -122,10 +125,10 @@ def validate(body: dict, sent: int) -> tuple[int, bool]:
     if not isinstance(body, dict) or set(body) - FIELDS or body.get("v") != 2 or type(body.get("v")) is not int:
         raise v1.DptError(422, "unsupported_version")
     # Reuse all frozen DPT/1 structural/semantic validation, preserving old meanings.
-    old = {key: val for key, val in body.items() if key not in ("c", "z")}
+    old = {key: val for key, val in body.items() if key not in ("c", "z", "j", "ei")}
     old["v"] = 1
     kind, unknown = v1.validate(old, sent)
-    if kind != 1 and ("c" in body or "z" in body):
+    if kind != 1 and ("c" in body or "z" in body or "j" in body or "ei" in body):
         raise v1.DptError(422, "invalid_semantics")
     if "c" in body:
         tcp = body["c"]
@@ -134,14 +137,50 @@ def validate(body: dict, sent: int) -> tuple[int, bool]:
         if tcp["u"] > sent:
             raise v1.DptError(422, "invalid_semantics")
         unknown |= tcp["s"] not in TCP_CODES
+    if "ei" in body:
+        value = body["ei"]
+        if type(value) is not str or not 7 <= len(value) <= 15:
+            raise v1.DptError(422, "invalid_schema")
+        try:
+            parsed_ip = ipaddress.IPv4Address(value)
+        except ipaddress.AddressValueError as exc:
+            raise v1.DptError(422, "invalid_schema") from exc
+        if str(parsed_ip) != value:
+            raise v1.DptError(422, "invalid_schema")
+        # A failed Edge DNS resolution cannot yield this-cycle Edge IP.
+        if body.get("s") == 20:
+            raise v1.DptError(422, "invalid_semantics")
+    if "j" in body:
+        auth = body["j"]
+        _object(auth, {"u", "s", "ms"}, AUTH_FIELDS,
+                {"u": (0, v1.MAX_SAFE_INT), "s": (0, 65535),
+                 "ms": (0, 600000)})
+        # Login completes before the root SSH+transfer observation.
+        if body.get("s") != 1 or not auth["u"] <= body["u"] <= sent:
+            raise v1.DptError(422, "invalid_semantics")
+        unknown |= auth["s"] not in AUTH_CODES
     if "z" in body:
         z = body["z"]
         _object(z, {"u", "s"}, DEEP_FIELDS,
                 {"u": (0, v1.MAX_SAFE_INT), "s": (0, 65535),
-                 "am": (0, 600000), "sm": (0, 600000), "rt": (1, 1)})
+                 "am": (0, 600000), "sm": (0, 600000), "rt": (1, 2)})
         if body["s"] != 1 or z["u"] > sent:
             raise v1.DptError(422, "invalid_semantics")
         unknown |= z["s"] not in DEEP_CODES
+        if z.get("rt") == 2:
+            # Lite's controlled public witness is not NPV end-to-end health.
+            # A signed login event must accompany its transfer witness.
+            auth = body.get("j")
+            if not isinstance(auth, dict) or auth["u"] > z["u"]:
+                raise v1.DptError(422, "invalid_semantics")
+            if auth["s"] != 1 and (z["s"] != auth["s"] or
+                                   "f" in z or "g" in z):
+                raise v1.DptError(422, "invalid_semantics")
+            for name in ("f", "g"):
+                if name in z and (
+                    not isinstance(z[name], dict) or z[name].get("r") != 8192
+                ):
+                    raise v1.DptError(422, "invalid_semantics")
         if z["s"] in (10, 11, 12) and ("f" in z or "g" in z):
             raise v1.DptError(422, "invalid_semantics")
         for name in ("f", "g"):
@@ -163,12 +202,14 @@ def store(db_path, body: dict, raw: bytes, sent: int, allowed_targets=None, now_
     now = int(time.time() * 1000) if now_ms is None else now_ms
     device, boot_id, q = body["id"], body["b"], body["q"]
     age = sent - max(body["u"], body.get("h", {}).get("u", 0),
-                     body.get("c", {}).get("u", 0), body.get("z", {}).get("u", 0))
+                     body.get("c", {}).get("u", 0), body.get("z", {}).get("u", 0),
+                     body.get("j", {}).get("u", 0))
     # Each channel has its own freshness; cannot promote old ssh if deep ran later.
     ssh_age = sent - body["u"]
     https_age = sent - body.get("h", {}).get("u", sent)
     tcp_age = sent - body.get("c", {}).get("u", sent)
     deep_age = sent - body.get("z", {}).get("u", sent)
+    auth_age = sent - body.get("j", {}).get("u", sent)
     sha = hashlib.sha256(raw).hexdigest()
     with closing(v1.connect_db(db_path)) as db:
         db.execute("BEGIN IMMEDIATE")
@@ -221,6 +262,7 @@ def store(db_path, body: dict, raw: bytes, sent: int, allowed_targets=None, now_
             https_age <= v1.HTTPS_MAX_AGE_MS and
             tcp_age <= v1.SSH_MAX_AGE_MS and
             deep_age <= v1.SSH_MAX_AGE_MS and
+            auth_age <= v1.SSH_MAX_AGE_MS and
             allowed and target_revision is not None
         )
         history = (kind == 1 and not eligible or

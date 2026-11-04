@@ -132,8 +132,11 @@ def render_home(model):
                 12: "خطای SSH", 90: "نامشخص"
             }.get(p.get("auth_code"), "نامشخص")))
             rows.append(("زمان ورود", f"{p['auth_ms']} ms"))
-        if p.get("deep_route") == 2:
-            rows.append(("مسیر انتقال", "مقصد عمومی کنترل‌شده · نه همه ترافیک NPV"))
+        if p.get("deep_route") in (2, 3):
+            rows.append(("مسیر انتقال",
+                         "HTTP روی SSH · speedtest.tele2.net:80 (مقصد عمومی)"
+                         if p.get("deep_route") == 3 else
+                         "مقصد عمومی کنترل‌شده · نه همه ترافیک NPV"))
             if p.get("deep_fresh"):
                 for label, part in (("نمونه اول", p.get("deep_first")),
                                     ("نمونه دوم", p.get("deep_second"))):
@@ -256,6 +259,8 @@ def render_detail(model, identifier):
                 rows.append(("مسیر Deep", "Loopback داخلی Core · سلامت NPV سنجیده نشده"))
             elif sample.get("deep_route") == 2:
                 rows.append(("مسیر Deep", "انتقال عمومی کنترل‌شده · نه سلامت تمام NPV"))
+            elif sample.get("deep_route") == 3:
+                rows.append(("مسیر Deep", "HTTP از داخل SSH → speedtest.tele2.net:80"))
             if sample.get("auth_code") is not None:
                 rows.append(("ورود SSH", {
                     1: "موفق", 10: "اعتبارنامه رد شد", 11: "Timeout",
@@ -319,6 +324,8 @@ def render_transition(model, entry):
     evidence = model.get("transition_evidence", {}).get(entry.get("transition_id"), {})
     rows.insert(len(rows)-1, ("IP رزولوشده همان شاهد",
                              evidence.get("edge_ip") or "ثبت نشده"))
+    if evidence.get("deep_route") == 3:
+        rows.append(("تست داده", "دو درخواست HTTP از داخل SSH · speedtest.tele2.net:80"))
     operator = model.get("operators", {}).get(incident["device_id"])
     if operator:
         rows.insert(1, ("اپراتور (اعلام‌شده)", operator))
@@ -334,7 +341,9 @@ def render_transition(model, entry):
             if kind == "RECOVERED" and tcp_only else
             "💡 این هشدار اولیه است؛ خطای DNS یا شبکه هم ممکن است. علت قطعی مشخص نیست."
             if kind == "OPEN" and tcp_only and entry.get("confidence") == detector.EARLY
-            else "💡 این گزارش فقط مسیر اندازه‌گیری‌شده را پوشش می‌دهد؛ منشأ اختلال قطعی نیست.")
+            else "💡 آزمون HTTP روی یک مقصد عمومی است؛ اختلال آن الزاماً فیلترینگ یا قطعی همه NPV نیست."
+            if evidence.get("deep_route") == 3 else
+            "💡 این گزارش فقط مسیر اندازه‌گیری‌شده را پوشش می‌دهد؛ منشأ اختلال قطعی نیست.")
     return _rich([
         {"type": "heading", "size": 3, "text": title},
         _table(rows),

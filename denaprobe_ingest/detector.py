@@ -153,12 +153,12 @@ def classify(body: dict, *, direct_ok: bool) -> tuple[str, str]:
         # tested path, even if unrelated HTTPS is SLOW/not measured. This
         # never declares end-to-end NPV/VPN health.
         return PREAUTH_REACHABLE, "TCP_SSH_PREAUTH_PASS_DEEP_NOT_MEASURED"
-    if not direct_ok:
-        return UNKNOWN, "DIRECT_CONTROL_UNAVAILABLE_FOR_DEEP"
     # CORE_LOOPBACK is a controlled responder on the SSH terminator; it does
     # not represent NPV customer public egress or imply a filtering cause.
-    # Success is valid only as limited TCP/SSH preauth reachability (D0
-    # recovery retains its two independent fresh samples).
+    # Completed loopback+TCP+SSH preauth may recover D0 even if unrelated
+    # direct HTTPS is slow/unavailable. The existing D0 recovery does not
+    # require HTTPS control when no Deep evidence exists.
+    # A D1/D2 incident cannot be recovered from loopback results.
     if z.get("rt") == 1:
         if z.get("s") == 1 and all(
             isinstance(z.get(k), dict) and z[k].get("s") == 1 and
@@ -166,6 +166,8 @@ def classify(body: dict, *, direct_ok: bool) -> tuple[str, str]:
         ):
             return PREAUTH_REACHABLE, "CORE_LOOPBACK_ONLY_TCP_SSH_REACHABLE"
         return UNKNOWN, "CORE_LOOPBACK_WITNESS_NOT_NPV_EGRESS"
+    if not direct_ok:
+        return UNKNOWN, "DIRECT_CONTROL_UNAVAILABLE_FOR_DEEP"
     code = z.get("s")
     if code in (20, 21, 30, 31):
         return D1, "AUTHENTICATED_SSH_SESSION_OR_CHANNEL_FAILED"

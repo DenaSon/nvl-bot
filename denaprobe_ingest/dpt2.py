@@ -155,7 +155,8 @@ def validate(body: dict, sent: int) -> tuple[int, bool]:
         _object(auth, {"u", "s", "ms"}, AUTH_FIELDS,
                 {"u": (0, v1.MAX_SAFE_INT), "s": (0, 65535),
                  "ms": (0, 600000)})
-        # The board stamps root u AFTER the whole SSH+transfer run.\n        # Login completion precedes the root completion (and z completion).\n        if body.get("s") != 1 or not auth["u"] <= body["u"] <= sent:
+        # Login completes before the root SSH+transfer observation.
+        if body.get("s") != 1 or not auth["u"] <= body["u"] <= sent:
             raise v1.DptError(422, "invalid_semantics")
         unknown |= auth["s"] not in AUTH_CODES
     if "z" in body:

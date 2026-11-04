@@ -112,7 +112,7 @@ class TestDpt2(unittest.TestCase):
         self.assertEqual(dpt2.validate(good, 22100)[0], 1)
         for bad_route in (0, 2, "1", True, None):
             malformed = probe(z={**good["z"], "rt": bad_route})
-            with self.assertRaises(collector.DptError):
+            with self.assertRaises(v1.DptError):
                 dpt2.validate(malformed, 22100)
         legacy = probe(z={k: v for k, v in good["z"].items() if k != "rt"})
         self.assertEqual(dpt2.validate(legacy, 22100)[0], 1)

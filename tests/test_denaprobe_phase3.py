@@ -202,6 +202,9 @@ class TestPhase3(unittest.TestCase):
         self.assertFalse(self.dashboard()["active"])
 
     def test_b2_core_loopback_does_not_mask_real_d0_or_fake_d0_recovery(self):
+        # Two preliminary samples establish current-boot continuity.
+        self.submit("preauth"); self.evaluate()
+        self.submit("preauth"); self.evaluate()
         self.submit("d0"); self.assertEqual(self.evaluate()[0]["kind"], "OPEN")
         self.submit("healthy", route=1); self.assertFalse(self.evaluate())
         self.submit("healthy", route=1)

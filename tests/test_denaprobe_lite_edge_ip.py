@@ -12,7 +12,7 @@ DEVICE = "dp-lite-test"
 NOW = 2_000_000_000_000
 
 
-def make(q, *, ip="198.51.100.22", mode="good"):
+def make(q, *, ip="198.51.100.22", mode="good", route=2):
     u = 100000 + q * 30000
     d = dict(v=2, id=DEVICE, b=BOOT, q=q, u=u, k=1, t=1,
              w=1, r=-47, s=1, p=52, o=255, d=12, x=3100, a=180,
@@ -33,13 +33,19 @@ def make(q, *, ip="198.51.100.22", mode="good"):
     complete = {"s": 1, "r": 8192, "n": 8192, "ms": 1100}
     failed = {"s": 20, "r": 8192, "n": 0, "ms": 12000}
     d["z"] = {"u": u - 100, "s": 1, "am": 300, "sm": 13500,
-              "rt": 2, "f": complete, "g": complete}
+              "rt": route, "f": complete, "g": complete}
     if mode == "stalled":
         d["z"]["s"] = 40
         d["z"]["g"] = failed
+    if mode == "http_status":
+        d["z"]["s"] = 41
+        d["z"]["g"] = {"s": 24, "r": 8192, "n": 0, "ms": 50}
+    if mode == "forward_denied":
+        d["z"] = {"u": u - 100, "s": 30, "am": 300, "sm": 500,
+                  "rt": route, "f": {"s": 23, "r": 8192, "n": 0, "ms": 30}}
     if mode == "auth_rejected":
         d["j"]["s"] = 10
-        d["z"] = {"u": u - 100, "s": 10, "am": 300, "sm": 300, "rt": 2}
+        d["z"] = {"u": u - 100, "s": 10, "am": 300, "sm": 300, "rt": route}
     return d
 
 
@@ -58,10 +64,10 @@ class LiteEdgeIp(unittest.TestCase):
         self.q = 1
         self.now = NOW
 
-    def send(self, *, ip="198.51.100.22", mode="good", evaluate=True):
+    def send(self, *, ip="198.51.100.22", mode="good", route=2, evaluate=True):
         self.q += 1
         self.now += 30000
-        body = make(self.q, ip=ip, mode=mode)
+        body = make(self.q, ip=ip, mode=mode, route=route)
         sent = max(body["u"], body.get("j", {}).get("u", 0),
                    body.get("z", {}).get("u", 0)) + 500
         self.assertEqual(dpt2.store(
@@ -120,6 +126,55 @@ class LiteEdgeIp(unittest.TestCase):
         for val in ("n1.nvlsup.com", "198.51.100.22", "2252"):
             self.assertIn(val, card)
         self.assertNotIn("Loopback داخلی", card)
+
+    def test_http_route3_verified_body_and_non_censorship_failures(self):
+        good = make(2, route=3)
+        self.assertEqual(dpt2.validate(good, good["u"] + 100)[0], 1)
+        self.assertEqual(detector.classify(good, direct_ok=False)[0],
+                         detector.HEALTHY)
+        stalled = make(2, mode="stalled", route=3)
+        self.assertEqual(dpt2.validate(stalled, stalled["u"] + 100)[0], 1)
+        self.assertEqual(detector.classify(stalled, direct_ok=False)[0],
+                         detector.D2)
+        for mode in ("http_status", "forward_denied"):
+            failure = make(2, mode=mode, route=3)
+            self.assertEqual(dpt2.validate(failure, failure["u"] + 100)[0], 1)
+            self.assertEqual(detector.classify(failure, direct_ok=False)[0],
+                             detector.UNKNOWN)
+        bogus = make(2, mode="stalled", route=3)
+        bogus["z"]["g"]["s"] = 24  # Cannot claim a timeout from 3xx/404.
+        with self.assertRaises(collector.DptError):
+            dpt2.validate(bogus, bogus["u"] + 100)
+        legacy = make(2, route=2)
+        self.assertEqual(dpt2.validate(legacy, legacy["u"] + 100)[0], 1)
+
+    def test_http_stall_creates_one_Rich_incident_then_two_passes_recover(self):
+        self.send(route=3)
+        self.send(route=3)
+        self.send(route=3, mode="stalled")
+        self.assertFalse(detector.read_dashboard(
+            self.db, now_ms=self.now+1000)["active"])  # first suspect
+        self.send(route=3, mode="stalled")
+        model = detector.read_dashboard(self.db, now_ms=self.now+1000)
+        self.assertEqual(len(model["active"]), 1)
+        self.assertEqual(model["active"][0]["observed_class"], detector.D2)
+        with collector.connect_db(self.db) as db:
+            tr = dict(db.execute(
+                "SELECT id,incident_id,kind,confidence,occurred_at,"
+                "evidence_sequence FROM dp3_transitions "
+                "ORDER BY id DESC LIMIT 1").fetchone())
+        msg = str(render_transition(model, {
+            "transition_id": tr["id"], **tr,
+        }))
+        self.assertIn("HTTP", msg)
+        self.assertIn("speedtest.tele2.net:80", msg)
+        self.assertIn("198.51.100.22", msg)
+        self.send(route=3)
+        self.assertEqual(len(detector.read_dashboard(
+            self.db, now_ms=self.now+1000)["active"]), 1)
+        self.send(route=3)
+        self.assertFalse(detector.read_dashboard(
+            self.db, now_ms=self.now+1000)["active"])
 
     def test_notification_uses_trigger_sample_ip_not_newer_dns(self):
         self.send(ip="198.51.100.10")

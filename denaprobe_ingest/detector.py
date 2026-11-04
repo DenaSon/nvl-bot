@@ -110,7 +110,8 @@ def _direct_control(db: sqlite3.Connection, latest: sqlite3.Row,
     # sender uptime conservatively and use the actual direct HTTPS age.
     last_completed = max(body["u"], body.get("h", {}).get("u", 0),
                          body.get("c", {}).get("u", 0),
-                         body.get("z", {}).get("u", 0))
+                         body.get("z", {}).get("u", 0),
+                         body.get("j", {}).get("u", 0))
     stored_age = db.execute(
         "SELECT sender_age_ms FROM dpt2_events WHERE "
         "device_id=? AND boot_id=? AND sequence=?",

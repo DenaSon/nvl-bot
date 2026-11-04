@@ -175,10 +175,11 @@ def validate(body: dict, sent: int) -> tuple[int, bool]:
             if auth["s"] != 1 and (z["s"] != auth["s"] or
                                    "f" in z or "g" in z):
                 raise v1.DptError(422, "invalid_semantics")
-            if "f" in z and z["f"].get("r") != 8192:
-                raise v1.DptError(422, "invalid_semantics")
-            if "g" in z and z["g"].get("r") != 8192:
-                raise v1.DptError(422, "invalid_semantics")
+            for name in ("f", "g"):
+                if name in z and (
+                    not isinstance(z[name], dict) or z[name].get("r") != 8192
+                ):
+                    raise v1.DptError(422, "invalid_semantics")
         if z["s"] in (10, 11, 12) and ("f" in z or "g" in z):
             raise v1.DptError(422, "invalid_semantics")
         for name in ("f", "g"):

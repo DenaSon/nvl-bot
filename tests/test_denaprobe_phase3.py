@@ -51,7 +51,7 @@ class TestPhase3(unittest.TestCase):
                                     now_ms=self.now), 0)
 
     def submit(self, kind, *, direct=True, wifi=1, revision=None,
-               https_code=1, tcp_code=20):
+               https_code=1, tcp_code=20, route=None):
         del revision
         self.q += 1
         self.now += 30000
@@ -84,6 +84,8 @@ class TestPhase3(unittest.TestCase):
             pass
         else:
             raise ValueError(kind)
+        if route is not None and "z" in body:
+            body["z"]["rt"] = route
         if wifi == 0:
             # DPT/1 inherited semantics forbid Wi-Fi RSSI when down.
             body.pop("r", None)
@@ -180,6 +182,39 @@ class TestPhase3(unittest.TestCase):
         self.assertEqual(self.evaluate()[0]["kind"], "RECOVERED")
         self.assertFalse(self.dashboard()["active"])
         self.assertEqual(len(self.dashboard()["incidents"]), 1)
+
+    def test_b2_core_loopback_success_is_not_npv_healthy_or_d1_d2(self):
+        self.submit("healthy", route=1); self.evaluate()
+        self.submit("healthy", route=1); self.evaluate()
+        model = self.dashboard()
+        self.assertFalse(model["active"])
+        self.assertNotEqual(model["states"][0]["effective"], detector.HEALTHY)
+        self.assertEqual(model["probes"][0]["deep_route"], 1)
+        self.assertTrue(model["probes"][0]["deep_fresh"])
+        card = str(render_home(model))
+        self.assertIn("Loopback", card)
+        self.assertIn("داخلی Core", card)
+        self.assertIn("16384", card)
+        self.submit("d1", route=1); self.assertFalse(self.evaluate())
+        self.submit("d1", route=1); self.assertFalse(self.evaluate())
+        self.submit("d2", route=1); self.assertFalse(self.evaluate())
+        self.submit("d2", route=1); self.assertFalse(self.evaluate())
+        self.assertFalse(self.dashboard()["active"])
+
+    def test_b2_core_loopback_does_not_mask_real_d0_or_fake_d0_recovery(self):
+        # Two preliminary samples establish current-boot continuity.
+        self.submit("preauth"); self.evaluate()
+        self.submit("preauth"); self.evaluate()
+        self.submit("d0"); self.assertEqual(self.evaluate()[0]["kind"], "OPEN")
+        self.submit("healthy", route=1, https_code=2); self.assertFalse(self.evaluate())
+        self.submit("healthy", route=1, https_code=2)
+        self.assertEqual(self.evaluate()[0]["kind"], "RECOVERED")
+        self.assertFalse(self.dashboard()["active"])
+        self.assertEqual(self.dashboard()["states"][0]["effective"], detector.PREAUTH_REACHABLE)
+        self.submit("d0"); self.assertEqual(self.evaluate()[0]["kind"], "OPEN")
+        self.submit("d2", route=1); self.assertFalse(self.evaluate())
+        self.submit("d2", route=1); self.assertFalse(self.evaluate())
+        self.assertEqual(self.dashboard()["active"][0]["observed_class"], detector.D0)
 
     def test_preauth_pass_is_never_full_health_and_wifi_gap_never_alerts(self):
         self.submit("preauth"); self.evaluate()

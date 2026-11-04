@@ -31,7 +31,8 @@ TCP_CODES = frozenset((1, 20, 21, 22, 90))
 DEEP_CODES = frozenset((1, 10, 11, 12, 20, 21, 30, 31, 40, 41, 42, 90))
 TRANSFER_CODES = frozenset((1, 2, 20, 21, 22, 23, 90))
 TCP_FIELDS = frozenset(("u", "s", "ms"))
-DEEP_FIELDS = frozenset(("u", "s", "am", "sm", "f", "g"))
+# Optional authenticated route tag: 1=CORE_LOOPBACK, never NPV egress.
+DEEP_FIELDS = frozenset(("u", "s", "am", "sm", "f", "g", "rt"))
 TRANSFER_FIELDS = frozenset(("s", "r", "n", "ms"))
 FIELDS = v1.FIELDS | frozenset(("c", "z"))
 
@@ -137,7 +138,7 @@ def validate(body: dict, sent: int) -> tuple[int, bool]:
         z = body["z"]
         _object(z, {"u", "s"}, DEEP_FIELDS,
                 {"u": (0, v1.MAX_SAFE_INT), "s": (0, 65535),
-                 "am": (0, 600000), "sm": (0, 600000)})
+                 "am": (0, 600000), "sm": (0, 600000), "rt": (1, 1)})
         if body["s"] != 1 or z["u"] > sent:
             raise v1.DptError(422, "invalid_semantics")
         unknown |= z["s"] not in DEEP_CODES

@@ -192,6 +192,32 @@ def classify(body: dict, *, direct_ok: bool) -> tuple[str, str]:
         ):
             return HEALTHY, "LITE_TWO_PUBLIC_WITNESS_SAMPLES_COMPLETE"
         return UNKNOWN, "LITE_DATA_RESULT_INCOMPLETE"
+    if z.get("rt") == 3:
+        # Two HTTP Range exchanges on a verified, password-authenticated SSH
+        # session to a fixed public third-party service. This is NOT a
+        # censorship diagnosis or a full NPV customer traffic test.
+        auth = body.get("j")
+        if not isinstance(auth, dict) or auth.get("s") != 1:
+            return UNKNOWN, "HTTP_SSH_AUTH_NOT_VERIFIED"
+        code = z.get("s")
+        if code == 1 and all(
+            isinstance(z.get(k), dict) and z[k].get("s") == 1 and
+            z[k].get("r") == 8192 and z[k].get("n") == 8192
+            for k in ("f", "g")
+        ):
+            return HEALTHY, "HTTP_OVER_SSH_TWO_8K_BODY_DOWNLOADS_COMPLETE"
+        if code == 40 and any(
+            isinstance(z.get(k), dict) and z[k].get("s") == 20
+            for k in ("f", "g")
+        ):
+            # Only after two fresh observations; remote HTTP service may be
+            # unavailable independently, so surface as *suspected* timeout.
+            return D2, "HTTP_OVER_SSH_DATA_TIMEOUT_DESTINATION_UNVERIFIED"
+        if code in (20, 21):
+            return D1, "HTTP_OVER_SSH_SESSION_DROPPED"
+        if code in (30, 31, 41, 42, 90, 10, 11, 12):
+            return UNKNOWN, "HTTP_ENDPOINT_FORWARD_CONFIG_OR_RESPONSE_ERROR"
+        return UNKNOWN, "HTTP_OVER_SSH_INCONCLUSIVE"
     if not direct_ok:
         return UNKNOWN, "DIRECT_CONTROL_UNAVAILABLE_FOR_DEEP"
     code = z.get("s")

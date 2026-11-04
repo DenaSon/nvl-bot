@@ -116,6 +116,9 @@ def render_home(model):
         p = probes[0]
         rows += [
             ("مقصد", p["target_id"] if p["target_id"] is not None else "نامشخص"),
+            ("دامنه Edge", p.get("edge_hostname") or "ثبت نشده"),
+            ("IP Resolve‌شده", p.get("edge_ip") or "نامشخص / DNS ناموفق"),
+            ("پورت Edge", p.get("edge_port") or "نامشخص"),
             ("اتصال TCP", _tcp_status(p)),
             ("پاسخ SSH اولیه", _ssh_status(p)),
             ("HTTPS مستقیم", _https_status(p)),
@@ -123,6 +126,19 @@ def render_home(model):
              not p["monitoring_gap"] else "نامشخص / دارای وقفه"),
             ("تونل VPN", "اندازه‌گیری نشده"),
         ]
+        if p.get("auth_fresh"):
+            rows.append(("ورود SSH", {
+                1: "✅ موفق", 10: "رد اعتبارنامه", 11: "پایان مهلت",
+                12: "خطای SSH", 90: "نامشخص"
+            }.get(p.get("auth_code"), "نامشخص")))
+            rows.append(("زمان ورود", f"{p['auth_ms']} ms"))
+        if p.get("deep_route") == 2:
+            rows.append(("مسیر انتقال", "مقصد عمومی کنترل‌شده · نه همه ترافیک NPV"))
+            if p.get("deep_fresh"):
+                for label, part in (("نمونه اول", p.get("deep_first")),
+                                    ("نمونه دوم", p.get("deep_second"))):
+                    if isinstance(part, dict):
+                        rows.append((label, f"{part.get('n', 0)}/{part.get('r', 0)} بایت · {part.get('ms', 0)} ms"))
         if p.get("deep_route") == 1:
             rows.append(("مسیر آزمون Deep", "Loopback داخلی Core · نه مسیر خروجی NPV"))
             if p.get("deep_fresh"):
@@ -218,6 +234,11 @@ def render_detail(model, identifier):
     if operator:
         rows.insert(2, ("اپراتور (اعلام‌شده)", operator))
     if sample:
+        if sample.get("edge_hostname"):
+            rows.append(("دامنه Edge", sample["edge_hostname"]))
+        if sample.get("edge_port"):
+            rows.append(("پورت Edge", sample["edge_port"]))
+        rows.append(("IP آخرین شاهد", sample.get("edge_ip") or "ثبت نشده"))
         tcp = sample.get("tcp_code")
         tcp_label = ("موفق" if tcp == 1 else "ناموفق" if tcp in (20, 21, 22)
                      else "اندازه‌گیری نشده")
@@ -233,6 +254,13 @@ def render_detail(model, identifier):
         if sample.get("deep_code") is not None:
             if sample.get("deep_route") == 1:
                 rows.append(("مسیر Deep", "Loopback داخلی Core · سلامت NPV سنجیده نشده"))
+            elif sample.get("deep_route") == 2:
+                rows.append(("مسیر Deep", "انتقال عمومی کنترل‌شده · نه سلامت تمام NPV"))
+            if sample.get("auth_code") is not None:
+                rows.append(("ورود SSH", {
+                    1: "موفق", 10: "اعتبارنامه رد شد", 11: "Timeout",
+                    12: "خطای SSH", 90: "نامشخص"
+                }.get(sample["auth_code"], "نامشخص")))
             for label, field in (("احراز هویت", "auth_ms"),
                                  ("نشست", "session_ms")):
                 if sample.get(field) is not None:
@@ -281,6 +309,16 @@ def render_transition(model, entry):
         ("مسیر", CLASSES.get(incident["observed_class"], "ارتباط شبکه")),
         ("زمان", _time(entry["occurred_at"])),
     ]
+    target = model.get("targets", {}).get((incident["target_id"],
+                                          incident["revision"]))
+    if target:
+        rows.insert(1, ("دامنه Edge", target[0]))
+        rows.insert(2, ("پورت Edge", target[1]))
+    # Bind IP to the exact signed incident/transition sample. Never show an
+    # IP from a newer DNS lookup as though it caused an older outage.
+    evidence = model.get("transition_evidence", {}).get(entry.get("transition_id"), {})
+    rows.insert(len(rows)-1, ("IP رزولوشده همان شاهد",
+                             evidence.get("edge_ip") or "ثبت نشده"))
     operator = model.get("operators", {}).get(incident["device_id"])
     if operator:
         rows.insert(1, ("اپراتور (اعلام‌شده)", operator))

@@ -146,6 +146,10 @@ def classify(body: dict, *, direct_ok: bool) -> tuple[str, str]:
     if tcp != 1:
         return UNKNOWN, "UNSUPPORTED_TCP_CODE"
     if body.get("s") != 1:
+        # TCP reaches the Edge but SSH transport/service repeatedly fails.
+        # Two fresh signed samples are required for D1; no attribution to DPI.
+        if body.get("s") in (30, 31, 50, 51):
+            return D1, "EDGE_SSH_TRANSPORT_OR_SERVICE_FAILED"
         return UNKNOWN, "SSH_PREAUTH_UNAVAILABLE"
     z = body.get("z")
     if not isinstance(z, dict):
@@ -166,6 +170,27 @@ def classify(body: dict, *, direct_ok: bool) -> tuple[str, str]:
         ):
             return PREAUTH_REACHABLE, "CORE_LOOPBACK_ONLY_TCP_SSH_REACHABLE"
         return UNKNOWN, "CORE_LOOPBACK_WITNESS_NOT_NPV_EGRESS"
+    if z.get("rt") == 2:
+        # Lite: a controlled public responder tested *through* authenticated
+        # SSH. Public HTTPS/64KiB control was intentionally removed on board.
+        # This is tested-path reachability, not proof of all NPV destinations.
+        auth = body.get("j")
+        if not isinstance(auth, dict) or auth.get("s") != 1:
+            return UNKNOWN, "LITE_AUTH_NOT_VERIFIED"
+        code = z.get("s")
+        if code in (20, 21, 30, 31):
+            return D1, "LITE_AUTHENTICATED_CHANNEL_OR_SESSION_FAILED"
+        if code in (40, 41):
+            return D2, "LITE_AUTHENTICATED_DATA_STALLED_OR_CORRUPTED"
+        if code in (10, 11, 12, 90, 42):
+            return UNKNOWN, "LITE_CONFIG_LOCAL_OR_UNCALIBRATED"
+        if code == 1 and all(
+            isinstance(z.get(k), dict) and z[k].get("s") == 1 and
+            z[k].get("r") == 8192 and z[k].get("n") == 8192
+            for k in ("f", "g")
+        ):
+            return HEALTHY, "LITE_TWO_PUBLIC_WITNESS_SAMPLES_COMPLETE"
+        return UNKNOWN, "LITE_DATA_RESULT_INCOMPLETE"
     if not direct_ok:
         return UNKNOWN, "DIRECT_CONTROL_UNAVAILABLE_FOR_DEEP"
     code = z.get("s")
@@ -241,12 +266,19 @@ def evaluate(db_path: Path, *, now_ms: int | None = None) -> list[dict]:
             # Old stage data transmitted later is historical, even if a newer
             # HTTPS submeasurement made the event look fresh as a whole.
             z = body.get("z")
-            if z is not None:
+            auth = body.get("j")
+            if z is not None or auth is not None:
                 latest_completed = max(body["u"], body.get("h", {}).get("u", 0),
-                                       body.get("c", {}).get("u", 0), z["u"])
-                deep_age = int(row["sender_age_ms"]) + latest_completed - z["u"]
-                fresh = fresh and _fresh(
-                    now, int(row["received_at_ms"]), deep_age, FRESH_MS)
+                                       body.get("c", {}).get("u", 0),
+                                       z.get("u", 0) if z else 0,
+                                       auth.get("u", 0) if auth else 0)
+                for evidence in (z, auth):
+                    if evidence is not None:
+                        evidence_age = (int(row["sender_age_ms"]) +
+                                        latest_completed - evidence["u"])
+                        fresh = fresh and _fresh(
+                            now, int(row["received_at_ms"]),
+                            evidence_age, FRESH_MS)
             observed, detail = classify(body, direct_ok=bool(fresh and direct_ok))
             if not fresh:
                 observed, detail = UNKNOWN, "STALE_OR_CONTINUITY_GAP"
@@ -371,6 +403,8 @@ def _live_probe(db: sqlite3.Connection, latest: sqlite3.Row, now: int) -> dict:
         "https_code": None, "https_received_at": None,
         "deep_route": None, "deep_code": None, "deep_fresh": False,
         "deep_first": None, "deep_second": None,
+        "edge_hostname": None, "edge_port": None, "edge_ip": None,
+        "auth_code": None, "auth_ms": None, "auth_fresh": False,
     }
     if latest["ssh_sequence"] is None:
         return result
@@ -384,7 +418,8 @@ def _live_probe(db: sqlite3.Connection, latest: sqlite3.Row, now: int) -> dict:
     body = json.loads(row["raw_json"])
     last_completed = max(
         body["u"], body.get("c", {}).get("u", 0),
-        body.get("z", {}).get("u", 0), body.get("h", {}).get("u", 0))
+        body.get("z", {}).get("u", 0), body.get("h", {}).get("u", 0),
+        body.get("j", {}).get("u", 0))
     ssh_age = int(row["sender_age_ms"]) + last_completed - body["u"]
     # A newer signed Wi-Fi-down observation invalidates a prior live result,
     # although it must never promote an outage or claim filtering.
@@ -407,8 +442,25 @@ def _live_probe(db: sqlite3.Connection, latest: sqlite3.Row, now: int) -> dict:
         wifi_code=0 if wifi_down else body.get("w"),
         tcp_code=body.get("c", {}).get("s") if fresh else None,
         ssh_code=body.get("s") if fresh else None,
+        edge_ip=body.get("ei") if fresh else None,
     )
-    # Route and Deep sample have an independent signed completion time.
+    # Pair this IP with the *registered target revision*, not a new DNS
+    # lookup or mutable current hostname.
+    target_row = db.execute(
+        "SELECT hostname,port FROM targets WHERE target_id=? AND revision=?",
+        (row["target_id"], row["target_revision"])).fetchone()
+    if target_row:
+        result.update(edge_hostname=target_row["hostname"],
+                      edge_port=target_row["port"])
+    # Independent signed login and transfer completion times.
+    auth = body.get("j")
+    if isinstance(auth, dict):
+        auth_age = int(row["sender_age_ms"]) + last_completed - auth["u"]
+        auth_fresh = bool(fresh and _fresh(
+            now, int(row["received_at_ms"]), auth_age, FRESH_MS))
+        result.update(auth_code=auth["s"] if auth_fresh else None,
+                      auth_ms=auth["ms"] if auth_fresh else None,
+                      auth_fresh=auth_fresh)
     z = body.get("z")
     if isinstance(z, dict):
         deep_age = int(row["sender_age_ms"]) + last_completed - z["u"]
@@ -470,6 +522,10 @@ def read_dashboard(db_path: Path, *, now_ms: int | None = None) -> dict:
                      for r in db.execute("SELECT * FROM dp3_operator_labels")}
         probes = [_live_probe(db, row, now) for row in db.execute(
             "SELECT * FROM dpt2_latest ORDER BY device_id LIMIT 50")]
+        targets = {(r["target_id"], r["revision"]):
+                   (r["hostname"], r["port"])
+                   for r in db.execute(
+                       "SELECT target_id,revision,hostname,port FROM targets")}
         probe_by_key = {
             (p["device_id"], p["target_id"], p["revision"]): p
             for p in probes
@@ -487,17 +543,47 @@ def read_dashboard(db_path: Path, *, now_ms: int | None = None) -> dict:
                 b = json.loads(row["raw_json"])
                 z, c = b.get("z") or {}, b.get("c") or {}
                 probe = probe_by_key.get(key, {})
+                j = b.get("j") or {}
+                host, port = targets.get((state["target_id"], state["revision"]),
+                                         (None, None))
                 samples[key] = {
                     "tcp_code": c.get("s"), "tcp_ms": c.get("ms"),
-                    "auth_ms": z.get("am"), "session_ms": z.get("sm"),
+                    "auth_ms": j.get("ms", z.get("am")),
+                    "auth_code": j.get("s"), "session_ms": z.get("sm"),
                     "deep_code": z.get("s"), "deep_route": z.get("rt"),
+                    "edge_ip": b.get("ei"),
+                    "edge_hostname": host, "edge_port": port,
                     "first": z.get("f"),
                     "second": z.get("g"),
                     "direct_code": probe.get("https_code"),
                     "received_at": row["received_at_ms"],
                 }
+        # Reconstruct exact notification evidence by its q and receive-time
+        # window. Never substitute the current DNS lookup for a past event.
+        transition_evidence = {}
+        for tr in db.execute(
+            "SELECT t.id,t.evidence_sequence,t.occurred_at,i.device_id,"
+            "i.target_id,i.revision FROM dp3_transitions t "
+            "JOIN dp3_incidents i ON i.id=t.incident_id "
+            "ORDER BY t.id DESC LIMIT 100"):
+            rows = db.execute(
+                "SELECT raw_json FROM dpt2_events WHERE "
+                "device_id=? AND target_id=? AND target_revision=? "
+                "AND sequence=? AND kind=1 AND history_only=0 "
+                "AND received_at_ms BETWEEN ? AND ?",
+                (tr["device_id"], tr["target_id"], tr["revision"],
+                 tr["evidence_sequence"], tr["occurred_at"]-FRESH_MS,
+                 tr["occurred_at"])).fetchall()
+            if len(rows) == 1:
+                evidence = json.loads(rows[0]["raw_json"])
+                transition_evidence[tr["id"]] = {
+                    "edge_ip": evidence.get("ei"),
+                    "auth_code": (evidence.get("j") or {}).get("s"),
+                    "deep_route": (evidence.get("z") or {}).get("rt"),
+                }
     # These counters are transport freshness, never a classifier verdict.
     fresh = sum(bool(p["ssh_fresh"]) for p in probes)
     return {"states": states, "incidents": incidents, "active": active,
             "fresh": fresh, "stale": len(probes) - fresh, "now": now,
-            "probes": probes, "samples": samples, "operators": operators}
+            "probes": probes, "samples": samples, "operators": operators,
+            "targets": targets, "transition_evidence": transition_evidence}

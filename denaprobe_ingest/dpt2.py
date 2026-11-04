@@ -30,7 +30,7 @@ ENDPOINT = "/api/dpt/v2/telemetry"
 MAX_BODY = 1024
 TCP_CODES = frozenset((1, 20, 21, 22, 90))
 DEEP_CODES = frozenset((1, 10, 11, 12, 20, 21, 30, 31, 40, 41, 42, 90))
-TRANSFER_CODES = frozenset((1, 2, 20, 21, 22, 23, 90))
+TRANSFER_CODES = frozenset((1, 2, 20, 21, 22, 23, 24, 90))
 TCP_FIELDS = frozenset(("u", "s", "ms"))
 # Optional authenticated route tag: 1=CORE_LOOPBACK, never NPV egress.
 DEEP_FIELDS = frozenset(("u", "s", "am", "sm", "f", "g", "rt"))
@@ -163,11 +163,11 @@ def validate(body: dict, sent: int) -> tuple[int, bool]:
         z = body["z"]
         _object(z, {"u", "s"}, DEEP_FIELDS,
                 {"u": (0, v1.MAX_SAFE_INT), "s": (0, 65535),
-                 "am": (0, 600000), "sm": (0, 600000), "rt": (1, 2)})
+                 "am": (0, 600000), "sm": (0, 600000), "rt": (1, 3)})
         if body["s"] != 1 or z["u"] > sent:
             raise v1.DptError(422, "invalid_semantics")
         unknown |= z["s"] not in DEEP_CODES
-        if z.get("rt") == 2:
+        if z.get("rt") in (2, 3):
             # Lite's controlled public witness is not NPV end-to-end health.
             # A signed login event must accompany its transfer witness.
             auth = body.get("j")
@@ -179,6 +179,19 @@ def validate(body: dict, sent: int) -> tuple[int, bool]:
             for name in ("f", "g"):
                 if name in z and (
                     not isinstance(z[name], dict) or z[name].get("r") != 8192
+                ):
+                    raise v1.DptError(422, "invalid_semantics")
+            # Route 3: each successful HTTP Range witness reads exactly
+            # 8KiB of body bytes; a timeout must be evidenced by sample s=20.
+            if z.get("rt") == 3:
+                if z["s"] == 1 and not all(
+                    isinstance(z.get(k), dict) and z[k].get("s") == 1
+                    for k in ("f", "g")
+                ):
+                    raise v1.DptError(422, "invalid_semantics")
+                if z["s"] == 40 and not any(
+                    isinstance(z.get(k), dict) and z[k].get("s") == 20
+                    for k in ("f", "g")
                 ):
                     raise v1.DptError(422, "invalid_semantics")
         if z["s"] in (10, 11, 12) and ("f" in z or "g" in z):

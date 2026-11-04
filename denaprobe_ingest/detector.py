@@ -155,6 +155,17 @@ def classify(body: dict, *, direct_ok: bool) -> tuple[str, str]:
         return PREAUTH_REACHABLE, "TCP_SSH_PREAUTH_PASS_DEEP_NOT_MEASURED"
     if not direct_ok:
         return UNKNOWN, "DIRECT_CONTROL_UNAVAILABLE_FOR_DEEP"
+    # CORE_LOOPBACK is a controlled responder on the SSH terminator; it does
+    # not represent NPV customer public egress or imply a filtering cause.
+    # Success is valid only as limited TCP/SSH preauth reachability (D0
+    # recovery retains its two independent fresh samples).
+    if z.get("rt") == 1:
+        if z.get("s") == 1 and all(
+            isinstance(z.get(k), dict) and z[k].get("s") == 1 and
+            z[k].get("n") == z[k].get("r") for k in ("f", "g")
+        ):
+            return PREAUTH_REACHABLE, "CORE_LOOPBACK_ONLY_TCP_SSH_REACHABLE"
+        return UNKNOWN, "CORE_LOOPBACK_WITNESS_NOT_NPV_EGRESS"
     code = z.get("s")
     if code in (20, 21, 30, 31):
         return D1, "AUTHENTICATED_SSH_SESSION_OR_CHANNEL_FAILED"
@@ -356,6 +367,8 @@ def _live_probe(db: sqlite3.Connection, latest: sqlite3.Row, now: int) -> dict:
         "last_received_at": 0, "ssh_fresh": False, "https_fresh": False,
         "tcp_code": None, "ssh_code": None, "wifi_code": None,
         "https_code": None, "https_received_at": None,
+        "deep_route": None, "deep_code": None, "deep_fresh": False,
+        "deep_first": None, "deep_second": None,
     }
     if latest["ssh_sequence"] is None:
         return result
@@ -393,6 +406,18 @@ def _live_probe(db: sqlite3.Connection, latest: sqlite3.Row, now: int) -> dict:
         tcp_code=body.get("c", {}).get("s") if fresh else None,
         ssh_code=body.get("s") if fresh else None,
     )
+    # Route and Deep sample have an independent signed completion time.
+    z = body.get("z")
+    if isinstance(z, dict):
+        deep_age = int(row["sender_age_ms"]) + last_completed - z["u"]
+        deep_fresh = bool(fresh and _fresh(
+            now, int(row["received_at_ms"]), deep_age, FRESH_MS))
+        result.update(
+            deep_route=z.get("rt"), deep_code=z.get("s") if deep_fresh else None,
+            deep_fresh=deep_fresh,
+            deep_first=z.get("f") if deep_fresh else None,
+            deep_second=z.get("g") if deep_fresh else None,
+        )
     if latest["https_sequence"] is None:
         return result
     control = db.execute(
@@ -463,7 +488,8 @@ def read_dashboard(db_path: Path, *, now_ms: int | None = None) -> dict:
                 samples[key] = {
                     "tcp_code": c.get("s"), "tcp_ms": c.get("ms"),
                     "auth_ms": z.get("am"), "session_ms": z.get("sm"),
-                    "deep_code": z.get("s"), "first": z.get("f"),
+                    "deep_code": z.get("s"), "deep_route": z.get("rt"),
+                    "first": z.get("f"),
                     "second": z.get("g"),
                     "direct_code": probe.get("https_code"),
                     "received_at": row["received_at_ms"],

@@ -16,7 +16,7 @@ def make(q, *, ip="198.51.100.22", mode="good"):
     u = 100000 + q * 30000
     d = dict(v=2, id=DEVICE, b=BOOT, q=q, u=u, k=1, t=1,
              w=1, r=-47, s=1, p=52, o=255, d=12, x=3100, a=180,
-             c={"u": u, "s": 1, "ms": 120})
+             c={"u": u - 17000, "s": 1, "ms": 120})
     if ip is not None:
         d["ei"] = ip
     if mode == "dns":
@@ -29,17 +29,17 @@ def make(q, *, ip="198.51.100.22", mode="good"):
         d.pop("a")
         d["c"]["s"] = 20
         return d
-    d["j"] = {"u": u + 500, "s": 1, "ms": 300}
+    d["j"] = {"u": u - 16000, "s": 1, "ms": 300}
     complete = {"s": 1, "r": 8192, "n": 8192, "ms": 1100}
     failed = {"s": 20, "r": 8192, "n": 0, "ms": 12000}
-    d["z"] = {"u": u + 15500, "s": 1, "am": 300, "sm": 13500,
+    d["z"] = {"u": u - 100, "s": 1, "am": 300, "sm": 13500,
               "rt": 2, "f": complete, "g": complete}
     if mode == "stalled":
         d["z"]["s"] = 40
         d["z"]["g"] = failed
     if mode == "auth_rejected":
         d["j"]["s"] = 10
-        d["z"] = {"u": u + 500, "s": 10, "am": 300, "sm": 300, "rt": 2}
+        d["z"] = {"u": u - 100, "s": 10, "am": 300, "sm": 300, "rt": 2}
     return d
 
 
@@ -73,15 +73,15 @@ class LiteEdgeIp(unittest.TestCase):
 
     def test_lite_signed_fields_and_zero_legacy_impact(self):
         healthy = make(2)
-        self.assertEqual(dpt2.validate(healthy, healthy["z"]["u"] + 50)[0], 1)
+        self.assertEqual(dpt2.validate(healthy, healthy["u"] + 50)[0], 1)
         self.assertEqual(detector.classify(healthy, direct_ok=False)[0],
                          detector.HEALTHY)
         stalled = make(2, mode="stalled")
-        self.assertEqual(dpt2.validate(stalled, stalled["z"]["u"] + 50)[0], 1)
+        self.assertEqual(dpt2.validate(stalled, stalled["u"] + 50)[0], 1)
         self.assertEqual(detector.classify(stalled, direct_ok=False)[0],
                          detector.D2)
         rejected = make(2, mode="auth_rejected")
-        self.assertEqual(dpt2.validate(rejected, rejected["z"]["u"] + 50)[0], 1)
+        self.assertEqual(dpt2.validate(rejected, rejected["u"] + 50)[0], 1)
         self.assertEqual(detector.classify(rejected, direct_ok=False)[0],
                          detector.UNKNOWN)
         old = make(2)
@@ -97,7 +97,7 @@ class LiteEdgeIp(unittest.TestCase):
                     None, True, 123):
             trial = dict(good, ei=bad)
             with self.subTest(ip=bad), self.assertRaises(collector.DptError):
-                dpt2.validate(trial, good["z"]["u"] + 50)
+                dpt2.validate(trial, good["u"] + 50)
         dns = make(2, mode="dns", ip=None)
         self.assertEqual(dpt2.validate(dns, dns["u"] + 100)[0], 1)
         dns["ei"] = "198.51.100.22"
@@ -106,7 +106,7 @@ class LiteEdgeIp(unittest.TestCase):
         invalid = make(2)
         invalid["j"]["s"] = 10  # cannot claim data success after auth denial
         with self.assertRaises(collector.DptError):
-            dpt2.validate(invalid, invalid["z"]["u"] + 100)
+            dpt2.validate(invalid, invalid["u"] + 100)
 
     def test_dashboard_registered_hostname_measured_ip_and_port(self):
         self.send(ip="198.51.100.22")

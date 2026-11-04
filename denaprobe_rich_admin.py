@@ -123,6 +123,20 @@ def render_home(model):
              not p["monitoring_gap"] else "نامشخص / دارای وقفه"),
             ("تونل VPN", "اندازه‌گیری نشده"),
         ]
+        if p.get("deep_route") == 1:
+            rows.append(("مسیر آزمون Deep", "Loopback داخلی Core · نه مسیر خروجی NPV"))
+            if p.get("deep_fresh"):
+                first, second = p.get("deep_first"), p.get("deep_second")
+                complete = (p.get("deep_code") == 1 and all(
+                    isinstance(x, dict) and x.get("s") == 1 and
+                    x.get("n") == x.get("r") for x in (first, second)))
+                rows.append(("دو انتقال آزمایشی",
+                             "موفق · داخلی Core" if complete else "ناموفق / ناقص · داخلی Core"))
+                for label, part in (("نمونه اول", first), ("نمونه دوم", second)):
+                    if isinstance(part, dict):
+                        rows.append((label, f"{part.get('n', 0)}/{part.get('r', 0)} بایت · {part.get('ms', 0)} ms"))
+            else:
+                rows.append(("نتیجه Deep", "قدیمی / نامشخص"))
         operator = model.get("operators", {}).get(p["device_id"])
         if operator:
             rows.insert(4, ("اپراتور (اعلام‌شده)", operator))
@@ -217,6 +231,8 @@ def render_detail(model, identifier):
             ("تازگی داده", _age(sample.get("received_at"), model["now"])),
         ]
         if sample.get("deep_code") is not None:
+            if sample.get("deep_route") == 1:
+                rows.append(("مسیر Deep", "Loopback داخلی Core · سلامت NPV سنجیده نشده"))
             for label, field in (("احراز هویت", "auth_ms"),
                                  ("نشست", "session_ms")):
                 if sample.get(field) is not None:

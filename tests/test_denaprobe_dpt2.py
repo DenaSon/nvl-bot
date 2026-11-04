@@ -105,6 +105,18 @@ class TestDpt2(unittest.TestCase):
                              "FROM dpt2_latest").fetchone()
             self.assertEqual(tuple(row), (3, 2, 0))
 
+    def test_b2_signed_loopback_route_validation(self):
+        complete = {"s": 1, "r": 16384, "n": 16384, "ms": 1100}
+        good = probe(z={"u": 2100, "s": 1, "am": 350, "sm": 22000,
+                        "rt": 1, "f": complete, "g": complete})
+        self.assertEqual(dpt2.validate(good, 22100)[0], 1)
+        for bad_route in (0, 2, "1", True, None):
+            malformed = probe(z={**good["z"], "rt": bad_route})
+            with self.assertRaises(collector.DptError):
+                dpt2.validate(malformed, 22100)
+        legacy = probe(z={k: v for k, v in good["z"].items() if k != "rt"})
+        self.assertEqual(dpt2.validate(legacy, 22100)[0], 1)
+
     def test_invalid_deep_shapes_and_timestamp_semantics(self):
         p = probe(z={"u": 2100, "s": 1})
         with self.assertRaises(v1.DptError):

@@ -177,6 +177,8 @@ def run_install(
     compose_version = ""
     image_id = ""
     managed_retry = False
+    xray_version = ""
+    xray_archive = ""
 
     try:
         cert = _validate_certificate(certificate)
@@ -191,6 +193,10 @@ def run_install(
         uid = _run(executor, "id -u", stage=stage, timeout=20).stdout.strip()
         if uid != "0":
             raise NodeInstallError(stage, f"remote uid is {uid!r}; root is required")
+
+        stage = "xray-core-plan"
+        xray_version = target_version()
+        xray_archive = archive_for_architecture(session.last_report.architecture)
 
         stage = "ownership-check"
         ownership = _run(
@@ -209,6 +215,17 @@ def run_install(
                 "existing Marzban-node files are not marked as NVL-managed; refusing to overwrite",
             )
         managed_retry = ownership == "nvl"
+        # Only resume incomplete installs. Never modify an active node through
+        # the provisioning wizard; upgrades require a separate explicit flow.
+        if managed_retry:
+            existing = executor.run(
+                "docker ps --format '{{.Names}}'", timeout=20,
+            )
+            if existing.exit_code == 0 and "marzban-node" in existing.stdout.split():
+                raise NodeInstallError(
+                    "existing-running-node",
+                    "active managed node exists; refusing reinstall or upgrade",
+                )
 
         stage = "port-recheck"
         before_ports = _listener_ports(executor)

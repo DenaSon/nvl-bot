@@ -19,7 +19,7 @@ _ARCHIVES = {
 
 
 def target_version() -> str:
-    version = os.environ.get(VERSION_ENV, DEFAULT_XRAY_VERSION).strip()
+    version = os.environ.get(VERSION_ENV, DEFAULT_XRAY_VERSION)
     if not _VERSION_RE.fullmatch(version):
         raise ValueError("invalid NVL_MARZBAN_NODE_XRAY_VERSION")
     return version
@@ -84,8 +84,8 @@ actual="$("$stage/xray" version | awk 'NR==1 {print $2}')"
 target="$core_dir/xray-v$version"
 if [ -e "$target" ]; then
   old="$("$target" version | awk 'NR==1 {print $2}')"
-  [ "$old" = "$version" ] || {
-    echo "existing versioned Xray binary is invalid" >&2; exit 1;
+  [ "$old" = "$version" ] && cmp -s "$stage/xray" "$target" || {
+    echo "existing Xray binary differs from verified release" >&2; exit 1;
   }
 else
   install -m 0755 "$stage/xray" "$target"

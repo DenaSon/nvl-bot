@@ -52,7 +52,7 @@ class InstallFakeExecutor:
         if self.fail_stage and self.fail_stage in command:
             return bad("forced failure")
 
-        if command == "docker ps --format '{{.Names}}'":
+        if command == "docker ps -a --format '{{.Names}}'":
             return ok("marzban-node\n" if self.existing_running else "")
 
         if command.startswith("docker exec marzban-node /var/lib/marzban-node/xray-core/"):

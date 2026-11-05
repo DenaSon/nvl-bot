@@ -245,6 +245,8 @@ def run_install(
         stage = "prerequisites"
         prereq_probe = executor.run(
             "command -v curl >/dev/null && "
+            "command -v unzip >/dev/null && "
+            "command -v sha256sum >/dev/null && "
             "dpkg -s ca-certificates >/dev/null 2>&1",
             timeout=20,
         )
@@ -254,7 +256,7 @@ def run_install(
                 (
                     "apt-get update -qq && "
                     "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
-                    "ca-certificates curl"
+                    "ca-certificates curl unzip"
                 ),
                 stage=stage,
                 timeout=300,
@@ -337,6 +339,18 @@ def run_install(
             mode=0o600,
         )
 
+        # Stage the pinned core before Compose references it.
+        stage = "xray-core-install"
+        executor.write_text(
+            INSTALL_SCRIPT_PATH, INSTALL_SCRIPT, mode=0o700,
+        )
+        _run(
+            executor,
+            f"/bin/sh {INSTALL_SCRIPT_PATH} {xray_version} {xray_archive}",
+            stage=stage,
+            timeout=480,
+        )
+
         stage = "write-config"
         executor.write_text(
             CERT_PATH,
@@ -345,7 +359,7 @@ def run_install(
         )
         executor.write_text(
             COMPOSE_PATH,
-            _compose_text(session.service_port, session.api_port),
+            _compose_text(session.service_port, session.api_port, xray_version=xray_version),
             mode=0o600,
         )
 

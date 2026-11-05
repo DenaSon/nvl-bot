@@ -215,16 +215,16 @@ def run_install(
                 "existing Marzban-node files are not marked as NVL-managed; refusing to overwrite",
             )
         managed_retry = ownership == "nvl"
-        # Only resume incomplete installs. Never modify an active node through
+        # Only resume marker-only installs. Never modify an existing container through
         # the provisioning wizard; upgrades require a separate explicit flow.
         if managed_retry:
             existing = executor.run(
-                "docker ps --format '{{.Names}}'", timeout=20,
+                "docker ps -a --format '{{.Names}}'", timeout=20,
             )
             if existing.exit_code == 0 and "marzban-node" in existing.stdout.split():
                 raise NodeInstallError(
                     "existing-running-node",
-                    "active managed node exists; refusing reinstall or upgrade",
+                    "existing managed node container found; refusing reinstall or upgrade",
                 )
 
         stage = "port-recheck"

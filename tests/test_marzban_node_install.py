@@ -359,6 +359,58 @@ class NodeInstallTests(unittest.TestCase):
         with self.assertRaises(bootstrap.NodeBootstrapError):
             installer.prepare_install(session)
 
+    def test_install_fails_before_compose_if_xray_download_or_verification_fails(self):
+        session = install_ready_session()
+        captured = {}
+
+        def factory(credentials, **kwargs):
+            executor = InstallFakeExecutor(
+                credentials, fail_stage="install-xray-core.sh", **kwargs
+            )
+            captured["executor"] = executor
+            return executor
+
+        report = installer.run_install(
+            session, certificate=VALID_CERT, executor_factory=factory,
+        )
+        self.assertFalse(report.success)
+        self.assertEqual(report.stage, "xray-core-install")
+        self.assertNotIn(installer.COMPOSE_PATH, captured["executor"].writes)
+        self.assertIsNone(session.password)
+
+    def test_mismatched_running_xray_version_fails_closed(self):
+        session = install_ready_session()
+        report = installer.run_install(
+            session,
+            certificate=VALID_CERT,
+            executor_factory=lambda credentials, **kwargs: InstallFakeExecutor(
+                credentials, core_version="25.3.6", **kwargs
+            ),
+        )
+        self.assertFalse(report.success)
+        self.assertEqual(report.stage, "xray-core-verify")
+        self.assertIn("does not match", report.error)
+
+    def test_existing_running_node_is_not_implicitly_upgraded(self):
+        session = install_ready_session()
+        captured = {}
+
+        def factory(credentials, **kwargs):
+            executor = InstallFakeExecutor(
+                credentials, ownership="nvl", existing_running=True, **kwargs,
+            )
+            captured["executor"] = executor
+            return executor
+
+        report = installer.run_install(
+            session, certificate=VALID_CERT, executor_factory=factory,
+        )
+        self.assertFalse(report.success)
+        self.assertEqual(report.stage, "existing-running-node")
+        self.assertFalse(captured["executor"].writes)
+        self.assertIsNone(session.password)
+
+
 
 if __name__ == "__main__":
     unittest.main()

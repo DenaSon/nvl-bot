@@ -42,6 +42,8 @@ class NodeInstallReport:
     service_port_listening: bool = False
     api_port_listening: bool = False
     image_id: str = ""
+    xray_core_version: str = ""
+    xray_core_executable: str = ""
     managed_retry: bool = False
     observed_at: str = ""
     error: str = ""
@@ -65,7 +67,7 @@ def _validate_certificate(certificate: str) -> str:
     return value + "\n"
 
 
-def _compose_text(service_port: int, api_port: int) -> str:
+def _compose_text(service_port: int, api_port: int, *, xray_version: str) -> str:
     return (
         "services:\n"
         "  marzban-node:\n"
@@ -78,6 +80,7 @@ def _compose_text(service_port: int, api_port: int) -> str:
         f'      SERVICE_PORT: "{int(service_port)}"\n'
         f'      XRAY_API_PORT: "{int(api_port)}"\n'
         '      SERVICE_PROTOCOL: "rest"\n'
+        f'      XRAY_EXECUTABLE_PATH: "{executable_path(xray_version)}"\n'
         "    volumes:\n"
         "      - /var/lib/marzban-node:/var/lib/marzban\n"
         "      - /var/lib/marzban-node:/var/lib/marzban-node\n"

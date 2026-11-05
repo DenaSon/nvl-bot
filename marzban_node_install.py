@@ -409,6 +409,18 @@ def run_install(
         if running != "true":
             raise NodeInstallError(stage, "Marzban-node container is not running")
 
+        stage = "xray-core-verify"
+        core_path = executable_path(xray_version)
+        core_out = _run(
+            executor,
+            f"docker exec marzban-node {core_path} version",
+            stage=stage,
+            timeout=30,
+        ).stdout.strip().splitlines()
+        first_line = core_out[0].split() if core_out else []
+        if len(first_line) < 2 or first_line[:2] != ["Xray", xray_version]:
+            raise NodeInstallError(stage, "node Xray version does not match pinned target")
+
         stage = "service-listener"
         wait_command = (
             "for i in $(seq 1 30); do "
@@ -441,6 +453,8 @@ def run_install(
             service_port_listening=session.service_port in ports,
             api_port_listening=session.api_port in ports,
             image_id=image_id,
+            xray_core_version=xray_version,
+            xray_core_executable=executable_path(xray_version),
             managed_retry=managed_retry,
             observed_at=_now_text(),
         )

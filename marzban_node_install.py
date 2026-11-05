@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from marzban_node_bootstrap import NodeBootstrapBusy, NodeBootstrapError, NodeBootstrapSession
+from marzban_node_xray_core import target_version, archive_for_architecture, executable_path, INSTALL_SCRIPT, INSTALL_SCRIPT_PATH
 from server_migration.ssh import ParamikoRemoteExecutor
 
 

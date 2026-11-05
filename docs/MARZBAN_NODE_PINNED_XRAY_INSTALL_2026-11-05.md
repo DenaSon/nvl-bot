@@ -16,7 +16,7 @@ The bot previously installed `gozargah/marzban-node:latest` without controlling 
 - Store the executable at `/var/lib/marzban-node/xray-core/xray-v<VERSION>`. Do not overwrite the bundled `/usr/local/bin/xray`.
 - Compose config points `XRAY_EXECUTABLE_PATH` to the versioned executable; `/var/lib/marzban-node` is already mounted in the container.
 - Validate Compose and verify Xray version *from inside* `marzban-node` after container start; only then report remote-install success.
-- Pre-existing running NVL-managed nodes are **refused** by the Phase 7 installer. Interrupted installs without a running Node may retry.
+- Pre-existing NVL-managed node containers are **refused** by the Phase 7 installer, even if stopped. Interrupted installs without a Node container may retry.
 - Credentials remain short-lived in-memory and are scrubbed on both success and failure.
 
 ## Test matrix
@@ -26,7 +26,7 @@ The bot previously installed `gozargah/marzban-node:latest` without controlling 
 3. Disposable VPS: complete Phase 6 SSH host-key preflight, run Phase 7, confirm reported core `26.6.1` and the pinned executable path.
 4. Check `docker exec marzban-node /var/lib/marzban-node/xray-core/xray-v26.6.1 version`; check Node Connected in Marzban and listener ports after Master sync.
 5. Perform real VLESS REALITY traffic tests with **both** Xray 25.3.6 and 26.6.1 clients and regression tests for Shadowsocks/Trojan. Pass conditions: successful REALITY handshake and egress, healthy other protocols, no regression.
-6. Confirm Phase 7 cannot silently alter an existing running node.
+6. Confirm Phase 7 cannot silently alter an existing Node container, running or stopped.
 
 ## Failure / rollback
 

@@ -23,6 +23,8 @@ class InstallFakeExecutor:
         docker_present=False,
         compose_present=False,
         fail_stage=None,
+        existing_running=False,
+        core_version="26.6.1",
     ):
         self.credentials = credentials
         self.expected_host_key_sha256 = expected_host_key_sha256
@@ -31,6 +33,8 @@ class InstallFakeExecutor:
         self.docker_present = docker_present
         self.compose_present = compose_present
         self.fail_stage = fail_stage
+        self.existing_running = existing_running
+        self.core_version = core_version
         self.started = False
         self.commands = []
         self.writes = {}
@@ -47,6 +51,12 @@ class InstallFakeExecutor:
 
         if self.fail_stage and self.fail_stage in command:
             return bad("forced failure")
+
+        if command == "docker ps -a --format '{{.Names}}'":
+            return ok("marzban-node\n" if self.existing_running else "")
+
+        if command.startswith("docker exec marzban-node /var/lib/marzban-node/xray-core/"):
+            return ok(f"Xray {self.core_version} (Xray, Penetrates Everything.)\n")
 
         if command == "id -u":
             return ok("0\n")
@@ -195,6 +205,8 @@ class NodeInstallTests(unittest.TestCase):
         self.assertTrue(report.container_running)
         self.assertTrue(report.service_port_listening)
         self.assertEqual(report.image_id, "sha256:abc123")
+        self.assertEqual(report.xray_core_version, "26.6.1")
+        self.assertEqual(report.xray_core_executable, "/var/lib/marzban-node/xray-core/xray-v26.6.1")
         self.assertTrue(report.docker_installed_now)
         self.assertEqual(session.stage, "REMOTE_INSTALL_COMPLETE")
         self.assertIsNone(session.password)
@@ -215,6 +227,12 @@ class NodeInstallTests(unittest.TestCase):
         self.assertIn('SERVICE_PORT: "62050"', compose)
         self.assertIn('XRAY_API_PORT: "62051"', compose)
         self.assertIn('SERVICE_PROTOCOL: "rest"', compose)
+        self.assertIn('XRAY_EXECUTABLE_PATH: "/var/lib/marzban-node/xray-core/xray-v26.6.1"', compose)
+        install_script, install_mode = executor.writes[installer.INSTALL_SCRIPT_PATH]
+        self.assertEqual(install_mode, 0o700)
+        self.assertIn("sha256sum -c -", install_script)
+        self.assertIn("Xray archive SHA256 verification failed", install_script)
+        self.assertTrue(any("install-xray-core.sh 26.6.1 Xray-linux-64.zip" in c for c in executor.commands))
         self.assertIn("- /var/lib/marzban-node:/var/lib/marzban", compose)
         self.assertIn("- /var/lib/marzban-node:/var/lib/marzban-node", compose)
         self.assertEqual(marker_mode, 0o600)
@@ -340,6 +358,58 @@ class NodeInstallTests(unittest.TestCase):
         )
         with self.assertRaises(bootstrap.NodeBootstrapError):
             installer.prepare_install(session)
+
+    def test_install_fails_before_compose_if_xray_download_or_verification_fails(self):
+        session = install_ready_session()
+        captured = {}
+
+        def factory(credentials, **kwargs):
+            executor = InstallFakeExecutor(
+                credentials, fail_stage="install-xray-core.sh", **kwargs
+            )
+            captured["executor"] = executor
+            return executor
+
+        report = installer.run_install(
+            session, certificate=VALID_CERT, executor_factory=factory,
+        )
+        self.assertFalse(report.success)
+        self.assertEqual(report.stage, "xray-core-install")
+        self.assertNotIn(installer.COMPOSE_PATH, captured["executor"].writes)
+        self.assertIsNone(session.password)
+
+    def test_mismatched_running_xray_version_fails_closed(self):
+        session = install_ready_session()
+        report = installer.run_install(
+            session,
+            certificate=VALID_CERT,
+            executor_factory=lambda credentials, **kwargs: InstallFakeExecutor(
+                credentials, core_version="25.3.6", **kwargs
+            ),
+        )
+        self.assertFalse(report.success)
+        self.assertEqual(report.stage, "xray-core-verify")
+        self.assertIn("does not match", report.error)
+
+    def test_existing_running_node_is_not_implicitly_upgraded(self):
+        session = install_ready_session()
+        captured = {}
+
+        def factory(credentials, **kwargs):
+            executor = InstallFakeExecutor(
+                credentials, ownership="nvl", existing_running=True, **kwargs,
+            )
+            captured["executor"] = executor
+            return executor
+
+        report = installer.run_install(
+            session, certificate=VALID_CERT, executor_factory=factory,
+        )
+        self.assertFalse(report.success)
+        self.assertEqual(report.stage, "existing-running-node")
+        self.assertFalse(captured["executor"].writes)
+        self.assertIsNone(session.password)
+
 
 
 if __name__ == "__main__":

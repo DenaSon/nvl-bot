@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from marzban_node_bootstrap import NodeBootstrapBusy, NodeBootstrapError, NodeBootstrapSession
+from marzban_node_xray_core import target_version, archive_for_architecture, executable_path, INSTALL_SCRIPT, INSTALL_SCRIPT_PATH
 from server_migration.ssh import ParamikoRemoteExecutor
 
 
@@ -41,6 +42,8 @@ class NodeInstallReport:
     service_port_listening: bool = False
     api_port_listening: bool = False
     image_id: str = ""
+    xray_core_version: str = ""
+    xray_core_executable: str = ""
     managed_retry: bool = False
     observed_at: str = ""
     error: str = ""
@@ -64,7 +67,7 @@ def _validate_certificate(certificate: str) -> str:
     return value + "\n"
 
 
-def _compose_text(service_port: int, api_port: int) -> str:
+def _compose_text(service_port: int, api_port: int, *, xray_version: str) -> str:
     return (
         "services:\n"
         "  marzban-node:\n"
@@ -77,6 +80,7 @@ def _compose_text(service_port: int, api_port: int) -> str:
         f'      SERVICE_PORT: "{int(service_port)}"\n'
         f'      XRAY_API_PORT: "{int(api_port)}"\n'
         '      SERVICE_PROTOCOL: "rest"\n'
+        f'      XRAY_EXECUTABLE_PATH: "{executable_path(xray_version)}"\n'
         "    volumes:\n"
         "      - /var/lib/marzban-node:/var/lib/marzban\n"
         "      - /var/lib/marzban-node:/var/lib/marzban-node\n"
@@ -173,6 +177,8 @@ def run_install(
     compose_version = ""
     image_id = ""
     managed_retry = False
+    xray_version = ""
+    xray_archive = ""
 
     try:
         cert = _validate_certificate(certificate)
@@ -187,6 +193,10 @@ def run_install(
         uid = _run(executor, "id -u", stage=stage, timeout=20).stdout.strip()
         if uid != "0":
             raise NodeInstallError(stage, f"remote uid is {uid!r}; root is required")
+
+        stage = "xray-core-plan"
+        xray_version = target_version()
+        xray_archive = archive_for_architecture(session.last_report.architecture)
 
         stage = "ownership-check"
         ownership = _run(
@@ -205,6 +215,17 @@ def run_install(
                 "existing Marzban-node files are not marked as NVL-managed; refusing to overwrite",
             )
         managed_retry = ownership == "nvl"
+        # Only resume marker-only installs. Never modify an existing container through
+        # the provisioning wizard; upgrades require a separate explicit flow.
+        if managed_retry:
+            existing = executor.run(
+                "docker ps -a --format '{{.Names}}'", timeout=20,
+            )
+            if existing.exit_code == 0 and "marzban-node" in existing.stdout.split():
+                raise NodeInstallError(
+                    "existing-running-node",
+                    "existing managed node container found; refusing reinstall or upgrade",
+                )
 
         stage = "port-recheck"
         before_ports = _listener_ports(executor)
@@ -224,6 +245,8 @@ def run_install(
         stage = "prerequisites"
         prereq_probe = executor.run(
             "command -v curl >/dev/null && "
+            "command -v unzip >/dev/null && "
+            "command -v sha256sum >/dev/null && "
             "dpkg -s ca-certificates >/dev/null 2>&1",
             timeout=20,
         )
@@ -233,7 +256,7 @@ def run_install(
                 (
                     "apt-get update -qq && "
                     "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
-                    "ca-certificates curl"
+                    "ca-certificates curl unzip"
                 ),
                 stage=stage,
                 timeout=300,
@@ -316,6 +339,18 @@ def run_install(
             mode=0o600,
         )
 
+        # Stage the pinned core before Compose references it.
+        stage = "xray-core-install"
+        executor.write_text(
+            INSTALL_SCRIPT_PATH, INSTALL_SCRIPT, mode=0o700,
+        )
+        _run(
+            executor,
+            f"/bin/sh {INSTALL_SCRIPT_PATH} {xray_version} {xray_archive}",
+            stage=stage,
+            timeout=480,
+        )
+
         stage = "write-config"
         executor.write_text(
             CERT_PATH,
@@ -324,7 +359,7 @@ def run_install(
         )
         executor.write_text(
             COMPOSE_PATH,
-            _compose_text(session.service_port, session.api_port),
+            _compose_text(session.service_port, session.api_port, xray_version=xray_version),
             mode=0o600,
         )
 
@@ -374,6 +409,18 @@ def run_install(
         if running != "true":
             raise NodeInstallError(stage, "Marzban-node container is not running")
 
+        stage = "xray-core-verify"
+        core_path = executable_path(xray_version)
+        core_out = _run(
+            executor,
+            f"docker exec marzban-node {core_path} version",
+            stage=stage,
+            timeout=30,
+        ).stdout.strip().splitlines()
+        first_line = core_out[0].split() if core_out else []
+        if len(first_line) < 2 or first_line[:2] != ["Xray", xray_version]:
+            raise NodeInstallError(stage, "node Xray version does not match pinned target")
+
         stage = "service-listener"
         wait_command = (
             "for i in $(seq 1 30); do "
@@ -406,6 +453,8 @@ def run_install(
             service_port_listening=session.service_port in ports,
             api_port_listening=session.api_port in ports,
             image_id=image_id,
+            xray_core_version=xray_version,
+            xray_core_executable=executable_path(xray_version),
             managed_retry=managed_retry,
             observed_at=_now_text(),
         )

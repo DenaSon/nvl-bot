@@ -38,6 +38,13 @@ _MESSAGES = {
     "PREVIEW_CHANGED": "اطلاعات تغییر کرده است؛ پیش‌نمایش تازه بگیرید.",
     "EXTERNAL_ROUTE_UNVERIFIED": "شواهد انتقال اضطراری قبلی کامل نیستند.",
     "FORCE_ABORT_ONLY_HOLD": "لغو اجباری فقط برای انتقال متوقف‌شده (HOLD) مجاز است.",
+    "FORCE_ABORT_ONLY_UNCOMMITTED": "این انتقال از مرحله قابل لغو گذشته است.",
+    "FORCE_ABORT_INTENT_TOO_RECENT": "انتقال هنوز ممکن است در جریان باشد؛ لغو فقط بعد از گذشت ۳ دقیقه مجاز است.",
+    "FORCE_ABORT_DNS_NOT_ON_SOURCE": "رکوردهای واقعی DNS کاملاً روی مبدأ نیستند؛ ابتدا مسیر را بازیابی کنید.",
+    "FORCE_ABORT_DNS_UNVERIFIED": "شناسه رکوردهای DNS قابل تأیید نیست.",
+    "FORCE_ABORT_ROUTE_CHANGED": "مسیر یا حساب‌ها در دیتابیس تغییر کرده‌اند؛ لغو خودکار مجاز نیست.",
+    "FORCE_ABORT_SNAPSHOT_CHANGED": "وضعیت انتقال در حین بررسی تغییر کرد؛ وضعیت را تازه‌سازی کنید.",
+    "FORCE_ABORT_OTHER_LEASE_RUNNING": "عملیات دیگری هم قفل فعال دارد؛ لغو خودکار مجاز نیست.",
     "FORCE_CONFIRMATION_EXPIRED": "تأیید لغو منقضی شده؛ دوباره بررسی کنید.",
     "LEASE_OWNERSHIP_LOST": "قفل ثبت‌شده متعلق به این انتقال نیست؛ بررسی لازم است.",
     "LEASE_IDENTITY_UNVERIFIED": "هویت قفل انتقال تأیید نشد؛ لغو مجاز نیست.",
@@ -136,7 +143,8 @@ class ManualQuickSwitchUI:
             if status=="HOLD":
                 rows.append([("⚠️ تلاش مجدد DNS با تأیید مدیر",
                              "apps_edge_quick_retry_review_"+rec["id"])])
-                rows.append([("⛔ لغو اجباری انتقال",
+            if status in ("DNS_INTENT","HOLD"):
+                rows.append([("⛔ بررسی لغو و آزادسازی قفل",
                              "apps_edge_quick_force_review_"+rec["id"])])
         rows.extend([[("🔄 تازه‌سازی","apps_edge_quick_status")],
                      [("↩️ مدیریت سرورها","apps_edge_quick_home")]])
@@ -311,7 +319,7 @@ class ManualQuickSwitchUI:
                 job=data[len("apps_edge_quick_force_review_"):]
                 rec=await asyncio.to_thread(self.engine.get,job)
                 if (not rec or rec.get("kind")!="QUICK"
-                        or rec.get("status")!="HOLD"
+                        or rec.get("status") not in ("DNS_INTENT","HOLD")
                         or rec.get("actor")!=str(actor)):
                     raise QuickSwitchHold("FORCE_ABORT_ONLY_HOLD")
                 nonce=secrets.token_hex(8)
@@ -327,7 +335,10 @@ class ManualQuickSwitchUI:
                     f"حساب‌ها: <b>{rec['account_count']}</b>\n\n"
                     "فقط پرونده و قفل همین عملیات بسته می‌شوند؛ "
                     "DNS، تنظیمات مسیر و حساب‌ها برگردانده نمی‌شوند. "
-                    "اگر Cloudflare قبلاً تغییر کرده باشد، باید مسیر را جداگانه بررسی کنید.",
+                    "برای DNS_INTENT فقط پس از گذشت ۳ دقیقه، تأیید زنده "
+                    "تمام رکوردهای DNS روی مبدأ و ثابت‌بودن مسیر DB، "
+                    "لغو مجاز است. اگر Cloudflare قبلاً تغییر کرده باشد، "
+                    "باید مسیر را جداگانه بررسی کنید.",
                     [[("⛔ تأیید لغو اجباری",
                        "apps_edge_quick_force_yes_"+nonce)],
                      [("انصراف","apps_edge_quick_status")]])

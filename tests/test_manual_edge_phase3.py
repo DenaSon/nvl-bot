@@ -127,6 +127,61 @@ class Phase3ManualTests(unittest.TestCase):
         with open(self.path,"rb") as f:
             self.assertNotIn(password.encode(),f.read())
 
+    def test_standby_admits_only_unrelated_running_route_lease(self):
+        op = self.prepare(ip="8.8.8.8")
+        with self.db() as db:
+            db.execute("""CREATE TABLE failover_operations(
+                id INTEGER PRIMARY KEY,source_host TEXT,target_host TEXT,
+                status TEXT)""")
+            db.execute(
+                "INSERT INTO failover_operations VALUES (1,?,?,?)",
+                ("1.1.1.1", "8.8.4.4", "RUNNING")
+            )
+        def guard(db):
+            if db.execute(
+                "SELECT 1 FROM failover_operations WHERE status='RUNNING'"
+            ).fetchone():
+                raise RuntimeError("ORIGINAL_FAILOVER_RUNNING")
+        journal = ManualEdgeJournal(
+            self.db,now=lambda:10000,guard=guard,
+            install_lock_path=os.path.join(self.temp.name, "wg-install.lock")
+        )
+        journal.mark_standby(op,77,77)
+        with self.db() as db:
+            self.assertEqual(db.execute(
+                "SELECT is_standby FROM host_pool WHERE host='8.8.8.8'"
+            ).fetchone(), (1,))
+            self.assertEqual(db.execute(
+                "SELECT status FROM failover_operations WHERE id=1"
+            ).fetchone(), ("RUNNING",))
+            self.assertEqual(db.execute(
+                "SELECT value FROM settings WHERE key='hosts'"
+            ).fetchone(), ("1.1.1.1",))
+
+    def test_standby_rejects_route_lease_on_same_target(self):
+        op = self.prepare(ip="8.8.8.8")
+        with self.db() as db:
+            db.execute("""CREATE TABLE failover_operations(
+                id INTEGER PRIMARY KEY,source_host TEXT,target_host TEXT,
+                status TEXT)""")
+            db.execute(
+                "INSERT INTO failover_operations VALUES (1,?,?,?)",
+                ("1.1.1.1", "8.8.8.8", "RUNNING")
+            )
+        def guard(db):
+            raise RuntimeError("ORIGINAL_FAILOVER_RUNNING")
+        journal = ManualEdgeJournal(
+            self.db,now=lambda:10000,guard=guard,
+            install_lock_path=os.path.join(self.temp.name, "wg-install.lock")
+        )
+        with self.assertRaisesRegex(
+                RuntimeError,"ORIGINAL_FAILOVER_RUNNING"):
+            journal.mark_standby(op,77,77)
+        with self.db() as db:
+            self.assertEqual(db.execute(
+                "SELECT is_standby FROM host_pool WHERE host='8.8.8.8'"
+            ).fetchone(), (0,))
+
     def test_manual_host_registered_without_cloudzy_receipt(self):
         op=self.prepare()
         r=self.journal.get(op)

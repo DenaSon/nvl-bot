@@ -9,10 +9,14 @@ never replay an uncertain Cloudflare write automatically.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import json
+import os
 import secrets
 import sqlite3
+import stat
 import time
 
 from manual_edge_identity import resolve as resolve_edge
@@ -77,6 +81,43 @@ class ManualQuickSwitch:
         self.now = now
         self._resume_lock = asyncio.Lock()
 
+    @contextmanager
+    def _effect_file_lock(self):
+        """Cross-process mutex for DNS writes and administrator Force.
+
+        A process-local threading/asyncio lock cannot fence a second bot
+        instance or a restarted worker. Use one lock file tied to the Core DB.
+        The file contains no secrets; it is never an SQLite or DNS lock.
+        """
+        with self.db() as db:
+            rows = db.execute("PRAGMA database_list").fetchall()
+        main = next((row[2] for row in rows if row[1] == "main"), "")
+        if not main or not os.path.isabs(main):
+            raise QuickSwitchHold("QUICK_SWITCH_LOCK_PATH_UNAVAILABLE")
+        path = main + ".manual_quick_switch.lock"
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags, 0o600)
+        except OSError:
+            raise QuickSwitchHold("QUICK_SWITCH_LOCK_UNAVAILABLE") from None
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) & 0o077):
+                raise QuickSwitchHold("QUICK_SWITCH_LOCK_UNTRUSTED")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise QuickSwitchHold("QUICK_SWITCH_EFFECT_BUSY") from None
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
     @staticmethod
     def _init(db):
         db.execute("""CREATE TABLE IF NOT EXISTS manual_quick_switch_jobs (
@@ -137,8 +178,25 @@ class ManualQuickSwitch:
         ).fetchone():
             raise QuickSwitchHold("ENDPOINT_STANDBY_OPERATION")
 
-    def _plan(self, db, target):
-        self.guard(db)
+    def _guard_for_plan(self, db, owned):
+        """Admit a verified own 6G lease, never a foreign running lease."""
+        if owned is None:
+            self.guard(db)
+            return
+        self._check_lease(db, owned)
+        try:
+            self.guard(db)
+        except RuntimeError as exc:
+            if str(exc) != "ORIGINAL_FAILOVER_RUNNING":
+                raise
+            running = db.execute(
+                "SELECT id FROM failover_operations WHERE status='RUNNING'"
+            ).fetchall()
+            if running != [(owned["lease_id"],)]:
+                raise
+
+    def _plan(self, db, target, *, owned=None):
+        self._guard_for_plan(db, owned)
         st = dict(db.execute(
             "SELECT key,value FROM settings WHERE key IN "
             "('hosts','dns_current_ip','core_wg_public_ip','tls_port',"
@@ -304,82 +362,136 @@ class ManualQuickSwitch:
             if actor is None:
                 row = db.execute(
                     "SELECT * FROM manual_quick_switch_jobs "
-                    "ORDER BY created_at DESC,id DESC LIMIT 1"
+                    "ORDER BY CASE WHEN kind='QUICK' AND "
+                    "status NOT IN ('DONE','ABORTED') THEN 0 ELSE 1 END, "
+                    "created_at DESC,id DESC LIMIT 1"
                 ).fetchone()
             else:
                 row = db.execute(
                     "SELECT * FROM manual_quick_switch_jobs "
-                    "WHERE actor=? ORDER BY created_at DESC,id DESC LIMIT 1",
+                    "WHERE actor=? ORDER BY CASE WHEN kind='QUICK' AND "
+                    "status NOT IN ('DONE','ABORTED') THEN 0 ELSE 1 END, "
+                    "created_at DESC,id DESC LIMIT 1",
                     (str(actor),)
                 ).fetchone()
             return dict(row) if row else None
 
     def force_abort(self, job, *, actor):
-        """Explicitly abandon a HOLD journal and release ONLY its own 6G lease.
+        # Cross-process mutual exclusion from the real DNS writer.
+        with self._effect_file_lock():
+            return self._force_abort_once(job, actor=actor)
 
-        This is not a transfer success or DNS/account rollback. Do not modify
-        customers, host_pool, settings, Cloudflare or unrelated leases.
+    def _force_abort_once(self, job, *, actor):
+        """Release only an owned HOLD or stale, DNS-unwritten DNS_INTENT.
+
+        No DNS, user, host_pool, route or WireGuard writes. For DNS_INTENT,
+        require fresh *live* source DNS and unchanged DB route metadata first.
+        The caller serializes against its own background transfer worker.
         """
+        rec = self.get(job)
+        if (not rec or rec["kind"] != "QUICK"
+                or rec["actor"] != str(actor)):
+            raise QuickSwitchHold("OPERATOR_OR_JOB_MISMATCH")
+        if rec["status"] == "ABORTED":
+            return "ABORTED"
+        if rec["status"] not in ("DNS_INTENT", "HOLD"):
+            raise QuickSwitchHold("FORCE_ABORT_ONLY_UNCOMMITTED")
+        intent = rec["status"] == "DNS_INTENT"
+        if intent and int(self.now()) - int(rec["updated_at"]) < TTL:
+            raise QuickSwitchHold("FORCE_ABORT_INTENT_TOO_RECENT")
+        # HOLD can mean DNS write uncertain or partially completed. Require
+        # source-state proof for *both* statuses, not merely DNS_INTENT.
+        try:
+            expected = json.loads(rec["dns_before_json"] or "[]")
+        except (ValueError, TypeError):
+            raise QuickSwitchHold("FORCE_ABORT_DNS_UNVERIFIED") from None
+        actual = self.dns.snapshot()
+        if not _exact_records(actual, expected, rec["source"]):
+            raise QuickSwitchHold("FORCE_ABORT_DNS_NOT_ON_SOURCE")
+
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
-            if not _has(db,"manual_quick_switch_jobs"):
-                raise QuickSwitchHold("FORCE_ABORT_JOB_UNAVAILABLE")
-            row=db.execute(
-                "SELECT kind,status,actor,source,target,lease_id "
+            row = db.execute(
+                "SELECT kind,status,actor,source,target,lease_id,updated_at "
                 "FROM manual_quick_switch_jobs WHERE id=?", (job,)
             ).fetchone()
-            if not row or row[0]!="QUICK" or row[2]!=str(actor):
+            if not row or row[0] != "QUICK" or row[2] != str(actor):
                 raise QuickSwitchHold("OPERATOR_OR_JOB_MISMATCH")
-            if row[1]=="ABORTED":
+            if row[1] == "ABORTED":
                 return "ABORTED"
-            if row[1]!="HOLD":
-                raise QuickSwitchHold("FORCE_ABORT_ONLY_HOLD")
-            if not _has(db,"failover_operations") or row[5] is None:
+            if row[1] not in ("DNS_INTENT", "HOLD"):
+                raise QuickSwitchHold("FORCE_ABORT_ONLY_UNCOMMITTED")
+            if not _has(db, "failover_operations") or row[5] is None:
                 raise QuickSwitchHold("LEASE_IDENTITY_UNVERIFIED")
-            lease=db.execute(
-                "SELECT status,source_host,target_host,detail_json "
-                "FROM failover_operations WHERE id=?", (row[5],)
-            ).fetchone()
-            if not lease or lease[:3]!=("RUNNING",row[3],row[4]):
-                raise QuickSwitchHold("LEASE_OWNERSHIP_LOST")
-            try:
-                details=json.loads(lease[3] or "{}")
-            except (ValueError,TypeError):
-                raise QuickSwitchHold("LEASE_IDENTITY_UNVERIFIED") from None
-            if details.get("job")!=job or details.get("component")!="MANUAL_QUICK_SWITCH":
-                raise QuickSwitchHold("LEASE_IDENTITY_UNVERIFIED")
-            now=int(self.now())
-            stamp=time.strftime("%Y-%m-%d %H:%M:%S")
-            changed=db.execute(
+            self._check_lease(db, rec)
+            if (row[1] != rec["status"] or row[6] != rec["updated_at"]
+                    or row[3:6] != (rec["source"],rec["target"],rec["lease_id"])):
+                raise QuickSwitchHold("FORCE_ABORT_SNAPSHOT_CHANGED")
+            if intent and (row[1] != "DNS_INTENT"
+                           or int(self.now())-row[6] < TTL):
+                raise QuickSwitchHold("FORCE_ABORT_INTENT_TOO_RECENT")
+            # Both HOLD and stale DNS_INTENT require exact route state.
+            if row[1] in ("HOLD", "DNS_INTENT"):
+                running = db.execute(
+                    "SELECT id FROM failover_operations WHERE status='RUNNING'"
+                ).fetchall()
+                if running != [(rec["lease_id"],)]:
+                    raise QuickSwitchHold("FORCE_ABORT_OTHER_LEASE_RUNNING")
+                st = dict(db.execute(
+                    "SELECT key,value FROM settings "
+                    "WHERE key IN ('hosts','dns_current_ip')"
+                ).fetchall())
+                default = db.execute(
+                    "SELECT host FROM host_pool "
+                    "WHERE active=1 AND is_default=1"
+                ).fetchall()
+                on_target = db.execute(
+                    "SELECT COUNT(*) FROM ssh_accounts WHERE host=?",
+                    (rec["target"],)
+                ).fetchone()[0]
+                if (st.get("hosts") != rec["source"]
+                        or st.get("dns_current_ip") != rec["source"]
+                        or default != [(rec["source"],)] or on_target):
+                    raise QuickSwitchHold("FORCE_ABORT_ROUTE_CHANGED")
+            now = int(self.now())
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            changed = db.execute(
                 "UPDATE manual_quick_switch_jobs SET status='ABORTED',"
                 "error_code='ADMIN_FORCE_ABORT_UNRECONCILED',updated_at=? "
-                "WHERE id=? AND actor=? AND status='HOLD'",
-                (now,job,str(actor)),
+                "WHERE id=? AND actor=? AND status=? AND updated_at=?",
+                (now, job, str(actor), row[1], row[6]),
             ).rowcount
-            if changed!=1:
+            if changed != 1:
                 raise QuickSwitchHold("JOURNAL_CHANGED")
-            released=db.execute(
+            released = db.execute(
                 "UPDATE failover_operations SET status='ABORTED',"
                 "updated_at=?,finished_at=? WHERE id=? AND status='RUNNING'",
-                (stamp,stamp,row[5]),
+                (stamp, stamp, rec["lease_id"]),
             ).rowcount
-            if released!=1:
+            if released != 1:
                 raise QuickSwitchHold("LEASE_OWNERSHIP_LOST")
             self._log(db,job,"ABORTED","ADMIN_FORCE_ABORT_UNRECONCILED")
             return "ABORTED"
 
     def _hold(self, job, code):
+        """Durably record all recoverable errors, including pre-DNS failures."""
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT status,error_code FROM manual_quick_switch_jobs "
+                "WHERE id=?", (job,)
+            ).fetchone()
+            if not row or row[0] in FINAL:
+                return
+            next_status = "DB_COMMITTED" if row[0] == "DB_COMMITTED" else "HOLD"
+            if row == (next_status, code):
+                return
             if db.execute(
-                "UPDATE manual_quick_switch_jobs SET "
-                "status=CASE WHEN status='DB_COMMITTED' "
-                "THEN status ELSE 'HOLD' END,"
-                "error_code=?,updated_at=? WHERE id=? AND "
-                "status NOT IN ('DONE','ABORTED')",
-                (code, int(self.now()), job)
+                "UPDATE manual_quick_switch_jobs SET status=?,"
+                "error_code=?,updated_at=? WHERE id=? AND status=?",
+                (next_status, code, int(self.now()), job, row[0])
             ).rowcount:
-                self._log(db, job, "HOLD", code)
+                self._log(db, job, next_status, code)
 
     def _commit(self, rec):
         with self.db() as db:
@@ -393,7 +505,7 @@ class ManualQuickSwitch:
             self._check_lease(db, rec)
             if rec["status"] == "DB_COMMITTED":
                 return
-            live = self._plan(db, rec["target"])
+            live = self._plan(db, rec["target"], owned=rec)
             if (live["source"] != rec["source"] or
                     live["fingerprint"] != rec["account_fingerprint"] or
                     live["count"] != rec["account_count"] or
@@ -459,17 +571,18 @@ class ManualQuickSwitch:
     @staticmethod
     def _check_lease(db, rec):
         row = db.execute(
-            "SELECT status,source_host,target_host,detail_json "
+            "SELECT mode,status,source_host,target_host,detail_json "
             "FROM failover_operations WHERE id=?", (rec["lease_id"],)
         ).fetchone()
-        if not row or row[:3] != (
-                "RUNNING", rec["source"],rec["target"]):
+        if not row or row[:4] != (
+                "MANUAL", "RUNNING", rec["source"], rec["target"]):
             raise QuickSwitchHold("LEASE_OWNERSHIP_LOST")
         try:
-            detail = json.loads(row[3] or "{}")
-        except ValueError:
+            detail = json.loads(row[4] or "{}")
+        except (ValueError, TypeError):
             raise QuickSwitchHold("LEASE_IDENTITY_UNVERIFIED") from None
-        if detail.get("job") != rec["id"]:
+        if (detail.get("job") != rec["id"]
+                or detail.get("component") != "MANUAL_QUICK_SWITCH"):
             raise QuickSwitchHold("LEASE_IDENTITY_UNVERIFIED")
 
     def _finish(self, rec):
@@ -511,11 +624,33 @@ class ManualQuickSwitch:
             self._log(db, rec["id"], "DONE", "LIVE_DNS_DB_VERIFIED")
 
     async def resume(self, job, *, actor, retry_dns=False):
-        # Serializes double-clicks/retries in the running bot process. The
-        # durable shared 6G lease provides cross-operation protection.
+        # Serialize retries inside the process AND across Core bot processes.
         async with self._resume_lock:
+            with self._effect_file_lock():
+                return await self._resume_guarded(
+                    job,actor=actor,retry_dns=retry_dns)
+
+    async def _resume_guarded(self, job, *, actor, retry_dns=False):
+        try:
             return await self._resume_once(
                 job, actor=actor, retry_dns=retry_dns)
+        except Exception as exc:
+            # Pre-DNS exceptions previously left DNS_INTENT with no durable
+            # error and no safe Force recovery path.
+            rec = self.get(job)
+            if (rec and rec["kind"] == "QUICK"
+                    and rec["actor"] == str(actor)
+                    and rec["status"] in ("DNS_INTENT","HOLD","DB_COMMITTED")):
+                code = (str(exc) if isinstance(exc, QuickSwitchHold)
+                        or (type(exc) is RuntimeError and
+                            str(exc) in ("ORIGINAL_FAILOVER_RUNNING",
+                                         "K2_ONBOARDING_ENABLED"))
+                        else type(exc).__name__.upper())
+                if (not 1 <= len(code) <= 90 or not code.isascii()
+                        or not code.replace("_", "").isalnum()):
+                    code = "RECOVERY_UNEXPECTED_ERROR"
+                self._hold(job, code)
+            raise
 
     async def _resume_once(self, job, *, actor, retry_dns=False):
         rec = self.get(job)
@@ -535,7 +670,7 @@ class ManualQuickSwitch:
                 raise QuickSwitchHold("DNS_RETRY_REQUIRES_CONFIRMATION")
             # Re-probe before a new external write, even after a restart.
             with self.db() as db:
-                plan = self._plan(db, rec["target"])
+                plan = self._plan(db, rec["target"], owned=rec)
                 if (plan["fingerprint"] != rec["account_fingerprint"]
                         or plan["count"] != rec["account_count"]):
                     raise QuickSwitchHold("ACCOUNT_SNAPSHOT_CHANGED")
@@ -554,7 +689,7 @@ class ManualQuickSwitch:
                 # A long external DNS cutover can outlive an earlier probe.
                 # Revalidate pinned SSH/WG/NAT before the SQLite route CAS.
                 with self.db() as db:
-                    plan = self._plan(db,rec["target"])
+                    plan = self._plan(db,rec["target"], owned=rec)
                     if (plan["fingerprint"] != rec["account_fingerprint"]
                             or plan["count"] != rec["account_count"]):
                         raise QuickSwitchHold("ACCOUNT_SNAPSHOT_CHANGED")

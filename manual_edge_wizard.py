@@ -120,6 +120,8 @@ FA = {
     "CORE_WG_INSTALL_BUSY":"نصب دیگری از WireGuard در جریان است؛ پس از تکمیل آن اقدام کنید.",
     "CORE_WG_INSTALL_LEASE_BUSY":"فرایند نصب دیگری در Core فعال است؛ نصب مجدد مجاز نیست.",
     "AUTO_FAILOVER_OR_K2_BUSY":"حالت Failover یا Egress محافظت‌شده با این عملیات تداخل دارد.",
+    "ORIGINAL_FAILOVER_RUNNING":"یک انتقال دیگر قفل مسیر را نگه داشته است. از «وضعیت انتقال و بازیابی» آن را بررسی کنید؛ نصب دوباره لازم نیست.",
+    "K2_ONBOARDING_ENABLED":"حالت Egress محافظت‌شده فعال است؛ این مرحله با آن تداخل دارد.",
     "TARGET_ALREADY_ROUTED":"این IP از قبل برای مسیر مشتریان استفاده شده است.",
     "TARGET_ALREADY_HAS_ACCOUNTS":"این Edge از قبل حساب مشتری دارد؛ نمی‌توان آن را Standby خالی دانست.",
     "ROUTE_JOB_MISMATCH":"شناسه انتقال با پرونده Edge سازگار نیست.",
@@ -195,7 +197,8 @@ class ManualEdgeWizard:
     def _summary(op):
         return ("🖥 <b>جزئیات سرور</b>\n\n"
                 f"IP: <code>{escape(str(op.get('ip') or '—'))}</code>\n"
-                f"پورت SSH: <b>{int(op.get('admin_port') or 22)}</b>\n")
+                f"پورت SSH مدیریت: <b>{int(op.get('admin_port') or 22)}</b>\n"
+                f"شناسه پرونده: <code>{escape(str(op.get('id') or '—'))}</code>\n")
 
     @staticmethod
     def _status_label(status):
@@ -292,7 +295,7 @@ class ManualEdgeWizard:
             rows.append([("❌ لغو درخواست","apps_edge_manual_cancel_"+opid)])
         if stage in ("DRAFT","IDENTITY_PENDING","HOSTKEY_PENDING",
                      "READY_INSTALL","INSTALLING","INSTALL_HOLD","HOLD") and not op.get("route_job"):
-            rows.append([("⛔ لغو اجباری پرونده",
+            rows.append([("⛔ لغو اجباری پرونده ثبت/نصب",
                          "apps_edge_manual_force_review_"+opid)])
         if stage in ("ACTIVE","EDGE_READY") and role in (
                 "FORMER","EDGE_READY","POOL_MISSING"):
@@ -428,7 +431,8 @@ class ManualEdgeWizard:
                 return await self._view(query,
                     "✅ <b>پرونده به درخواست مدیر بسته شد.</b>\n"
                     "وضعیت قبلی: <b>"+escape(result["previous_status"])+"</b>\n"
-                    "فقط پرونده تغییر کرد؛ حساب‌ها، DNS و شبکه دست‌نخورده‌اند.",
+                    "فقط پرونده ثبت/نصب بسته شد؛ حساب‌ها، DNS و شبکه دست‌نخورده‌اند. "
+                    "این گزینه هیچ قفل انتقال کاربری را آزاد نمی‌کند.",
                     [[("➕ افزودن سرور جدید","apps_edge_manual_new")],
                      [("🖥 مدیریت سرورها","apps_edge_manual_home")]])
             if data.startswith("apps_edge_manual_force_review_"):
@@ -447,12 +451,13 @@ class ManualEdgeWizard:
                     "expires":self.now()+180,
                 }
                 return await self._view(query,
-                    "⚠️ <b>لغو اجباری پرونده</b>\n\n"
+                    "⚠️ <b>لغو اجباری پرونده ثبت/نصب</b>\n\n"
                     "IP: <code>"+escape(op.get("ip") or "ثبت نشده")+"</code>\n"
+                    "شناسه: <code>"+escape(opid)+"</code>\n"
                     "وضعیت: <b>"+escape(op["status"])+"</b>\n\n"
-                    "فقط پرونده ثبت/نصب بسته می‌شود. عملیات احتمالی روی VPS "
-                    "یا WireGuard برگردانده نمی‌شود. "
-                    "اگر نصب هنوز اجرا شود، لغو مسدود خواهد شد.",
+                    "این اقدام فقط پرونده ثبت/نصب را می‌بندد؛ قفل انتقال کاربران "
+                    "را آزاد نمی‌کند. تغییرات احتمالی VPS یا WireGuard برگردانده "
+                    "نمی‌شود. اگر نصب هنوز اجرا شود، لغو مسدود خواهد شد.",
                     [[("⛔ تأیید لغو اجباری",
                        "apps_edge_manual_force_yes_"+nonce)],
                      [("انصراف","apps_edge_manual_detail_"+opid)]])
@@ -809,7 +814,9 @@ class ManualEdgeWizard:
                                         [[("↩️ همه سرورها","apps_edge_manual_home")]])
             return await self._show(query,actor,chat)
         except Exception as exc:
-            code=str(exc) if isinstance(exc,(ManualWizardHold,ManualEdgeHold,IntakeHold)) else type(exc).__name__
+            code=(str(exc) if isinstance(exc,(ManualWizardHold,ManualEdgeHold,IntakeHold))
+                  or (type(exc) is RuntimeError and str(exc) in FA)
+                  else type(exc).__name__)
             if isinstance(exc,(ManualWizardHold,ManualEdgeHold,IntakeHold)):
                 log.warning("Manual Edge callback rejected action=%s actor=%s "
                             "code=%s trace=%s",data,actor,code,
@@ -820,13 +827,15 @@ class ManualEdgeWizard:
                               "exception_type=%s",data,actor,type(exc).__name__)
             diagnostic=("\nکد پیگیری: <code>"+escape(code)+"</code>"
                         if code in FA else "")
+            buttons=[[("🔄 وضعیت سرور","apps_edge_manual_home")]]
+            if code=="ORIGINAL_FAILOVER_RUNNING":
+                buttons.append([("📋 وضعیت انتقال و بازیابی","apps_edge_quick_status")])
+            buttons.append([("↩️ مدیریت سرورها","apps_cz_home")])
             return await self._view(query,
                 "⛔️ <b>عملیات متوقف شد.</b>\n"+
                 escape(FA.get(code,"خطای پیش‌بینی‌نشده در عملیات Edge رخ داد. "
                        "به‌جای تکرار نصب، لاگ فنی Core را بررسی کنید."))+
-                diagnostic,
-                [[("🔄 وضعیت سرور","apps_edge_manual_home")],
-                 [("↩️ مدیریت سرورها","apps_cz_home")]])
+                diagnostic,buttons)
 
 
     async def receive_text(self,update,context,state,text,*,actor,chat,app,role):

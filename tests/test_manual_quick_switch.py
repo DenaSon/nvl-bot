@@ -342,6 +342,116 @@ class QuickSwitchTests(unittest.IsolatedAsyncioTestCase):
                 client_witness="test",expected_active=446)
 
 
+    async def test_production_guard_allows_only_exact_own_running_lease(self):
+        # Unlike the old no-op guard fixture, emulate the legacy guard
+        # rejecting any RUNNING lease, including the newly reserved one.
+        def live_guard(db):
+            if db.execute(
+                "SELECT 1 FROM failover_operations "
+                "WHERE status='RUNNING'"
+            ).fetchone():
+                raise RuntimeError("ORIGINAL_FAILOVER_RUNNING")
+        self.engine.guard = live_guard
+        plan = await self.engine.preview(NEW)
+        job = await self.engine.start(
+            plan, actor="7", client_witness="independent ISP test")
+        self.assertEqual(self.engine.get(job)["status"], "DONE")
+        self.assertEqual(self.dns.writes, 1)
+        self.assertEqual(self.one(
+            "SELECT status FROM failover_operations"), ("SUCCEEDED",))
+
+    async def test_foreign_running_lease_cannot_be_ignored(self):
+        def live_guard(db):
+            if db.execute(
+                "SELECT 1 FROM failover_operations "
+                "WHERE status='RUNNING'"
+            ).fetchone():
+                raise RuntimeError("ORIGINAL_FAILOVER_RUNNING")
+        self.engine.guard = live_guard
+        plan = await self.engine.preview(NEW)
+        job = self.engine._reserve(plan, actor="7", evidence="test")
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO failover_operations "
+                "(mode,status,source_host,target_host) "
+                "VALUES ('EXTERNAL','RUNNING',?,?)", (OLD,NEW)
+            )
+        with self.assertRaisesRegex(RuntimeError, "ORIGINAL_FAILOVER_RUNNING"):
+            await self.engine.resume(job, actor="7", retry_dns=True)
+        self.assertEqual(self.engine.get(job)["status"], "HOLD")
+        self.assertEqual(
+            self.engine.get(job)["error_code"], "ORIGINAL_FAILOVER_RUNNING")
+        self.assertEqual(self.dns.writes, 0)
+
+    async def test_pre_dns_read_failure_is_durable_and_force_recoverable(self):
+        plan = await self.engine.preview(NEW)
+        job = self.engine._reserve(plan, actor="7", evidence="test")
+        def broken_dns():
+            raise TimeoutError("transient")
+        self.dns.snapshot = broken_dns
+        with self.assertRaises(TimeoutError):
+            await self.engine.resume(job, actor="7", retry_dns=True)
+        self.assertEqual(self.engine.get(job)["status"], "HOLD")
+        self.assertEqual(self.engine.get(job)["error_code"], "TIMEOUTERROR")
+        with self.assertRaises(TimeoutError):
+            self.engine.force_abort(job, actor="7")
+        self.dns.snapshot = lambda: [dict(row) for row in self.dns.records]
+        self.assertEqual(self.engine.force_abort(job, actor="7"), "ABORTED")
+        self.assertEqual(self.one(
+            "SELECT status FROM failover_operations"), ("ABORTED",))
+
+    async def test_force_abort_hold_refuses_partial_or_target_dns(self):
+        plan = await self.engine.preview(NEW)
+        job = self.engine._reserve(plan, actor="7", evidence="test")
+        self.engine._hold(job, "DNS_WRITE_RESULT_UNCERTAIN")
+        for changed in (NEW, "4.4.4.4"):
+            self.dns.records[0]["ip"] = changed
+            with self.assertRaisesRegex(
+                    QuickSwitchHold, "FORCE_ABORT_DNS_NOT_ON_SOURCE"):
+                self.engine.force_abort(job, actor="7")
+            self.assertEqual(self.engine.get(job)["status"], "HOLD")
+            self.assertEqual(self.one(
+                "SELECT status FROM failover_operations"), ("RUNNING",))
+        self.dns.records[0]["ip"] = OLD
+        self.assertEqual(self.engine.force_abort(job, actor="7"), "ABORTED")
+        self.assertEqual(self.one(
+            "SELECT status FROM failover_operations"), ("ABORTED",))
+
+    async def test_force_abort_rejects_parallel_worker_across_engines(self):
+        plan = await self.engine.preview(NEW)
+        job = self.engine._reserve(plan, actor="7", evidence="test")
+        self.engine._hold(job, "DNS_RETRY_REQUIRES_CONFIRMATION")
+        with self.engine._effect_file_lock():
+            with self.assertRaisesRegex(
+                    QuickSwitchHold, "QUICK_SWITCH_EFFECT_BUSY"):
+                self.engine.force_abort(job, actor="7")
+            with self.assertRaisesRegex(
+                    QuickSwitchHold, "QUICK_SWITCH_EFFECT_BUSY"):
+                await self.engine.resume(job, actor="7", retry_dns=True)
+        self.assertEqual(self.dns.writes, 0)
+        self.assertEqual(self.engine.get(job)["status"], "HOLD")
+        self.assertEqual(self.engine.force_abort(job, actor="7"), "ABORTED")
+
+    async def test_force_abort_stale_dns_intent_checks_live_source(self):
+        clock = [1000]
+        self.engine.now = lambda: clock[0]
+        plan = await self.engine.preview(NEW)
+        job = self.engine._reserve(plan, actor="7", evidence="test")
+        with self.assertRaisesRegex(
+                QuickSwitchHold, "FORCE_ABORT_INTENT_TOO_RECENT"):
+            self.engine.force_abort(job, actor="7")
+        clock[0] += 181
+        self.dns.records[0]["ip"] = NEW
+        with self.assertRaisesRegex(
+                QuickSwitchHold, "FORCE_ABORT_DNS_NOT_ON_SOURCE"):
+            self.engine.force_abort(job, actor="7")
+        self.assertEqual(self.engine.get(job)["status"], "DNS_INTENT")
+        self.dns.records[0]["ip"] = OLD
+        self.assertEqual(self.engine.force_abort(job, actor="7"), "ABORTED")
+        self.assertEqual(self.dns.writes, 0)
+        self.assertEqual(self.one(
+            "SELECT host FROM host_pool WHERE is_default=1"), (OLD,))
+
     async def test_force_abort_hold_releases_only_owned_lease_without_dns_or_user_changes(self):
         plan=await self.engine.preview(NEW)
         job=self.engine._reserve(plan,actor="7",evidence="verified")
@@ -382,7 +492,7 @@ class QuickSwitchTests(unittest.IsolatedAsyncioTestCase):
     async def test_force_abort_rejects_active_or_already_committed_and_wrong_lease(self):
         plan=await self.engine.preview(NEW)
         job=self.engine._reserve(plan,actor="7",evidence="test")
-        with self.assertRaisesRegex(QuickSwitchHold,"FORCE_ABORT_ONLY_HOLD"):
+        with self.assertRaisesRegex(QuickSwitchHold,"FORCE_ABORT_INTENT_TOO_RECENT"):
             self.engine.force_abort(job,actor="7")
         self.engine._hold(job,"DB_COMMIT_REVIEW_REQUIRED")
         with self.connect() as db:

@@ -56,7 +56,7 @@ class FakeEngine:
     def force_abort(self,job,*,actor):
         self.events.append(("force_abort",job,actor))
         assert self.rec and self.rec["id"]==job and self.rec["actor"]==str(actor)
-        assert self.rec["status"]=="HOLD"
+        assert self.rec["status"] in ("HOLD", "DNS_INTENT")
         self.rec["status"]="ABORTED"
         self.rec["error_code"]="ADMIN_FORCE_ABORT_UNRECONCILED"
         return "ABORTED"
@@ -216,14 +216,14 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("apps_edge_quick_force_review_deadbeef",actions)
         await self.cb("apps_edge_quick_force_review_deadbeef")
         body,rows=FakeHtml.cards[-1]
-        self.assertIn("فقط پرونده و قفل",body)
+        self.assertIn("فقط پرونده و Lease",body)
         yes=next(d for row in rows for _,d in row
                  if d.startswith("apps_edge_quick_force_yes_"))
         self.assertEqual(self.engine.events,[])
         await self.cb(yes)
         self.assertEqual(self.engine.events,[("force_abort","deadbeef",7)])
         self.assertEqual(self.engine.rec["status"],"ABORTED")
-        self.assertIn("هیچ حساب، DNS یا رله‌ای تغییر نکرد",
+        self.assertIn("هیچ فرمانی برای تغییر DNS، کاربران یا رله ارسال نشد",
                       FakeHtml.cards[-1][0])
         await self.cb(yes)
         self.assertEqual(len(self.engine.events),1)
@@ -231,6 +231,41 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
         await self.cb("apps_edge_quick_status")
         self.assertIn("فقط پرونده و قفل عملیات آزاد شده‌اند",
                       FakeHtml.cards[-1][0])
+
+    async def test_error_status_shows_job_id_persian_hint_and_code(self):
+        self.engine.rec={
+            "id":"diagnostic-01","kind":"QUICK","status":"HOLD",
+            "actor":"7","source":"153.75.87.190",
+            "target":"45.59.126.73","account_count":446,
+            "error_code":"DB_COMMIT_REVIEW_REQUIRED",
+        }
+        await self.cb("apps_edge_quick_status")
+        body=FakeHtml.cards[-1][0]
+        self.assertIn("diagnostic-01",body)
+        self.assertIn("کد پیگیری",body)
+        self.assertIn("DB_COMMIT_REVIEW_REQUIRED",body)
+        self.assertIn("دیتابیس",body)
+        self.assertIn("لغو اجباری به معنی بازگرداندن",body)
+
+    async def test_stale_dns_intent_exposes_force_recovery(self):
+        self.engine.rec={
+            "id":"stale-intent","kind":"QUICK","status":"DNS_INTENT",
+            "actor":"7","source":"153.75.87.190",
+            "target":"45.59.126.73","account_count":446,"error_code":"",
+        }
+        await self.cb("apps_edge_quick_status")
+        actions=[d for row in FakeHtml.cards[-1][1] for _,d in row]
+        self.assertIn(
+            "apps_edge_quick_force_review_stale-intent",actions)
+        await self.cb("apps_edge_quick_force_review_stale-intent")
+        text,rows=FakeHtml.cards[-1]
+        self.assertIn("DNS_INTENT",text)
+        yes=next(d for row in rows for _,d in row
+                 if d.startswith("apps_edge_quick_force_yes_"))
+        await self.cb(yes)
+        self.assertEqual(
+            self.engine.events,[("force_abort","stale-intent",7)])
+        self.assertEqual(self.engine.rec["status"],"ABORTED")
 
     async def test_force_abort_unauthorized_actor_and_non_hold_cannot_mutate(self):
         self.engine.rec={

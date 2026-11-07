@@ -39,8 +39,19 @@ class HTMLDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             body["reply_markup"]["inline_keyboard"][0][0]["callback_data"],
             "apps_edge_quick_select_8.8.8.8")
-        self.assertTrue(body["protect_content"])
+        self.assertIs(body["protect_content"], False)  # normal wizard screen
         self.assertEqual(self.context.user_data["manual_edge_rich_pointer"],44)
+
+    async def test_sensitive_message_requires_explicit_protection(self):
+        # The ordinary wizard and status screens must remain shareable.
+        await self.delivery.send(
+            chat=77,text="🔐 <b>پیام محرمانه</b>",rows=[],
+            protect_content=True)
+        self.assertIs(self.calls[-1][1]["protect_content"], True)
+        await self.delivery.show(
+            chat=77,context=self.context,text="🖥 <b>مرحله ۲/۴</b>",
+            rows=[],protect_content=False)
+        self.assertIs(self.calls[-1][1]["protect_content"], False)
 
     async def test_stale_rich_pointer_does_not_edit(self):
         for text in ("اول","دوم"):
@@ -55,6 +66,7 @@ class HTMLDeliveryTests(unittest.IsolatedAsyncioTestCase):
             rows=[[("📝 فرم",{"web_app":{
                 "url":"https://secure.example/manual-edge/form?ticket=abc"}})]])
         webapp=self.calls[0][1]["reply_markup"]["inline_keyboard"][0][0]["web_app"]
+        self.assertIs(self.calls[0][1]["protect_content"], True)
         self.assertEqual(webapp["url"],
                          "https://secure.example/manual-edge/form?ticket=abc")
         for action in ("delete_everything","apps_edge_manual_"+"x"*70):

@@ -576,7 +576,6 @@ class ManualEdgeJournal:
     def mark_standby(self,op_id,actor,chat):
         with self.db() as db:
             self.initialize(db);db.execute("BEGIN IMMEDIATE")
-            self._protected(db)
             row=db.execute(
                 "SELECT ip FROM manual_edge_operations "
                 "WHERE id=? AND actor=? AND chat=? AND status='EDGE_READY'",
@@ -585,6 +584,29 @@ class ManualEdgeJournal:
             if not row:
                 raise ManualEdgeHold("EDGE_NOT_READY")
             ip=row[0]
+            unrelated_lease=False
+            try:
+                self._protected(db)
+            except RuntimeError as exc:
+                if str(exc)!="ORIGINAL_FAILOVER_RUNNING":
+                    raise
+                # STANDBY only adds an unused Edge to inventory: no DNS or
+                # customer changes. Admit this narrow exception only when
+                # every live route lease is for *different* endpoints.
+                if not db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='failover_operations'"
+                ).fetchone():
+                    raise
+                leases=db.execute(
+                    "SELECT source_host,target_host FROM failover_operations "
+                    "WHERE status='RUNNING'"
+                ).fetchall()
+                if (not leases or any(
+                        not src or not dst or ip in (src,dst)
+                        for src,dst in leases)):
+                    raise
+                unrelated_lease=True
             st=dict(db.execute(
                 "SELECT key,value FROM settings WHERE key IN "
                 "('hosts','dns_current_ip','auto_failover_mode',"
@@ -607,7 +629,8 @@ class ManualEdgeJournal:
             if changed!=1:
                 raise ManualEdgeHold("STANDBY_ROLE_CHANGED")
             self._cas(db,op_id,actor,chat,"EDGE_READY","STANDBY",
-                      "STANDBY_NETWORK_VERIFIED")
+                      "STANDBY_VERIFIED_UNRELATED_6G_LEASE" if unrelated_lease
+                      else "STANDBY_NETWORK_VERIFIED")
 
     def bind_route(self,op_id,actor,chat,job):
         with self.db() as db:

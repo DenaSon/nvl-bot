@@ -578,6 +578,7 @@ from incident_observability import (
     REASON_NO_DEFAULT_EDGE,
     REASON_WIDESPREAD_NETWORK_OUTAGE,
     classify_filter_incident,
+    edge_monitor_telegram_alerts_enabled,
     normalize_auto_block_reason,
     normalize_failover_result_reason,
     reason_label_fa,
@@ -3501,6 +3502,13 @@ async def _notify_incident_once(app, incident, text):
         return False
     state = incident.get("state")
     reason = incident.get("last_reason")
+    # Telegram-only preference: retain incident timeline and 6H safety
+    # decisions. Real FAILOVER_FAILED alerts remain enabled independently.
+    if (state in (
+            INCIDENT_STATE_FILTER_CONFIRMED,
+            INCIDENT_STATE_FAILOVER_BLOCKED,
+        ) and not edge_monitor_telegram_alerts_enabled()):
+        return False
     if not should_notify_incident(
         previous_state=incident.get("last_notified_state"),
         previous_reason=incident.get("last_notified_reason"),
@@ -28747,7 +28755,8 @@ async def _host_health_tick(app):
             "Host service unhealthy (monitor-only): host=%s port=%s fails=%s error=%s",
             host, service_port, new_fails, service_err,
         )
-        if new_fails == HOST_HEALTH_FAIL_THRESHOLD:
+        if (new_fails == HOST_HEALTH_FAIL_THRESHOLD
+                and edge_monitor_telegram_alerts_enabled()):
             await _notify_admins(
                 app,
                 f"🔴 <b>هشدار سلامت Edge — نیازمند بررسی دستی</b>\n\n"

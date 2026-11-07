@@ -17,6 +17,7 @@ from incident_observability import (
     REASON_NO_STANDBY,
     REASON_REGIONAL_SUSPECTED,
     classify_filter_incident,
+    edge_monitor_telegram_alerts_enabled,
     normalize_auto_block_reason,
     should_notify_incident,
     standby_safety_failures,
@@ -96,6 +97,15 @@ class V119BIncidentPolicyTests(unittest.TestCase):
         self.assertIn("WG_NOT_OK", failures)
         self.assertNotIn("CORE_PATH_NOT_OK", failures)
         self.assertIn("EXTERNAL_NOT_OK", failures)
+
+    def test_edge_monitor_telegram_notices_default_off_but_opt_in(self):
+        self.assertFalse(edge_monitor_telegram_alerts_enabled({}))
+        self.assertFalse(edge_monitor_telegram_alerts_enabled(
+            {"NVL_EDGE_MONITOR_ALERTS_ENABLED": "0"}))
+        self.assertFalse(edge_monitor_telegram_alerts_enabled(
+            {"NVL_EDGE_MONITOR_ALERTS_ENABLED": "true"}))
+        self.assertTrue(edge_monitor_telegram_alerts_enabled(
+            {"NVL_EDGE_MONITOR_ALERTS_ENABLED": "1"}))
 
     def test_noncritical_incident_states_are_quiet(self):
         for state in (
@@ -178,6 +188,33 @@ class V119BIntegrationStaticTests(unittest.TestCase):
             'BOT_VERSION_TAG = "V124-2026-10-07-critical-only-regional-notifications"',
             self.source,
         )
+
+    def test_three_unwanted_telegram_notices_are_gated_at_delivery(self):
+        incident = self._region(
+            "async def _notify_incident_once(",
+            "def _db_running_failover_id(",
+        )
+        self.assertIn("INCIDENT_STATE_FILTER_CONFIRMED", incident)
+        self.assertIn("INCIDENT_STATE_FAILOVER_BLOCKED", incident)
+        self.assertIn("not edge_monitor_telegram_alerts_enabled()", incident)
+        self.assertNotIn("INCIDENT_STATE_FAILOVER_FAILED,", incident)
+
+        host = self._region(
+            "async def _host_health_tick(",
+            "async def _host_health_loop(",
+        )
+        self.assertIn("new_fails == HOST_HEALTH_FAIL_THRESHOLD", host)
+        self.assertIn("and edge_monitor_telegram_alerts_enabled()", host)
+        self.assertIn("_db_record_host_check", host)
+        self.assertIn("_db_record_admin_host_check", host)
+
+        blocked = self._region(
+            "async def _incident_mark_failover_blocked(",
+            "async def _phase6h_auto_failover_tick(",
+        )
+        self.assertIn("_db_transition_filter_incident", blocked)
+        self.assertIn("_db_record_filter_incident_event", blocked)
+        self.assertIn("_notify_incident_once", blocked)
 
     def test_incident_schema_and_event_timeline_exist(self):
         self.assertIn("CREATE TABLE IF NOT EXISTS filter_incidents", self.source)

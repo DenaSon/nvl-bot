@@ -66,6 +66,7 @@ class HTMLDeliveryTests(unittest.IsolatedAsyncioTestCase):
             rows=[[("📝 فرم",{"web_app":{
                 "url":"https://secure.example/manual-edge/form?ticket=abc"}})]])
         webapp=self.calls[0][1]["reply_markup"]["inline_keyboard"][0][0]["web_app"]
+        self.assertIs(self.calls[0][1]["protect_content"], True)
         self.assertEqual(webapp["url"],
                          "https://secure.example/manual-edge/form?ticket=abc")
         for action in ("delete_everything","apps_edge_manual_"+"x"*70):

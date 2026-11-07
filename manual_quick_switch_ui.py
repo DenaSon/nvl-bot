@@ -48,6 +48,18 @@ _MESSAGES = {
     "FORCE_CONFIRMATION_EXPIRED": "تأیید لغو منقضی شده؛ دوباره بررسی کنید.",
     "LEASE_OWNERSHIP_LOST": "قفل ثبت‌شده متعلق به این انتقال نیست؛ بررسی لازم است.",
     "LEASE_IDENTITY_UNVERIFIED": "هویت قفل انتقال تأیید نشد؛ لغو مجاز نیست.",
+    "ORIGINAL_FAILOVER_RUNNING": "قفل یک انتقال دیگر هنوز فعال است؛ وضعیت انتقال را بررسی کنید.",
+    "DB_COMMIT_REVIEW_REQUIRED": "ثبت مسیر در دیتابیس کامل نشده یا نتیجه‌اش نامشخص است؛ وضعیت DNS را بررسی کنید.",
+    "POSTCOMMIT_REVIEW_REQUIRED": "ثبت مسیر انجام شده اما تأیید نهایی کامل نیست؛ از لغو اجباری استفاده نکنید.",
+    "RECOVERY_UNEXPECTED_ERROR": "بازیابی با خطای پیش‌بینی‌نشده متوقف شد؛ جزئیات فنی باید بررسی شود.",
+    "DNS_RETRY_REQUIRES_CONFIRMATION": "DNS هنوز روی مبدأ است؛ تلاش دوباره نیازمند تأیید جداگانه است.",
+    "OPERATION_ALREADY_RUNNING": "یک عملیات در حال اجراست؛ پس از پایان آن وضعیت را تازه‌سازی کنید.",
+    "RECOVERY_NOT_READY": "وضعیت فعلی برای تلاش مجدد DNS مناسب نیست؛ گزارش انتقال را بررسی کنید.",
+    "FORCE_ABORT_ONLY_UNCOMMITTED": "این انتقال از مرحله‌ای که بتوان پرونده و قفلش را لغو کرد عبور کرده است.",
+    "FORCE_ABORT_INTENT_TOO_RECENT": "هنوز ۳ دقیقه از ثبت انتقال نگذشته است؛ برای جلوگیری از تداخل، لغو مجاز نیست.",
+    "FORCE_ABORT_DNS_NOT_ON_SOURCE": "DNS روی مبدأ یکپارچه نیست؛ ابتدا وضعیت واقعی DNS را بررسی کنید.",
+    "FORCE_ABORT_ROUTE_CHANGED": "مسیر کاربران یا دیتابیس تغییر کرده؛ آزادسازی خودکار قفل مجاز نیست.",
+    "FORCE_ABORT_SNAPSHOT_CHANGED": "وضعیت در هنگام تأیید تغییر کرده است؛ گزارش را تازه‌سازی کنید.",
 }
 
 def _message(error):
@@ -131,32 +143,48 @@ class ManualQuickSwitchUI:
                 [[("🔄 تازه‌سازی","apps_edge_quick_status")],
                  [("↩️ مدیریت سرورها","apps_edge_quick_home")]])
         status=rec["status"]
-        label={"DNS_INTENT":"در حال تغییر DNS","HOLD":"نیازمند بررسی",
+        label={"DNS_INTENT":"نتیجه انتقال نامشخص؛ نیازمند بررسی",
+               "HOLD":"متوقف‌شده؛ نیازمند بازیابی",
                "DB_COMMITTED":"DNS و دیتابیس تغییر کرده؛ کنترل نهایی",
                "DONE":"تکمیل فنی","EXTERNAL_VERIFIED":"بازیابی دستی ثبت شد",
                "ABORTED":"لغوشده"}.get(status,status)
         rows=[]
         if (rec["kind"]=="QUICK" and rec["actor"]==str(chat)
                 and status in ("DNS_INTENT","HOLD","DB_COMMITTED")):
-            rows.append([("🔎 بررسی و ادامه بدون تکرار DNS",
+            rows.append([("🔎 بررسی وضعیت DNS و ادامه ایمن",
                          "apps_edge_quick_resume_"+rec["id"])])
             if status=="HOLD":
                 rows.append([("⚠️ تلاش مجدد DNS با تأیید مدیر",
                              "apps_edge_quick_retry_review_"+rec["id"])])
             if status in ("DNS_INTENT","HOLD"):
-                rows.append([("⛔ بررسی لغو و آزادسازی قفل",
+                rows.append([("⛔ لغو انتقال و آزادسازی قفل",
                              "apps_edge_quick_force_review_"+rec["id"])])
         rows.extend([[("🔄 تازه‌سازی","apps_edge_quick_status")],
                      [("↩️ مدیریت سرورها","apps_edge_quick_home")]])
         title=("✅ <b>انتقال با موفقیت انجام شد</b>" if status=="DONE"
                else "📋 <b>وضعیت انتقال</b>")
-        detail=(f"\nکد بررسی: <code>{escape(rec['error_code'] or error)}</code>"
-                if rec["error_code"] or (error and status!="DONE") else "")
+        code=(rec.get("error_code") or
+              (error if status not in ("DONE","ABORTED") else None))
+        detail=(f"\n\n⚠️ {_message(code)}\n"
+                f"کد پیگیری: <code>{escape(str(code))}</code>"
+                if code else "")
         message=(title+"\n\n"
+                 f"شناسه انتقال: <code>{escape(rec['id'])}</code>\n"
                  f"مبدأ: <code>{escape(rec['source'])}</code>\n"
                  f"مقصد: <code>{escape(rec['target'])}</code>\n"
                  f"حساب‌ها: <b>{rec['account_count']}</b>\n"
                  f"وضعیت: <b>{escape(label)}</b>"+detail)
+        if status=="DNS_INTENT":
+            message+=("\n\nتا زمانی که نتیجه DNS قطعی نشده، "
+                      "از آغاز انتقال دیگر خودداری کنید. "
+                      "دکمه بازیابی وضعیت را فقط بررسی می‌کند و "
+                      "DNS را بدون تأیید جدا دوباره تغییر نمی‌دهد.")
+        elif status=="HOLD":
+            message+=("\n\nبرای تعیین‌تکلیف ابتدا وضعیت DNS را بررسی کنید. "
+                      "لغو اجباری به معنی بازگرداندن مسیر یا اتصال کاربران نیست.")
+        elif status=="DB_COMMITTED":
+            message+=("\n\nمسیر در دیتابیس ثبت شده؛ "
+                      "لغو اجباری مجاز نیست و کنترل نهایی لازم است.")
         if status=="DONE":
             message+="\n🌐 DNS: <b>تأییدشده</b>\n\n" \
                      "اتصال واقعی مشتری را نیز بررسی کنید."
@@ -309,10 +337,11 @@ class ManualQuickSwitchUI:
                 await asyncio.to_thread(abort)
                 return await self._view(
                     context,chat,
-                    "✅ <b>انتقال با لغو اجباری بسته شد.</b>\n\n"
-                    "پرونده و Lease همین انتقال آزاد شدند. "
-                    "هیچ حساب، DNS یا رله‌ای تغییر نکرد.\n"
-                    "⚠️ پیش از انتقال بعدی، وضعیت واقعی DNS و مسیر را بررسی کنید.",
+                    "✅ <b>پرونده انتقال بسته شد؛ قفل آن آزاد شد.</b>\n\n"
+                    "این اقدام فقط رکورد انتقال و Lease مربوط به آن را بست. "
+                    "هیچ فرمانی برای تغییر DNS، کاربران یا رله ارسال نشد.\n"
+                    "⚠️ بازگشت DNS یا برقرارشدن اتصال کاربران تأیید نشده است؛ "
+                    "پیش از انتقال بعدی مسیر واقعی را بررسی کنید.",
                     [[("📋 وضعیت و سوابق","apps_edge_quick_status")],
                      [("🖥 مدیریت سرورها","apps_edge_manual_home")]])
             if data.startswith("apps_edge_quick_force_review_"):
@@ -327,19 +356,23 @@ class ManualQuickSwitchUI:
                     "force_job":job,"nonce":nonce,
                     "expires":self.now()+PENDING_TTL,
                 }
+                note=("برای پرونده «در انتظار DNS»، لغو فقط پس از ۳ دقیقه "
+                      "و تأیید زنده همه رکوردهای DNS روی مبدأ و مسیر دیتابیس مجاز است."
+                      if rec["status"]=="DNS_INTENT" else
+                      "این انتقال متوقف شده است؛ قبل از تأیید، "
+                      "وضعیت DNS و مسیر واقعی را مستقل بررسی کنید.")
                 return await self._view(
                     context,chat,
-                    "⚠️ <b>لغو اجباری انتقال</b>\n\n"
+                    "⚠️ <b>لغو پرونده انتقال و آزادسازی قفل</b>\n\n"
+                    f"شناسه: <code>{escape(rec['id'])}</code>\n"
                     f"مبدأ: <code>{escape(rec['source'])}</code>\n"
                     f"مقصد: <code>{escape(rec['target'])}</code>\n"
-                    f"حساب‌ها: <b>{rec['account_count']}</b>\n\n"
-                    "فقط پرونده و قفل همین عملیات بسته می‌شوند؛ "
-                    "DNS، تنظیمات مسیر و حساب‌ها برگردانده نمی‌شوند. "
-                    "برای DNS_INTENT فقط پس از گذشت ۳ دقیقه، تأیید زنده "
-                    "تمام رکوردهای DNS روی مبدأ و ثابت‌بودن مسیر DB، "
-                    "لغو مجاز است. اگر Cloudflare قبلاً تغییر کرده باشد، "
-                    "باید مسیر را جداگانه بررسی کنید.",
-                    [[("⛔ تأیید لغو اجباری",
+                    f"وضعیت: <b>{escape(rec['status'])}</b>\n\n"
+                    +note+"\n\n"
+                    "این اقدام فقط پرونده و Lease همان انتقال را می‌بندد. "
+                    "DNS، حساب‌ها و WireGuard برگردانده نمی‌شوند؛ "
+                    "آزادسازی قفل به معنی وصل‌شدن کاربران نیست.",
+                    [[("⛔ تأیید بستن انتقال و آزادسازی قفل",
                        "apps_edge_quick_force_yes_"+nonce)],
                      [("انصراف","apps_edge_quick_status")]])
             if data.startswith("apps_edge_quick_select_"):
@@ -471,9 +504,12 @@ class ManualQuickSwitchUI:
                      [("↩️ مدیریت سرورها","apps_edge_quick_home")]])
             return await self._home(context,chat)
         except Exception as exc:
+            code=(str(exc) if isinstance(exc,QuickSwitchHold)
+                  else type(exc).__name__)
             return await self._view(
-                context,chat,"⛔️ <b>عملیات متوقف شد.</b>\n" +
-                escape(_message(exc)) +
-                "\nپیش از تلاش مجدد، وضعیت انتقال را بررسی کنید.",
-                [[("📋 وضعیت و بازیابی","apps_edge_quick_status")],
+                context,chat,"⛔️ <b>عملیات متوقف شد.</b>\n"+
+                escape(_message(code))+
+                "\nکد پیگیری: <code>"+escape(code)+"</code>"+
+                "\n\nوضعیت واقعی انتقال را پیش از اقدام دوباره بررسی کنید.",
+                [[("📋 وضعیت انتقال و بازیابی","apps_edge_quick_status")],
                  [("↩️ مدیریت سرورها","apps_edge_quick_home")]])

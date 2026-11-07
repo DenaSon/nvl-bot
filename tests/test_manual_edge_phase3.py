@@ -306,6 +306,7 @@ class Phase3ManualTests(unittest.TestCase):
         self.assertEqual(body["parse_mode"],"HTML")
         self.assertEqual(body["chat_id"],77)
         self.assertIn("مدیریت سرورها",body["text"])
+        self.assertIs(body["protect_content"], False)
         self.assertEqual(context.user_data["manual_edge_rich_pointer"],101)
 
     def test_callback_pointer_is_not_rebound_from_another_chat(self):
@@ -335,6 +336,35 @@ class Phase3ManualTests(unittest.TestCase):
                 denied,context,"apps_edge_manual_home",role="member",
                 actor=77,chat=77,app=app))
             self.assertEqual(context.user_data["manual_edge_rich_pointer"],101)
+
+    def test_wizard_shows_recovery_link_for_legacy_failover_lease(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+        from manual_edge_wizard import ManualEdgeWizard
+
+        op=self.prepare("8.8.8.8",port=2299)
+        wizard=ManualEdgeWizard(
+            db=self.db,preflight=lambda:(2222,"pub"),
+            provision=AsyncMock(),verify=AsyncMock(),
+            probe=AsyncMock(return_value=True),nat=AsyncMock(return_value=True),
+            queue=SimpleNamespace())
+        wizard._tls_port=lambda:2088
+        wizard._view=AsyncMock(return_value=1)
+        with patch.object(
+                wizard.journal,"mark_standby",
+                side_effect=RuntimeError("ORIGINAL_FAILOVER_RUNNING")):
+            asyncio.run(wizard.handle(
+                SimpleNamespace(),SimpleNamespace(user_data={}),
+                "apps_edge_manual_standby_"+op,
+                role="admin",actor=77,chat=77,
+                app=SimpleNamespace(bot=SimpleNamespace(token="123:TEST"))))
+        body=wizard._view.await_args.args[1]
+        rows=wizard._view.await_args.args[2]
+        self.assertIn("ORIGINAL_FAILOVER_RUNNING",body)
+        self.assertIn("قفل مسیر",body)
+        self.assertIn("apps_edge_quick_status",
+                      [action for row in rows for _,action in row])
 
     def test_management_port_collisions_fail_before_any_remote_effect(self):
         from manual_edge_wizard import ManualEdgeWizard, ManualWizardHold

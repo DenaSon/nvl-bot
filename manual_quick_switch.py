@@ -336,55 +336,91 @@ class ManualQuickSwitch:
             return dict(row) if row else None
 
     def force_abort(self, job, *, actor):
-        """Explicitly abandon a HOLD journal and release ONLY its own 6G lease.
+        """Release only an owned HOLD or stale, DNS-unwritten DNS_INTENT.
 
-        This is not a transfer success or DNS/account rollback. Do not modify
-        customers, host_pool, settings, Cloudflare or unrelated leases.
+        No DNS, user, host_pool, route or WireGuard writes. For DNS_INTENT,
+        require fresh *live* source DNS and unchanged DB route metadata first.
+        The caller serializes against its own background transfer worker.
         """
+        rec = self.get(job)
+        if (not rec or rec["kind"] != "QUICK"
+                or rec["actor"] != str(actor)):
+            raise QuickSwitchHold("OPERATOR_OR_JOB_MISMATCH")
+        if rec["status"] == "ABORTED":
+            return "ABORTED"
+        if rec["status"] not in ("DNS_INTENT", "HOLD"):
+            raise QuickSwitchHold("FORCE_ABORT_ONLY_UNCOMMITTED")
+        intent = rec["status"] == "DNS_INTENT"
+        if intent:
+            if int(self.now()) - int(rec["updated_at"]) < TTL:
+                raise QuickSwitchHold("FORCE_ABORT_INTENT_TOO_RECENT")
+            try:
+                expected = json.loads(rec["dns_before_json"] or "[]")
+            except (ValueError, TypeError):
+                raise QuickSwitchHold("FORCE_ABORT_DNS_UNVERIFIED") from None
+            # Fail closed on DNS API failure, partial writes or wrong record IDs.
+            actual = self.dns.snapshot()
+            if not _exact_records(actual, expected, rec["source"]):
+                raise QuickSwitchHold("FORCE_ABORT_DNS_NOT_ON_SOURCE")
+
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
-            if not _has(db,"manual_quick_switch_jobs"):
-                raise QuickSwitchHold("FORCE_ABORT_JOB_UNAVAILABLE")
-            row=db.execute(
-                "SELECT kind,status,actor,source,target,lease_id "
+            row = db.execute(
+                "SELECT kind,status,actor,source,target,lease_id,updated_at "
                 "FROM manual_quick_switch_jobs WHERE id=?", (job,)
             ).fetchone()
-            if not row or row[0]!="QUICK" or row[2]!=str(actor):
+            if not row or row[0] != "QUICK" or row[2] != str(actor):
                 raise QuickSwitchHold("OPERATOR_OR_JOB_MISMATCH")
-            if row[1]=="ABORTED":
+            if row[1] == "ABORTED":
                 return "ABORTED"
-            if row[1]!="HOLD":
-                raise QuickSwitchHold("FORCE_ABORT_ONLY_HOLD")
-            if not _has(db,"failover_operations") or row[5] is None:
+            if row[1] not in ("DNS_INTENT", "HOLD"):
+                raise QuickSwitchHold("FORCE_ABORT_ONLY_UNCOMMITTED")
+            if not _has(db, "failover_operations") or row[5] is None:
                 raise QuickSwitchHold("LEASE_IDENTITY_UNVERIFIED")
-            lease=db.execute(
-                "SELECT status,source_host,target_host,detail_json "
-                "FROM failover_operations WHERE id=?", (row[5],)
-            ).fetchone()
-            if not lease or lease[:3]!=("RUNNING",row[3],row[4]):
-                raise QuickSwitchHold("LEASE_OWNERSHIP_LOST")
-            try:
-                details=json.loads(lease[3] or "{}")
-            except (ValueError,TypeError):
-                raise QuickSwitchHold("LEASE_IDENTITY_UNVERIFIED") from None
-            if details.get("job")!=job or details.get("component")!="MANUAL_QUICK_SWITCH":
-                raise QuickSwitchHold("LEASE_IDENTITY_UNVERIFIED")
-            now=int(self.now())
-            stamp=time.strftime("%Y-%m-%d %H:%M:%S")
-            changed=db.execute(
+            self._check_lease(db, rec)
+            if (row[1] != rec["status"] or row[6] != rec["updated_at"]
+                    or row[3:6] != (rec["source"],rec["target"],rec["lease_id"])):
+                raise QuickSwitchHold("FORCE_ABORT_SNAPSHOT_CHANGED")
+            if intent:
+                if row[1] != "DNS_INTENT" or int(self.now())-row[6] < TTL:
+                    raise QuickSwitchHold("FORCE_ABORT_INTENT_TOO_RECENT")
+                running = db.execute(
+                    "SELECT id FROM failover_operations WHERE status='RUNNING'"
+                ).fetchall()
+                if running != [(rec["lease_id"],)]:
+                    raise QuickSwitchHold("FORCE_ABORT_OTHER_LEASE_RUNNING")
+                st = dict(db.execute(
+                    "SELECT key,value FROM settings "
+                    "WHERE key IN ('hosts','dns_current_ip')"
+                ).fetchall())
+                default = db.execute(
+                    "SELECT host FROM host_pool "
+                    "WHERE active=1 AND is_default=1"
+                ).fetchall()
+                on_target = db.execute(
+                    "SELECT COUNT(*) FROM ssh_accounts WHERE host=?",
+                    (rec["target"],)
+                ).fetchone()[0]
+                if (st.get("hosts") != rec["source"]
+                        or st.get("dns_current_ip") != rec["source"]
+                        or default != [(rec["source"],)] or on_target):
+                    raise QuickSwitchHold("FORCE_ABORT_ROUTE_CHANGED")
+            now = int(self.now())
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            changed = db.execute(
                 "UPDATE manual_quick_switch_jobs SET status='ABORTED',"
                 "error_code='ADMIN_FORCE_ABORT_UNRECONCILED',updated_at=? "
-                "WHERE id=? AND actor=? AND status='HOLD'",
-                (now,job,str(actor)),
+                "WHERE id=? AND actor=? AND status=? AND updated_at=?",
+                (now, job, str(actor), row[1], row[6]),
             ).rowcount
-            if changed!=1:
+            if changed != 1:
                 raise QuickSwitchHold("JOURNAL_CHANGED")
-            released=db.execute(
+            released = db.execute(
                 "UPDATE failover_operations SET status='ABORTED',"
                 "updated_at=?,finished_at=? WHERE id=? AND status='RUNNING'",
-                (stamp,stamp,row[5]),
+                (stamp, stamp, rec["lease_id"]),
             ).rowcount
-            if released!=1:
+            if released != 1:
                 raise QuickSwitchHold("LEASE_OWNERSHIP_LOST")
             self._log(db,job,"ABORTED","ADMIN_FORCE_ABORT_UNRECONCILED")
             return "ABORTED"

@@ -138,7 +138,7 @@ class ManualQuickSwitchUI:
                  [("↩️ مدیریت سرورها","apps_edge_quick_home")]])
         status=rec["status"]
         label={"DNS_INTENT":"نتیجه انتقال نامشخص؛ نیازمند بررسی",
-               "HOLD":"متوقف‌شده؛ نیازمند بازیابی",
+               "HOLD":"متوقف‌شده؛ نیازمند بررسی و بازیابی",
                "DB_COMMITTED":"DNS و دیتابیس تغییر کرده؛ کنترل نهایی",
                "DONE":"تکمیل فنی","EXTERNAL_VERIFIED":"بازیابی دستی ثبت شد",
                "ABORTED":"لغوشده"}.get(status,status)

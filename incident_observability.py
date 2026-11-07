@@ -8,6 +8,7 @@ notification is meaningful.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 
 
 INCIDENT_STATE_SUSPECTED = "SUSPECTED"
@@ -43,6 +44,23 @@ REASON_FAILOVER_STARTED = "FAILOVER_STARTED"
 REASON_DIFFERENTIAL_NOT_CONFIRMED = "DIFFERENTIAL_NOT_CONFIRMED"
 REASON_DIFFERENTIAL_STALE = "DIFFERENTIAL_STALE"
 REASON_WIDESPREAD_NETWORK_OUTAGE = "WIDESPREAD_NETWORK_OUTAGE"
+
+# These three monitoring/decision notices are explicitly quiet by default.
+# Incident state, failover safety, audit events and failed failover alerts do
+# not depend on this Telegram-only setting.
+EDGE_MONITOR_ALERT_ENV = "NVL_EDGE_MONITOR_ALERTS_ENABLED"
+
+
+def edge_monitor_telegram_alerts_enabled(environ=None) -> bool:
+    """Opt in to noisy Edge health, filter-confirmed and auto-block notices.
+
+    Missing, empty or invalid values are OFF. This is a pure policy read;
+    callers must gate *delivery only*, not monitoring, incident persistence,
+    safety checks or failover decision logic.
+    """
+    source = os.environ if environ is None else environ
+    return source.get(EDGE_MONITOR_ALERT_ENV, "0") == "1"
+
 
 # Telegram admin alerts are intentionally restricted to states that require
 # immediate operator attention. Lower-severity states are still persisted in

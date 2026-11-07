@@ -14,12 +14,15 @@ from manual_edge_rich import render_manual_card
 class ManualHtmlBotAPI(RichBotAPI):
     """Narrow standard Bot API adapter, with injectable offline transport."""
 
-    async def send_html(self, *, chat_id, text, keyboard):
+    async def send_html(self, *, chat_id, text, keyboard, protect_content=False):
+        # Screens are screenshot/forward friendly by default. Callers must
+        # opt into protected delivery only for actual secrets; the manual
+        # wizard never echoes a password, token or private key in messages.
         body={
             "chat_id":chat_id,
             "text":text,
             "parse_mode":"HTML",
-            "protect_content":True,
+            "protect_content":bool(protect_content),
             "link_preview_options":{"is_disabled":True},
         }
         if keyboard is not None:
@@ -56,15 +59,17 @@ class ManualHtmlDelivery:
             keyboard.append(buttons)
         return {"inline_keyboard":keyboard} if keyboard else None
 
-    async def send(self, *, chat, text, rows):
+    async def send(self, *, chat, text, rows, protect_content=False):
         if type(chat) is not int or chat <= 0:
             raise RichDeliveryHold("TELEGRAM_CHAT_INVALID")
         keyboard=self._keyboard(text,rows)
         # No retry after uncertain delivery. No business action is replayed.
         return await self.api.send_html(
-            chat_id=chat,text=text,keyboard=keyboard)
+            chat_id=chat,text=text,keyboard=keyboard,
+            protect_content=protect_content)
 
-    async def show(self, *, chat, context, text, rows):
+    async def show(self, *, chat, context, text, rows, protect_content=False):
         if not hasattr(context,"user_data"):
             raise RichDeliveryHold("TELEGRAM_CONTEXT_INVALID")
-        return await self.send(chat=chat,text=text,rows=rows)
+        return await self.send(
+            chat=chat,text=text,rows=rows,protect_content=protect_content)

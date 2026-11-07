@@ -9,10 +9,14 @@ never replay an uncertain Cloudflare write automatically.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import json
+import os
 import secrets
 import sqlite3
+import stat
 import time
 
 from manual_edge_identity import resolve as resolve_edge
@@ -76,6 +80,43 @@ class ManualQuickSwitch:
         self.guard = guard
         self.now = now
         self._resume_lock = asyncio.Lock()
+
+    @contextmanager
+    def _effect_file_lock(self):
+        """Cross-process mutex for DNS writes and administrator Force.
+
+        A process-local threading/asyncio lock cannot fence a second bot
+        instance or a restarted worker. Use one lock file tied to the Core DB.
+        The file contains no secrets; it is never an SQLite or DNS lock.
+        """
+        with self.db() as db:
+            rows = db.execute("PRAGMA database_list").fetchall()
+        main = next((row[2] for row in rows if row[1] == "main"), "")
+        if not main or not os.path.isabs(main):
+            raise QuickSwitchHold("QUICK_SWITCH_LOCK_PATH_UNAVAILABLE")
+        path = main + ".manual_quick_switch.lock"
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags, 0o600)
+        except OSError:
+            raise QuickSwitchHold("QUICK_SWITCH_LOCK_UNAVAILABLE") from None
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) & 0o077):
+                raise QuickSwitchHold("QUICK_SWITCH_LOCK_UNTRUSTED")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise QuickSwitchHold("QUICK_SWITCH_EFFECT_BUSY") from None
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
     @staticmethod
     def _init(db):
@@ -336,6 +377,11 @@ class ManualQuickSwitch:
             return dict(row) if row else None
 
     def force_abort(self, job, *, actor):
+        # Cross-process mutual exclusion from the real DNS writer.
+        with self._effect_file_lock():
+            return self._force_abort_once(job, actor=actor)
+
+    def _force_abort_once(self, job, *, actor):
         """Release only an owned HOLD or stale, DNS-unwritten DNS_INTENT.
 
         No DNS, user, host_pool, route or WireGuard writes. For DNS_INTENT,
@@ -351,17 +397,17 @@ class ManualQuickSwitch:
         if rec["status"] not in ("DNS_INTENT", "HOLD"):
             raise QuickSwitchHold("FORCE_ABORT_ONLY_UNCOMMITTED")
         intent = rec["status"] == "DNS_INTENT"
-        if intent:
-            if int(self.now()) - int(rec["updated_at"]) < TTL:
-                raise QuickSwitchHold("FORCE_ABORT_INTENT_TOO_RECENT")
-            try:
-                expected = json.loads(rec["dns_before_json"] or "[]")
-            except (ValueError, TypeError):
-                raise QuickSwitchHold("FORCE_ABORT_DNS_UNVERIFIED") from None
-            # Fail closed on DNS API failure, partial writes or wrong record IDs.
-            actual = self.dns.snapshot()
-            if not _exact_records(actual, expected, rec["source"]):
-                raise QuickSwitchHold("FORCE_ABORT_DNS_NOT_ON_SOURCE")
+        if intent and int(self.now()) - int(rec["updated_at"]) < TTL:
+            raise QuickSwitchHold("FORCE_ABORT_INTENT_TOO_RECENT")
+        # HOLD can mean DNS write uncertain or partially completed. Require
+        # source-state proof for *both* statuses, not merely DNS_INTENT.
+        try:
+            expected = json.loads(rec["dns_before_json"] or "[]")
+        except (ValueError, TypeError):
+            raise QuickSwitchHold("FORCE_ABORT_DNS_UNVERIFIED") from None
+        actual = self.dns.snapshot()
+        if not _exact_records(actual, expected, rec["source"]):
+            raise QuickSwitchHold("FORCE_ABORT_DNS_NOT_ON_SOURCE")
 
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -381,9 +427,11 @@ class ManualQuickSwitch:
             if (row[1] != rec["status"] or row[6] != rec["updated_at"]
                     or row[3:6] != (rec["source"],rec["target"],rec["lease_id"])):
                 raise QuickSwitchHold("FORCE_ABORT_SNAPSHOT_CHANGED")
-            if intent:
-                if row[1] != "DNS_INTENT" or int(self.now())-row[6] < TTL:
-                    raise QuickSwitchHold("FORCE_ABORT_INTENT_TOO_RECENT")
+            if intent and (row[1] != "DNS_INTENT"
+                           or int(self.now())-row[6] < TTL):
+                raise QuickSwitchHold("FORCE_ABORT_INTENT_TOO_RECENT")
+            # Both HOLD and stale DNS_INTENT require exact route state.
+            if row[1] in ("HOLD", "DNS_INTENT"):
                 running = db.execute(
                     "SELECT id FROM failover_operations WHERE status='RUNNING'"
                 ).fetchall()
@@ -576,28 +624,33 @@ class ManualQuickSwitch:
             self._log(db, rec["id"], "DONE", "LIVE_DNS_DB_VERIFIED")
 
     async def resume(self, job, *, actor, retry_dns=False):
-        # Serialize retries; the original 6G lease protects external effects.
+        # Serialize retries inside the process AND across Core bot processes.
         async with self._resume_lock:
-            try:
-                return await self._resume_once(
-                    job, actor=actor, retry_dns=retry_dns)
-            except Exception as exc:
-                # Pre-DNS exceptions previously left DNS_INTENT with no
-                # persistent error and no Force recovery path.
-                rec = self.get(job)
-                if (rec and rec["kind"] == "QUICK"
-                        and rec["actor"] == str(actor)
-                        and rec["status"] in ("DNS_INTENT","HOLD","DB_COMMITTED")):
-                    code = (str(exc) if isinstance(exc, QuickSwitchHold)
-                            or (type(exc) is RuntimeError and
-                                str(exc) in ("ORIGINAL_FAILOVER_RUNNING",
-                                             "K2_ONBOARDING_ENABLED"))
-                            else type(exc).__name__.upper())
-                    if (not 1 <= len(code) <= 90 or not code.isascii()
-                            or not code.replace("_", "").isalnum()):
-                        code = "RECOVERY_UNEXPECTED_ERROR"
-                    self._hold(job, code)
-                raise
+            with self._effect_file_lock():
+                return await self._resume_guarded(
+                    job,actor=actor,retry_dns=retry_dns)
+
+    async def _resume_guarded(self, job, *, actor, retry_dns=False):
+        try:
+            return await self._resume_once(
+                job, actor=actor, retry_dns=retry_dns)
+        except Exception as exc:
+            # Pre-DNS exceptions previously left DNS_INTENT with no durable
+            # error and no safe Force recovery path.
+            rec = self.get(job)
+            if (rec and rec["kind"] == "QUICK"
+                    and rec["actor"] == str(actor)
+                    and rec["status"] in ("DNS_INTENT","HOLD","DB_COMMITTED")):
+                code = (str(exc) if isinstance(exc, QuickSwitchHold)
+                        or (type(exc) is RuntimeError and
+                            str(exc) in ("ORIGINAL_FAILOVER_RUNNING",
+                                         "K2_ONBOARDING_ENABLED"))
+                        else type(exc).__name__.upper())
+                if (not 1 <= len(code) <= 90 or not code.isascii()
+                        or not code.replace("_", "").isalnum()):
+                    code = "RECOVERY_UNEXPECTED_ERROR"
+                self._hold(job, code)
+            raise
 
     async def _resume_once(self, job, *, actor, retry_dns=False):
         rec = self.get(job)

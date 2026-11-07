@@ -137,8 +137,25 @@ class ManualQuickSwitch:
         ).fetchone():
             raise QuickSwitchHold("ENDPOINT_STANDBY_OPERATION")
 
-    def _plan(self, db, target):
-        self.guard(db)
+    def _guard_for_plan(self, db, owned):
+        """Admit a verified own 6G lease, never a foreign running lease."""
+        if owned is None:
+            self.guard(db)
+            return
+        self._check_lease(db, owned)
+        try:
+            self.guard(db)
+        except RuntimeError as exc:
+            if str(exc) != "ORIGINAL_FAILOVER_RUNNING":
+                raise
+            running = db.execute(
+                "SELECT id FROM failover_operations WHERE status='RUNNING'"
+            ).fetchall()
+            if running != [(owned["lease_id"],)]:
+                raise
+
+    def _plan(self, db, target, *, owned=None):
+        self._guard_for_plan(db, owned)
         st = dict(db.execute(
             "SELECT key,value FROM settings WHERE key IN "
             "('hosts','dns_current_ip','core_wg_public_ip','tls_port',"
@@ -304,12 +321,16 @@ class ManualQuickSwitch:
             if actor is None:
                 row = db.execute(
                     "SELECT * FROM manual_quick_switch_jobs "
-                    "ORDER BY created_at DESC,id DESC LIMIT 1"
+                    "ORDER BY CASE WHEN kind='QUICK' AND "
+                    "status NOT IN ('DONE','ABORTED') THEN 0 ELSE 1 END, "
+                    "created_at DESC,id DESC LIMIT 1"
                 ).fetchone()
             else:
                 row = db.execute(
                     "SELECT * FROM manual_quick_switch_jobs "
-                    "WHERE actor=? ORDER BY created_at DESC,id DESC LIMIT 1",
+                    "WHERE actor=? ORDER BY CASE WHEN kind='QUICK' AND "
+                    "status NOT IN ('DONE','ABORTED') THEN 0 ELSE 1 END, "
+                    "created_at DESC,id DESC LIMIT 1",
                     (str(actor),)
                 ).fetchone()
             return dict(row) if row else None
@@ -369,17 +390,24 @@ class ManualQuickSwitch:
             return "ABORTED"
 
     def _hold(self, job, code):
+        """Durably record all recoverable errors, including pre-DNS failures."""
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT status,error_code FROM manual_quick_switch_jobs "
+                "WHERE id=?", (job,)
+            ).fetchone()
+            if not row or row[0] in FINAL:
+                return
+            next_status = "DB_COMMITTED" if row[0] == "DB_COMMITTED" else "HOLD"
+            if row == (next_status, code):
+                return
             if db.execute(
-                "UPDATE manual_quick_switch_jobs SET "
-                "status=CASE WHEN status='DB_COMMITTED' "
-                "THEN status ELSE 'HOLD' END,"
-                "error_code=?,updated_at=? WHERE id=? AND "
-                "status NOT IN ('DONE','ABORTED')",
-                (code, int(self.now()), job)
+                "UPDATE manual_quick_switch_jobs SET status=?,"
+                "error_code=?,updated_at=? WHERE id=? AND status=?",
+                (next_status, code, int(self.now()), job, row[0])
             ).rowcount:
-                self._log(db, job, "HOLD", code)
+                self._log(db, job, next_status, code)
 
     def _commit(self, rec):
         with self.db() as db:
@@ -393,7 +421,7 @@ class ManualQuickSwitch:
             self._check_lease(db, rec)
             if rec["status"] == "DB_COMMITTED":
                 return
-            live = self._plan(db, rec["target"])
+            live = self._plan(db, rec["target"], owned=rec)
             if (live["source"] != rec["source"] or
                     live["fingerprint"] != rec["account_fingerprint"] or
                     live["count"] != rec["account_count"] or
@@ -459,17 +487,18 @@ class ManualQuickSwitch:
     @staticmethod
     def _check_lease(db, rec):
         row = db.execute(
-            "SELECT status,source_host,target_host,detail_json "
+            "SELECT mode,status,source_host,target_host,detail_json "
             "FROM failover_operations WHERE id=?", (rec["lease_id"],)
         ).fetchone()
-        if not row or row[:3] != (
-                "RUNNING", rec["source"],rec["target"]):
+        if not row or row[:4] != (
+                "MANUAL", "RUNNING", rec["source"], rec["target"]):
             raise QuickSwitchHold("LEASE_OWNERSHIP_LOST")
         try:
-            detail = json.loads(row[3] or "{}")
-        except ValueError:
+            detail = json.loads(row[4] or "{}")
+        except (ValueError, TypeError):
             raise QuickSwitchHold("LEASE_IDENTITY_UNVERIFIED") from None
-        if detail.get("job") != rec["id"]:
+        if (detail.get("job") != rec["id"]
+                or detail.get("component") != "MANUAL_QUICK_SWITCH"):
             raise QuickSwitchHold("LEASE_IDENTITY_UNVERIFIED")
 
     def _finish(self, rec):
@@ -511,11 +540,28 @@ class ManualQuickSwitch:
             self._log(db, rec["id"], "DONE", "LIVE_DNS_DB_VERIFIED")
 
     async def resume(self, job, *, actor, retry_dns=False):
-        # Serializes double-clicks/retries in the running bot process. The
-        # durable shared 6G lease provides cross-operation protection.
+        # Serialize retries; the original 6G lease protects external effects.
         async with self._resume_lock:
-            return await self._resume_once(
-                job, actor=actor, retry_dns=retry_dns)
+            try:
+                return await self._resume_once(
+                    job, actor=actor, retry_dns=retry_dns)
+            except Exception as exc:
+                # Pre-DNS exceptions previously left DNS_INTENT with no
+                # persistent error and no Force recovery path.
+                rec = self.get(job)
+                if (rec and rec["kind"] == "QUICK"
+                        and rec["actor"] == str(actor)
+                        and rec["status"] in ("DNS_INTENT","HOLD","DB_COMMITTED")):
+                    code = (str(exc) if isinstance(exc, QuickSwitchHold)
+                            or (type(exc) is RuntimeError and
+                                str(exc) in ("ORIGINAL_FAILOVER_RUNNING",
+                                             "K2_ONBOARDING_ENABLED"))
+                            else type(exc).__name__.upper())
+                    if (not 1 <= len(code) <= 90 or not code.isascii()
+                            or not code.replace("_", "").isalnum()):
+                        code = "RECOVERY_UNEXPECTED_ERROR"
+                    self._hold(job, code)
+                raise
 
     async def _resume_once(self, job, *, actor, retry_dns=False):
         rec = self.get(job)
@@ -535,7 +581,7 @@ class ManualQuickSwitch:
                 raise QuickSwitchHold("DNS_RETRY_REQUIRES_CONFIRMATION")
             # Re-probe before a new external write, even after a restart.
             with self.db() as db:
-                plan = self._plan(db, rec["target"])
+                plan = self._plan(db, rec["target"], owned=rec)
                 if (plan["fingerprint"] != rec["account_fingerprint"]
                         or plan["count"] != rec["account_count"]):
                     raise QuickSwitchHold("ACCOUNT_SNAPSHOT_CHANGED")
@@ -554,7 +600,7 @@ class ManualQuickSwitch:
                 # A long external DNS cutover can outlive an earlier probe.
                 # Revalidate pinned SSH/WG/NAT before the SQLite route CAS.
                 with self.db() as db:
-                    plan = self._plan(db,rec["target"])
+                    plan = self._plan(db,rec["target"], owned=rec)
                     if (plan["fingerprint"] != rec["account_fingerprint"]
                             or plan["count"] != rec["account_count"]):
                         raise QuickSwitchHold("ACCOUNT_SNAPSHOT_CHANGED")

@@ -457,7 +457,7 @@ class QuickSwitchTests(unittest.IsolatedAsyncioTestCase):
     async def test_force_abort_rejects_active_or_already_committed_and_wrong_lease(self):
         plan=await self.engine.preview(NEW)
         job=self.engine._reserve(plan,actor="7",evidence="test")
-        with self.assertRaisesRegex(QuickSwitchHold,"FORCE_ABORT_ONLY_UNCOMMITTED"):
+        with self.assertRaisesRegex(QuickSwitchHold,"FORCE_ABORT_INTENT_TOO_RECENT"):
             self.engine.force_abort(job,actor="7")
         self.engine._hold(job,"DB_COMMIT_REVIEW_REQUIRED")
         with self.connect() as db:

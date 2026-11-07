@@ -63,10 +63,17 @@ class ManualHtmlDelivery:
         if type(chat) is not int or chat <= 0:
             raise RichDeliveryHold("TELEGRAM_CHAT_INVALID")
         keyboard=self._keyboard(text,rows)
+        # A short-lived credential WebApp ticket must not become forwardable.
+        # Ordinary progress/status pages have no WebApp ticket and remain
+        # screenshot-friendly. Explicit protected messages remain supported.
+        has_webapp_ticket=any(
+            isinstance(action,dict) and "web_app" in action
+            for group in rows for _,action in group
+        )
         # No retry after uncertain delivery. No business action is replayed.
         return await self.api.send_html(
             chat_id=chat,text=text,keyboard=keyboard,
-            protect_content=protect_content)
+            protect_content=bool(protect_content or has_webapp_ticket))
 
     async def show(self, *, chat, context, text, rows, protect_content=False):
         if not hasattr(context,"user_data"):

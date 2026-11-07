@@ -393,9 +393,44 @@ class QuickSwitchTests(unittest.IsolatedAsyncioTestCase):
             await self.engine.resume(job, actor="7", retry_dns=True)
         self.assertEqual(self.engine.get(job)["status"], "HOLD")
         self.assertEqual(self.engine.get(job)["error_code"], "TIMEOUTERROR")
+        with self.assertRaises(TimeoutError):
+            self.engine.force_abort(job, actor="7")
+        self.dns.snapshot = lambda: [dict(row) for row in self.dns.records]
         self.assertEqual(self.engine.force_abort(job, actor="7"), "ABORTED")
         self.assertEqual(self.one(
             "SELECT status FROM failover_operations"), ("ABORTED",))
+
+    async def test_force_abort_hold_refuses_partial_or_target_dns(self):
+        plan = await self.engine.preview(NEW)
+        job = self.engine._reserve(plan, actor="7", evidence="test")
+        self.engine._hold(job, "DNS_WRITE_RESULT_UNCERTAIN")
+        for changed in (NEW, "4.4.4.4"):
+            self.dns.records[0]["ip"] = changed
+            with self.assertRaisesRegex(
+                    QuickSwitchHold, "FORCE_ABORT_DNS_NOT_ON_SOURCE"):
+                self.engine.force_abort(job, actor="7")
+            self.assertEqual(self.engine.get(job)["status"], "HOLD")
+            self.assertEqual(self.one(
+                "SELECT status FROM failover_operations"), ("RUNNING",))
+        self.dns.records[0]["ip"] = OLD
+        self.assertEqual(self.engine.force_abort(job, actor="7"), "ABORTED")
+        self.assertEqual(self.one(
+            "SELECT status FROM failover_operations"), ("ABORTED",))
+
+    async def test_force_abort_rejects_parallel_worker_across_engines(self):
+        plan = await self.engine.preview(NEW)
+        job = self.engine._reserve(plan, actor="7", evidence="test")
+        self.engine._hold(job, "DNS_RETRY_REQUIRES_CONFIRMATION")
+        with self.engine._effect_file_lock():
+            with self.assertRaisesRegex(
+                    QuickSwitchHold, "QUICK_SWITCH_EFFECT_BUSY"):
+                self.engine.force_abort(job, actor="7")
+            with self.assertRaisesRegex(
+                    QuickSwitchHold, "QUICK_SWITCH_EFFECT_BUSY"):
+                await self.engine.resume(job, actor="7", retry_dns=True)
+        self.assertEqual(self.dns.writes, 0)
+        self.assertEqual(self.engine.get(job)["status"], "HOLD")
+        self.assertEqual(self.engine.force_abort(job, actor="7"), "ABORTED")
 
     async def test_force_abort_stale_dns_intent_checks_live_source(self):
         clock = [1000]

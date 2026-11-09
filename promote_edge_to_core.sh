@@ -534,6 +534,7 @@ cat << 'EOF' > /root/ip_limiter.py
 from __future__ import annotations
 import os
 import re
+import ipaddress
 import sys
 import time
 import signal
@@ -545,6 +546,8 @@ USER_LIMITS_DIR = os.environ.get("IP_LIMITER_LIMITS_DIR", "/etc/ssh/user-limits"
 POLL_INTERVAL_SECONDS = float(os.environ.get("IP_LIMITER_POLL_SECONDS", "5"))
 SSH_PORTS = [p.strip() for p in os.environ.get("IP_LIMITER_PORTS", "22,2252").split(",") if p.strip()]
 EXCLUDE_USERS = {u.strip() for u in os.environ.get("IP_LIMITER_EXCLUDE_USERS", "root").split(",") if u.strip()}
+# Legacy ingress SNAT makes this subnet identify shared Edges, not individual users.
+SHARED_EDGE_NETWORK = ipaddress.ip_network("10.77.0.0/24")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [ip-limiter] %(levelname)s: %(message)s", stream=sys.stdout)
 log = logging.getLogger("ip_limiter")
@@ -559,7 +562,15 @@ def setup_firewall_cooldown():
             subprocess.run(["iptables", "-I", "INPUT", "-m", "set", "--match-set", "ssh_penalty", "src", "-j", "DROP"])
     except Exception: pass
 
+def is_shared_edge_ip(ip: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip) in SHARED_EDGE_NETWORK
+    except ValueError:
+        return False
+
 def apply_cooldown(ip: str):
+    # Never ban a shared Edge address: that would block unrelated customers.
+    if is_shared_edge_ip(ip): return
     try: subprocess.run(["ipset", "add", "ssh_penalty", ip, "timeout", "10"], stderr=subprocess.DEVNULL)
     except Exception: pass
 
@@ -607,6 +618,8 @@ def _tick():
         if len(ip_ports) < 2: continue
         peer_ip = ip_ports[-1].rsplit(':', 1)[0].strip('[]')
         if peer_ip in ("127.0.0.1", "::1", "localhost"): continue
+        # Do not count or kill sessions behind shared Edge SNAT addresses.
+        if is_shared_edge_ip(peer_ip): continue
 
         pids = re.findall(r'pid=(\d+)', line)
         if not pids: continue

@@ -93,7 +93,14 @@ import aiohttp
 import qrcode
 import v2ray_engine
 import marzban_admin
-import nvl_agent_lifecycle
+# A partially copied release must not bring down the production bot while the
+# opt-in reseller feature is OFF. Fail closed until the module is deployed.
+try:
+    import nvl_agent_lifecycle
+except ModuleNotFoundError as exc:
+    if exc.name != "nvl_agent_lifecycle":
+        raise
+    nvl_agent_lifecycle = None
 import cloudflare_dns
 from ssh_reactivation import resolve_ssh_reactivation_host, audit_ssh_reactivation
 from dns_route_guard import DNSDecision, RelayCandidate, plan_host_retirement_dns
@@ -856,7 +863,7 @@ NVL_SUPERADMIN_ACCOUNTING_REPORT_ENABLED = (
     os.environ.get("NVL_SUPERADMIN_ACCOUNTING_REPORT_ENABLED", "0") == "1"
 )
 # Reseller lifecycle UI is opt-in and read-only; no live API or scheduler.
-NVL_AGENT_LIFECYCLE_R1_ENABLED = os.environ.get("NVL_AGENT_LIFECYCLE_R1_ENABLED", "0") == "1"
+NVL_AGENT_LIFECYCLE_R1_ENABLED = (os.environ.get("NVL_AGENT_LIFECYCLE_R1_ENABLED", "0") == "1" and nvl_agent_lifecycle is not None)
 
 # 🔴🔵 رمز تاییدِ عملیات سراسری RED & BLUE (قطع/وصل کامل سرور و افزودن روز به همه کاربران).
 # مقدار باید فقط از Environment دریافت شود؛ هیچ رمز پیش‌فرضی داخل Source Control نگه‌داری نمی‌شود.

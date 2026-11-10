@@ -131,7 +131,7 @@ class SuperAdminAccessTests(unittest.TestCase):
     def test_critical_notice_ignores_stale_primary_and_env(self):
         old = REVOKED_LEGACY_ADMIN_ID
         with patch.dict("os.environ", {"NVL_CRITICAL_SUPERADMIN_IDS": str(old)}):
-            self.assertEqual(_recipients(old, authorized_superadmin_ids=ADMIN_IDS), ADMIN_IDS)
+            self.assertEqual(_recipients(old, authorized_superadmin_ids=ADMIN_IDS), tuple(sorted(ADMIN_IDS)))
             self.assertEqual(_recipients(old), ())
         self.assertEqual(_recipients(ADMIN_IDS[0], extra=f"{old},{ADMIN_IDS[1]}"),
                          tuple(sorted(ADMIN_IDS[:2])))

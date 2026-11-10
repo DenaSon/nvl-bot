@@ -108,6 +108,10 @@ import marzban_local_health
 import marzban_regional_filtering as marzban_regional
 import marzban_observability
 import secrets
+from nvl_superadmin_access import (
+    active_superadmin_ids, is_private_superadmin, is_revoked_principal,
+    permitted_notification_ids,
+)
 
 import base64
 import re
@@ -238,7 +242,7 @@ def _bilingual_label(en: str, fa: str) -> str:
 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputMediaPhoto
 from telegram.error import BadRequest
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ApplicationHandlerStop, filters, ContextTypes, PicklePersistence, PersistenceInput
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, TypeHandler, ApplicationHandlerStop, filters, ContextTypes, PicklePersistence, PersistenceInput
 
 from edge_observability import (
     DIAG_CORE_LOCAL,
@@ -842,7 +846,8 @@ log = logging.getLogger("NeVeL_Enterprise")
 SUBPROCESS_TIMEOUT = 12.0      # تایم‌اوت دستورات حساس (useradd/chpasswd/usermod) — از ۶ به ۱۲ ثانیه افزایش یافت
 MONITOR_TIMEOUT = 8.0          # تایم‌اوت دستورات مانیتورینگ (ps/awk برای کاربران آنلاین)
 
-SUPER_ADMIN_ID = 1947045855    # 👑 آیدی تلگرام مدیر کل (Super Admin)
+# Compatibility-only primary; never use this ID as an authorization grant.
+SUPER_ADMIN_ID = 5981086716
 ACCOUNTANT_IDS = () # 📊 آیدی تلگرام حسابدارها (چند نفر)
 ACCOUNTING_DB_PATH = os.path.join(_SCRIPT_DIR, "accounting.db") # 🗄 مسیر دیتابیس دوم (حسابداری)
 # Read-only Super Admin finance V1. Explicit opt-in on the live Core; no DB writes.
@@ -1782,8 +1787,10 @@ async def _notify_super_admin(app, text: str, tg_user=None):
             u_info += f"\nیوزرنیم: @{esc(tg_user.username)}"
         super_admin_text = text + u_info  # این اطلاعات فقط به متن سوپر ادمین اضافه می‌شود
         
-    with contextlib.suppress(Exception):
-        await app.bot.send_message(chat_id=SUPER_ADMIN_ID, text=super_admin_text, parse_mode="HTML")
+    recipients = await asyncio.to_thread(active_superadmin_ids, DB_PATH)
+    for chat_id in recipients:
+        with contextlib.suppress(Exception):
+            await app.bot.send_message(chat_id=chat_id, text=super_admin_text, parse_mode="HTML")
         
     # 📊 ارسال رونوشت به حسابدارها (فقط متن اصلی، بدون اطلاعات مجری)
     for acc_id in ACCOUNTANT_IDS:
@@ -4519,6 +4526,8 @@ async def _update_cloudflare_dns(new_ip: str):
 # overwrite می‌شد)، لیستی از تمام chat_idهایی که تابه‌حال با MASTER_USER/MASTER_PASS واردشده‌اند
 # در کلید جدید «admin_chat_ids» (جدا شده با کاما) نگه‌داری می‌شود تا رسیدها/هشدارها به همه برسد.
 def _db_add_admin_chat_id(chat_id):
+    if is_revoked_principal(chat_id):
+        return
     with db_conn() as conn:
         # ادمین‌های در حال کار (آنلاین)
         row = conn.execute("SELECT value FROM settings WHERE key='admin_chat_ids'").fetchone()
@@ -4558,8 +4567,7 @@ def _db_get_admin_chat_ids():
         out = set()
         for x in ids:
             with contextlib.suppress(Exception): out.add(int(x))
-        out.add(SUPER_ADMIN_ID)
-        return out
+        return set(permitted_notification_ids(DB_PATH, out))
 
 def _db_get_historical_admin_chat_ids():
     with db_conn() as conn:
@@ -8158,6 +8166,34 @@ async def _mig_run_call(target, context, session, title, fn):
         return None
 
 
+def _is_superadmin_identity(update_or_query):
+    """Only an active bot_access super_admin in their own private chat."""
+    actor = getattr(update_or_query, "effective_user", None)
+    if actor is None:
+        actor = getattr(update_or_query, "from_user", None)
+    chat = getattr(update_or_query, "effective_chat", None)
+    if chat is None:
+        message = getattr(update_or_query, "message", None)
+        chat = getattr(message, "chat", None)
+    return is_private_superadmin(
+        DB_PATH, getattr(actor, "id", None),
+        getattr(chat, "id", None), getattr(chat, "type", None),
+    )
+
+
+def _is_superadmin_update(update, context):
+    return (is_auth(context) and context.user_data.get("role") == "admin"
+            and _is_superadmin_identity(update))
+
+
+async def _nvl_revoked_admin_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stop revoked principal BEFORE any command, callback, photo or persisted role."""
+    actor = getattr(update, "effective_user", None)
+    if actor is not None and is_revoked_principal(getattr(actor, "id", None)):
+        context.user_data.clear()
+        raise ApplicationHandlerStop
+
+
 async def show_main_menu(update_or_query, context):
     role = context.user_data.get('role')
 
@@ -8179,7 +8215,7 @@ async def show_main_menu(update_or_query, context):
             ['🛠 V2Ray / Marzban', '🧩 برنامه‌ها'],
             ['📦 بکاپ'],
         ]
-        if chat_id == SUPER_ADMIN_ID:
+        if _is_superadmin_identity(update_or_query):
             kb.append(['👑 تنظیمات سوپر ادمین'])
         kb.append(['❌ خروج'])
     elif role == 'accountant':
@@ -8220,7 +8256,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id if hasattr(update, 'effective_chat') else 0
     
     # 👑 ورود اتوماتیک و بدون رمز برای سوپر ادمین
-    if chat_id == SUPER_ADMIN_ID:
+    if _is_superadmin_identity(update):
         _register_login_success(chat_id)
         await asyncio.to_thread(_db_add_admin_chat_id, chat_id)
         context.user_data.update({'logged_in': True, 'role': 'admin', 'agent_id': 0, 'state': None})
@@ -13207,7 +13243,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text in main_menus and is_auth(context):
         safe_clear_context(context)
-        if text == '👑 تنظیمات سوپر ادمین' and chat_id == SUPER_ADMIN_ID:
+        if text == '👑 تنظیمات سوپر ادمین' and _is_superadmin_update(update, context):
             kb = [[InlineKeyboardButton("📊 فعالیت‌های سیستم (ادمین)", callback_data="super_admin_stats")],
                   [InlineKeyboardButton("💼 سوابق مالی نمایندگان", callback_data="super_agent_list")],
                   [InlineKeyboardButton("⚙️ مدیریت فروش سرویس‌ها", callback_data="super_admin_sales_manage")],
@@ -13345,7 +13381,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 _register_login_success(chat_id)
                 
                 # 👑 ارسال پیام به سوپر ادمین برای اطلاع‌رسانی ورود ادمین جدید
-                if chat_id != SUPER_ADMIN_ID:
+                if not _is_superadmin_identity(update):
                     await _notify_super_admin(context.application, f"🔐 <b>ورود به حساب ادمین کل</b>\nیک کاربر با یوزرنیم و پسورد مدیریت وارد ربات شد.", tg_user=update.effective_user)
 
                 # 🆕 به‌جای overwrite کردن یک chat_id تکی، این چت هم به لیست ادمین‌های فعال اضافه
@@ -16555,27 +16591,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # user_id + private chat_id + authenticated role on EVERY interaction.
     if d.startswith("nvl_fin:"):
         if (not NVL_SUPERADMIN_ACCOUNTING_REPORT_ENABLED
-                or role != 'admin'
-                or update.effective_user is None
-                or update.effective_chat is None
-                or update.effective_user.id != SUPER_ADMIN_ID
-                or update.effective_chat.id != SUPER_ADMIN_ID):
+                or not _is_superadmin_update(update, context)):
             await query.message.reply_text("⛔️ دسترسی به گزارش حسابداری مجاز نیست.")
             return
         try:
             from nvl_superadmin_accounting_report import (
-                ReportUnavailable, build_report_text, is_superadmin_request,
+                ReportUnavailable, build_report_text,
             )
         except ImportError:
             log.exception("Super Admin finance report module not installed on this Core")
             await query.message.reply_text("⚠️ ماژول گزارش حسابداری در این نسخه سرور نصب نیست.")
-            return
-        if not is_superadmin_request(
-                role=role,
-                chat_id=update.effective_chat.id,
-                user_id=update.effective_user.id,
-                superadmin_id=SUPER_ADMIN_ID):
-            await query.message.reply_text("⛔️ دسترسی غیرمجاز.")
             return
         if d == "nvl_fin:menu":
             kb = [
@@ -27245,7 +27270,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             safe_clear_context(context)
 
 # 👑 پنل سوپر ادمین
-    elif d == "super_admin_back" and update.effective_chat.id == SUPER_ADMIN_ID:
+    elif d == "super_admin_back" and _is_superadmin_update(update, context):
         kb = [[InlineKeyboardButton("📊 فعالیت‌های سیستم (ادمین)", callback_data="super_admin_stats")],
               [InlineKeyboardButton("💼 سوابق مالی نمایندگان", callback_data="super_agent_list")],
               [InlineKeyboardButton("⚙️ مدیریت فروش سرویس‌ها", callback_data="super_admin_sales_manage")],
@@ -27255,7 +27280,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             kb.insert(2, [InlineKeyboardButton("💰 گزارش حسابداری", callback_data="nvl_fin:menu")])
         await query.edit_message_text("👑 <b>پنل تنظیمات اختصاصی سوپر ادمین</b>\n\nبخش مورد نظر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
-    elif d == "super_admin_sales_manage" and update.effective_chat.id == SUPER_ADMIN_ID:
+    elif d == "super_admin_sales_manage" and _is_superadmin_update(update, context):
         ssh_en = await asyncio.to_thread(_db_get_setting, 'sell_ssh', '1') == '1'
         bulk_en = await asyncio.to_thread(_db_get_setting, 'sell_bulk', '1') == '1'
         v2_unlimit_en = await asyncio.to_thread(_db_get_setting, 'sell_v2ray_unlimit', '1') == '1'
@@ -27269,7 +27294,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await query.edit_message_text("⚙️ <b>مدیریت فروش و ساخت سرویس‌ها</b>\n\nبا خاموش کردن هر بخش، دکمهٔ آن از منوی «🛒 خرید اشتراک» برای تمامی کاربران (ادمین و نماینده) پنهان می‌شود.", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
-    elif d.startswith("tsell_") and update.effective_chat.id == SUPER_ADMIN_ID:
+    elif d.startswith("tsell_") and _is_superadmin_update(update, context):
         target = d.split("tsell_")[1]
         key = f"sell_{target}"
         cur = await asyncio.to_thread(_db_get_setting, key, '1')
@@ -27289,7 +27314,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(kb))
 
-    elif d == "super_admin_stats" and update.effective_chat.id == SUPER_ADMIN_ID:
+    elif d == "super_admin_stats" and _is_superadmin_update(update, context):
         cr_tdy, cr_yest, cr_wk, cr_mo, rn_tdy, rn_yest, rn_wk, rn_mo, rn_lmo = await asyncio.to_thread(_get_super_admin_stats, None)
         txt = (f"👑 <b>فعالیت‌های سیستم (توسط شخص ادمین)</b>\n\n"
                f"🆕 <b>ساخت اکانت:</b>\n"
@@ -27299,14 +27324,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="super_admin_back")]]
         await query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
         
-    elif d == "super_agent_list" and update.effective_chat.id == SUPER_ADMIN_ID:
+    elif d == "super_agent_list" and _is_superadmin_update(update, context):
         agents = await asyncio.to_thread(_db_get_all_agents)
         if not agents: return await query.edit_message_text("نماینده‌ای یافت نشد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="super_admin_back")]]))
         kb = [[InlineKeyboardButton(f"💼 {a[1]}", callback_data=f"super_agent_det_{a[0]}")] for a in agents]
         kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="super_admin_back")])
         await query.edit_message_text("👑 <b>سوابق مالی نمایندگان</b>\nنماینده مورد نظر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
         
-    elif d.startswith("super_agent_det_") and update.effective_chat.id == SUPER_ADMIN_ID:
+    elif d.startswith("super_agent_det_") and _is_superadmin_update(update, context):
         a_id = int(d.split("_")[3])
         info = await asyncio.to_thread(_db_get_agent_info, a_id)
         if not info: return await query.edit_message_text("نماینده یافت نشد.")
@@ -27332,7 +27357,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [[InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="super_agent_list")]]
         await query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
-    elif d == "super_admin_users_menu" and update.effective_chat.id == SUPER_ADMIN_ID:
+    elif d == "super_admin_users_menu" and _is_superadmin_update(update, context):
         kb = [
             [InlineKeyboardButton("👮‍♂️ ادمین‌های ربات", callback_data="super_admin_list_admins")],
             [InlineKeyboardButton("💼 فروشنده‌های ربات", callback_data="super_admin_list_agents")],
@@ -27340,11 +27365,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await query.edit_message_text("👥 <b>مدیریت کاربران و ادمین‌های ربات</b>\n\nبخش مورد نظر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
-    elif d == "super_admin_list_admins" and update.effective_chat.id == SUPER_ADMIN_ID:
+    elif d == "super_admin_list_admins" and _is_superadmin_update(update, context):
         await query.answer("⏳ در حال دریافت اطلاعات از تلگرام...", show_alert=False)
         active_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
         historical_ids = await asyncio.to_thread(_db_get_historical_admin_chat_ids)
-        historical_ids.add(SUPER_ADMIN_ID) # همیشه سوپر ادمین را نشان بده
+        super_admin_ids = await asyncio.to_thread(active_superadmin_ids, DB_PATH)
+        historical_ids.update(super_admin_ids)
         
         # 🆕 اضافه کردن حسابدارها به لیست نمایش
         for acc in ACCOUNTANT_IDS:
@@ -27353,16 +27379,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = ["👮‍♂️ <b>لیست تمام مدیران و حسابداران ربات:</b>\n"]
         for cid in historical_ids:
             # تشخیص نقش کاربر برای نمایش مرتب‌تر
-            if cid == SUPER_ADMIN_ID:
+            if cid in super_admin_ids:
                 role_label = "👑 <b>سوپر ادمین</b>"
             elif cid in ACCOUNTANT_IDS:
                 role_label = "📊 <b>حسابدار</b>"
             else:
                 role_label = "🔹 <b>ادمین</b>"
 
-            is_active = "🟢 (آنلاین)" if (cid in active_ids or cid == SUPER_ADMIN_ID or cid in ACCOUNTANT_IDS) else "🔴 (خارج شده)"
+            is_active = "🟢 (آنلاین)" if (cid in active_ids or cid in super_admin_ids or cid in ACCOUNTANT_IDS) else "🔴 (خارج شده)"
             
-            if cid == SUPER_ADMIN_ID:
+            if cid in super_admin_ids:
                 lines.append(f"{role_label} {is_active}\nآیدی: <code>{cid}</code>")
             else:
                 try:
@@ -27379,7 +27405,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             full_text = full_text[:3800] + "\n\n... (لیست به دلیل طولانی بودن برش خورد)"
         await query.edit_message_text(full_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
-    elif d == "super_admin_list_agents" and update.effective_chat.id == SUPER_ADMIN_ID:
+    elif d == "super_admin_list_agents" and _is_superadmin_update(update, context):
         await query.answer("⏳ در حال دریافت اطلاعات از تلگرام...", show_alert=False)
         def _get_all_agents_raw():
             with db_conn() as conn:
@@ -28723,8 +28749,10 @@ def _probe_wireguard_edge_sync(host):
 
 async def _hf02_notify_route_event(app, event, host, target=None, reason=None):
     """Only critical route decisions reach explicitly authorized super-admins."""
+    authorized = await asyncio.to_thread(active_superadmin_ids, DB_PATH)
     ref = await send_critical_notice(
         app, event=event, primary_super_admin_id=SUPER_ADMIN_ID,
+        authorized_superadmin_ids=authorized,
         dedupe_key=str(host), logger=log,
     )
     if ref:
@@ -31225,6 +31253,9 @@ if __name__ == '__main__':
         filepath=PERSISTENCE_PATH,
         store_data=PersistenceInput(bot_data=False, chat_data=False, user_data=True, callback_data=False))
     app = ApplicationBuilder().token(TOKEN).persistence(persistence).post_init(_post_init).post_shutdown(_post_shutdown).build()
+    # Globally deny previously revoked principal before commands, text,
+    # photographs and callbacks (including old persisted admin sessions).
+    app.add_handler(TypeHandler(Update, _nvl_revoked_admin_guard), group=-2)
     # Intercept command-shaped root passwords (e.g. /Secret123) before
     # CommandHandler. This group only consumes a command when a private
     # manual Edge password intake is pending, then stops group 0 routing.

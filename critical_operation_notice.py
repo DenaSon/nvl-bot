@@ -10,7 +10,8 @@ import os
 import time
 import uuid
 from html import escape
-from typing import Optional
+from typing import Optional, Iterable
+from nvl_superadmin_access import is_revoked_principal
 
 
 EVENTS = {
@@ -29,12 +30,25 @@ _COOLDOWNS = {"ROUTE_CHANGE_FAILED": 900, "ROUTE_CHANGE_BLOCKED": 3600}
 _STATE_KEY = "_nvl_critical_notice_sent_at"
 
 
-def _recipients(primary: int, extra: Optional[str] = None) -> tuple[int, ...]:
+def _recipients(primary: int, extra: Optional[str] = None,
+                authorized_superadmin_ids: Optional[Iterable[int]] = None) -> tuple[int, ...]:
     """Explicit super-admin IDs only; never use all-admin/accountant lists."""
     ids = set()
+    # Explicit DB-derived allowlist overrides BOTH the legacy primary and
+    # NVL_CRITICAL_SUPERADMIN_IDS env. Revoked principals cannot slip back
+    # through a stale notification environment setting.
+    if authorized_superadmin_ids is not None:
+        for raw in authorized_superadmin_ids:
+            try:
+                value = int(raw)
+                if value > 0 and not is_revoked_principal(value):
+                    ids.add(value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+        return tuple(sorted(ids))
     try:
         value = int(primary)
-        if value > 0:
+        if value > 0 and not is_revoked_principal(value):
             ids.add(value)
     except (TypeError, ValueError):
         pass
@@ -43,7 +57,7 @@ def _recipients(primary: int, extra: Optional[str] = None) -> tuple[int, ...]:
     for raw in extra.split(","):
         try:
             value = int(raw.strip())
-            if value > 0:
+            if value > 0 and not is_revoked_principal(value):
                 ids.add(value)
         except ValueError:
             continue
@@ -73,6 +87,7 @@ async def send_critical_notice(
     operation_ref: Optional[str] = None,
     logger: Optional[logging.Logger] = None,
     now: Optional[float] = None,
+    authorized_superadmin_ids: Optional[Iterable[int]] = None,
 ) -> Optional[str]:
     """Best-effort notice. Telegram failure cannot fail/undo an operation."""
     log = logger or logging.getLogger(__name__)
@@ -96,7 +111,9 @@ async def send_critical_notice(
         log.info("NVL_CRITICAL_NOTICE throttled event=%s key=%s", event, dedupe_key)
         return None
 
-    targets = _recipients(primary_super_admin_id)
+    targets = _recipients(
+        primary_super_admin_id, authorized_superadmin_ids=authorized_superadmin_ids
+    )
     if not targets:
         log.error("NVL_CRITICAL_NOTICE skipped event=%s ref=%s reason=NO_SUPERADMIN", event, reference)
         return None

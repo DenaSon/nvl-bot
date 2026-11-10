@@ -865,6 +865,29 @@ NVL_SUPERADMIN_ACCOUNTING_REPORT_ENABLED = (
 # Reseller lifecycle UI is opt-in and read-only; no live API or scheduler.
 NVL_AGENT_LIFECYCLE_R1_ENABLED = (os.environ.get("NVL_AGENT_LIFECYCLE_R1_ENABLED", "0") == "1" and nvl_agent_lifecycle is not None)
 
+def _agent_lifecycle_access(agent_id, *, r2=False):
+    """Default-off rollout plus optional explicit canary reseller allowlist."""
+    if not NVL_AGENT_LIFECYCLE_R1_ENABLED:
+        return False
+    if r2 and os.environ.get("NVL_AGENT_LIFECYCLE_R2_ENABLED", "0") != "1":
+        return False
+    try:
+        owner = int(agent_id)
+    except (TypeError, ValueError):
+        return False
+    if owner <= 0:
+        return False
+    raw = os.environ.get("NVL_AGENT_LIFECYCLE_ALLOWED_AGENT_IDS", "").strip()
+    if not raw:
+        return True
+    try:
+        allowed = {int(item.strip()) for item in raw.split(",")}
+    except (TypeError, ValueError):
+        return False  # malformed canary config fails closed
+    return owner in allowed
+
+
+
 # 🔴🔵 رمز تاییدِ عملیات سراسری RED & BLUE (قطع/وصل کامل سرور و افزودن روز به همه کاربران).
 # مقدار باید فقط از Environment دریافت شود؛ هیچ رمز پیش‌فرضی داخل Source Control نگه‌داری نمی‌شود.
 # اگر تنظیم نشده باشد، عملیات‌های RED/BLUE با هیچ متن معمولی تأیید نمی‌شوند.
@@ -8453,7 +8476,7 @@ async def _show_users_hub(target, context):
         )
 
     kb = [[InlineKeyboardButton(label, callback_data=cb)] for label, cb in labels]
-    if role == 'agent' and NVL_AGENT_LIFECYCLE_R1_ENABLED:
+    if role == 'agent' and _agent_lifecycle_access(context.user_data.get('agent_id', 0)):
         kb.append([InlineKeyboardButton("⏳ کاربران نزدیک به انقضا", callback_data="aglx_soon_3")])
     kb.append([InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")])
     text = f"{title}\n━━━━━━━━━━━━━━\n{subtitle}"
@@ -8467,7 +8490,7 @@ async def _show_agent_lifecycle_panel(update, context, *, days=3, page=0):
     """R1: an explicitly enabled, per-agent, read-only cross-service expiry list."""
     target = update.callback_query if getattr(update, 'callback_query', None) else update
     agent_id = context.user_data.get('agent_id', 0)
-    if (not NVL_AGENT_LIFECYCLE_R1_ENABLED or not is_auth(context)
+    if (not _agent_lifecycle_access(agent_id) or not is_auth(context)
             or context.user_data.get('role') != 'agent' or not agent_id):
         await target.edit_message_text("⛔️ این بخش برای شما فعال نیست.")
         return
@@ -21870,7 +21893,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop(key, None)
         await _show_users_panel(update, context, page=0)
     elif d.startswith("aglx_"):
-        if not NVL_AGENT_LIFECYCLE_R1_ENABLED or not is_auth(context) or role != 'agent' or not ag_id:
+        if not _agent_lifecycle_access(ag_id) or not is_auth(context) or role != 'agent' or not ag_id:
             await query.message.reply_text("⛔️ دسترسی غیرمجاز.")
             return
         if d.startswith("aglx_soon_"):
@@ -22257,7 +22280,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         safe_clear_context(context)
         await _show_users_hub(query, context)
     elif d == "uact_back":
-        if (role == 'agent' and NVL_AGENT_LIFECYCLE_R1_ENABLED
+        if (role == 'agent' and _agent_lifecycle_access(ag_id)
                 and context.user_data.get('agent_lifecycle_view') == 'soon'):
             await _show_agent_lifecycle_panel(update, context,
                 days=context.user_data.get('agent_lifecycle_days', 3),

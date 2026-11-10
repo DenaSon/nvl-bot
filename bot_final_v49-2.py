@@ -8503,6 +8503,8 @@ async def _show_agent_v2ray_types(target, context):
         await target.edit_message_text("⛔️ دسترسی به این بخش مجاز نیست.")
         return
     context.user_data.pop('agent_user_search_from_hub', None)
+    if context.user_data.get('state') == 'USER_SEARCH_INPUT':
+        context.user_data['state'] = None
     kb = [
         [
             InlineKeyboardButton("🚀 مدت‌دار", callback_data="umanage_v2ray"),
@@ -21954,6 +21956,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d == "ag_v2ray_types":
         await _show_agent_v2ray_types(query, context)
     elif d in ("umanage_ssh", "umanage_v2ray", "umanage_v2ray_vol"):
+        if context.user_data.get('state') == 'USER_SEARCH_INPUT':
+            context.user_data['state'] = None
         context.user_data['manage_type'] = d.removeprefix("umanage_")
         for key in ('agent_lifecycle_view', 'agent_lifecycle_days', 'agent_lifecycle_page'):
             context.user_data.pop(key, None)

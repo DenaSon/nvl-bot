@@ -105,12 +105,12 @@ class AccountingReportV1Tests(unittest.TestCase):
 
     def test_host_local_timestamps_configurable_not_silently_utc(self):
         with sqlite3.connect(self.db) as conn:
-            conn.execute("INSERT INTO receipts VALUES (7, 'approved', 25, '2026-11-03 12:00:00', NULL)")
+            conn.execute("INSERT INTO receipts VALUES (7, 'approved', 25, '2026-11-03 10:00:00', NULL)")
         utc = self.report("7d")
         tehran = self.report("7d", legacy_server_tz=TEHRAN)
         self.assertEqual(utc["receipts"]["approved"]["unmarked"][1], 75)
-        # Tehran-start boundary is 12:00 local: prior 08:29:59 and 11:00 are excluded
-        self.assertEqual(tehran["receipts"]["approved"]["unmarked"][1], 25)
+        # Tehran-start is 12:00 local, so the 10:00 extra row is excluded.
+        self.assertEqual(tehran["receipts"]["approved"]["unmarked"][1], 50)
 
     def test_current_balances_never_filtered_by_period(self):
         for period in ("all", "7d", "30d"):

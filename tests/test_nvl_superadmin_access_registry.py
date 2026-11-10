@@ -1,6 +1,7 @@
 """Fail-closed real bot_access Super Admin authorization and legacy revocation."""
 import ast
 import asyncio
+from enum import Enum
 from pathlib import Path
 import sqlite3
 import sys
@@ -57,6 +58,11 @@ class SuperAdminAccessTests(unittest.TestCase):
             self.assertFalse(is_active_superadmin(str(self.dbfile), uid))
         self.assertFalse(is_private_superadmin(str(self.dbfile), ADMIN_IDS[0], ADMIN_IDS[1], "private"))
         self.assertFalse(is_private_superadmin(str(self.dbfile), ADMIN_IDS[0], ADMIN_IDS[0], "group"))
+        class ChatType(str, Enum):
+            PRIVATE = "private"
+        self.assertTrue(is_private_superadmin(
+            str(self.dbfile), ADMIN_IDS[0], ADMIN_IDS[0], ChatType.PRIVATE
+        ))
         self.assertFalse(is_private_superadmin(str(self.dbfile), ADMIN_IDS[0], ADMIN_IDS[0], None))
         self.assertFalse(is_private_superadmin(str(self.dbfile), str(ADMIN_IDS[0]), ADMIN_IDS[0], "private"))
 

@@ -93,6 +93,14 @@ import aiohttp
 import qrcode
 import v2ray_engine
 import marzban_admin
+# A partially copied release must not bring down the production bot while the
+# opt-in reseller feature is OFF. Fail closed until the module is deployed.
+try:
+    import nvl_agent_lifecycle
+except ModuleNotFoundError as exc:
+    if exc.name != "nvl_agent_lifecycle":
+        raise
+    nvl_agent_lifecycle = None
 import cloudflare_dns
 from ssh_reactivation import resolve_ssh_reactivation_host, audit_ssh_reactivation
 from dns_route_guard import DNSDecision, RelayCandidate, plan_host_retirement_dns
@@ -854,6 +862,31 @@ ACCOUNTING_DB_PATH = os.path.join(_SCRIPT_DIR, "accounting.db") # 🗄 مسیر 
 NVL_SUPERADMIN_ACCOUNTING_REPORT_ENABLED = (
     os.environ.get("NVL_SUPERADMIN_ACCOUNTING_REPORT_ENABLED", "0") == "1"
 )
+# Reseller lifecycle UI is opt-in and read-only; no live API or scheduler.
+NVL_AGENT_LIFECYCLE_R1_ENABLED = (os.environ.get("NVL_AGENT_LIFECYCLE_R1_ENABLED", "0") == "1" and nvl_agent_lifecycle is not None)
+
+def _agent_lifecycle_access(agent_id, *, r2=False):
+    """Default-off rollout plus optional explicit canary reseller allowlist."""
+    if not NVL_AGENT_LIFECYCLE_R1_ENABLED:
+        return False
+    if r2 and os.environ.get("NVL_AGENT_LIFECYCLE_R2_ENABLED", "0") != "1":
+        return False
+    try:
+        owner = int(agent_id)
+    except (TypeError, ValueError):
+        return False
+    if owner <= 0:
+        return False
+    raw = os.environ.get("NVL_AGENT_LIFECYCLE_ALLOWED_AGENT_IDS", "").strip()
+    if not raw:
+        return True
+    try:
+        allowed = {int(item.strip()) for item in raw.split(",")}
+    except (TypeError, ValueError):
+        return False  # malformed canary config fails closed
+    return owner in allowed
+
+
 
 # 🔴🔵 رمز تاییدِ عملیات سراسری RED & BLUE (قطع/وصل کامل سرور و افزودن روز به همه کاربران).
 # مقدار باید فقط از Environment دریافت شود؛ هیچ رمز پیش‌فرضی داخل Source Control نگه‌داری نمی‌شود.
@@ -4747,31 +4780,72 @@ def _db_get_users_with_agents():
             ORDER BY COALESCE(a.last_act, s.creation_date) DESC, s.rowid DESC
         """).fetchall()
 
-def _db_get_users_with_agents_by_type(stype='ssh'):
+def _db_get_users_with_agents_by_type(stype='ssh', agent_id=None, limit=None, offset=0):
+    """List service accounts with ownership and optional paging enforced in SQL."""
     with db_conn() as conn:
-        has_cname = False
-        try:
-            cols = [info[1] for info in conn.execute("PRAGMA table_info(ssh_accounts)").fetchall()]
-            has_cname = "customer_name" in cols
-        except: pass
-        cname_col = "s.customer_name" if has_cname else "NULL as customer_name"
-        
-        return conn.execute(f"""
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(ssh_accounts)")}
+        cname_col = "s.customer_name" if "customer_name" in cols else "NULL AS customer_name"
+        owner_clause = " AND s.agent_id=?" if agent_id is not None else ""
+        params = [stype]
+        if agent_id is not None:
+            params.append(int(agent_id))
+        query = f"""
             SELECT s.username, s.agent_id,
-                (SELECT action FROM activity_log WHERE username = s.username AND action IN ('create', 'extend') ORDER BY created_at DESC LIMIT 1) as act_type,
+                (SELECT action FROM activity_log WHERE username=s.username
+                 AND action IN ('create','extend') ORDER BY created_at DESC LIMIT 1) AS act_type,
                 {cname_col}
-            FROM ssh_accounts s 
+            FROM ssh_accounts s
             LEFT JOIN (
-                SELECT username, MAX(created_at) as last_act 
-                FROM activity_log 
-                WHERE action IN ('create', 'extend') 
-                GROUP BY username
-            ) a ON s.username = a.username
-            WHERE s.status != '⏳ درحال ساخت' AND s.service_type=? 
-            ORDER BY COALESCE(a.last_act, s.creation_date) DESC, s.rowid DESC
-        """, (stype,)).fetchall()
-def _db_search_users(term):
-    with db_conn() as conn: return conn.execute("SELECT username FROM ssh_accounts WHERE username LIKE ? AND status != '⏳ درحال ساخت'", (f"%{term}%",)).fetchall()
+                SELECT username, MAX(created_at) AS last_act FROM activity_log
+                WHERE action IN ('create','extend') GROUP BY username
+            ) a ON s.username=a.username
+            WHERE s.status != '⏳ درحال ساخت' AND s.service_type=?{owner_clause}
+            ORDER BY COALESCE(a.last_act,s.creation_date) DESC, s.rowid DESC
+        """
+        if limit is not None:
+            if int(limit) <= 0 or int(offset) < 0:
+                raise ValueError("invalid user page")
+            query += " LIMIT ? OFFSET ?"
+            params.extend((int(limit), int(offset)))
+        return conn.execute(query, params).fetchall()
+
+
+def _db_count_users_by_type(stype='ssh', agent_id=None):
+    with db_conn() as conn:
+        query = "SELECT COUNT(*) FROM ssh_accounts WHERE status != '⏳ درحال ساخت' AND service_type=?"
+        params = [stype]
+        if agent_id is not None:
+            query += " AND agent_id=?"
+            params.append(int(agent_id))
+        return int(conn.execute(query, params).fetchone()[0])
+
+
+def _db_search_users(term, agent_id=None, limit=None):
+    """Case-insensitive literal substring search; scope before limiting results."""
+    with db_conn() as conn:
+        sql = ("SELECT username FROM ssh_accounts "
+               "WHERE instr(lower(username), lower(?)) > 0 "
+               "AND status != '⏳ درحال ساخت'")
+        params = [str(term)]
+        if agent_id is not None:
+            sql += " AND agent_id=?"
+            params.append(int(agent_id))
+        sql += " ORDER BY username"
+        if limit is not None:
+            if int(limit) <= 0:
+                raise ValueError("invalid search limit")
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        return conn.execute(sql, params).fetchall()
+
+
+def _db_get_expiring_agent_accounts(agent_id, days=3, page=0):
+    with db_conn() as conn:
+        return nvl_agent_lifecycle.list_expiring_accounts(
+            conn, agent_id, days=days, page=page
+        )
+
+
 def _db_preflight_ssh_reactivation(un):
     """Reject invalid/retired routing before unlocking or recreating Linux users."""
     with db_conn() as conn:
@@ -6608,7 +6682,7 @@ def safe_clear_context(context):
     # نمایندهٔ خاص» روی کاربری عملیات انجام می‌داد (تغییر پسورد/افزایش ظرفیت/حذف)، دکمهٔ
     # «بازگشت» بعد از آن به لیست کامل همهٔ کاربران می‌رفت نه لیست فیلترشدهٔ همان نماینده.
     # این دو کلید هم نگه داشته می‌شوند تا ناوبری در بخش نمایندگان درست بماند.
-    keep = {k: context.user_data[k] for k in ['logged_in', 'role', 'agent_id', 'users_agent_filter', 'user_page'] if k in context.user_data}
+    keep = {k: context.user_data[k] for k in ['logged_in', 'role', 'agent_id', 'users_agent_filter', 'user_page', 'manage_type', 'agent_lifecycle_view', 'agent_lifecycle_days', 'agent_lifecycle_page', 'agent_user_search_from_hub'] if k in context.user_data}
     context.user_data.clear(); context.user_data.update(keep)
 
 def is_auth(context): return context.user_data.get('logged_in', False)
@@ -8390,15 +8464,19 @@ async def _show_users_hub(target, context):
         return
 
     context.user_data.pop('users_agent_filter', None)
+    context.user_data.pop('agent_user_search_from_hub', None)
+    for key in ('agent_lifecycle_view', 'agent_lifecycle_days', 'agent_lifecycle_page'):
+        context.user_data.pop(key, None)
 
     if role == 'agent':
         title = "👥 <b>کاربران من</b>"
-        subtitle = "سرویس موردنظر را انتخاب کنید."
-        labels = (
-            ("🔐 SSH", "umanage_ssh"),
-            ("🚀 V2Ray مدت‌دار", "umanage_v2ray"),
-            ("📦 V2Ray حجمی", "umanage_v2ray_vol"),
-        )
+        subtitle = "سرویس موردنظر را انتخاب کنید یا نام کاربری را جستجو کنید."
+        # Three short buttons in one row; the two V2Ray modes open separately.
+        kb = [[
+            InlineKeyboardButton("🔐 SSH", callback_data="umanage_ssh"),
+            InlineKeyboardButton("🚀 V2Ray", callback_data="ag_v2ray_types"),
+            InlineKeyboardButton("🔎 جستجو", callback_data="ag_users_search"),
+        ]]
     else:
         title = "👥 <b>کاربران</b>"
         subtitle = "نمای مدیریت کاربران بر اساس نوع سرویس."
@@ -8407,8 +8485,9 @@ async def _show_users_hub(target, context):
             ("🚀 V2Ray مدت‌دار", "umanage_v2ray"),
             ("📦 V2Ray حجمی", "umanage_v2ray_vol"),
         )
-
-    kb = [[InlineKeyboardButton(label, callback_data=cb)] for label, cb in labels]
+        kb = [[InlineKeyboardButton(label, callback_data=cb)] for label, cb in labels]
+    if role == 'agent' and _agent_lifecycle_access(context.user_data.get('agent_id', 0)):
+        kb.append([InlineKeyboardButton("⏳ کاربران نزدیک به انقضا", callback_data="aglx_soon_3")])
     kb.append([InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")])
     text = f"{title}\n━━━━━━━━━━━━━━\n{subtitle}"
 
@@ -8417,73 +8496,166 @@ async def _show_users_hub(target, context):
     else:
         await target.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
+async def _show_agent_v2ray_types(target, context):
+    """Reseller-only navigation; existing V2Ray service handlers are unchanged."""
+    if (not is_auth(context) or context.user_data.get('role') != 'agent'
+            or not context.user_data.get('agent_id')):
+        await target.edit_message_text("⛔️ دسترسی به این بخش مجاز نیست.")
+        return
+    context.user_data.pop('agent_user_search_from_hub', None)
+    if context.user_data.get('state') == 'USER_SEARCH_INPUT':
+        context.user_data['state'] = None
+    kb = [
+        [
+            InlineKeyboardButton("🚀 مدت‌دار", callback_data="umanage_v2ray"),
+            InlineKeyboardButton("📦 حجمی", callback_data="umanage_v2ray_vol"),
+        ],
+        [InlineKeyboardButton("↩️ کاربران من", callback_data="users_hub")],
+    ]
+    await target.edit_message_text(
+        "👥 کاربران من › 🚀 <b>V2Ray</b>\n\nنوع سرویس را انتخاب کنید.",
+        reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML",
+    )
+
+
+async def _show_agent_lifecycle_panel(update, context, *, days=3, page=0):
+    """R1: an explicitly enabled, per-agent, read-only cross-service expiry list."""
+    target = update.callback_query if getattr(update, 'callback_query', None) else update
+    agent_id = context.user_data.get('agent_id', 0)
+    if (not _agent_lifecycle_access(agent_id) or not is_auth(context)
+            or context.user_data.get('role') != 'agent' or not agent_id):
+        await target.edit_message_text("⛔️ این بخش برای شما فعال نیست.")
+        return
+    try:
+        days, page = int(days), int(page)
+        total, rows = await asyncio.to_thread(_db_get_expiring_agent_accounts, agent_id, days, page)
+    except (ValueError, TypeError):
+        await target.edit_message_text("⛔️ پارامتر فیلتر نامعتبر است.")
+        return
+    except Exception:
+        log.exception("Reseller expiry view failed")
+        await target.edit_message_text("⚠️ اطلاعات انقضا در دسترس نیست. هیچ تغییری اعمال نشد.")
+        return
+
+    context.user_data['agent_lifecycle_view'] = 'soon'
+    context.user_data['agent_lifecycle_days'] = days
+    context.user_data['agent_lifecycle_page'] = page
+    today = datetime.now().date()
+    kb = []
+    for username, service_type, customer_name, expiry in rows:
+        remaining = (datetime.strptime(expiry, "%Y-%m-%d").date() - today).days
+        suffix = f" · {remaining} روز" if remaining else " · امروز"
+        label = f"{'🔐' if service_type == 'ssh' else '🚀'} {username[:28]}{suffix}"
+        kb.append([InlineKeyboardButton(label, callback_data=f"udet_{username}")])
+        if customer_name:
+            kb.append([InlineKeyboardButton(f"🔖 {str(customer_name)[:38]}", callback_data=f"udet_{username}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"aglx_page_{page-1}"))
+    if (page + 1) * nvl_agent_lifecycle.PAGE_SIZE < total:
+        nav.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"aglx_page_{page+1}"))
+    if nav:
+        kb.append(nav)
+    kb.append([
+        InlineKeyboardButton("۱ روز", callback_data="aglx_soon_1"),
+        InlineKeyboardButton("۳ روز", callback_data="aglx_soon_3"),
+        InlineKeyboardButton("۷ روز", callback_data="aglx_soon_7"),
+    ])
+    kb.append([InlineKeyboardButton("↩️ کاربران من", callback_data="users_hub")])
+    header = (
+        f"⏳ کاربران نزدیک به انقضا · {days} روز آینده\n"
+        f"👥 {total} اشتراک فعال · صفحه {page+1}\n"
+        "SSH و V2Ray مدت‌دار | حساب‌های آنهولد مستثنا هستند"
+    )
+    if not rows:
+        header += "\n\nموردی برای نمایش وجود ندارد."
+    await target.edit_message_text(header, reply_markup=InlineKeyboardMarkup(kb))
+
+
 async def _show_users_panel(update, context, page=0, agent_filter=None):
-    context.user_data['user_page'] = page
+    """Existing agent/admin user list; SQL applies owner filter before paging."""
     role, ag_id = context.user_data.get('role'), context.user_data.get('agent_id', 0)
-    
-    # 🆕 اگر ادمین از پنل «مدیریت نماینده‌ها» وارد شده باشد
-    if agent_filter is not None:
+    target = update.callback_query if getattr(update, 'callback_query', None) else update.message
+    if (not is_auth(context) or role not in ('admin', 'agent')
+            or (role == 'agent' and not ag_id)):
+        if getattr(update, 'callback_query', None):
+            await target.edit_message_text("⛔️ دسترسی غیرمجاز.")
+        else:
+            await target.reply_text("⛔️ دسترسی غیرمجاز.")
+        return
+    try:
+        page = int(page)
+    except (TypeError, ValueError):
+        page = 0
+    page = max(0, page)
+    context.user_data['user_page'] = page
+    if role == 'admin' and agent_filter is not None:
         context.user_data['users_agent_filter'] = agent_filter
-    else:
-        agent_filter = context.user_data.get('users_agent_filter') if role == 'admin' else None
-
-    show_owner_label = False  
-    
-    # 🌟 گرفتن نوع سرویس انتخابی کاربر و تعیین نام برای نمایش در هدر
+    agent_filter = context.user_data.get('users_agent_filter') if role == 'admin' else None
     manage_type = context.user_data.get('manage_type', 'ssh')
-    if manage_type == "v2ray": srv_name = "V2Ray مدت‌دار"
-    elif manage_type == "v2ray_vol": srv_name = "V2Ray حجمی"
-    else: srv_name = "SSH"
-
+    if manage_type not in ('ssh', 'v2ray', 'v2ray_vol'):
+        manage_type = 'ssh'
+    srv_name = {'ssh': 'SSH', 'v2ray': 'V2Ray مدت‌دار',
+                'v2ray_vol': 'V2Ray حجمی'}[manage_type]
+    owner_id = ag_id if role == 'agent' else agent_filter
+    total = await asyncio.to_thread(_db_count_users_by_type, manage_type, owner_id)
+    rows = await asyncio.to_thread(
+        _db_get_users_with_agents_by_type, manage_type, owner_id, 10, page * 10
+    )
     if role == 'agent':
-        rows = await asyncio.to_thread(_db_get_users_with_agents_by_type, manage_type)
-        users = [(u, act, cname) for u, owner, act, cname in rows if owner == ag_id]
+        users = [(u, act, cname) for u, _owner, act, cname in rows]
         panel_title = f"👥 کاربران من › {srv_name}"
     elif agent_filter is not None:
-        rows = await asyncio.to_thread(_db_get_users_with_agents_by_type, manage_type)
-        users = [(u, act, cname) for u, owner, act, cname in rows if owner == agent_filter]
+        users = [(u, act, cname) for u, _owner, act, cname in rows]
         agent_info = await asyncio.to_thread(_db_get_agent_info, agent_filter)
         agent_name = agent_info[0] if agent_info else "؟"
         panel_title = f"🤝 نمایندگان › {esc(agent_name)} › {srv_name}"
     else:
-        rows = await asyncio.to_thread(_db_get_users_with_agents_by_type, manage_type)
         agents_map = {a[0]: a[1] for a in await asyncio.to_thread(_db_get_all_agents)}
-        users = [(u, agents_map.get(owner, "مستقیم (ادمین)") if owner else "مستقیم (ادمین)", act, cname) for u, owner, act, cname in rows]
+        users = [
+            (u, agents_map.get(owner, "مستقیم (ادمین)") if owner else "مستقیم (ادمین)", act, cname)
+            for u, owner, act, cname in rows
+        ]
         panel_title = f"👥 کاربران › {srv_name}"
-        show_owner_label = True
-        
+    show_owner_label = role == 'admin' and agent_filter is None
     back_cb = f"agm_det_{agent_filter}" if agent_filter is not None else "users_hub"
+    if role == 'agent' and manage_type in ('v2ray', 'v2ray_vol'):
+        back_cb = "ag_v2ray_types"
     bottom_kb = [[InlineKeyboardButton("🔍 جستجوی کاربر", callback_data="usearch")]]
-    
     if role == 'admin' and agent_filter is None:
         bottom_kb.append([InlineKeyboardButton("📢 پیام همگانی به نمایندگان", callback_data="bcast_menu")])
     bottom_label = "↩️ نماینده" if agent_filter is not None else "↩️ نوع سرویس"
     bottom_kb.append([InlineKeyboardButton(bottom_label, callback_data=back_cb)])
-
     if not users:
-        txt = f"{panel_title}\n\nهیچ کاربری یافت نشد."; kb = bottom_kb
+        txt = f"{panel_title}\n\nهیچ کاربری یافت نشد." if total == 0 else f"{panel_title}\n\nصفحه خالی است؛ به صفحه قبل برگردید."
+        kb = bottom_kb
     else:
-        start = page * 10; end = start + 10; page_users = users[start:end]
         user_kb = []
         if show_owner_label:
-            for u in page_users:
+            for u in users:
                 act_label = " (تمدیدی)" if u[2] == 'extend' else (" (جدید)" if u[2] == 'create' else "")
                 cname_label = f" ({u[3]}) " if len(u) > 3 and u[3] else " "
                 user_kb.append([InlineKeyboardButton(f"👤 {u[0]}{cname_label}{act_label} — {u[1]}", callback_data=f"udet_{u[0]}")])
         else:
-            for u in page_users:
+            for u in users:
                 act_label = " (تمدیدی)" if u[1] == 'extend' else (" (جدید)" if u[1] == 'create' else "")
                 cname_label = f" ({u[2]}) " if len(u) > 2 and u[2] else " "
-                user_kb.append([InlineKeyboardButton(f"👤 {u[0]}{cname_label}{act_label}", callback_data=f"udet_{u[0]}"), InlineKeyboardButton("⚙️ تنظیمات", callback_data=f"udet_{u[0]}")])
+                user_kb.append([InlineKeyboardButton(f"👤 {u[0]}{cname_label}{act_label}", callback_data=f"udet_{u[0]}"),
+                                InlineKeyboardButton("⚙️ تنظیمات", callback_data=f"udet_{u[0]}")])
         nav = []
-        if page > 0: nav.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"upage_{page-1}"))
-        if end < len(users): nav.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"upage_{page+1}"))
-        if nav: user_kb.append(nav)
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"upage_{page-1}"))
+        if (page + 1) * 10 < total:
+            nav.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"upage_{page+1}"))
+        if nav:
+            user_kb.append(nav)
         kb = user_kb + bottom_kb
         txt = f"{panel_title} (صفحه {page+1}):"
+    if getattr(update, 'callback_query', None):
+        await update.callback_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb))
+    else:
+        await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb))
 
-    if hasattr(update, 'callback_query') and update.callback_query: await update.callback_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb))
-    else: await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb))
 
 async def _bcast_build_menu_kb():
     """کیبورد منوی «پیام همگانی به نمایندگان»: گزینهٔ نوشتن پیام جدید + دکمهٔ هر پیام آماده."""
@@ -13634,18 +13806,36 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 🔍 جستجوی کاربر
     elif state == 'USER_SEARCH_INPUT':
-        res = await asyncio.to_thread(_db_search_users, text.strip().lower())
-        if role == 'agent':
-            rows_owner = await asyncio.to_thread(_db_get_users_with_agents)
-            owned = {u for u, owner in rows_owner if owner == context.user_data.get('agent_id', 0)}
-            res = [r for r in res if r[0] in owned]
+        search_owner = context.user_data.get('agent_id', 0) if role == 'agent' else None
+        if role not in ('admin', 'agent') or (role == 'agent' and not search_owner):
+            await update.message.reply_text("⛔️ دسترسی غیرمجاز.")
+            return
+        from_hub = role == 'agent' and context.user_data.get('agent_user_search_from_hub') is True
+        username_query = text.strip()
+        if from_hub and not 2 <= len(username_query) <= 64:
+            await update.message.reply_text("⚠️ لطفاً حداقل ۲ و حداکثر ۶۴ نویسه از نام کاربری را بفرستید.")
+            return
+        # The hub search is bounded to avoid expensive or oversized Telegram menus.
+        search_limit = 30 if from_hub else None
+        res = await asyncio.to_thread(_db_search_users, username_query.lower(), search_owner, search_limit)
+        back_cb = "users_hub" if from_hub else "uact_back"
+        back_text = "↩️ کاربران من" if from_hub else "🔙 بازگشت"
+        if from_hub:
+            context.user_data['state'] = None
         if res:
-            if len(res) == 1: safe_clear_context(context); await _show_user_detail(update, res[0][0], context)
+            if len(res) == 1:
+                safe_clear_context(context)
+                await _show_user_detail(update, res[0][0], context)
             else:
                 kb = [[InlineKeyboardButton(f"👤 {row[0]}", callback_data=f"udet_{row[0]}")] for row in res]
-                kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="uact_back")])
-                await update.message.reply_text(f"🔍 {len(res)} کاربر یافت شد:", reply_markup=InlineKeyboardMarkup(kb))
-        else: await update.message.reply_text("❌ یافت نشد!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="uact_back")]]))
+                kb.append([InlineKeyboardButton(back_text, callback_data=back_cb)])
+                hint = "\nبرای نتایج دقیق‌تر، نام کاربری طولانی‌تری جستجو کنید." if from_hub and len(res) == 30 else ""
+                await update.message.reply_text(f"🔎 {len(res)} کاربر یافت شد:{hint}", reply_markup=InlineKeyboardMarkup(kb))
+        else:
+            await update.message.reply_text(
+                "❌ کاربری با این نام یافت نشد.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(back_text, callback_data=back_cb)]]),
+            )
         return
 
     # 📢 پیام همگانی به نمایندگان: متن دلخواه → پیش‌نمایش + تاییدیه
@@ -21745,19 +21935,54 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # جستجو و منو
-    if d == "usearch":
-        await query.edit_message_text("👥 کاربران › 🔍 جستجو\n\nنام کاربری (مثال: 0350) را بفرستید:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ لیست کاربران", callback_data="uact_back")]]))
+    if d in ("usearch", "ag_users_search"):
+        if d == "ag_users_search":
+            if role != 'agent' or not ag_id:
+                await query.edit_message_text("⛔️ دسترسی غیرمجاز.")
+                return
+            context.user_data['agent_user_search_from_hub'] = True
+            back_cb, back_text = "users_hub", "↩️ کاربران من"
+        else:
+            context.user_data.pop('agent_user_search_from_hub', None)
+            back_cb, back_text = "uact_back", "↩️ لیست کاربران"
+        await query.edit_message_text(
+            "👥 کاربران › 🔎 جستجو\n\nنام کاربری (username) یا بخشی از آن را بفرستید:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(back_text, callback_data=back_cb)]
+            ]),
+        )
         context.user_data['state'] = 'USER_SEARCH_INPUT'
     #---------------------------------------------------------------------
-    elif d == "umanage_ssh":
-        context.user_data['manage_type'] = 'ssh'
+    elif d == "ag_v2ray_types":
+        await _show_agent_v2ray_types(query, context)
+    elif d in ("umanage_ssh", "umanage_v2ray", "umanage_v2ray_vol"):
+        if context.user_data.get('state') == 'USER_SEARCH_INPUT':
+            context.user_data['state'] = None
+        context.user_data['manage_type'] = d.removeprefix("umanage_")
+        for key in ('agent_lifecycle_view', 'agent_lifecycle_days', 'agent_lifecycle_page'):
+            context.user_data.pop(key, None)
         await _show_users_panel(update, context, page=0)
-    elif d == "umanage_v2ray":
-        context.user_data['manage_type'] = 'v2ray'
-        await _show_users_panel(update, context, page=0)
-    elif d == "umanage_v2ray_vol":
-        context.user_data['manage_type'] = 'v2ray_vol'
-        await _show_users_panel(update, context, page=0)
+    elif d.startswith("aglx_"):
+        if not _agent_lifecycle_access(ag_id) or not is_auth(context) or role != 'agent' or not ag_id:
+            await query.message.reply_text("⛔️ دسترسی غیرمجاز.")
+            return
+        if d.startswith("aglx_soon_"):
+            try:
+                days = int(d.rsplit("_", 1)[1])
+            except ValueError:
+                await query.answer("بازه نامعتبر")
+                return
+            await _show_agent_lifecycle_panel(update, context, days=days, page=0)
+        elif d.startswith("aglx_page_") and context.user_data.get('agent_lifecycle_view') == 'soon':
+            try:
+                page = int(d.rsplit("_", 1)[1])
+            except ValueError:
+                await query.answer("صفحه نامعتبر")
+                return
+            await _show_agent_lifecycle_panel(update, context,
+                days=context.user_data.get('agent_lifecycle_days', 3), page=page)
+        else:
+            await query.answer("فیلتر نامعتبر")
 
     elif d.startswith("v2act_sub_"):
         un = d.split("_", 2)[2]
@@ -22125,7 +22350,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         safe_clear_context(context)
         await _show_users_hub(query, context)
     elif d == "uact_back":
-        await _show_users_panel(update, context, page=context.user_data.get('user_page', 0))
+        if role == 'agent' and context.user_data.get('agent_user_search_from_hub'):
+            await _show_users_hub(query, context)
+        elif (role == 'agent' and _agent_lifecycle_access(ag_id)
+                and context.user_data.get('agent_lifecycle_view') == 'soon'):
+            await _show_agent_lifecycle_panel(update, context,
+                days=context.user_data.get('agent_lifecycle_days', 3),
+                page=context.user_data.get('agent_lifecycle_page', 0))
+        else:
+            await _show_users_panel(update, context, page=context.user_data.get('user_page', 0))
 
     # 📢 پیام همگانی به نمایندگان
     elif d == "bcast_menu" and role == 'admin':
@@ -24519,7 +24752,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # مدیریت کاربر
     elif d.startswith("upage_"): await _show_users_panel(update, context, page=int(d.split("_")[1]))
-    elif d.startswith("udet_"): await _show_user_detail(update, d.split("_")[1], context)
+    elif d.startswith("udet_"): await _show_user_detail(update, d.split("_", 1)[1], context)
     elif d.startswith("uact_dl_"):
         # 🆕 قبل از حذف واقعی، تاییدیهٔ بله/خیر گرفته می‌شود (حذف اکانت غیرقابل‌بازگشت است)
         un = d.split("_")[2]

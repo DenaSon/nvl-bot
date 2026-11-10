@@ -845,6 +845,10 @@ MONITOR_TIMEOUT = 8.0          # تایم‌اوت دستورات مانیتور
 SUPER_ADMIN_ID = 1947045855    # 👑 آیدی تلگرام مدیر کل (Super Admin)
 ACCOUNTANT_IDS = () # 📊 آیدی تلگرام حسابدارها (چند نفر)
 ACCOUNTING_DB_PATH = os.path.join(_SCRIPT_DIR, "accounting.db") # 🗄 مسیر دیتابیس دوم (حسابداری)
+# Read-only Super Admin finance V1. Explicit opt-in on the live Core; no DB writes.
+NVL_SUPERADMIN_ACCOUNTING_REPORT_ENABLED = (
+    os.environ.get("NVL_SUPERADMIN_ACCOUNTING_REPORT_ENABLED", "0") == "1"
+)
 
 # 🔴🔵 رمز تاییدِ عملیات سراسری RED & BLUE (قطع/وصل کامل سرور و افزودن روز به همه کاربران).
 # مقدار باید فقط از Environment دریافت شود؛ هیچ رمز پیش‌فرضی داخل Source Control نگه‌داری نمی‌شود.
@@ -13209,6 +13213,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                   [InlineKeyboardButton("⚙️ مدیریت فروش سرویس‌ها", callback_data="super_admin_sales_manage")],
                   [InlineKeyboardButton("👥 مدیریت کاربران و ادمین‌های ربات", callback_data="super_admin_users_menu")],
                   [InlineKeyboardButton("🔙 بستن", callback_data="uact_back_to_menu")]]
+            if NVL_SUPERADMIN_ACCOUNTING_REPORT_ENABLED:
+                kb.insert(2, [InlineKeyboardButton("💰 گزارش حسابداری", callback_data="nvl_fin:menu")])
             await update.message.reply_text("👑 <b>پنل تنظیمات اختصاصی سوپر ادمین</b>\n\nبخش مورد نظر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
             return
         elif role == 'accountant':
@@ -16544,6 +16550,84 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_auth(context): return
     query = update.callback_query; await query.answer(); d = query.data
     role, ag_id = context.user_data.get('role'), context.user_data.get('agent_id', 0)
+    # Finance V1 uses one isolated, opt-in read-only callback namespace.
+    # Keep this path out of the legacy callback chain and enforce Telegram
+    # user_id + private chat_id + authenticated role on EVERY interaction.
+    if d.startswith("nvl_fin:"):
+        if (not NVL_SUPERADMIN_ACCOUNTING_REPORT_ENABLED
+                or role != 'admin'
+                or update.effective_user is None
+                or update.effective_chat is None
+                or update.effective_user.id != SUPER_ADMIN_ID
+                or update.effective_chat.id != SUPER_ADMIN_ID):
+            await query.message.reply_text("⛔️ دسترسی به گزارش حسابداری مجاز نیست.")
+            return
+        try:
+            from nvl_superadmin_accounting_report import (
+                ReportUnavailable, build_report_text, is_superadmin_request,
+            )
+        except ImportError:
+            log.exception("Super Admin finance report module not installed on this Core")
+            await query.message.reply_text("⚠️ ماژول گزارش حسابداری در این نسخه سرور نصب نیست.")
+            return
+        if not is_superadmin_request(
+                role=role,
+                chat_id=update.effective_chat.id,
+                user_id=update.effective_user.id,
+                superadmin_id=SUPER_ADMIN_ID):
+            await query.message.reply_text("⛔️ دسترسی غیرمجاز.")
+            return
+        if d == "nvl_fin:menu":
+            kb = [
+                [InlineKeyboardButton("📚 از ابتدا", callback_data="nvl_fin:all")],
+                [InlineKeyboardButton("📅 ۷ روز اخیر", callback_data="nvl_fin:7d"),
+                 InlineKeyboardButton("🗓 ۳۰ روز اخیر", callback_data="nvl_fin:30d")],
+                [InlineKeyboardButton("🔙 پنل سوپر ادمین", callback_data="super_admin_back")],
+            ]
+            await query.edit_message_text(
+                "💰 <b>گزارش حسابداری NVL</b>\n\n"
+                "بازه گزارش را انتخاب کنید.\n"
+                "گزارش فقط از سوابق موجود خوانده می‌شود و هیچ تغییری در حساب‌ها ایجاد نمی‌کند.",
+                reply_markup=InlineKeyboardMarkup(kb),
+                parse_mode="HTML",
+            )
+            return
+        period = d.split(":", 1)[1]
+        if period not in ("all", "7d", "30d"):
+            await query.message.reply_text("⛔️ بازه گزارش نامعتبر است.")
+            return
+        try:
+            report_text = await asyncio.to_thread(
+                build_report_text, DB_PATH, ACCOUNTING_DB_PATH, period,
+            )
+        except ReportUnavailable as exc:
+            log.warning("Super Admin finance report data unavailable: %s", type(exc).__name__)
+            await query.edit_message_text(
+                "⚠️ اطلاعات مورد نیاز کامل یا در دسترس نیست؛"
+                " برای جلوگیری از نمایش عدد اشتباه گزارشی تولید نشد.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data="nvl_fin:menu")],
+                ]),
+            )
+            return
+        except Exception:
+            log.exception("Unexpected error generating read-only Super Admin finance report")
+            await query.edit_message_text(
+                "⚠️ خطا در تهیه گزارش؛ هیچ تغییری در اطلاعات مالی انجام نشده است.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data="nvl_fin:menu")],
+                ]),
+            )
+            return
+        await query.edit_message_text(
+            report_text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 انتخاب بازه", callback_data="nvl_fin:menu")],
+                [InlineKeyboardButton("👑 پنل سوپر ادمین", callback_data="super_admin_back")],
+            ]),
+        )
+        return
+
     if role == 'admin' and (d in ('apps_home','hpeg_status','hpeg_wizard','uact_back_to_menu')
         or d.startswith(('hpeg_edge_','hpeg_more_','hpeg_page_',
                          'hpeg_m4_home_','hpeg_m4_cancel_','hpeg_m4_single_','hpeg_m4_batch_'))):
@@ -27167,6 +27251,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
               [InlineKeyboardButton("⚙️ مدیریت فروش سرویس‌ها", callback_data="super_admin_sales_manage")],
               [InlineKeyboardButton("👥 مدیریت کاربران و ادمین‌های ربات", callback_data="super_admin_users_menu")],
               [InlineKeyboardButton("🔙 بستن", callback_data="uact_back_to_menu")]]
+        if NVL_SUPERADMIN_ACCOUNTING_REPORT_ENABLED:
+            kb.insert(2, [InlineKeyboardButton("💰 گزارش حسابداری", callback_data="nvl_fin:menu")])
         await query.edit_message_text("👑 <b>پنل تنظیمات اختصاصی سوپر ادمین</b>\n\nبخش مورد نظر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
     elif d == "super_admin_sales_manage" and update.effective_chat.id == SUPER_ADMIN_ID:

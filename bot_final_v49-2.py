@@ -864,6 +864,8 @@ NVL_SUPERADMIN_ACCOUNTING_REPORT_ENABLED = (
 )
 # Reseller lifecycle UI is opt-in and read-only; no live API or scheduler.
 NVL_AGENT_LIFECYCLE_R1_ENABLED = (os.environ.get("NVL_AGENT_LIFECYCLE_R1_ENABLED", "0") == "1" and nvl_agent_lifecycle is not None)
+# Phase 2 is separately gated; never sends notifications or runs background jobs.
+NVL_AGENT_LIFECYCLE_R2_ENABLED = os.environ.get("NVL_AGENT_LIFECYCLE_R2_ENABLED", "0") == "1"
 
 def _agent_lifecycle_access(agent_id, *, r2=False):
     """Default-off rollout plus optional explicit canary reseller allowlist."""
@@ -4846,6 +4848,23 @@ def _db_get_expiring_agent_accounts(agent_id, days=3, page=0):
         )
 
 
+def _db_get_expired_agent_accounts(agent_id, page=0):
+    with db_conn() as conn:
+        return nvl_agent_lifecycle.list_expired_accounts(conn, agent_id, page=page)
+
+
+def _db_get_agent_volume_candidates(agent_id):
+    """Locally authorized usernames only; no secret or remote usage is stored."""
+    with db_conn() as conn:
+        return conn.execute(
+            "SELECT username, customer_name, status FROM ssh_accounts "
+            "WHERE agent_id=? AND service_type='v2ray_vol' "
+            "AND status != '⏳ درحال ساخت' AND COALESCE(hold_active,0)=0 "
+            "ORDER BY username",
+            (int(agent_id),),
+        ).fetchall()
+
+
 def _db_preflight_ssh_reactivation(un):
     """Reject invalid/retired routing before unlocking or recreating Linux users."""
     with db_conn() as conn:
@@ -8471,7 +8490,6 @@ async def _show_users_hub(target, context):
     if role == 'agent':
         title = "👥 <b>کاربران من</b>"
         subtitle = "سرویس موردنظر را انتخاب کنید یا نام کاربری را جستجو کنید."
-        # Three short buttons in one row; the two V2Ray modes open separately.
         kb = [[
             InlineKeyboardButton("🔐 SSH", callback_data="umanage_ssh"),
             InlineKeyboardButton("🚀 V2Ray", callback_data="ag_v2ray_types"),
@@ -8488,6 +8506,9 @@ async def _show_users_hub(target, context):
         kb = [[InlineKeyboardButton(label, callback_data=cb)] for label, cb in labels]
     if role == 'agent' and _agent_lifecycle_access(context.user_data.get('agent_id', 0)):
         kb.append([InlineKeyboardButton("⏳ کاربران نزدیک به انقضا", callback_data="aglx_soon_3")])
+        if _agent_lifecycle_access(context.user_data.get('agent_id', 0), r2=True):
+            kb.append([InlineKeyboardButton("⌛ کاربران منقضی‌شده", callback_data="aglx_expired_0")])
+            kb.append([InlineKeyboardButton("📉 حجم رو به اتمام", callback_data="aglx_low_0")])
     kb.append([InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")])
     text = f"{title}\n━━━━━━━━━━━━━━\n{subtitle}"
 
@@ -8518,33 +8539,38 @@ async def _show_agent_v2ray_types(target, context):
     )
 
 
-async def _show_agent_lifecycle_panel(update, context, *, days=3, page=0):
-    """R1: an explicitly enabled, per-agent, read-only cross-service expiry list."""
+async def _show_agent_lifecycle_panel(update, context, *, days=3, page=0, mode='soon'):
+    """Opt-in, read-only, tenant-scoped timed-subscription queue."""
     target = update.callback_query if getattr(update, 'callback_query', None) else update
     agent_id = context.user_data.get('agent_id', 0)
     if (not _agent_lifecycle_access(agent_id) or not is_auth(context)
-            or context.user_data.get('role') != 'agent' or not agent_id):
+            or context.user_data.get('role') != 'agent' or not agent_id
+            or mode not in ('soon', 'expired')
+            or (mode == 'expired' and not NVL_AGENT_LIFECYCLE_R2_ENABLED)):
         await target.edit_message_text("⛔️ این بخش برای شما فعال نیست.")
         return
     try:
         days, page = int(days), int(page)
-        total, rows = await asyncio.to_thread(_db_get_expiring_agent_accounts, agent_id, days, page)
+        if mode == 'soon':
+            total, rows = await asyncio.to_thread(_db_get_expiring_agent_accounts, agent_id, days, page)
+        else:
+            total, rows = await asyncio.to_thread(_db_get_expired_agent_accounts, agent_id, page)
     except (ValueError, TypeError):
         await target.edit_message_text("⛔️ پارامتر فیلتر نامعتبر است.")
         return
     except Exception:
-        log.exception("Reseller expiry view failed")
+        log.exception("Reseller lifecycle date view failed")
         await target.edit_message_text("⚠️ اطلاعات انقضا در دسترس نیست. هیچ تغییری اعمال نشد.")
         return
 
-    context.user_data['agent_lifecycle_view'] = 'soon'
+    context.user_data['agent_lifecycle_view'] = mode
     context.user_data['agent_lifecycle_days'] = days
     context.user_data['agent_lifecycle_page'] = page
     today = datetime.now().date()
     kb = []
     for username, service_type, customer_name, expiry in rows:
         remaining = (datetime.strptime(expiry, "%Y-%m-%d").date() - today).days
-        suffix = f" · {remaining} روز" if remaining else " · امروز"
+        suffix = (f" · {remaining} روز" if remaining else " · امروز") if mode == 'soon' else f" · {abs(remaining)} روز گذشته"
         label = f"{'🔐' if service_type == 'ssh' else '🚀'} {username[:28]}{suffix}"
         kb.append([InlineKeyboardButton(label, callback_data=f"udet_{username}")])
         if customer_name:
@@ -8556,20 +8582,101 @@ async def _show_agent_lifecycle_panel(update, context, *, days=3, page=0):
         nav.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"aglx_page_{page+1}"))
     if nav:
         kb.append(nav)
-    kb.append([
-        InlineKeyboardButton("۱ روز", callback_data="aglx_soon_1"),
-        InlineKeyboardButton("۳ روز", callback_data="aglx_soon_3"),
-        InlineKeyboardButton("۷ روز", callback_data="aglx_soon_7"),
-    ])
+    if mode == 'soon':
+        kb.append([
+            InlineKeyboardButton("۱ روز", callback_data="aglx_soon_1"),
+            InlineKeyboardButton("۳ روز", callback_data="aglx_soon_3"),
+            InlineKeyboardButton("۷ روز", callback_data="aglx_soon_7"),
+        ])
     kb.append([InlineKeyboardButton("↩️ کاربران من", callback_data="users_hub")])
-    header = (
-        f"⏳ کاربران نزدیک به انقضا · {days} روز آینده\n"
-        f"👥 {total} اشتراک فعال · صفحه {page+1}\n"
-        "SSH و V2Ray مدت‌دار | حساب‌های آنهولد مستثنا هستند"
-    )
+    if mode == 'soon':
+        header = (
+            f"⏳ کاربران نزدیک به انقضا · {days} روز آینده\n"
+            f"👥 {total} اشتراک فعال · صفحه {page+1}\n"
+            "SSH و V2Ray مدت‌دار | حساب‌های آنهولد مستثنا هستند"
+        )
+    else:
+        header = (
+            f"⌛ اشتراک‌های منقضی‌شده\n"
+            f"👥 {total} مورد · صفحه {page+1}\n"
+            "SSH و V2Ray مدت‌دار | جدیدترین انقضا در ابتدا"
+        )
     if not rows:
         header += "\n\nموردی برای نمایش وجود ندارد."
     await target.edit_message_text(header, reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def _show_agent_low_volume_panel(update, context, *, page=0):
+    """R2: on-demand Marzban read; partial snapshots fail closed, no bulk jobs."""
+    query = update.callback_query
+    agent_id = context.user_data.get('agent_id', 0)
+    if (not _agent_lifecycle_access(agent_id, r2=True)
+            or not is_auth(context) or context.user_data.get('role') != 'agent'
+            or not agent_id):
+        await query.edit_message_text("⛔️ دسترسی غیرمجاز.")
+        return
+    try:
+        page = int(page)
+        if page < 0:
+            raise ValueError("invalid page")
+        owned = await asyncio.to_thread(_db_get_agent_volume_candidates, agent_id)
+        if not owned:
+            selected = []
+        else:
+            service = await _get_marzban_admin_service()
+            ok, snapshot = await service.list_users(limit=5000)
+            if not ok:
+                raise RuntimeError("Marzban usage unavailable")
+            if isinstance(snapshot, dict):
+                remote = snapshot.get('users')
+                total = snapshot.get('total')
+            elif isinstance(snapshot, list):
+                remote, total = snapshot, None
+            else:
+                raise RuntimeError("Invalid Marzban usage payload")
+            if not isinstance(remote, list) or len(remote) >= 5000:
+                raise RuntimeError("Marzban usage snapshot incomplete")
+            if total is not None and int(total) > len(remote):
+                raise RuntimeError("Marzban usage snapshot truncated")
+            selected = nvl_agent_lifecycle.select_low_volume_accounts(owned, remote)
+    except (ValueError, TypeError):
+        await query.edit_message_text("⛔️ پارامتر فیلتر نامعتبر است.")
+        return
+    except Exception:
+        log.exception("Reseller low-volume read failed")
+        await query.edit_message_text(
+            "⚠️ داده حجم از Marzban کامل یا در دسترس نیست؛ برای جلوگیری از گزارش اشتباه، فهرستی نمایش داده نشد.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("↩️ کاربران من", callback_data="users_hub")]
+            ]),
+        )
+        return
+    context.user_data['agent_lifecycle_view'] = 'low'
+    context.user_data['agent_lifecycle_page'] = page
+    start = page * nvl_agent_lifecycle.PAGE_SIZE
+    kb = []
+    for username, customer, remaining, limit in selected[start:start+nvl_agent_lifecycle.PAGE_SIZE]:
+        remaining_gb = remaining / (1024 ** 3)
+        label = f"📦 {username[:27]} · {remaining_gb:.2f} GB"
+        kb.append([InlineKeyboardButton(label, callback_data=f"udet_{username}")])
+        if customer:
+            kb.append([InlineKeyboardButton(f"🔖 {str(customer)[:38]}", callback_data=f"udet_{username}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"aglx_low_{page-1}"))
+    if start + nvl_agent_lifecycle.PAGE_SIZE < len(selected):
+        nav.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"aglx_low_{page+1}"))
+    if nav:
+        kb.append(nav)
+    kb.append([InlineKeyboardButton("↩️ کاربران من", callback_data="users_hub")])
+    message = (
+        f"📉 حجم رو به اتمام · زیر ۱۰٪ باقی‌مانده\n"
+        f"👥 {len(selected)} اشتراک حجمی · صفحه {page+1}\n"
+        "مصرف از Marzban به‌صورت لحظه‌ای خوانده شده است."
+    )
+    if not selected:
+        message += "\n\nاشتراک کم‌حجمی یافت نشد."
+    await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(kb))
 
 
 async def _show_users_panel(update, context, page=0, agent_filter=None):
@@ -8869,6 +8976,8 @@ async def _show_v2ray_user_detail(update_or_query, username, context, db_res, v2
          InlineKeyboardButton("🗑 حذف اکانت", callback_data=f"v2act_dl_{username}")],
         [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="uact_back")]
     ])
+    if role == 'agent' and _agent_lifecycle_access(ag_id, r2=True) and not is_vol:
+        kb.insert(-1, [InlineKeyboardButton("📝 متن یادآوری تمدید", callback_data=f"aglx_note_{username}")])
     
     if hasattr(update_or_query, 'callback_query') and update_or_query.callback_query:
         await update_or_query.callback_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
@@ -11244,6 +11353,8 @@ async def _show_user_detail(update_or_query, username, context):
         [InlineKeyboardButton("🔴 غیرفعال" if st == "🟢 فعال" else "🟢 فعال", callback_data=f"uact_tg_{username}"), InlineKeyboardButton("🗑 حذف اکانت", callback_data=f"uact_dl_{username}")],
         [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="uact_back")]
     ]
+    if role == 'agent' and _agent_lifecycle_access(ag_id, r2=True):
+        kb.insert(-1, [InlineKeyboardButton("📝 متن یادآوری تمدید", callback_data=f"aglx_note_{username}")])
     mode_label = {"tls": "🔐 TLS (اتصال مستقیم با گواهی معتبر)"}.get(acc_conn_mode, "🔌 مستقیم")
     hold_active, _hd, hold_days = await asyncio.to_thread(_db_get_hold_info, username)
     hold_line = ""
@@ -13815,7 +13926,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if from_hub and not 2 <= len(username_query) <= 64:
             await update.message.reply_text("⚠️ لطفاً حداقل ۲ و حداکثر ۶۴ نویسه از نام کاربری را بفرستید.")
             return
-        # The hub search is bounded to avoid expensive or oversized Telegram menus.
         search_limit = 30 if from_hub else None
         res = await asyncio.to_thread(_db_search_users, username_query.lower(), search_owner, search_limit)
         back_cb = "users_hub" if from_hub else "uact_back"
@@ -21973,16 +22083,53 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer("بازه نامعتبر")
                 return
             await _show_agent_lifecycle_panel(update, context, days=days, page=0)
-        elif d.startswith("aglx_page_") and context.user_data.get('agent_lifecycle_view') == 'soon':
+        elif d.startswith("aglx_expired_") and NVL_AGENT_LIFECYCLE_R2_ENABLED:
+            await _show_agent_lifecycle_panel(update, context, mode='expired', page=0)
+        elif d.startswith("aglx_page_") and context.user_data.get('agent_lifecycle_view') in ('soon', 'expired'):
             try:
                 page = int(d.rsplit("_", 1)[1])
             except ValueError:
                 await query.answer("صفحه نامعتبر")
                 return
             await _show_agent_lifecycle_panel(update, context,
+                mode=context.user_data['agent_lifecycle_view'],
                 days=context.user_data.get('agent_lifecycle_days', 3), page=page)
+        elif d.startswith("aglx_low_") and NVL_AGENT_LIFECYCLE_R2_ENABLED:
+            try:
+                page = int(d.rsplit("_", 1)[1])
+            except ValueError:
+                await query.answer("صفحه نامعتبر")
+                return
+            await _show_agent_low_volume_panel(update, context, page=page)
+        elif d.startswith("aglx_note_") and NVL_AGENT_LIFECYCLE_R2_ENABLED:
+            username = d[len("aglx_note_"):]
+            def _lookup_note_target():
+                with db_conn() as conn:
+                    return conn.execute(
+                        "SELECT expire_date, service_type, agent_id, hold_active "
+                        "FROM ssh_accounts WHERE username=?", (username,)
+                    ).fetchone()
+            row = await asyncio.to_thread(_lookup_note_target)
+            if (not row or int(row[2] or 0) != int(ag_id)
+                    or row[1] not in ('ssh', 'v2ray') or bool(row[3])):
+                await query.edit_message_text("⛔️ دسترسی به این اشتراک مجاز نیست.")
+                return
+            try:
+                note = nvl_agent_lifecycle.renewal_reminder(username, row[0])
+            except ValueError:
+                await query.edit_message_text("⚠️ تاریخ انقضا برای یادآوری معتبر نیست.")
+                return
+            await query.edit_message_text(
+                f"📝 <b>متن آماده برای کپی و ارسال دستی</b>\n"
+                f"این پیام خودکار برای مشتری ارسال نمی‌شود.\n\n<pre>{esc(note)}</pre>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("↩️ بازگشت به اشتراک", callback_data=f"udet_{username}")]
+                ]),
+            )
         else:
             await query.answer("فیلتر نامعتبر")
+
 
     elif d.startswith("v2act_sub_"):
         un = d.split("_", 2)[2]
@@ -22350,12 +22497,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         safe_clear_context(context)
         await _show_users_hub(query, context)
     elif d == "uact_back":
+        lifecycle_view = context.user_data.get('agent_lifecycle_view')
         if role == 'agent' and context.user_data.get('agent_user_search_from_hub'):
             await _show_users_hub(query, context)
-        elif (role == 'agent' and _agent_lifecycle_access(ag_id)
-                and context.user_data.get('agent_lifecycle_view') == 'soon'):
+        elif role == 'agent' and _agent_lifecycle_access(ag_id) and lifecycle_view == 'soon':
             await _show_agent_lifecycle_panel(update, context,
                 days=context.user_data.get('agent_lifecycle_days', 3),
+                page=context.user_data.get('agent_lifecycle_page', 0))
+        elif role == 'agent' and _agent_lifecycle_access(ag_id, r2=True) and lifecycle_view == 'expired':
+            await _show_agent_lifecycle_panel(update, context, mode='expired',
+                page=context.user_data.get('agent_lifecycle_page', 0))
+        elif role == 'agent' and _agent_lifecycle_access(ag_id, r2=True) and lifecycle_view == 'low':
+            await _show_agent_low_volume_panel(update, context,
                 page=context.user_data.get('agent_lifecycle_page', 0))
         else:
             await _show_users_panel(update, context, page=context.user_data.get('user_page', 0))

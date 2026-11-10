@@ -4797,7 +4797,7 @@ def _db_search_users(term, agent_id=None):
         if agent_id is not None:
             sql += " AND agent_id=?"
             params.append(int(agent_id))
-        return conn.execute(sql + " ORDER BY username LIMIT 50", params).fetchall()
+        return conn.execute(sql + " ORDER BY username", params).fetchall()
 
 
 def _db_get_expiring_agent_accounts(agent_id, days=3, page=0):
@@ -8516,7 +8516,10 @@ async def _show_users_panel(update, context, page=0, agent_filter=None):
     target = update.callback_query if getattr(update, 'callback_query', None) else update.message
     if (not is_auth(context) or role not in ('admin', 'agent')
             or (role == 'agent' and not ag_id)):
-        await target.reply_text("⛔️ دسترسی غیرمجاز.")
+        if getattr(update, 'callback_query', None):
+            await target.edit_message_text("⛔️ دسترسی غیرمجاز.")
+        else:
+            await target.reply_text("⛔️ دسترسی غیرمجاز.")
         return
     try:
         page = int(page)

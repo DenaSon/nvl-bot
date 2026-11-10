@@ -76,6 +76,25 @@ class AgentListSqlTests(unittest.TestCase):
         self.assertEqual(len(self.func["_db_search_users"]("u", None)), 13)
         self.assertNotIn(("pending",), self.func["_db_search_users"]("pending", 4))
 
+    def test_username_search_is_literal_bounded_and_owner_scoped(self):
+        self.conn.execute(
+            "INSERT INTO ssh_accounts VALUES ('agent_00', 4, '🟢 فعال', "
+            "'v2ray_vol', '2026-11-20', 'Sample')"
+        )
+        self.conn.execute(
+            "INSERT INTO ssh_accounts VALUES ('agent_01', 5, '🟢 فعال', "
+            "'v2ray', '2026-11-20', 'Not Mine')"
+        )
+        search = self.func["_db_search_users"]
+        self.assertEqual(search("_", 4), [("agent_00",)])
+        self.assertEqual(search("%", 4), [])  # '%' is no longer a wildcard
+        self.assertEqual(search("AGENT_", 4), [("agent_00",)])
+        self.assertEqual(search("agent_", 5), [("agent_01",)])
+        self.assertEqual(len(search("u", 4, 3)), 3)
+        self.assertTrue(all(name != "agent_01" for name, in search("agent", 4, 30)))
+        with self.assertRaises(ValueError):
+            search("u", 4, 0)
+
     def test_invalid_page_rejected(self):
         with self.assertRaises(ValueError):
             self.func["_db_get_users_with_agents_by_type"]("ssh", 4, 10, -10)

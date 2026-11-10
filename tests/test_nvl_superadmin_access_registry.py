@@ -134,7 +134,7 @@ class SuperAdminAccessTests(unittest.TestCase):
             self.assertEqual(_recipients(old, authorized_superadmin_ids=ADMIN_IDS), ADMIN_IDS)
             self.assertEqual(_recipients(old), ())
         self.assertEqual(_recipients(ADMIN_IDS[0], extra=f"{old},{ADMIN_IDS[1]}"),
-                         ADMIN_IDS[:2])
+                         tuple(sorted(ADMIN_IDS[:2])))
 
 
 class CriticalNoticeDeliveryTests(unittest.IsolatedAsyncioTestCase):

@@ -11,6 +11,7 @@ import time
 import uuid
 from html import escape
 from typing import Optional, Iterable
+from nvl_superadmin_access import is_revoked_principal
 
 
 EVENTS = {
@@ -40,14 +41,14 @@ def _recipients(primary: int, extra: Optional[str] = None,
         for raw in authorized_superadmin_ids:
             try:
                 value = int(raw)
-                if value > 0 and value != 1947045855:
+                if value > 0 and not is_revoked_principal(value):
                     ids.add(value)
             except (TypeError, ValueError, OverflowError):
                 continue
         return tuple(sorted(ids))
     try:
         value = int(primary)
-        if value > 0:
+        if value > 0 and not is_revoked_principal(value):
             ids.add(value)
     except (TypeError, ValueError):
         pass
@@ -56,7 +57,7 @@ def _recipients(primary: int, extra: Optional[str] = None,
     for raw in extra.split(","):
         try:
             value = int(raw.strip())
-            if value > 0:
+            if value > 0 and not is_revoked_principal(value):
                 ids.add(value)
         except ValueError:
             continue

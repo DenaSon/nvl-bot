@@ -69,7 +69,7 @@ def is_private_superadmin(
         type(user_id) is int
         and type(chat_id) is int
         and user_id == chat_id
-        and str(chat_type) == "private"
+        and str(getattr(chat_type, "value", chat_type)) == "private"
         and is_active_superadmin(db_path, user_id)
     )
 

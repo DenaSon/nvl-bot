@@ -117,6 +117,7 @@ import marzban_regional_filtering as marzban_regional
 import marzban_observability
 import marzban_alerting
 import nvl_daily_business
+from cloudzy_rich_transport import RichBotAPI as NVLDailyRichBotAPI
 import secrets
 from nvl_superadmin_access import (
     active_superadmin_ids, is_private_superadmin, is_revoked_principal,
@@ -31606,16 +31607,15 @@ async def _daily_business_report_loop(app):
                     ).strftime("%Y-%m-%d")
                     previous = nvl_daily_business.summarize(conn, yesterday)
                     label = fmt_jalali_date_only(datetime.strptime(day, "%Y-%m-%d"))
-                    return day, nvl_daily_business.render_report(
+                    return day, nvl_daily_business.render_rich_report(
                         report, previous=previous, label=label,
                     )
 
             day, message = await asyncio.to_thread(_claim_and_render)
             if day is not None:
                 try:
-                    receipt = await app.bot.send_message(
-                        chat_id=group_id, text=message, parse_mode="HTML",
-                        disable_web_page_preview=True,
+                    message_id = await NVLDailyRichBotAPI(app.bot.token).send(
+                        chat_id=group_id, rich_message=message,
                     )
                 except Exception as exc:
                     # An ambiguous Telegram timeout can mean the message arrived.
@@ -31628,10 +31628,10 @@ async def _daily_business_report_loop(app):
                 else:
                     with db_conn() as conn:
                         nvl_daily_business.finish_delivery(
-                            conn, day, message_id=receipt.message_id,
+                            conn, day, message_id=message_id,
                         )
                     log.info("NVL_DAILY_BUSINESS_REPORT SENT day=%s message_id=%s",
-                             day, receipt.message_id)
+                             day, message_id)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -31666,12 +31666,12 @@ async def cmd_daily_business_report(update: Update, context: ContextTypes.DEFAUL
                 conn, day, now=datetime.now(timezone.utc) if arg == "today" else None
             )
             label = fmt_jalali_date_only(datetime.strptime(day, "%Y-%m-%d"))
-            return nvl_daily_business.render_report(
+            return nvl_daily_business.render_rich_report(
                 result, label=label, preview=arg == "today",
             )
-    text = await asyncio.to_thread(_read)
-    await update.effective_message.reply_text(
-        text, parse_mode="HTML", disable_web_page_preview=True,
+    rich_message = await asyncio.to_thread(_read)
+    await NVLDailyRichBotAPI(context.bot.token).send(
+        chat_id=chat.id, rich_message=rich_message,
     )
 
 async def _post_init(app):

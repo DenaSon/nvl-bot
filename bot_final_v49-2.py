@@ -91,6 +91,7 @@ import string
 import json
 import aiohttp
 import qrcode
+from ssh_credential_ui import credential_fields_text, napsternet_qr_png, ssh_connection_action_rows
 import v2ray_engine
 import marzban_admin
 # A partially copied release must not bring down the production bot while the
@@ -8874,59 +8875,84 @@ async def _build_napsternet_link(host: str, port, un: str, pw: str, conn_mode: s
     code = base64.b64encode(json.dumps(cfg, separators=(',', ':')).encode()).decode()
     return f"npvt-ssh://{code}"
 
-async def _build_invoice_text(un: str):
-    """
-    متن کامل فاکتور یک اکانت را همیشه تازه و از روی دیتابیس فعلی می‌سازد (نه از یک متن ذخیره‌شدهٔ
-    قدیمی). چون تمام اطلاعات لازم (پسورد، تاریخ‌ها، ظرفیت) در جدول ssh_accounts نگه‌داری می‌شود،
-    این تابع همیشه — حتی روزها بعد از ساخت اکانت و حتی بعد از ری‌استارت ربات — قابل فراخوانی و
-    ارسال مجدد است؛ بنابراین «امکان ارسال مجدد فاکتور» دیگر وابسته به لاگ یا حافظهٔ موقت نیست.
-    خروجی: متن HTML فاکتور، یا None اگر اکانت دیگر وجود نداشته باشد.
-    """
-    row = await asyncio.to_thread(_db_get_user, un)
-    if not row: return None
-    pw, exp, crt, lim, st, _agid, acc_host, acc_conn_mode = row
-    hl = [h.strip() for h in (await asyncio.to_thread(_db_get_setting, 'hosts', LAST_RESORT_HOST_IP)).split(',') if h.strip()]
-    prt = await asyncio.to_thread(_db_get_setting, 'port', '22')
-    # 🆕 اگر حالت اتصال این اکانت «tls» باشد، در فاکتور هم به‌جای IP خامِ سرور، همان دامنهٔ TLS
-    # (و پورت مربوطه) نمایش داده می‌شود — چون در این حالت کلاینت اصلاً نباید مستقیم به IP وصل شود.
-    if acc_conn_mode == 'tls':
-        primary_host = await asyncio.to_thread(_db_get_setting, 'tls_domain', 'ws.nvlsup.com')
-        prt = await asyncio.to_thread(_db_get_setting, 'tls_port', '2088')
-        mode_line = "🔐 حالت اتصال: TLS (اتصال مستقیم با گواهی معتبر)\n"
-    else:
-        public_domain = await asyncio.to_thread(_db_get_setting, 'public_domain', '')
-        if public_domain.strip():
-            primary_host = public_domain.strip()
-        else:
-            primary_host = acc_host if acc_host else (hl[0] if hl else _hosts_fallback_with_warning())
-        # در حالت دامنهٔ ثابت، پورت باید متعلق به IP فعلیِ همان دامنه باشد، نه لزوماً IP اولیهٔ اکانت.
-        dns_target = await asyncio.to_thread(_db_get_setting, 'dns_current_ip', '') if public_domain.strip() else ''
-        prt = await asyncio.to_thread(_db_get_host_service_port, dns_target.strip() or primary_host, prt)
-        mode_line = "🔌 حالت اتصال: مستقیم\n"
-    rem_str = get_remaining_days(exp)
-    hold_active, _hd, hold_days = await asyncio.to_thread(_db_get_hold_info, un)
-    if hold_active:
-        rem_str = f"ON HOLD ({ACCOUNT_HOLD_DAYS} Days)"
+async def _ssh_endpoint_info(acc_host: str | None, conn_mode: str | None):
+    """Visible SSH endpoint, matching the connection mode and current public-domain routing."""
+    conn_mode = conn_mode or 'direct'
+    hosts = [h.strip() for h in (await asyncio.to_thread(
+        _db_get_setting, 'hosts', LAST_RESORT_HOST_IP
+    )).split(',') if h.strip()]
+    fallback_port = await asyncio.to_thread(_db_get_setting, 'port', '22')
+    if conn_mode == 'tls':
+        host = await asyncio.to_thread(_db_get_setting, 'tls_domain', 'ws.nvlsup.com')
+        port = await asyncio.to_thread(_db_get_setting, 'tls_port', '2088')
+        return host, port, "🔐 TLS (اتصال با گواهی معتبر)"
 
-    # 🗓 محاسبهٔ تعداد ماه اشتراک بر اساس روزهای پلن
-    m_count = 1
+    public_domain = (await asyncio.to_thread(_db_get_setting, 'public_domain', '')).strip()
+    host = public_domain or acc_host or (hosts[0] if hosts else _hosts_fallback_with_warning())
+    dns_target = (await asyncio.to_thread(
+        _db_get_setting, 'dns_current_ip', ''
+    )).strip() if public_domain else ''
+    port = await asyncio.to_thread(_db_get_host_service_port, dns_target or host, fallback_port)
+    return host, port, "🔌 مستقیم"
+
+
+async def _build_invoice_text(un: str):
+    """Build a fresh, readable SSH invoice from the current account and routing settings."""
+    row = await asyncio.to_thread(_db_get_user, un)
+    if not row:
+        return None
+    pw, exp, crt, lim, st, _agid, acc_host, acc_conn_mode = row
+    host, port, mode_label = await _ssh_endpoint_info(acc_host, acc_conn_mode)
+    remaining = get_remaining_days(exp)
+    hold_active, _deadline, hold_days = await asyncio.to_thread(_db_get_hold_info, un)
+    months = 1
     if hold_days:
-        m_count = max(1, round(int(hold_days) / 30))
+        months = max(1, round(int(hold_days) / 30))
     else:
         try:
             exp_dt = datetime.strptime(exp[:10], "%Y-%m-%d")
             crt_dt = datetime.strptime(crt[:10], "%Y-%m-%d")
-            m_count = max(1, round((exp_dt - crt_dt).days / 30))
+            months = max(1, round((exp_dt - crt_dt).days / 30))
         except Exception:
-            m_count = 1
+            pass
 
-    return (f"host: {esc(primary_host)}\n"
-            f"username: <code>{esc(un)}</code>\npassword: <code>{esc(pw)}</code>\nport: <code>{esc(prt)}</code>\n\n"
-            f"{mode_line}"
-            f"مدت اشتراک: {m_count} ماهه\n"
-            f"تاریخ انقضا: {format_db_date_to_jalali(exp)} | ({rem_str})\n"
-            f"تعداد کاربر مجاز به اتصال: {lim}\nحجم: نامحدود\nتاریخ ساخت: {format_db_date_to_jalali(crt)}\nوضعیت: {st}")
-#----------------------------------------------------
+    hold_line = (
+        f"\n⏸ <b>فعال‌سازی:</b> در انتظار اولین اتصال (مهلت {ACCOUNT_HOLD_DAYS} روز)"
+        if hold_active else ""
+    )
+    return (
+        "🔐 <b>اطلاعات اتصال SSH</b>\n\n"
+        f"{credential_fields_text(host, un, pw, port)}\n\n"
+        "📋 <b>مشخصات اشتراک</b>\n"
+        f"🔀 <b>حالت اتصال:</b> {esc(mode_label)}\n"
+        f"⏳ <b>مدت اشتراک:</b> {months} ماه\n"
+        f"📅 <b>تاریخ انقضا:</b> {esc(format_db_date_to_jalali(exp))}\n"
+        f"⌛ <b>زمان باقی‌مانده:</b> {esc(remaining)}\n"
+        f"👥 <b>تعداد اتصال مجاز:</b> {esc(lim)}\n"
+        "📦 <b>حجم:</b> نامحدود\n"
+        f"🗓 <b>تاریخ ساخت:</b> {esc(format_db_date_to_jalali(crt))}\n"
+        f"📍 <b>وضعیت حساب:</b> {esc(st)}{hold_line}"
+    )
+
+
+async def _ssh_invoice_markup(un: str, *, back_callback: str | None = None):
+    """One keyboard for single purchase, bulk purchase and re-opened invoices."""
+    row = await asyncio.to_thread(_db_get_user, un)
+    if not row:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("↩️ بازگشت", callback_data=back_callback or "uact_back")]
+        ])
+    host, port, _mode = await _ssh_endpoint_info(row[6], row[7])
+    buttons = ssh_connection_action_rows(
+        un, row[0], host, port,
+        qr_callback=f"uact_niinv_{un}",
+        text_callback=f"uact_nitxtinv_{un}",
+    )
+    if back_callback:
+        buttons.append([InlineKeyboardButton("↩️ بازگشت", callback_data=back_callback)])
+    return InlineKeyboardMarkup(buttons)
+
+
 async def _show_v2ray_user_detail(update_or_query, username, context, db_res, v2_res):
     p, exp, crt, lim, st, owner_aid, _, _ = db_res
     stype, db_data_limit, sub_url = v2_res
@@ -11342,6 +11368,7 @@ async def _show_user_detail(update_or_query, username, context):
         return await _show_v2ray_user_detail(update_or_query, username, context, res, stype_row)
 
     acc_conn_mode = acc_conn_mode or 'direct'
+    endpoint_host, endpoint_port, _endpoint_mode = await _ssh_endpoint_info(acc_host, acc_conn_mode)
     rem_str = get_remaining_days(exp)
     owner_label = "مستقیم (ادمین)"
     if owner_aid:
@@ -11355,7 +11382,7 @@ async def _show_user_detail(update_or_query, username, context):
         conn_line = ""
         health_line = ""
     else:
-        host_display_text = f"\n🌐 هاست فعلی: {esc(display_host)}"
+        host_display_text = f"\n🖥 هاست زیرساخت: <code>{esc(display_host)}</code>"
         conn_counts, conn_err = await _get_live_connection_counts()
         if conn_err:
             conn_line = "\nتعداد دستگاه های متصل شده: نامشخص (خطای مانیتورینگ سرور)"
@@ -11372,8 +11399,12 @@ async def _show_user_detail(update_or_query, username, context):
             health_line = (f"\n📊 وضعیت سرور ({host_label} — {esc(display_host)}): CPU {health['cpu_pct']}٪ | "
                             f"RAM {health['ram_used_mb']:,}/{health['ram_total_mb']:,} مگابایت ({health['ram_pct']}٪)")
 
-    kb = [
-        [InlineKeyboardButton("🔗 دریافت کد نپسترنت", callback_data=f"uact_ni_{username}"), InlineKeyboardButton("🧾 دریافت فاکتور کامل", callback_data=f"uact_inv_{username}")],
+    kb = ssh_connection_action_rows(
+        username, p, endpoint_host, endpoint_port,
+        qr_callback=f"uact_ni_{username}",
+        text_callback=f"uact_nitxt_{username}",
+    ) + [
+        [InlineKeyboardButton("🧾 دریافت فاکتور کامل", callback_data=f"uact_inv_{username}")],
         [InlineKeyboardButton("🔄 تمدید اکانت", callback_data=f"uact_rn_{username}"), InlineKeyboardButton("🔻 کاهش تمدید", callback_data=f"uact_rd_{username}")],
         [InlineKeyboardButton("تغییر پسورد", callback_data=f"uact_pw_{username}"), InlineKeyboardButton("👥 تعداد کاربر", callback_data=f"uact_uc_{username}")],
         [InlineKeyboardButton("📜 تاریخچه اتصالات", callback_data=f"uact_hist_{username}")],
@@ -11389,12 +11420,27 @@ async def _show_user_detail(update_or_query, username, context):
         real_days_txt = f"{int(hold_days)} روزه" if hold_days else "خریداری‌شده"
         hold_line = f"\n⏳ در حال آنهولد (اشتراک {real_days_txt} — منتظر اولین اتصال یا پایان مهلت {ACCOUNT_HOLD_DAYS} روزه)"
     
-    txt = (f"username: {esc(username)}\npassword: {esc(p)}\n\n👤 مالک: {esc(owner_label)}\nتعداد کاربر: {lim}"
-           f"{host_display_text}\n🔀 حالت اتصال: {mode_label}\n"
-           f"انقضا: {format_db_date_to_jalali(exp)} | ({rem_str})\nتاریخ ساخت: {format_db_date_to_jalali(crt)}\nوضعیت: {st}" + conn_line + health_line + hold_line)
-    if hasattr(update_or_query, 'callback_query') and update_or_query.callback_query: await update_or_query.callback_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb))
-    elif hasattr(update_or_query, 'edit_message_text'): await update_or_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb))
-    else: await update_or_query.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb))
+    txt = (
+        "🔐 <b>حساب SSH</b>\n\n"
+        f"{credential_fields_text(endpoint_host, username, p, endpoint_port)}\n\n"
+        "📋 <b>مشخصات حساب</b>\n"
+        f"👤 <b>مالک:</b> {esc(owner_label)}\n"
+        f"👥 <b>اتصالات مجاز:</b> {esc(lim)}"
+        f"{host_display_text}\n"
+        f"🔀 <b>حالت اتصال:</b> {esc(mode_label)}\n"
+        f"📅 <b>انقضا:</b> {esc(format_db_date_to_jalali(exp))}\n"
+        f"⌛ <b>زمان باقی‌مانده:</b> {esc(rem_str)}\n"
+        f"🗓 <b>تاریخ ساخت:</b> {esc(format_db_date_to_jalali(crt))}\n"
+        f"📍 <b>وضعیت حساب:</b> {esc(st)}"
+        + conn_line + health_line + hold_line
+    )
+    markup = InlineKeyboardMarkup(kb)
+    if hasattr(update_or_query, 'callback_query') and update_or_query.callback_query:
+        await update_or_query.callback_query.edit_message_text(txt, reply_markup=markup, parse_mode="HTML")
+    elif hasattr(update_or_query, 'edit_message_text'):
+        await update_or_query.edit_message_text(txt, reply_markup=markup, parse_mode="HTML")
+    else:
+        await update_or_query.message.reply_text(txt, reply_markup=markup, parse_mode="HTML")
 
 async def _show_agent_detail(query, context, a_id):
     """🆕 پنل جزئیات یک نماینده را (دوباره) رندر می‌کند — هم از دکمهٔ «مشاهده نماینده» در لیست و هم
@@ -11861,7 +11907,7 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
                 continue
             # 🆕 طبق درخواست: دکمهٔ «دریافت کد نپسترنت» بلافاصله زیر فاکتور همین اکانت (نه فقط
             # در انتهای دسته) قرار می‌گیرد تا نیازی به رفتن به لیست کاربران نباشد.
-            bulk_inv_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 دریافت کد نپسترنت", callback_data=f"uact_niinv_{un}")]])
+            bulk_inv_kb = await _ssh_invoice_markup(un)
             with contextlib.suppress(Exception):
                 await context.bot.send_message(chat_id=query.message.chat_id, text=invoice_txt, parse_mode="HTML", reply_markup=bulk_inv_kb)
 
@@ -24902,7 +24948,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 log.exception("ساخت متن فاکتور برای اکانت %s با خطا مواجه شد؛ اکانت با موفقیت ساخته شده اما نمایش فاکتور ناموفق بود.", un)
                 out = None
-            inv_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 دریافت کد نپسترنت (قابل کپی)", callback_data=f"uact_niinv_{un}")]])
+            inv_kb = await _ssh_invoice_markup(un)
             if out is None:
                 with contextlib.suppress(Exception):
                     await context.bot.send_message(
@@ -27174,32 +27220,62 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("✅ دامنه حذف شد.", reply_markup=kb)
 
     elif d.startswith("uact_ni_") or d.startswith("uact_niinv_"):
+        # Preserve the original invoice/detail message: QR is delivered as a separate photo.
         from_invoice = d.startswith("uact_niinv_")
         un = d.split("_", 2)[2]
-        r = await asyncio.to_thread(_db_get_user, un)
-        if not r: return await query.message.reply_text("❌ این کاربر دیگر وجود ندارد.")
-        if not _can_manage_user(role, ag_id, r[5]): return await query.message.reply_text("⛔️ شما مجاز به مشاهده این اکانت نیستید.")
-        p, _, _, _, _, _, acc_host, acc_conn_mode = r
-        prt = await asyncio.to_thread(_db_get_setting, 'port', '22')
-        hl = [h.strip() for h in (await asyncio.to_thread(_db_get_setting, 'hosts', LAST_RESORT_HOST_IP)).split(',') if h.strip()]
-        primary_host = acc_host if acc_host else (hl[0] if hl else _hosts_fallback_with_warning())
-        link = await _build_napsternet_link(primary_host, prt, un, p, acc_conn_mode or 'direct')
-        out = f"🔗 <b>لینک اتصال (روی کد لمس کنید تا کپی شود):</b>\n\n<code>{link}</code>"
-        # 🔧 رفع باگ ناوبری (دور دوم): «بازگشت» باید به همان نوع پیامی برگردد که دکمهٔ نپسترنت
-        # رویش بود، نه همیشه به یک قالب ثابت. اگر این دکمه زیر فاکتورِ اکانتِ تازه‌ساخته‌شده (تکی یا
-        # دسته‌ای؛ قالب host/username/password/port) بود، بازگشت باید همان فاکتور را دوباره بسازد؛
-        # اگر زیر پنل «جزئیات اکانت» در مدیریت کاربران بود (قالب مالک/تعداد کاربر/وضعیت/اتصال)،
-        # بازگشت باید به همان پنل برود — این حالت دوم از قبل درست کار می‌کرد و تغییری نکرده.
-        back_cb = f"uact_invview_{un}" if from_invoice else f"udet_{un}"
-        back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data=back_cb)]])
-        # 🔧 رفع باگ ناوبری: قبلاً با reply_text یک پیام کاملاً جدید در انتهای چت ارسال می‌شد و از
-        # همان پیام/دکمه‌ای که رویش کلیک شده بود فاصله می‌گرفت. حالا همان پیام (چه پنل جزئیات
-        # اکانت باشد، چه فاکتور تکی/دسته‌ای) مستقیماً ویرایش می‌شود تا کد دقیقاً همان‌جا ظاهر شود؛
-        # اگر پیام قابل ویرایش نبود (مثلاً خیلی قدیمی بود)، به‌صورت پشتیبان پیام جدید ارسال می‌شود.
+        account = await asyncio.to_thread(_db_get_user, un)
+        if not account:
+            return await query.message.reply_text("❌ این حساب دیگر وجود ندارد.")
+        if not _can_manage_user(role, ag_id, account[5]):
+            return await query.message.reply_text("⛔️ شما مجاز به مشاهده این اکانت نیستید.")
+        host, port, _mode = await _ssh_endpoint_info(account[6], account[7])
+        link = await _build_napsternet_link(host, port, un, account[0], account[7] or 'direct')
+        text_callback = f"uact_nitxtinv_{un}" if from_invoice else f"uact_nitxt_{un}"
+        text_button = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔗 نمایش لینک متنی", callback_data=text_callback)]
+        ])
         try:
-            await query.edit_message_text(out, parse_mode="HTML", reply_markup=back_kb)
+            qr_image = await asyncio.to_thread(napsternet_qr_png, link)
+            await context.bot.send_photo(
+                chat_id=query.message.chat_id,
+                photo=qr_image,
+                caption=(
+                    f"📱 <b>QR اتصال SSH</b>\n👤 <code>{esc(un)}</code>\n\n"
+                    "با NapsternetV اسکن کنید. برای دریافت لینک کامل به‌شکل متن، دکمه زیر را بزنید."
+                ),
+                parse_mode="HTML",
+                reply_markup=text_button,
+            )
         except Exception:
-            await query.message.reply_text(out, parse_mode="HTML", reply_markup=back_kb)
+            log.exception("SSH QR delivery failed for account %s", un)
+            await query.message.reply_text(
+                "⚠️ نمایش QR ممکن نشد. لینک متنی همچنان در دسترس است.",
+                reply_markup=text_button,
+            )
+
+    elif d.startswith("uact_nitxt_") or d.startswith("uact_nitxtinv_"):
+        from_invoice = d.startswith("uact_nitxtinv_")
+        un = d.split("_", 2)[2]
+        account = await asyncio.to_thread(_db_get_user, un)
+        if not account:
+            return await query.message.reply_text("❌ این حساب دیگر وجود ندارد.")
+        if not _can_manage_user(role, ag_id, account[5]):
+            return await query.message.reply_text("⛔️ شما مجاز به مشاهده این اکانت نیستید.")
+        host, port, _mode = await _ssh_endpoint_info(account[6], account[7])
+        link = await _build_napsternet_link(host, port, un, account[0], account[7] or 'direct')
+        back_callback = f"uact_invview_{un}" if from_invoice else f"udet_{un}"
+        await query.message.reply_text(
+            "🔗 <b>لینک کامل اتصال SSH</b>\n\n"
+            f"<code>{esc(link)}</code>\n\n"
+            "برای کپی دستی، متن لینک را انتخاب و کپی کنید.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📱 نمایش QR اتصال", callback_data=(
+                    f"uact_niinv_{un}" if from_invoice else f"uact_ni_{un}"
+                ))],
+                [InlineKeyboardButton("↩️ اطلاعات حساب", callback_data=back_callback)],
+            ]),
+        )
 
     # 🆕 «بازگشت» از کد نپسترنتِ یک فاکتورِ تازه‌ساخته‌شده — همان فاکتور را از روی دیتابیس فعلی
     # دوباره می‌سازد و دقیقاً با همان دکمهٔ نپسترنتِ نوع «فاکتور» (نه نوع «پنل مدیریت») نمایش می‌دهد.
@@ -27210,7 +27286,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not _can_manage_user(role, ag_id, r[5]): return await query.message.reply_text("⛔️ شما مجاز به مشاهده این اکانت نیستید.")
         out = await _build_invoice_text(un)
         if out is None: return await query.edit_message_text("❌ این کاربر دیگر وجود ندارد.")
-        inv_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 دریافت کد نپسترنت (قابل کپی)", callback_data=f"uact_niinv_{un}")]])
+        inv_kb = await _ssh_invoice_markup(un)
         await query.edit_message_text(out, reply_markup=inv_kb, parse_mode="HTML")
 
     # 🧾 ارسال مجدد فاکتور کامل — همیشه در دسترس، چون از روی دیتابیس فعلی ساخته می‌شود.
@@ -27226,7 +27302,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not _can_manage_user(role, ag_id, r[5]): return await query.message.reply_text("⛔️ شما مجاز به مشاهده این اکانت نیستید.")
         inv = await _build_invoice_text(un)
         if inv is None: return await query.edit_message_text("❌ این کاربر دیگر وجود ندارد.")
-        back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data=f"udet_{un}")]])
+        back_kb = await _ssh_invoice_markup(un, back_callback=f"udet_{un}")
         try:
             await query.edit_message_text(inv, parse_mode="HTML", reply_markup=back_kb)
         except Exception:

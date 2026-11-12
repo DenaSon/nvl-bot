@@ -215,6 +215,90 @@ def render_report(summary, *, previous=None, label=None, preview=False):
     return "\n".join(rows).replace("\n\n\n", "\n\n")
 
 
+def _rich_table(rows):
+    """Telegram Bot API 10.3 compact two-column InputRichBlockTable."""
+    return {
+        "type": "table", "is_compact": True,
+        "cells": [
+            [
+                {"text": str(label)},
+                {"text": {"type": "bold", "text": str(value)}},
+            ]
+            for label, value in rows
+        ],
+    }
+
+
+def render_rich_report(summary, *, previous=None, label=None, preview=False):
+    """Compact RTL Rich Message, shared by private preview and scheduled digest.
+
+    Only renders a precomputed summary; no database access or financial mutation.
+    Critical partial-day warning is outside the collapsed details block.
+    """
+    counts, totals = summary["counts"], summary["totals"]
+    day = str(label or summary["day"])
+    period = "امروز تا این لحظه" if preview else "روز بسته‌شده"
+    overview = [
+        ("👥 نماینده خریدار", f"{summary['buyers']:,} نفر"),
+        ("🆕 نماینده جدید", f"{counts['AGENT_CREATED']:,} نفر"),
+        ("🛒 خرید و تمدید", f"{counts['PURCHASE']:,} مورد"),
+        ("💳 شارژ کیف پول", f"{_money(summary['wallet_topups'])} تومان"),
+        ("📦 خالص مصرف اعتبار", f"{_money(summary['net_purchases'])} تومان"),
+        ("🏦 ورودی بانکی مرکزی", f"{_money(summary['central_bank'])} تومان"),
+    ]
+    details = [
+        ("نماینده شارژکننده", f"{summary['topuppers']:,} نفر"),
+        ("مبلغ ناخالص خرید", f"{_money(totals['PURCHASE'])} تومان"),
+        ("بازگشت اعتبار خرید", f"{_money(totals['PURCHASE_REFUND'])} تومان"),
+        ("واریز بانکی تأییدشده", f"{_money(totals['BANK_TOPUP'])} تومان"),
+        ("شارژ دستی مدیر", f"{_money(totals['MANUAL_TOPUP'])} تومان"),
+        ("واریز به کارت نمایندگان", f"{_money(summary['partner_bank'])} تومان"),
+    ]
+    blocks = [
+        {"type": "heading", "size": 3, "text": "📊 NVL | گزارش مالی روزانه"},
+        {"type": "paragraph", "text": f"📅 {day} · {period} · تهران"},
+    ]
+    if summary["partial"]:
+        blocks.append({
+            "type": "paragraph",
+            "text": "⚠️ داده‌های ناقص: ثبت رویدادها از میانه این روز شروع شده است.",
+        })
+    blocks.append(_rich_table(overview))
+    if previous is not None and not preview and not summary["partial"] and not previous["partial"]:
+        last = previous["net_purchases"]
+        delta = summary["net_purchases"] - last
+        direction = "⬆️" if delta > 0 else ("⬇️" if delta < 0 else "➡️")
+        percent = (
+            f"{abs(delta / last * 100):.1f}٪"
+            if last != 0 else ("جدید" if delta else "بدون تغییر")
+        )
+        blocks.append({
+            "type": "paragraph",
+            "text": f"📈 خالص خرید نسبت به دیروز: {direction} {percent}",
+        })
+    blocks.append({
+        "type": "details",
+        "summary": "🔎 جزئیات مالی و توضیحات",
+        "blocks": [
+            _rich_table(details),
+            {
+                "type": "paragraph",
+                "text": (
+                    "واریز به کارت نمایندگان، ورودی حساب مرکزی نیست. "
+                    "شارژ دستی الزاماً دریافت وجه نقدی نیست. "
+                    "خرید با کیف پول دوباره ورودی نقدی حساب نمی‌شود. "
+                    "فروش مستقیم مدیر بدون ثبت دریافت وجه منظور نشده است."
+                ),
+            },
+        ],
+    })
+    blocks.append({
+        "type": "footer",
+        "text": "مبالغ به تومان · گزارش روزانه بر اساس رویدادهای ثبت‌شده",
+    })
+    return {"blocks": blocks, "is_rtl": True, "skip_entity_detection": True}
+
+
 def claim_due_day(conn, *, now=None, send_time="00:05", max_backlog=7):
     """Claim oldest unsent closed calendar day. INTENT means no auto resend."""
     clock = _utc(now)

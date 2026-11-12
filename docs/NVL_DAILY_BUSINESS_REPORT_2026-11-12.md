@@ -83,6 +83,34 @@ Super-admin-only private read-only commands:
 
 The manual commands do not write a delivery claim or post to the group.
 
+## Rich Telegram presentation (Bot API 10.3)
+
+Both the automatic group delivery and the authorized private commands now use
+the **same** `render_rich_report()` layout through the existing
+`cloudzy_rich_transport.RichBotAPI.send()` adapter and the Telegram
+`sendRichMessage` method. No additional token, bot, process or dependency.
+
+- Right-to-left compact, two-column **native** RichBlockTable (`is_compact=true`)
+  shows six overview KPIs: unique buyers, new resellers, purchase count, wallet
+  credits, net wallet consumption, central-account bank receipts.
+- A collapsed native **RichBlockDetails** holds bank/partner/manual breakdown,
+  gross sales, refunds, and finance caveats.
+- **Partial coverage warning stays visible** outside the Details; the daily
+  comparison appears only when both calendar days are complete.
+- Transport receipt is the returned `message_id`, stored using the existing
+  daily outbox state machine (`SENT` or `UNCERTAIN`). Uncertain deliveries are
+  held rather than automatically resent.
+- The `/daily_business_report today|yesterday` private commands also deliver
+  Rich messages and keep their existing superadmin permission checks; groups
+  remain silent when users submit these commands.
+- The previous `render_report()` HTML renderer is retained only for internal
+  compatibility; no production daily report delivery calls it.
+
+**Production validation:** after releasing both the main bot and
+`nvl_daily_business.py`, issue `/daily_business_report today` privately and
+confirm that the table and expand/collapse control appear. The automated
+report keeps the existing 00:05 Tehran schedule and group ID.
+
 ## Deploy to Core
 
 1. Deploy **both** `bot_final_v49-2.py` and `nvl_daily_business.py` from the

@@ -159,7 +159,21 @@ def prepare_delivery(
     cutoff = now - timedelta(minutes=max(1, int(cooldown_minutes)))
     sent = []
     suppressed = []
-    events = obs.pending_notifications(conn, limit=max(1, int(outbox_limit)))
+    # Exclude already suppressed rows BEFORE LIMIT, avoiding outbox starvation.
+    rows = conn.execute(
+        """SELECT event_id, asset_key, asset_type, asset_name, address,
+                  previous_state, current_state, transition_kind,
+                  filter_reason, created_at, evidence_json
+           FROM marzban_monitor_events e
+           WHERE notified_at IS NULL AND transition_kind != 'DEGRADED'
+             AND COALESCE(previous_state, '') != 'UNKNOWN'
+             AND NOT EXISTS (
+                 SELECT 1 FROM marzban_alert_suppressed s WHERE s.event_id=e.event_id
+             )
+           ORDER BY event_id LIMIT ?""",
+        (max(1, int(outbox_limit)),),
+    ).fetchall()
+    events = tuple(obs._row_to_event(row) for row in rows)
     for event in events:
         if conn.execute(
             "SELECT 1 FROM marzban_alert_suppressed WHERE event_id=?",

@@ -106,13 +106,16 @@ def observe_regional_scan(conn, states: Sequence[regional.AssetRegionalState]) -
         )
 
 
-def _has_notified_warning(conn, asset_key: str) -> bool:
-    return conn.execute(
-        """SELECT 1 FROM marzban_monitor_events
-           WHERE asset_key=? AND transition_kind='WARNING'
-             AND notified_at IS NOT NULL LIMIT 1""",
-        (asset_key,),
-    ).fetchone() is not None
+def _has_notified_warning(conn, recovery: obs.MonitorEvent) -> bool:
+    # Require the warning from THIS incident to have been delivered. An older
+    # warning must not turn a new, unannounced transient into recovery spam.
+    row = conn.execute(
+        """SELECT notified_at FROM marzban_monitor_events
+           WHERE asset_key=? AND transition_kind='WARNING' AND event_id<?
+           ORDER BY event_id DESC LIMIT 1""",
+        (recovery.asset_key, recovery.event_id),
+    ).fetchone()
+    return bool(row and row[0])
 
 
 def _within_cooldown(conn, event: obs.MonitorEvent, cutoff: datetime) -> bool:
@@ -211,7 +214,7 @@ def prepare_delivery(
                 suppressed.append((event.event_id, "STALE_RECOVERY"))
                 continue
             if (event.previous_state != REGIONAL_STATE_LIKELY
-                    and not _has_notified_warning(conn, event.asset_key)):
+                    and not _has_notified_warning(conn, event)):
                 suppressed.append((event.event_id, "UNANNOUNCED_WARNING_RECOVERY"))
                 continue
 

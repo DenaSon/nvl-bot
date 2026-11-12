@@ -116,6 +116,7 @@ import marzban_local_health
 import marzban_regional_filtering as marzban_regional
 import marzban_observability
 import marzban_alerting
+import nvl_daily_business
 import secrets
 from nvl_superadmin_access import (
     active_superadmin_ids, is_private_superadmin, is_revoked_principal,
@@ -1430,6 +1431,7 @@ def init_db():
         marzban_regional.install_schema(conn)
         marzban_observability.install_schema(conn)
         marzban_alerting.install_schema(conn)
+        nvl_daily_business.install_schema(conn)
         # ---------------------------------------------------------
         
 
@@ -5263,6 +5265,9 @@ def _db_admin_topup_agent(aid, amount):
     with db_conn() as conn:
         conn.execute("UPDATE agents SET balance = balance + ? WHERE id=?", (amount, aid))
         _apply_emergency_repayment(conn, aid, amount)
+        nvl_daily_business.record_event(
+            conn, kind="MANUAL_TOPUP", agent_id=aid, amount=amount,
+        )
         r = conn.execute("SELECT name FROM agents WHERE id=?", (aid,)).fetchone()
         agent_name = r[0] if r else str(aid)
     
@@ -5446,10 +5451,7 @@ async def _delete_marzban_user_consistent(username: str):
         try:
             with db_conn() as conn:
                 if owner_agent_id and refund > 0:
-                    conn.execute(
-                        "UPDATE agents SET balance = balance + ? WHERE id=?",
-                        (refund, owner_agent_id),
-                    )
+                    nvl_daily_business.refund_purchase(conn, owner_agent_id, refund)
                     used_row = conn.execute(
                         "SELECT emergency_used FROM agents WHERE id=?",
                         (owner_agent_id,),
@@ -5531,11 +5533,19 @@ def _db_find_agent_by_ref(ref):
     with db_conn() as conn: res = conn.execute("SELECT id FROM agents WHERE referral_code=?", (ref,)).fetchone(); return res[0] if res else 0
 def _db_create_agent(u, p, n, pid):
     ref = "REF-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
-    with db_conn() as conn:
-        try:
-            conn.execute("INSERT INTO agents (username, password, name, referral_code, parent_id) VALUES (?,?,?,?,?)", (u, hash_password(p), n, ref, pid))
-            return True, ref
-        except: return False, None
+    try:
+        with db_conn() as conn:
+            cursor = conn.execute(
+                "INSERT INTO agents (username, password, name, referral_code, parent_id) VALUES (?,?,?,?,?)",
+                (u, hash_password(p), n, ref, pid),
+            )
+            nvl_daily_business.record_event(
+                conn, kind="AGENT_CREATED", agent_id=cursor.lastrowid,
+                source_key=f"agent:{cursor.lastrowid}",
+            )
+        return True, ref
+    except sqlite3.IntegrityError:
+        return False, None
 def _db_update_agent_field(aid, field, v):
     if field not in _ALLOWED_AGENT_FIELDS: raise ValueError("فیلد غیرمجاز")
     with db_conn() as conn: conn.execute(f"UPDATE agents SET {field}=? WHERE id=?", (v, aid))
@@ -11581,7 +11591,7 @@ async def _apply_user_limit_increase(context, role, ag_id, un, new_limit, emerge
         await _sync_user_limit_file(un, new_limit)  # 🆕 فایل سقف اتصال PAM هم‌زمان با تغییر عدد به‌روز می‌شود
 
         if role == 'agent':
-            with db_conn() as conn: conn.execute("UPDATE agents SET balance = balance - ? WHERE id=?", (cost, ag_id_local))
+            with db_conn() as conn: nvl_daily_business.charge_purchase(conn, ag_id_local, cost)
             await asyncio.to_thread(_db_distribute_commission, ag_id_local, retail_dec)
             # 🎁 کش‌بک ترغیبی نمایندگان پرفروش (۵۰+ اکانت فعال): ۷٪ از هزینهٔ همین افزایش کاربر
             await _apply_agent_cashback_if_eligible(ag_id_local, retail_dec)
@@ -11635,7 +11645,7 @@ async def _apply_user_limit_decrease(context, role, ag_id, un, new_limit):
         if role == 'agent':
             emergency_repaid = 0.0
             with db_conn() as conn:
-                conn.execute("UPDATE agents SET balance = balance + ? WHERE id=?", (refund, ag_id))
+                nvl_daily_business.refund_purchase(conn, ag_id, refund)
                 if refund > 0:
                     used_before_row = conn.execute("SELECT emergency_used FROM agents WHERE id=?", (ag_id,)).fetchone()
                     used_before = (used_before_row[0] or 0.0) if used_before_row else 0.0
@@ -11827,7 +11837,7 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
             # گام ۵: کسر هزینهٔ همین اکانت از کیف‌پول نماینده و توزیع کمیسیون (خطای احتمالی اینجا اکانت را باطل نمی‌کند)
             if role == 'agent':
                 try:
-                    with db_conn() as conn: conn.execute("UPDATE agents SET balance = balance - ? WHERE id=?", (cost_per, ag_id))
+                    with db_conn() as conn: nvl_daily_business.charge_purchase(conn, ag_id, cost_per)
                     await asyncio.to_thread(_db_distribute_commission, ag_id, retail_per_dec)
                     # 🎁 کش‌بک ترغیبی نمایندگان پرفروش (۵۰+ اکانت فعال): ۷٪ از هزینهٔ همین اکانت
                     await _apply_agent_cashback_if_eligible(ag_id, retail_per_dec)
@@ -22018,11 +22028,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d.startswith("c2c_acc_"):
         parts = d.split("_"); receipt_id, aid, amt = int(parts[2]), int(parts[3]), float(parts[4])
         with db_conn() as conn:
-            status = conn.execute("SELECT status FROM receipts WHERE id=?", (receipt_id,)).fetchone()
-            if status and status[0] == 'pending':
+            receipt = conn.execute(
+                "SELECT agent_id, amount, status, card_owner_agent_id FROM receipts WHERE id=?",
+                (receipt_id,),
+            ).fetchone()
+            if (receipt and receipt[2] == 'pending'
+                    and receipt[0] == aid and abs(float(receipt[1]) - amt) < 0.01):
                 conn.execute("UPDATE agents SET balance = balance + ? WHERE id=?", (amt, aid))
                 _apply_emergency_repayment(conn, aid, amt)
                 conn.execute("UPDATE receipts SET status='approved' WHERE id=?", (receipt_id,))
+                nvl_daily_business.record_event(
+                    conn, kind="BANK_TOPUP", agent_id=aid, amount=amt,
+                    card_owner_agent_id=receipt[3],
+                    source_key=f"receipt:{receipt_id}",
+                )
                 
                 # ثبت در دیتابیس حسابداری
                 ag_name_row = conn.execute("SELECT name FROM agents WHERE id=?", (aid,)).fetchone()
@@ -22280,7 +22299,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if role == 'agent':
                 if mode == 'extend':
-                    with db_conn() as conn: conn.execute("UPDATE agents SET balance = balance - ? WHERE id=?", (cost, ag_id))
+                    with db_conn() as conn: nvl_daily_business.charge_purchase(conn, ag_id, cost)
                     await asyncio.to_thread(_db_distribute_commission, ag_id, retail_dec)
                     await _apply_agent_cashback_if_eligible(ag_id, retail_dec)
                     emergency_shortfall = max(0.0, cost - ainf[2])
@@ -22290,7 +22309,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             await _notify_admins(context.application, f"🆘 نمایندهٔ «{esc(ainf[0])}» برای تمدید V2Ray <code>{esc(un)}</code> مبلغ {int(emergency_shortfall):,} تومان از شارژ اضطراری استفاده کرد.")
                 else:
                     # کاهش تمدید: بازگرداندن پول به نماینده
-                    with db_conn() as conn: conn.execute("UPDATE agents SET balance = balance + ? WHERE id=?", (cost, ag_id))
+                    with db_conn() as conn: nvl_daily_business.refund_purchase(conn, ag_id, cost)
 
             action_str = f"{days} روز تمدید" if mode == 'extend' else f"{days} روز کسر"
             await query.answer(f"✅ {action_str} با موفقیت انجام شد!")
@@ -22421,7 +22440,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
             if role == 'agent':
                 try:
-                    with db_conn() as conn: conn.execute("UPDATE agents SET balance = balance - ? WHERE id=?", (cost, ag_id))
+                    with db_conn() as conn: nvl_daily_business.charge_purchase(conn, ag_id, cost)
                     await asyncio.to_thread(_db_distribute_commission, ag_id, retail_dec)
                     await _apply_agent_cashback_if_eligible(ag_id, retail_dec)
                     emergency_shortfall = max(0.0, cost - ainf[2])
@@ -24346,7 +24365,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if role == 'agent':
                     with contextlib.suppress(Exception): await asyncio.to_thread(_db_increment_lifetime_sold, ag_id)
                     try:
-                        with db_conn() as conn: conn.execute("UPDATE agents SET balance = balance - ? WHERE id=?", (cost, ag_id))
+                        with db_conn() as conn: nvl_daily_business.charge_purchase(conn, ag_id, cost)
                         await asyncio.to_thread(_db_distribute_commission, ag_id, retail_dec)
                         await _apply_agent_cashback_if_eligible(ag_id, retail_dec)
                         emergency_shortfall = max(0.0, cost - ainf[2])
@@ -24540,7 +24559,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if role == 'agent':
                     with contextlib.suppress(Exception): await asyncio.to_thread(_db_increment_lifetime_sold, ag_id)
                     try:
-                        with db_conn() as conn: conn.execute("UPDATE agents SET balance = balance - ? WHERE id=?", (cost, ag_id))
+                        with db_conn() as conn: nvl_daily_business.charge_purchase(conn, ag_id, cost)
                         await asyncio.to_thread(_db_distribute_commission, ag_id, retail_dec)
                         await _apply_agent_cashback_if_eligible(ag_id, retail_dec)
                         emergency_shortfall = max(0.0, cost - ainf[2])
@@ -24860,7 +24879,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # گام ۵: کسر هزینه از کیف پول نماینده و توزیع پورسانت لایه‌ای (خطای احتمالی اینجا اکانت را باطل نمی‌کند)
             if role == 'agent':
                 try:
-                    with db_conn() as conn: conn.execute("UPDATE agents SET balance = balance - ? WHERE id=?", (cost, ag_id))
+                    with db_conn() as conn: nvl_daily_business.charge_purchase(conn, ag_id, cost)
                     await asyncio.to_thread(_db_distribute_commission, ag_id, retail_dec)
                     # 🎁 کش‌بک ترغیبی نمایندگان پرفروش (۵۰+ اکانت فعال): ۷٪ از هزینهٔ همین خرید
                     await _apply_agent_cashback_if_eligible(ag_id, retail_dec)
@@ -24951,7 +24970,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 refund, refund_desc = await _calc_account_refund(un)
                 if refund > 0:
                     with db_conn() as conn:
-                        conn.execute("UPDATE agents SET balance = balance + ? WHERE id=?", (refund, owner_agent_id))
+                        nvl_daily_business.refund_purchase(conn, owner_agent_id, refund)
                         used_before_row = conn.execute("SELECT emergency_used FROM agents WHERE id=?", (owner_agent_id,)).fetchone()
                         used_before = (used_before_row[0] or 0.0) if used_before_row else 0.0
                         _apply_emergency_repayment(conn, owner_agent_id, refund)
@@ -27633,7 +27652,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if role == 'agent':
                 if mode == 'extend':
-                    with db_conn() as conn: conn.execute("UPDATE agents SET balance = balance - ? WHERE id=?", (cost, ag_id))
+                    with db_conn() as conn: nvl_daily_business.charge_purchase(conn, ag_id, cost)
                     await asyncio.to_thread(_db_distribute_commission, ag_id, retail_dec)
                     # 🎁 کش‌بک ترغیبی نمایندگان پرفروش (۵۰+ اکانت فعال): ۷٪ از هزینهٔ همین تمدید
                     await _apply_agent_cashback_if_eligible(ag_id, retail_dec)
@@ -27648,7 +27667,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     # 💰 در حالت کاهش، مبلغ متناظر با روزهای کم‌شده به موجودی نماینده بازگردانده می‌شود
                     # (بدون دست‌کاری کمیسیون زیرمجموعه‌ها که قبلاً هنگام تمدید اشتباه پرداخت شده بود).
-                    with db_conn() as conn: conn.execute("UPDATE agents SET balance = balance + ? WHERE id=?", (cost, ag_id))
+                    with db_conn() as conn: nvl_daily_business.refund_purchase(conn, ag_id, cost)
 
             # 🆕 طبق درخواست: به‌جای یک پیام کوتاهِ «با موفقیت تمدید شد»، همان فاکتور/پنل کامل
             # اکانت (شبیه صفحهٔ جزئیات اکانت) نمایش داده می‌شود تا اطلاعات کامل (مالک، تعداد
@@ -31561,6 +31580,97 @@ async def cmd_marzban_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE
     await _render_marzban_monitor_panel(update.effective_message)
 
 
+
+
+async def _daily_business_report_loop(app):
+    """Once-per-day closed Tehran report, durable at-most-once group delivery."""
+    while True:
+        try:
+            group_id = int(os.environ.get("NVL_DAILY_FINANCE_REPORT_CHAT_ID", "0"))
+            if group_id >= 0:
+                raise ValueError("daily business report requires a negative group chat id")
+            send_time = os.environ.get("NVL_DAILY_FINANCE_REPORT_TIME", "00:05")
+            if os.environ.get("NVL_DAILY_FINANCE_REPORT_TZ", "Asia/Tehran") != "Asia/Tehran":
+                raise ValueError("daily report timezone must be Asia/Tehran")
+
+            def _claim_and_render():
+                with db_conn() as conn:
+                    day = nvl_daily_business.claim_due_day(
+                        conn, send_time=send_time,
+                    )
+                    if day is None:
+                        return None, None
+                    report = nvl_daily_business.summarize(conn, day)
+                    yesterday = (
+                        datetime.strptime(day, "%Y-%m-%d") - timedelta(days=1)
+                    ).strftime("%Y-%m-%d")
+                    previous = nvl_daily_business.summarize(conn, yesterday)
+                    label = fmt_jalali_date_only(datetime.strptime(day, "%Y-%m-%d"))
+                    return day, nvl_daily_business.render_report(
+                        report, previous=previous, label=label,
+                    )
+
+            day, message = await asyncio.to_thread(_claim_and_render)
+            if day is not None:
+                try:
+                    receipt = await app.bot.send_message(
+                        chat_id=group_id, text=message, parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
+                except Exception as exc:
+                    # An ambiguous Telegram timeout can mean the message arrived.
+                    # Hold the claim for manual reconciliation, never auto-resend.
+                    with db_conn() as conn:
+                        nvl_daily_business.finish_delivery(
+                            conn, day, error_kind=type(exc).__name__,
+                        )
+                    log.exception("NVL_DAILY_BUSINESS_REPORT UNCERTAIN day=%s", day)
+                else:
+                    with db_conn() as conn:
+                        nvl_daily_business.finish_delivery(
+                            conn, day, message_id=receipt.message_id,
+                        )
+                    log.info("NVL_DAILY_BUSINESS_REPORT SENT day=%s message_id=%s",
+                             day, receipt.message_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("NVL_DAILY_BUSINESS_REPORT check failed")
+        await asyncio.sleep(60)
+
+
+async def cmd_daily_business_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Read-only finance preview, restricted to current superadmins in private."""
+    chat = update.effective_chat
+    user = update.effective_user
+    authorized = await asyncio.to_thread(active_superadmin_ids, DB_PATH)
+    if (chat is None or chat.type != "private"
+            or user is None or user.id not in set(authorized)):
+        if update.effective_message:
+            await update.effective_message.reply_text("⛔️ فقط سوپراَدمین مجاز است.")
+        return
+    arg = context.args[0].lower() if context.args else "today"
+    if arg not in ("today", "yesterday"):
+        await update.effective_message.reply_text(
+            "استفاده: /daily_business_report today یا yesterday"
+        )
+        return
+    today = datetime.now(IRAN_TZ).date()
+    day = (today if arg == "today" else today - timedelta(days=1)).isoformat()
+    def _read():
+        with db_conn() as conn:
+            result = nvl_daily_business.summarize(
+                conn, day, now=datetime.now(timezone.utc) if arg == "today" else None
+            )
+            label = fmt_jalali_date_only(datetime.strptime(day, "%Y-%m-%d"))
+            return nvl_daily_business.render_report(
+                result, label=label, preview=arg == "today",
+            )
+    text = await asyncio.to_thread(_read)
+    await update.effective_message.reply_text(
+        text, parse_mode="HTML", disable_web_page_preview=True,
+    )
+
 async def _post_init(app):
     if globals().get("_DP3_ENABLED", False):
         # No new poller or systemd unit. Opt-in only AFTER hardware/Core E2E.
@@ -31609,6 +31719,8 @@ async def _post_init(app):
     app.bot_data['marzban_regional_task'] = asyncio.create_task(_marzban_regional_filter_loop(app))
     app.bot_data['udpgw_health_task'] = asyncio.create_task(_udpgw_health_loop(app))
     app.bot_data['daily_sales_report_task'] = asyncio.create_task(_daily_sales_report_loop(app))
+    if os.environ.get('NVL_DAILY_FINANCE_REPORT_ENABLED', '0') == '1':
+        app.bot_data['daily_business_report_task'] = asyncio.create_task(_daily_business_report_loop(app))
     app.bot_data['filter_detect_task'] = asyncio.create_task(_filter_detect_loop(app))  # 🆕 V89
     app.bot_data['weekly_accounting_task'] = asyncio.create_task(_weekly_accounting_report_loop(app))
 
@@ -31623,7 +31735,7 @@ async def _post_shutdown(app):
     # قلم افتاده بود — پس هیچ‌وقت cancel نمی‌شد و روی asyncio.sleep(...) منتظر می‌ماند، پروسه
     # واقعاً خارج نمی‌شد تا systemd صبرش تمام شود و به‌زور بکشدش (که همان قطعیِ طولانی و نیازِ
     # نماینده‌ها به ورودِ مجدد را رقم می‌زد).
-    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 V119A Regional Filter Monitor'), ('radar_monitor_task', '🌐 Cloudflare Radar Network Context'), ('fast_default_sentinel_task', '⚡ V119A Fast Default Sentinel'), ('standby_readiness_task', '🛟 V119C Warm Standby Watchdog'), ('marzban_asset_discovery_task', '🧭 V120A Marzban Asset Discovery'), ('marzban_local_health_task', '🩺 V120B Marzban Local Health'), ('marzban_regional_task', '🌍 V120C Marzban Regional Filtering'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار'), ('dp3_monitor_task', '📡 DenaProbe R3')):
+    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 V119A Regional Filter Monitor'), ('radar_monitor_task', '🌐 Cloudflare Radar Network Context'), ('fast_default_sentinel_task', '⚡ V119A Fast Default Sentinel'), ('standby_readiness_task', '🛟 V119C Warm Standby Watchdog'), ('marzban_asset_discovery_task', '🧭 V120A Marzban Asset Discovery'), ('marzban_local_health_task', '🩺 V120B Marzban Local Health'), ('marzban_regional_task', '🌍 V120C Marzban Regional Filtering'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('daily_business_report_task', '📊 گزارش روزانه کسب‌وکار'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار'), ('dp3_monitor_task', '📡 DenaProbe R3')):
         task = app.bot_data.get(key)
         if task and not task.done():
             task.cancel()
@@ -31667,6 +31779,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("marzban_monitor", cmd_marzban_monitor))
+    app.add_handler(CommandHandler("daily_business_report", cmd_daily_business_report))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))

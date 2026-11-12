@@ -43,7 +43,7 @@ jobs:
           cache-dependency-path: .github/workflows/python-checks.yml
 
       - name: Install test dependencies
-        run: python -m pip install --disable-pip-version-check aiohttp qrcode
+        run: python -m pip install --disable-pip-version-check aiohttp qrcode pillow==12.3.0 python-telegram-bot==22.8
 
       - name: Compile changed Python modules
         run: |
@@ -80,7 +80,7 @@ jobs:
           cache-dependency-path: .github/workflows/python-checks.yml
 
       - name: Install test dependencies
-        run: python -m pip install --disable-pip-version-check aiohttp qrcode
+        run: python -m pip install --disable-pip-version-check aiohttp qrcode pillow==12.3.0 python-telegram-bot==22.8
 
       - name: Select matching privileged safety tests
         run: |

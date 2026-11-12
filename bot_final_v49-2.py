@@ -31642,10 +31642,13 @@ async def _daily_business_report_loop(app):
 async def cmd_daily_business_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Read-only finance preview, restricted to current superadmins in private."""
     chat = update.effective_chat
+    # Group chats are notification destinations, not interactive finance panels.
+    # Ignore every invocation silently, including those from superadmins.
+    if chat is None or chat.type != "private":
+        return
     user = update.effective_user
     authorized = await asyncio.to_thread(active_superadmin_ids, DB_PATH)
-    if (chat is None or chat.type != "private"
-            or user is None or user.id not in set(authorized)):
+    if user is None or user.id not in set(authorized):
         if update.effective_message:
             await update.effective_message.reply_text("⛔️ فقط سوپراَدمین مجاز است.")
         return

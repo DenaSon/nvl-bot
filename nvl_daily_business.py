@@ -212,7 +212,7 @@ def render_report(summary, *, previous=None, label=None, preview=False):
             )
             rows.extend(["", f"📈 تغییر خالص خرید نسبت به دیروز: {direction} {percent}"])
     rows.extend(["", "ℹ️ مبالغ فروش مستقیم مدیر بدون ثبت دریافت وجه، در گردش کیف پول نمایندگان منظور نشده‌اند."])
-    return "\n".join(line for line in rows if line is not None and line != partial.rstrip() or line)
+    return "\n".join(rows).replace("\n\n\n", "\n\n")
 
 
 def claim_due_day(conn, *, now=None, send_time="00:05", max_backlog=7):

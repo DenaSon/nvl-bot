@@ -66,10 +66,13 @@ class Phase6APortHealthSeparationTests(unittest.TestCase):
             "_db_get_host_service_port, dns_target.strip() or host, port",
             self.source,
         )
+        # SSH invoices now share the same endpoint selector with account details.
         self.assertIn(
-            "_db_get_host_service_port, dns_target.strip() or primary_host, prt",
+            "_db_get_host_service_port, dns_target or host, fallback_port",
             self.source,
         )
+        self.assertIn("async def _ssh_endpoint_info(", self.source)
+        self.assertIn("_ssh_endpoint_info(acc_host, acc_conn_mode)", self.source)
 
     def test_management_paths_use_admin_port(self):
         for fragment in (

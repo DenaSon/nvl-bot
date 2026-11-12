@@ -86,13 +86,17 @@ class V120D1MonitoringUITests(unittest.TestCase):
             region,
         )
 
-    def test_blocked_alert_recipient_is_expected_warning(self):
+    def test_marzban_alerts_are_group_only_with_no_private_fallback(self):
         region = self._region(
             "async def _deliver_marzban_monitor_alerts",
             "async def _marzban_regional_filter_loop",
         )
-        self.assertIn("bot was blocked by the user", region)
-        self.assertIn("reason=BOT_BLOCKED", region)
+        self.assertIn("MARZBAN_ALERT_CHAT_ID", region)
+        self.assertIn("if chat_id >= 0:", region)
+        self.assertIn("chat_id=chat_id", region)
+        self.assertIn("no private fallback", region)
+        self.assertNotIn("bot was blocked by the user", region)
+        self.assertNotIn("_db_get_admin_chat_ids", region)
 
     def test_release_marker(self):
         self.assertIn(

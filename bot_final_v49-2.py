@@ -115,6 +115,7 @@ import marzban_asset_discovery
 import marzban_local_health
 import marzban_regional_filtering as marzban_regional
 import marzban_observability
+import marzban_alerting
 import secrets
 from nvl_superadmin_access import (
     active_superadmin_ids, is_private_superadmin, is_revoked_principal,
@@ -1074,6 +1075,11 @@ MARZBAN_REGIONAL_BACKOFF_BASE_SECONDS = _phase6c_env_int("NVL_MARZBAN_REGIONAL_B
 MARZBAN_REGIONAL_BACKOFF_MAX_SECONDS = _phase6c_env_int("NVL_MARZBAN_REGIONAL_BACKOFF_MAX", 3600)
 MARZBAN_REGIONAL_ERROR_BACKOFF_SECONDS = _phase6c_env_int("NVL_MARZBAN_REGIONAL_ERROR_BACKOFF", 300)
 
+# Telegram delivery ONLY for Marzban Infrastructure Alert; never admin DMs.
+# A group chat id is configured in the Core's service environment (not Git).
+MARZBAN_ALERT_CONFIRM_SCANS = _phase6c_env_int("MARZBAN_ALERT_CONFIRM_SCANS", 3, minimum=1, maximum=10)
+MARZBAN_ALERT_COOLDOWN_MINUTES = _phase6c_env_int("MARZBAN_ALERT_COOLDOWN_MINUTES", 60, minimum=1, maximum=1440)
+
 # ==========================================
 # 🆕 V89 — سیستم شناسایی خودکار فیلتر شدن بر اساس کاربران آنلاین
 # ==========================================
@@ -1423,6 +1429,7 @@ def init_db():
         marzban_local_health.install_schema(conn)
         marzban_regional.install_schema(conn)
         marzban_observability.install_schema(conn)
+        marzban_alerting.install_schema(conn)
         # ---------------------------------------------------------
         
 
@@ -7022,6 +7029,8 @@ async def _marzban_regional_filter_tick(app):
                 states,
                 health_map,
             )
+            # Count independent, fresh Check-Host revisions for POSSIBLE alerts.
+            marzban_alerting.observe_regional_scan(conn, states)
             marzban_regional.persist_asset_states(conn, states)
             runtime = marzban_regional.get_runtime(conn)
             return states, runtime
@@ -7045,38 +7054,46 @@ async def _marzban_regional_filter_tick(app):
 
 
 async def _deliver_marzban_monitor_alerts(app):
-    """Deliver transition outbox once; repeated identical states stay silent."""
+    """Deliver ONLY to the configured Telegram group; no private-admin fallback."""
+    if os.environ.get("MARZBAN_ALERT_ENABLED", "1").strip() != "1":
+        return {"pending": 0, "delivered": 0, "disabled": True}
+
+    raw_chat_id = os.environ.get("MARZBAN_ALERT_CHAT_ID", "").strip()
+    try:
+        chat_id = int(raw_chat_id)
+        if chat_id >= 0:
+            raise ValueError("expected a negative Telegram group chat id")
+    except (TypeError, ValueError):
+        log.warning("MARZBAN_ALERT_CHAT_ID is missing/invalid; no private fallback.")
+        return {"pending": 0, "delivered": 0, "unconfigured": True}
+
     def _pending():
         with db_conn() as conn:
-            return marzban_observability.pending_notifications(conn, limit=20)
+            events, suppressed = marzban_alerting.prepare_delivery(
+                conn,
+                confirm_scans=MARZBAN_ALERT_CONFIRM_SCANS,
+                cooldown_minutes=MARZBAN_ALERT_COOLDOWN_MINUTES,
+            )
+            marzban_alerting.mark_suppressed(conn, suppressed)
+            return events, len(suppressed)
 
-    events = await asyncio.to_thread(_pending)
+    events, suppressed_count = await asyncio.to_thread(_pending)
     if not events:
-        return {"pending": 0, "delivered": 0}
+        return {"pending": 0, "delivered": 0, "suppressed": suppressed_count}
 
     text = marzban_observability.render_alert_digest(events)
-    admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
     delivered = 0
-    for chat_id in admin_ids:
-        try:
-            await app.bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-            delivered += 1
-        except Exception as exc:
-            if "bot was blocked by the user" in str(exc).lower():
-                log.warning(
-                    "V120D Marzban alert recipient unavailable chat_id=%s reason=BOT_BLOCKED",
-                    chat_id,
-                )
-            else:
-                log.exception(
-                    "V120D Marzban alert delivery failed chat_id=%s",
-                    chat_id,
-                )
+    try:
+        await app.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        delivered = 1
+    except Exception:
+        # Retry from durable outbox on the next scan. Never send admin DMs.
+        log.exception("Marzban group alert delivery failed; chat_id=%s", chat_id)
 
     if delivered > 0:
         event_ids = [event.event_id for event in events]
@@ -7087,11 +7104,10 @@ async def _deliver_marzban_monitor_alerts(app):
 
         await asyncio.to_thread(_mark)
         log.info(
-            "V120D Marzban alert delivered events=%s admins=%s",
-            len(events),
-            delivered,
+            "Marzban group alert delivered events=%s chat_id=%s suppressed=%s",
+            len(events), chat_id, suppressed_count,
         )
-    return {"pending": len(events), "delivered": delivered}
+    return {"pending": len(events), "delivered": delivered, "suppressed": suppressed_count}
 
 
 async def _marzban_regional_filter_loop(app):

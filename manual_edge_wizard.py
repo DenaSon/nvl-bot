@@ -289,7 +289,7 @@ class ManualEdgeWizard:
         latest=await asyncio.to_thread(self.journal.latest,actor,chat)
         if latest is None:
             return await self._view(query,
-                "🖥 <b>مدیریت سرورها</b>\n\n"
+                "🖥 <b>مدیریت سرورها</b>\n\n" +
                 ("برای شروع، یک Edge جدید اضافه کنید." if self._new_edge_buttons()
                  else "افزودن Edge جدید در حال حاضر غیرفعال است."),
                 self._new_edge_buttons()+

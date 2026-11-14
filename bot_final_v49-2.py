@@ -423,7 +423,7 @@ from cloudzy_cz04b_guarded import GuardedCloudzy04B
 from cloudzy_cz07_queue import DurableCutoverQueue
 from cloudzy_cz04b_dns import CloudflareExactDNS
 from manual_edge_wizard import ManualEdgeWizard
-from manual_quick_switch import ManualQuickSwitch, check_manual_relay_via_cz04b
+from manual_quick_switch import ManualQuickSwitch, check_manual_relay_via_cz04b, QuickSwitchHold
 from manual_quick_switch_ui import ManualQuickSwitchUI
 from manual_edge_secure_form import ManualFormStore, serve_private
 from cloudzy_admin_panel import CloudzyAdminPanel

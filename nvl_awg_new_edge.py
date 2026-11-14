@@ -8,7 +8,7 @@ No fixed public Edge address is accepted or embedded here.
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import ipaddress
 import re
 
@@ -62,7 +62,7 @@ class AWGCoreProfile:
     core_tunnel_ip: str
     core_listen_port: int
     mtu: int
-    values: tuple[tuple[str, str], ...]
+    values: tuple[tuple[str, str], ...] = field(repr=False)
 
     @classmethod
     def parse(cls, conf: str) -> "AWGCoreProfile":

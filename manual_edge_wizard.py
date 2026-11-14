@@ -477,6 +477,31 @@ class ManualEdgeWizard:
             return await self._view(query,"⛔️ فقط مدیر در گفتگوی خصوصی مجاز است.",
                                     [[("↩️ برنامه‌ها","apps_home")]])
         try:
+            # An older Telegram keyboard must not expose or mutate a legacy
+            # WG operation while its explicit operator UI flag is disabled.
+            if not self._legacy_wg_ui_enabled():
+                scoped_prefixes=(
+                    "apps_edge_manual_detail_", "apps_edge_manual_force_review_",
+                    "apps_edge_manual_archive_yes_", "apps_edge_manual_archive_",
+                    "apps_edge_manual_rearm_yes_", "apps_edge_manual_rearm_",
+                    "apps_edge_manual_key_", "apps_edge_manual_pin_",
+                    "apps_edge_manual_password_", "apps_edge_manual_standby_",
+                    "apps_edge_manual_review_", "apps_edge_manual_progress_",
+                    "apps_edge_manual_finish_", "apps_edge_manual_cancel_",
+                )
+                legacy_op_id=next((data[len(prefix):] for prefix in scoped_prefixes
+                                   if data.startswith(prefix)),None)
+                if data.startswith("apps_edge_manual_force_yes_"):
+                    pending=context.user_data.get("manual_edge_force")
+                    legacy_op_id=pending.get("op") if isinstance(pending,dict) else None
+                if data=="apps_edge_manual_cancel":
+                    session=context.user_data.get("manual_edge_session")
+                    legacy_op_id=session.get("op") if isinstance(session,dict) else None
+                if legacy_op_id:
+                    existing=await asyncio.to_thread(self.journal.get,legacy_op_id)
+                    if (existing and existing.get("tunnel_backend","wireguard")
+                            =="wireguard"):
+                        raise ManualWizardHold("LEGACY_WG_NOT_AVAILABLE")
             if data=="apps_edge_manual_home":
                 return await self._show(query,actor,chat)
             if data.startswith("apps_edge_manual_list_"):

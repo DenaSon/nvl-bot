@@ -26,6 +26,10 @@ test "$(stat -c %u:%a "$STAGE")" = "0:600" || fail STAGED_CONFIG_NOT_PRIVATE
 test ! -e "$CONF" && test ! -L "$CONF" || fail EXISTING_AWG_CONFIG
 ip link show awg0 >/dev/null 2>&1 && fail EXISTING_AWG_LINK
 ip link show wg0 >/dev/null 2>&1 && fail EXISTING_WG_LINK
+# The new-Edge installer must never reuse any pre-existing WG/AWG interface.
+if ip -o link show | awk -F': ' '{print $2}' | grep -Eq '^(awg|wg)[0-9]+(@|$)'; then
+  fail EXISTING_WG_OR_AWG_TUNNEL
+fi
 test "$CUSTOMER_PORT" != "$TLS_PORT" || fail SERVICE_PORT_COLLISION
 test "$CUSTOMER_PORT" != "$ADMIN_PORT" || fail ADMIN_PORT_COLLISION
 test "$TLS_PORT" != "$ADMIN_PORT" || fail ADMIN_PORT_COLLISION
@@ -73,6 +77,15 @@ for p in "$CUSTOMER_PORT" "$TLS_PORT"; do
     fail CUSTOMER_PORT_ALREADY_LISTENING
   fi
 done
+# Reject any existing public-port NAT ownership on the fresh VPS. Otherwise
+# -I could shadow another service and make the install appear successful.
+if command -v iptables-save >/dev/null 2>&1; then
+  for p in "$CUSTOMER_PORT" "$TLS_PORT"; do
+    if iptables-save -t nat | grep -E -- "-A PREROUTING .*(--dport $p)( |$)" >/dev/null; then
+      fail CUSTOMER_PORT_EXISTING_NAT
+    fi
+  done
+fi
 
 echo "AWG_EDGE_INSTALL=BEGIN_FRESH_ONLY"
 apt-get -o DPkg::Lock::Timeout=30 update -qq

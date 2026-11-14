@@ -325,7 +325,8 @@ class ManualEdgeWizard:
         rows=[]
         if stage=="HOSTKEY_PENDING":
             rows.append([("🔐 بررسی هویت SSH","apps_edge_manual_key_"+opid)])
-        if stage=="READY_INSTALL":
+        if stage=="READY_INSTALL" and (op.get("tunnel_backend")!="amneziawg"
+                                      or self._awg_available()):
             rows.append([("📝 ورود امن رمز","apps_edge_manual_password_"+opid)])
         if stage=="EDGE_READY" and (op.get("tunnel_backend")!="amneziawg"
                                     or self._awg_can_verify()):
@@ -710,6 +711,8 @@ class ManualEdgeWizard:
             if data.startswith("apps_edge_manual_password_"):
                 opid=data[len("apps_edge_manual_password_"):]
                 op=await asyncio.to_thread(self.journal.get,opid)
+                if op and op.get("tunnel_backend")=="amneziawg" and not self._awg_available():
+                    raise ManualWizardHold("AWG_CORE_NOT_READY")
                 if (not op or (op["actor"],op["chat"])!=(actor,chat)
                         or op["status"]!="READY_INSTALL" or opid in self.running):
                     raise ManualWizardHold("INSTALL_NOT_READY")

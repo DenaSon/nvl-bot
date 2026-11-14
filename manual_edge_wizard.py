@@ -192,6 +192,10 @@ class ManualEdgeWizard:
         return (op.get("tunnel_backend","wireguard")=="wireguard"
                 or self._awg_cutover_ready(op.get("ip","")))
 
+    def _awg_can_verify(self):
+        """Existing AWG Edges remain verifiable when new installation is OFF."""
+        return self.awg_preflight is not None and self.awg_check is not None
+
     def _new_edge_buttons(self):
         # Preserve the exact old user experience while the AWG feature is OFF.
         if not self._awg_available():
@@ -203,7 +207,7 @@ class ManualEdgeWizard:
 
     def _preflight_for(self, op):
         if op.get("tunnel_backend", "wireguard")=="amneziawg":
-            if not self._awg_available():
+            if not self._awg_can_verify():
                 raise ManualWizardHold("AWG_CORE_NOT_READY")
             return self.awg_preflight
         return self.preflight
@@ -324,8 +328,7 @@ class ManualEdgeWizard:
         if stage=="READY_INSTALL":
             rows.append([("📝 ورود امن رمز","apps_edge_manual_password_"+opid)])
         if stage=="EDGE_READY" and (op.get("tunnel_backend")!="amneziawg"
-                                    or (self.awg_check is not None
-                                        and self._awg_available())):
+                                    or self._awg_can_verify()):
             rows.append([("✅ بررسی و فعال‌سازی Standby",
                          "apps_edge_manual_standby_"+opid)])
         if (stage=="STANDBY" and role=="STANDBY"
@@ -334,7 +337,7 @@ class ManualEdgeWizard:
                          "apps_edge_quick_select_"+op["ip"])])
         if (stage=="ACTIVE" and role=="FORMER" and
                 (op.get("tunnel_backend")!="amneziawg" or
-                 (self._awg_available() and self.awg_check is not None))):
+                 self._awg_can_verify())):
             rows.append([("🔄 بررسی و تبدیل رله سابق به Standby",
                          "apps_edge_manual_rearm_"+opid)])
         if stage=="ROUTING":
@@ -374,6 +377,8 @@ class ManualEdgeWizard:
                     self.is_core_host,op["ip"]):
                 raise ManualWizardHold("CORE_IP_CANNOT_BE_EDGE")
             backend=op.get("tunnel_backend","wireguard")
+            if backend=="amneziawg" and not self._awg_available():
+                raise ManualWizardHold("AWG_CORE_NOT_READY")
             customer_port,_ = await asyncio.to_thread(self._preflight_for(op))
             tls_port = await asyncio.to_thread(self._tls_port)
             self._assert_management_port_safe(
@@ -723,7 +728,7 @@ class ManualEdgeWizard:
                 opid=data[len("apps_edge_manual_standby_"):]
                 op=await asyncio.to_thread(self.journal.get,opid)
                 if op and op.get("tunnel_backend")=="amneziawg":
-                    if not self._awg_available() or self.awg_check is None:
+                    if not self._awg_can_verify():
                         raise ManualWizardHold("AWG_STANDBY_BACKEND_DISABLED")
                 if not op or (op["actor"],op["chat"])!=(actor,chat) or op["status"]!="EDGE_READY":
                     raise ManualWizardHold("EDGE_NOT_READY")

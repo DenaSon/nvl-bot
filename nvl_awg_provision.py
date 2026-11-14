@@ -160,6 +160,8 @@ def provision_awg_new_edge_sync(
         _remote(
             ssh,
             "test ! -e /etc/amnezia/amneziawg/awg0.conf"
+            " && test ! -e /root/nvl-awg-stage/awg0.conf"
+            " && test ! -e /root/nvl-awg-stage/setup_edge_awg_relay.sh"
             " && ! ip link show awg0 >/dev/null 2>&1"
             " && ! ip link show wg0 >/dev/null 2>&1",
             timeout=10,

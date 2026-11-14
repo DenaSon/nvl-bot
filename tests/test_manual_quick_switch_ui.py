@@ -1,6 +1,7 @@
 """Phase 3: Rich UI navigation and live Quick Switch callback acceptance."""
 import ast
 import asyncio
+import os
 from contextlib import contextmanager
 from pathlib import Path
 import sqlite3
@@ -68,6 +69,9 @@ class FakeEngine:
 
 class Phase3UITests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        legacy=patch.dict(os.environ, {"NVL_LEGACY_WG_UI_ENABLED":"1"})
+        legacy.start()
+        self.addCleanup(legacy.stop)
         tmp=TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.path=Path(tmp.name)/"ui.db"
@@ -119,7 +123,7 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
     async def test_home_contains_only_manual_edge_navigation(self):
         await self.cb("apps_edge_quick_home")
         text,rows=FakeHtml.cards[-1]
-        self.assertIn("مدیریت سرورها",text)
+        self.assertIn("مدیریت Edge",text)
         callbacks=[d for row in rows for _,d in row]
         self.assertIn("apps_edge_manual_home",callbacks)
         self.assertIn("apps_edge_quick_select_45.59.126.73",callbacks)
@@ -128,7 +132,7 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_home_redirect_shows_new_ui(self):
         await self.cb("apps_cz_home")
-        self.assertIn("مدیریت سرورها",FakeHtml.cards[-1][0])
+        self.assertIn("مدیریت Edge",FakeHtml.cards[-1][0])
         self.assertNotIn("Cloudzy",FakeHtml.cards[-1][0])
 
     async def test_mutation_is_not_released_by_default(self):
@@ -312,8 +316,9 @@ class Phase3StaticIntegration(unittest.TestCase):
         self.assertNotIn("Cloudzy",text)
 
     def test_handlers_route_old_manual_and_cloudzy_home_to_new_ui(self):
-        self.assertIn('d.startswith("apps_edge_quick_") or d == "apps_cz_home"',
+        self.assertIn('if d.startswith("apps_cz_") or d.startswith("u7:"):',
                       self.bot)
+        self.assertIn('if d.startswith("apps_edge_quick_"):',self.bot)
         self.assertIn('_manual_quick_ui.handle(',self.bot)
         self.assertIn('d.startswith(("apps_edge_manual_review_","apps_edge_manual_go_"))',
                       self.bot)

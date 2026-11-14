@@ -22,6 +22,7 @@ class AWGWizardGateTests(unittest.TestCase):
             awg_preflight=lambda: (2252, "awg"),
             provision=lambda *a: None,
             awg_provision=lambda *a: None,
+            awg_check=lambda *a: False,
             verify=lambda *a: False,
             probe=lambda *a: False,
             nat=lambda *a: False,
@@ -29,15 +30,18 @@ class AWGWizardGateTests(unittest.TestCase):
             is_core_host=lambda *a: False,
         )
 
-    def test_flag_off_preserves_legacy_button_and_blocks_awg_preflight(self):
+    def test_flag_off_hides_new_intake_but_keeps_existing_awg_verification(self):
         with patch.dict(os.environ, {"NVL_AWG_NEW_EDGE_ENABLED": "0"}):
             self.assertFalse(self.wizard._awg_available())
             self.assertEqual(
                 self.wizard._new_edge_buttons(),
                 [[("➕ افزودن سرور جدید", "apps_edge_manual_new")]],
             )
-            with self.assertRaisesRegex(ManualWizardHold, "AWG_CORE_NOT_READY"):
-                self.wizard._preflight_for({"tunnel_backend":"amneziawg"})
+            self.assertTrue(self.wizard._awg_can_verify())
+            self.assertEqual(
+                self.wizard._preflight_for({"tunnel_backend":"amneziawg"})()[1],
+                "awg",
+            )
             self.assertEqual(
                 self.wizard._preflight_for({"tunnel_backend":"wireguard"})()[1],
                 "legacy",

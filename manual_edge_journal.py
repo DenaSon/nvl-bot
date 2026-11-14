@@ -268,14 +268,22 @@ class ManualEdgeJournal:
     def _former_standby_checks(self, db, op_id, actor, chat, customer_port):
         """Fail closed on stale route/identity. Run again under write lock."""
         op=db.execute(
-            "SELECT ip,status,admin_port,pin_type,pin_base64,archived_at "
+            "SELECT ip,status,admin_port,pin_type,pin_base64,archived_at,tunnel_backend "
             "FROM manual_edge_operations "
             "WHERE id=? AND actor=? AND chat=?",
             (op_id,actor,chat),
         ).fetchone()
         if not op:
             raise ManualEdgeHold("OPERATOR_MISMATCH")
-        ip,status,admin_port,key_type,key_data,archived=op
+        ip,status,admin_port,key_type,key_data,archived,backend=op
+        from nvl_awg_target import target_backend
+        from nvl_tunnel_backend import TunnelHold
+        try:
+            observed_backend=target_backend(db,ip)
+        except TunnelHold:
+            raise ManualEdgeHold("FORMER_BACKEND_UNVERIFIED") from None
+        if backend not in ("wireguard","amneziawg") or backend!=observed_backend:
+            raise ManualEdgeHold("FORMER_BACKEND_UNVERIFIED")
         if archived is not None or status!="ACTIVE" or not ip:
             raise ManualEdgeHold("FORMER_NOT_ELIGIBLE")
         if not admin_port or not key_type or not key_data:
@@ -330,7 +338,7 @@ class ManualEdgeJournal:
         return {"id":op_id,"ip":ip,"admin_port":admin_port,
                 "service_port":customer_port,
                 "pin_type":key_type,"pin_base64":key_data,
-                "source":defaults[0][0]}
+                "tunnel_backend":backend,"source":defaults[0][0]}
 
     def preview_former_standby(self, op_id, actor, chat, customer_port):
         """Read-only eligibility before fresh independent SSH/WG/NAT checks."""

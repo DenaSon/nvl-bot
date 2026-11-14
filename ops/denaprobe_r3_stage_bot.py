@@ -63,14 +63,21 @@ def integrate(live: str, release: str) -> str:
     updated_menu = old_menu.replace("    return rows\n", addition + "    return rows\n", 1)
     result = result.replace(old_menu, updated_menu, 1)
 
-    next_callback = ('    if d in ("apps_cz_rich_home", '
-                     '"apps_cz_rich_migration")')
+    # Both pre-retirement and AWG-first baselines are valid. Locate the
+    # first callback *after* the R3 handler in each snapshot separately.
+    provider_anchor = ('    if d in ("apps_cz_rich_home", '
+                       '"apps_cz_rich_migration")')
+    fallback_anchor = "    if d == 'apps_home':"
+    release_end = (provider_anchor if provider_anchor in release
+                   else fallback_anchor)
+    live_end = (provider_anchor if provider_anchor in result
+                else fallback_anchor)
     new_callback = section(
         release, '    if d == "apps_dp3_home" or d.startswith("dp3:"):',
-        next_callback, "R3 callback",
+        release_end, "R3 callback",
     )
-    once(result, next_callback, "existing callback")
-    result = result.replace(next_callback, new_callback + next_callback, 1)
+    once(result, live_end, "existing callback")
+    result = result.replace(live_end, new_callback + live_end, 1)
 
     init_anchor = "async def _post_init(app):\n"
     init_block = section(

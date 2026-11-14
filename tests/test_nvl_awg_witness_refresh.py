@@ -69,7 +69,8 @@ class WitnessRefreshTests(unittest.TestCase):
         return tunnel
 
     def test_two_standbys_have_separate_markers(self):
-        with patch.object(Path, "lstat", self._as_root):
+        with patch.object(Path, "lstat",
+                              lambda path, *a, **kw: self._as_root(path, *a, **kw)):
             ready, failed = refresh(
                 db_path=self.db,marker_dir=self.directory,
                 attest_fn=self.fake_attest,root_check=lambda:0)
@@ -80,7 +81,8 @@ class WitnessRefreshTests(unittest.TestCase):
                             (self.directory / EDGE2).read_text())
 
     def test_failed_candidate_revokes_only_its_marker(self):
-        with patch.object(Path, "lstat", self._as_root):
+        with patch.object(Path, "lstat",
+                              lambda path, *a, **kw: self._as_root(path, *a, **kw)):
             refresh(db_path=self.db,marker_dir=self.directory,
                     attest_fn=self.fake_attest,root_check=lambda:0)
 
@@ -97,7 +99,8 @@ class WitnessRefreshTests(unittest.TestCase):
         self.assertFalse((self.directory / EDGE2).exists())
 
     def test_retired_edge_is_pruned_and_never_attested(self):
-        with patch.object(Path, "lstat", self._as_root):
+        with patch.object(Path, "lstat",
+                              lambda path, *a, **kw: self._as_root(path, *a, **kw)):
             refresh(db_path=self.db,marker_dir=self.directory,
                     attest_fn=self.fake_attest,root_check=lambda:0)
             with sqlite3.connect(self.db) as db:
@@ -121,14 +124,16 @@ class WitnessRefreshTests(unittest.TestCase):
         with sqlite3.connect(self.db) as db:
             db.execute("INSERT INTO manual_edge_operations VALUES (?, 'STANDBY',NULL,'amneziawg')",
                        (HOST1,))
-        with patch.object(Path, "lstat", self._as_root):
+        with patch.object(Path, "lstat",
+                              lambda path, *a, **kw: self._as_root(path, *a, **kw)):
             with self.assertRaisesRegex(WitnessRefreshHold,"WITNESS_CANDIDATE_AMBIGUOUS"):
                 refresh(db_path=self.db,marker_dir=self.directory,
                         attest_fn=self.fake_attest,root_check=lambda:0)
         self.assertFalse((self.directory / EDGE1).exists())
 
     def test_gate_accepts_exact_per_edge_witness_and_rejects_stale(self):
-        with patch.object(Path, "lstat", self._as_root):
+        with patch.object(Path, "lstat",
+                              lambda path, *a, **kw: self._as_root(path, *a, **kw)):
             refresh(db_path=self.db,marker_dir=self.directory,
                     attest_fn=self.fake_attest,root_check=lambda:0)
 

@@ -35,24 +35,35 @@ port all come from a fresh verified wizard request or Core state.
 
 ### Current PR scope
 
+The guarded bot callback is now wired behind NVL_AWG_NEW_EDGE_ENABLED=1.
+Default remains OFF, and the existing WireGuard wizard UI/behavior is unchanged
+when the flag is absent. Enabled AWG wizard steps use the existing verified
+host-key/pinned SSH/password deletion journal. A new Edge is registered as
+inactive EDGE_READY, never silently promoted to Standby.
+
+The new-edge installer and callback are NOT deployed. Do not enable the flag
+until the full pinned source release is deployed, CI green and a fresh VPS
+canary passes. The production-serving AWG Edge is out of scope.
+
+
 - `nvl_awg_new_edge.py`: parse shared Core settings, allocate safe /32,
   render new-edge config and Core peer block without hardcoding any live IP.
 - `nvl_awg_core_peer.py`: pure Core append-only peer plan with SHA256 CAS
   checks. This is not yet a live executor.
 - `setup_edge_awg_relay.sh`: guarded, fresh-server-only installer. It will
   refuse any existing `awg0` or `wg0`; never replay it on an active Edge.
-- Unit/static regressions; no bot callback or new Edge is deployed in this PR.
+- Unit/static regressions for AWG peer, wizard feature flag, limiter and NAT. The bot callback is implemented but default-OFF and not deployed.
 
 ### Hard blockers before enabling the bot action
 
-- Connect planner to a pinned SSH host-key collector, secret-safe SFTP and
-  durable journal with no automatic retry after partial remote execution.
-- Add a real locked Core peer commit/rollback worker and post-install
-  health and NAT checks.
+- Run an isolated fresh-VPS canary of the existing pinned SSH, secret-safe SFTP,
+  durable journal and locked Core peer append (no production retry of failures).
+- Prove SSH customer and TLS service, current peer handshake and persisted NAT
+  through an independent external client connection before any Standby.
 - Check actual Core `/root/ip_limiter.py` is AWG shared-source aware; a
   source merge in `promote_edge_to_core.sh` does not patch a running Core.
-- Add guarded bot selection for tunnel backend with WG remaining the legacy
-  default, then test with an entirely fresh VPS, *not* the active Edge.
+- Enable the existing guarded AWG wizard flag only after pinned source release,
+  Core runtime SHA checks, explicit administrator approval and the canary.
 - Check provider inbound UDP permissions for the new AWG port.
 
 No current production route, DNS record, user assignment or server

@@ -132,7 +132,10 @@ def allocated_edge_ip(
     live_allowed_ips: str = "",
 ) -> str:
     """Never reuse Core /32 or any config, runtime or registered address."""
-    network = ipaddress.IPv4Network(\n        pool or str(ipaddress.IPv4Network(core_tunnel_ip + "/24", strict=False)),\n        strict=True,\n    )
+    network = ipaddress.IPv4Network(
+        pool or str(ipaddress.IPv4Network(core_tunnel_ip + "/24", strict=False)),
+        strict=True,
+    )
     core = ipaddress.IPv4Address(ipv4(core_tunnel_ip))
     if core not in network:
         raise AWGPlanHold("AWG_CORE_OUTSIDE_POOL")

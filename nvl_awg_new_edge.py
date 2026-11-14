@@ -128,11 +128,11 @@ class AWGCoreProfile:
 
 def allocated_edge_ip(
     core_conf: str, *, core_tunnel_ip: str,
-    pool: str = "10.203.77.0/24", registered_ips: tuple[str, ...] = (),
+    pool: str | None = None, registered_ips: tuple[str, ...] = (),
     live_allowed_ips: str = "",
 ) -> str:
     """Never reuse Core /32 or any config, runtime or registered address."""
-    network = ipaddress.IPv4Network(pool, strict=True)
+    network = ipaddress.IPv4Network(\n        pool or str(ipaddress.IPv4Network(core_tunnel_ip + "/24", strict=False)),\n        strict=True,\n    )
     core = ipaddress.IPv4Address(ipv4(core_tunnel_ip))
     if core not in network:
         raise AWGPlanHold("AWG_CORE_OUTSIDE_POOL")
@@ -198,12 +198,15 @@ def render_new_edge_conf(
     )
 
 
-def expected_peer_block(*, host: str, peer_key: str, tunnel_ip: str) -> str:
+def expected_peer_block(*, host: str, peer_key: str, tunnel_ip: str, edge_port: int) -> str:
     ip = ipv4(host, global_address=True)
     public_key(peer_key)
     tunnel = ipv4(tunnel_ip)
+    port(edge_port)
     return (
         f"\n[Peer]\n# edge-{ip.replace('.', '-')}\n"
         f"PublicKey = {peer_key}\n"
         f"AllowedIPs = {tunnel}/32\n"
+        f"Endpoint = {ip}:{edge_port}\n"
+        "PersistentKeepalive = 25\n"
     )

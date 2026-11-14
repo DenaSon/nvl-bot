@@ -69,7 +69,8 @@ def provision_awg_new_edge_sync(
     host: str, admin_port: int, password: str,
     pinned_key: tuple[str, str], *,
     core_public_ip: str, customer_port: int, tls_port: int,
-    db_factory, install_management_key,\n    core_config_path="/etc/amnezia/amneziawg/awg0.conf",
+    db_factory, install_management_key,
+    core_config_path="/etc/amnezia/amneziawg/awg0.conf",
     installer_path="/root/setup_edge_awg_relay.sh",
     edge_udp_port: int = 42371,
 ) -> tuple[bool, str, dict | None]:
@@ -78,7 +79,10 @@ def provision_awg_new_edge_sync(
     try:
         if os.geteuid() != 0:
             raise AWGProvisionHold("CORE_ROOT_REQUIRED")
-        if not callable(install_management_key):\n            raise AWGProvisionHold("CORE_MANAGEMENT_KEY_INSTALL_REQUIRED")\n        if not isinstance(password, str) or not password:\n            raise AWGProvisionHold("SSH_PASSWORD_MISSING")
+        if not callable(install_management_key):
+            raise AWGProvisionHold("CORE_MANAGEMENT_KEY_INSTALL_REQUIRED")
+        if not isinstance(password, str) or not password:
+            raise AWGProvisionHold("SSH_PASSWORD_MISSING")
         host = ipv4(host, global_address=True)
         core_public_ip = ipv4(core_public_ip, global_address=True)
         if host == core_public_ip:
@@ -128,7 +132,10 @@ def provision_awg_new_edge_sync(
             look_for_keys=False, allow_agent=False,
             timeout=15, banner_timeout=15, auth_timeout=15,
         )
-        key_ok, _reason = install_management_key(ssh)\n        if key_ok is not True:\n            raise AWGProvisionHold("CORE_MANAGEMENT_KEY_INSTALL_FAILED")\n        # Never install over a pre-existing tunnel, even if the OS check was
+        key_ok, _reason = install_management_key(ssh)
+        if key_ok is not True:
+            raise AWGProvisionHold("CORE_MANAGEMENT_KEY_INSTALL_FAILED")
+        # Never install over a pre-existing tunnel, even if the OS check was
         # passed earlier in the wizard. Pinned SSH prevents host spoofing.
         _remote(
             ssh,
@@ -204,7 +211,8 @@ def provision_awg_new_edge_sync(
             tunnel_ok=True, edge_wg_ip=plan.edge_tunnel_ip,
             edge_pubkey=edge_key, tunnel_backend="amneziawg",
         )
-    except Exception:\n        # Every failure after remote effect begins is a durable INSTALL_HOLD
+    except Exception:
+        # Every failure after remote effect begins is a durable INSTALL_HOLD
         # in ManualEdgeWizard: never retry or start another installer.
         # No raw traceback/SSH error or profile/HPK are returned to Telegram.
         return False, "AWG_NEW_EDGE_REQUIRES_MANUAL_REVIEW", None

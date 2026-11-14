@@ -144,7 +144,8 @@ class ManualEdgeWizard:
     def __init__(self, *, db, preflight, provision, verify, probe, nat, queue,
                  form_store=None, now=time.time, key_reader=fingerprint_ssh,
                  enabled=None, form_url=None, guard=None, is_core_host=None,
-                 os_check=None, awg_preflight=None, awg_provision=None,\n                 awg_check=None):
+                 os_check=None, awg_preflight=None, awg_provision=None,
+                 awg_check=None):
         self.journal=ManualEdgeJournal(db,now=now,guard=guard)
         # Production wires the authoritative Core-host validator. Without
         # this callback the mutating wizard must fail closed, not guess.

@@ -417,7 +417,6 @@ from edge_egress_k2_m4_status import (
     root_checkpoint_status_html as k2_m44_root_status_html,
 )
 import edge_egress_k2_root_direct as k2_root_direct_flags
-from cloudzy_quick_edge import QuickEdgeWizard
 from cloudzy_cz04a import Cloudzy04A
 from cloudzy_cz04b_guarded import GuardedCloudzy04B
 from cloudzy_cz07_queue import DurableCutoverQueue
@@ -426,7 +425,6 @@ from manual_edge_wizard import ManualEdgeWizard
 from manual_quick_switch import ManualQuickSwitch, check_manual_relay_via_cz04b, QuickSwitchHold
 from manual_quick_switch_ui import ManualQuickSwitchUI
 from manual_edge_secure_form import ManualFormStore, serve_private
-from cloudzy_admin_panel import CloudzyAdminPanel
 from edge_egress_k2_root_direct import (
     bound_root_client as k2_root_direct_client,
     native_review as k2_native_review,
@@ -7281,36 +7279,6 @@ async def require_login(update):
 
 PORTAL_DISPLAY_NAME = "NeVeL"  # 🔒 نام ثابت پورتال و مدیریت — با تغییر «نام برند» در تنظیمات عوض نمی‌شود
 
-_cloudzy_admin_panel = CloudzyAdminPanel()
-
-
-def _cloudzy_quick_preflight():
-    """Fail closed before paid create AND before mutating Core/Legacy WG."""
-    if paramiko is None or os.geteuid() != 0:
-        raise RuntimeError("CORE_ROOT_PARAMIKO_REQUIRED")
-    if not os.path.isfile(EDGE_SETUP_SCRIPT_LOCAL_PATH) or not os.path.isfile(WG_CONF_PATH):
-        raise RuntimeError("LEGACY_WG_INSTALLER_NOT_AVAILABLE")
-    if not all(_get_core_wg_identity()) or not _get_core_public_ip_cached():
-        raise RuntimeError("CORE_WG_IDENTITY_NOT_READY")
-    with db_conn() as conn:
-        _db_assert_legacy_host_mutation_allowed(conn)
-        if _db_running_failover_id(conn) is not None:
-            raise RuntimeError("ORIGINAL_6G_FAILOVER_BUSY")
-        row = conn.execute(
-            "SELECT value FROM settings WHERE key='edge_egress_v1_onboard_enabled'"
-        ).fetchone()
-        if row is not None and row[0] == '1':
-            raise RuntimeError("EXPLICIT_K2_ONBOARDING_MUST_BE_DISABLED")
-    if any_protected_bindings(db_conn):
-        raise RuntimeError("PROTECTED_K2_BINDINGS_PRESENT")
-    ok, error, pubkey = _ensure_local_ssh_keypair_sync()
-    if not ok or not pubkey or not os.path.isfile(DO_SSH_KEY_PATH):
-        raise RuntimeError("LEGACY_ED25519_KEY_MISSING")
-    if os.stat(DO_SSH_KEY_PATH).st_mode & 0o077:
-        raise RuntimeError("LEGACY_ED25519_KEY_INSECURE_PERMISSIONS")
-    return _normalize_ssh_port(_db_get_setting('port', '22'), 22), pubkey
-
-
 def _manual_edge_preflight():
     """Read-only Core identity and SSH/WG checks; never queries Cloudzy.
 
@@ -7329,57 +7297,6 @@ def _manual_edge_preflight():
     if os.stat(DO_SSH_KEY_PATH).st_mode & 0o077:
         raise RuntimeError("LEGACY_ED25519_KEY_INSECURE_PERMISSIONS")
     return _normalize_ssh_port(_db_get_setting('port','2252'),2252),pubkey
-
-
-async def _cloudzy_quick_provision(ip, port, hostname, chat, app, server_id, trusted_host_key):
-    if await asyncio.to_thread(_db_host_exists, ip):
-        raise RuntimeError("CLOUDZY_IP_ALREADY_REGISTERED")
-    # Legacy wg0 peer removal identifies entries by edge-<IPv4>, not the
-    # Cloudzy provider hostname used to reconcile a potentially charged order.
-    legacy_peer_name = "edge-" + ip.replace(".", "-")
-    return await _provision_new_edge(
-        ip, None, port, legacy_peer_name, chat, app,
-        private_key_path=DO_SSH_KEY_PATH, connect_retries=3,
-        provider="cloudzy", provider_instance_id=server_id,
-        egress_stage_requested=False, trusted_host_key=trusted_host_key,
-        pool_active=False,
-    )
-
-
-async def _cloudzy_quick_verify(ip, port, server_id):
-    """CZ-03 acceptance: installed, SSH service responds, no customer assignment."""
-    with db_conn() as conn:
-        row = conn.execute(
-            "SELECT active,is_default,service_port,provider,provider_instance_id "
-            "FROM host_pool WHERE host=?", (ip,)
-        ).fetchone()
-        if not row or row[0] or row[1] or int(row[2]) != port:
-            raise RuntimeError("CLOUDZY_LEGACY_EDGE_NOT_INACTIVE")
-        if row[3] != "cloudzy" or row[4] != server_id:
-            raise RuntimeError("CLOUDZY_PROVIDER_OWNERSHIP_MISMATCH")
-        users = conn.execute(
-            "SELECT COUNT(*) FROM ssh_accounts WHERE host=?", (ip,)
-        ).fetchone()[0]
-        hosts_row = conn.execute(
-            "SELECT value FROM settings WHERE key='hosts'"
-        ).fetchone()
-        dns_row = conn.execute(
-            "SELECT value FROM settings WHERE key='dns_current_ip'"
-        ).fetchone()
-        if users or ip in (hosts_row[0] if hosts_row else "").split(","):
-            raise RuntimeError("CLOUDZY_EDGE_ALREADY_SELECTABLE")
-        if dns_row and dns_row[0] == ip:
-            raise RuntimeError("CLOUDZY_EDGE_SELECTED_PUBLIC_DNS")
-    reachable, _reason = await _check_ssh_reachable(ip, port, timeout=7)
-    return bool(reachable)
-
-
-_cloudzy_quick_edge = QuickEdgeWizard(
-    conn_factory=db_conn,
-    preflight=_cloudzy_quick_preflight,
-    provision=_cloudzy_quick_provision,
-    verify=_cloudzy_quick_verify,
-)
 
 
 def _cloudzy_04a_guard(conn):
@@ -7413,7 +7330,6 @@ _cloudzy_04a = Cloudzy04A(
 )
 
 # CZ-06: reuse the existing CZ-04A protected standby operation after CZ-03.
-_cloudzy_quick_edge.standby_service = _cloudzy_04a
 
 
 def _cloudzy_04b_guard(conn):
@@ -7762,9 +7678,6 @@ _manual_quick_ui = ManualQuickSwitchUI(
 
 # Phase 7 is opt-in and strictly a read-only Rich admin view. No effectful
 # Cloudzy/CZ07 callback is forwarded through this bridge.
-from cloudzy_rich_bridge import (
-    handle_rich_admin_callback as _cloudzy_rich_admin_callback,
-)
 
 # DenaProbe R3: optional admin dashboard and independently gated alerts.
 # Both run in the existing bot; the Collector remains isolated.
@@ -14414,7 +14327,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             friendly = {
                 "EDGE_ALREADY_REGISTERED": "این IP قبلاً در فهرست سرورها وجود دارد.",
                 "MANUAL_EDGE_OPERATION_EXISTS": "این IP پروندهٔ افزودن دستی دارد؛ ابتدا همان پرونده را بررسی کنید.",
-                "CLOUDZY_EDGE_ALREADY_EXISTS": "این IP قبلاً در پروندهٔ Cloudzy ثبت شده است.",
+                "CLOUDZY_EDGE_ALREADY_EXISTS": "این IP قبلاً در پرونده دیگری ثبت شده است.",
                 "CORE_CANNOT_BE_EDGE": "آدرس Core نمی‌تواند به‌عنوان Edge ثبت شود.",
                 "CORE_IDENTITY_UNAVAILABLE": "هویت Core مشخص نیست؛ ثبت IP متوقف شد.",
                 "CUSTOMER_PORT_INVALID": "پورت سرویس مشتری در تنظیمات معتبر نیست.",
@@ -17349,7 +17262,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Read-only Rich card entry/refresh/details. Recheck live active-admin
     # membership, private chat, original journal owner and message pointer.
     # The input never reaches Cloudzy purchase/DNS, CZ07 mutation or K2.
-    if d.startswith("apps_edge_quick_") or d == "apps_cz_home":
+    # Retired provider callbacks from old Telegram messages can only return to
+    # the provider-independent Edge dashboard. No provider purchase, old
+    # Standby, DNS, or account mutation can be reached from these callbacks.
+    if d.startswith("apps_cz_") or d.startswith("u7:"):
+        await _manual_quick_ui.handle(
+            query,context,"apps_edge_quick_home",role=role,
+            actor=update.effective_user.id,chat=update.effective_chat.id,
+            is_private=(getattr(update.effective_chat,"type",None)=="private"),
+        )
+        return
+    if d.startswith("apps_edge_quick_"):
         await _manual_quick_ui.handle(
             query,context,d,role=role,actor=update.effective_user.id,
             chat=update.effective_chat.id,
@@ -17403,61 +17326,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if result in ("RICH_UNAVAILABLE", "STALE_OR_FORWARDED_CARD"):
                 log.warning("DenaProbe R3 dashboard hold code=%s", result)
         return
-    if d in ("apps_cz_rich_home", "apps_cz_rich_migration") or d.startswith("u7:"):
-        active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
-        await _cloudzy_rich_admin_callback(
-            data=d, query=query, context=context, db_factory=db_conn,
-            role=role, actor=update.effective_user.id,
-            chat=update.effective_chat.id,
-            is_private=(getattr(update.effective_chat, "type", None) == "private"),
-            active_admin_ids=active_admin_ids,
-        )
-        return
     if d == 'apps_home':
         context.user_data.pop("mza_nodes_origin", None)
         await _show_admin_programs_hub(query, context)
-        return
-    elif d.startswith("apps_cz7_"):
-        await _cloudzy_07.handle_callback(
-            query, context, d, role=role,
-            actor=update.effective_user.id, chat=update.effective_chat.id,
-            markup=_cloudzy_markup, app=context.application,
-        )
-        return
-    elif d.startswith("apps_cz5_"):
-        await _cloudzy_04b.handle_callback(
-            query, context, d, role=role,
-            actor=update.effective_user.id, chat=update.effective_chat.id,
-            markup=_cloudzy_markup,
-        )
-        return
-    elif d == "apps_cz_edge" or d.startswith("apps_cz4_"):
-        await _cloudzy_04a.handle_callback(
-            query, context, d, role=role,
-            actor=update.effective_user.id, chat=update.effective_chat.id,
-            markup=_cloudzy_markup,
-        )
-        return
-    elif (d in ("apps_cz_wizard", "apps_cz_operations", "apps_cz6_start",
-                "apps_cz6_status")
-          or d.startswith(("apps_cz_q", "apps_cz6_resume_"))):
-        await _cloudzy_quick_edge.handle_callback(
-            query, context, d, role=role,
-            actor=update.effective_user.id, chat=update.effective_chat.id,
-            markup=_cloudzy_markup, app=context.application,
-        )
         return
     elif d.startswith("apps_edge_manual_"):
         await _manual_edge.handle(
             query,context,d,role=role,actor=update.effective_user.id,
             chat=update.effective_chat.id,app=context.application,
-        )
-        return
-    elif d.startswith("apps_cz_"):
-        await _cloudzy_admin_panel.handle_callback(
-            query, context, d, role=role,
-            actor=update.effective_user.id, chat=update.effective_chat.id,
-            markup=_cloudzy_markup,
         )
         return
     elif d == 'apps_marzban_nodes':
@@ -22963,7 +22839,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # The native protected K2 branch above remains a separate guarded path.
         await query.message.reply_text(
             "⛔️ فعال‌سازی Relay از این مسیر قدیمی متوقف است. "
-            "برای تغییر DNS و Default از مسیر Journalدار Cloudzy/CZ04B استفاده کنید. "
+            "برای تغییر مسیر از «مدیریت Edge» و بخش انتقال کاربران و DNS استفاده کنید. "
             "هیچ Default، DNS، NAT یا حسابی تغییر نکرد."
         )
         return
@@ -26988,7 +26864,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # recognizable, but deny mutation (including stale Telegram buttons).
         await query.message.reply_text(
             "⛔️ تغییر Relay پیش‌فرض یا انتقال کاربران از این منوی قدیمی متوقف است. "
-            "از «Cloudzy | Edge و Relay» و مسیر تأییدشده CZ04B/CZ07 استفاده کنید. "
+            "از «مدیریت Edge» و بخش انتقال کاربران و DNS استفاده کنید. "
             "هیچ DNS، Default یا حسابی تغییر نکرد."
         )
         return

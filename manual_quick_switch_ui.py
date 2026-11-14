@@ -150,6 +150,7 @@ class ManualQuickSwitchUI:
         waiting=[]
         for ip in standby[:6]:
             from nvl_awg_target import target_backend
+            backend=None
             try:
                 with self.db() as db:
                     backend=target_backend(db,ip)

@@ -73,13 +73,20 @@ class RegistryTests(unittest.TestCase):
             self.assertNotIn(secret_field, SCHEMA.lower())
 
 
-class ProbeTests(RegistryTests):
+class ProbeTests(unittest.TestCase):
     def setUp(self):
-        super().setUp()
+        self.db = sqlite3.connect(":memory:")
         self.db.executescript(SCHEMA)
-        self.add()
+        self.db.execute(
+            "INSERT INTO edge_tunnel_bindings VALUES (?,?,?,?,?,?,?,?)",
+            (HOST, "amneziawg", "awg0", "10.203.77.1", "10.203.77.2",
+             EDGE_KEY, "VERIFIED", 1794642576),
+        )
         self.binding = lookup_binding(self.db, HOST)
         self.commands = []
+
+    def tearDown(self):
+        self.db.close()
 
     def runner(self, cmd, **kwargs):
         self.commands.append(cmd)

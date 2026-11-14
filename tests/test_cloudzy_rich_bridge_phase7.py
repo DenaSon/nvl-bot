@@ -252,18 +252,21 @@ class Phase7BridgeTests(unittest.TestCase):
             "buttons","thinking") for block in card["blocks"]))
         self.assertEqual(self.open(ENTRY,actor=11,chat=11), "EMPTY")
 
-    def test_business_callback_routes_still_unchanged_in_source(self):
-        """Verify Rich branch occurs BEFORE original CZ07 and is read-only."""
+    def test_retired_provider_callbacks_cannot_reach_business_engines(self):
+        """Historical provider buttons only navigate to the admin Edge hub."""
         source=(Path(__file__).parent.parent/"bot_final_v49-2.py").read_text()
-        entry=source.index('if d in ("apps_cz_rich_home", "apps_cz_rich_migration") or d.startswith("u7:")')
-        existing=source.index('elif d.startswith("apps_cz7_")')
-        self.assertLess(entry,existing)
-        self.assertIn('await _cloudzy_rich_admin_callback(',source)
-        self.assertIn('actor in active_admin_ids',source)
-        self.assertIn('active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)',source)
-        self.assertNotIn('_cloudzy_rich_enabled',source)
-        self.assertNotIn('_cloudzy_rich_admin_ids',source)
-        self.assertNotIn("_cloudzy_07.handle_callback(",source[entry:existing])
+        start=source.index('if d.startswith("apps_cz") or d.startswith("u7:"):')
+        stop=source.index('if d.startswith("apps_edge_quick_"):',start)
+        protected=source[start:stop]
+        self.assertIn('await _manual_quick_ui.handle(',protected)
+        self.assertIn('"apps_edge_quick_home"',protected)
+        self.assertIn('return',protected)
+        self.assertNotIn('_cloudzy_',protected)
+        for retired in ('await _cloudzy_07.handle_callback(',
+                        'await _cloudzy_quick_edge.handle_callback(',
+                        'await _cloudzy_admin_panel.handle_callback(',
+                        'await _cloudzy_rich_admin_callback('):
+            self.assertNotIn(retired,source)
 
 
 if __name__=="__main__":

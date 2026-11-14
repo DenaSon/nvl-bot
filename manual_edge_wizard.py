@@ -210,7 +210,7 @@ class ManualEdgeWizard:
         """AWG-first menu; no legacy trace when the fallback is disabled."""
         rows=[]
         if self._awg_available():
-            rows.append([("➕ افزودن Edge جدید", "apps_edge_manual_new_awg")])
+            rows.append([("➕ افزودن Edge با AWG", "apps_edge_manual_new_awg")])
         if self._legacy_intake_enabled():
             rows.append([("➕ افزودن Edge با WireGuard", "apps_edge_manual_new")])
         return rows
@@ -1000,6 +1000,11 @@ class ManualEdgeWizard:
                 context.user_data.pop("manual_edge_candidate_ip",None)
                 raise
             opid=sess["op"]
+            if state in ("MANUAL_EDGE_IP","MANUAL_EDGE_PORT","MANUAL_EDGE_PASSWORD"):
+                current_op=await asyncio.to_thread(self.journal.get,opid)
+                if current_op and not self._intake_available(
+                        current_op.get("tunnel_backend","wireguard")):
+                    raise ManualWizardHold("EDGE_CREATION_UNAVAILABLE")
             if state=="MANUAL_EDGE_IP" and sess["stage"]=="server_ip":
                 from manual_edge_secure_form import public_ip
                 ip=public_ip(text.strip())

@@ -100,7 +100,7 @@ class SharedEdgeIPLimiterTests(unittest.TestCase):
         limiter = load_embedded_limiter()
         from subprocess import CompletedProcess
         key = "A" * 43 + "="
-        output = key + " 10.231.55.2/32\\n"
+        output = key + " 10.231.55.2/32\n"
         with mock.patch.object(
             limiter.subprocess, "run",
             return_value=CompletedProcess([], 0, output, ""),
@@ -117,7 +117,7 @@ class SharedEdgeIPLimiterTests(unittest.TestCase):
         limiter = load_embedded_limiter()
         from subprocess import CompletedProcess
         key = "A" * 43 + "="
-        for rows in (key + " 10.231.55.0/24\\n", "broken\\n"):
+        for rows in (key + " 10.231.55.0/24\n", "broken\n"):
             with self.subTest(rows=rows), mock.patch.object(
                 limiter.subprocess, "run",
                 return_value=CompletedProcess([], 0, rows, ""),

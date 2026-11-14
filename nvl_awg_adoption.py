@@ -126,8 +126,12 @@ def _text(raw, limit=131072) -> str:
     return raw
 
 
-def _single_peer(output: str, key: str) -> bool:
-    return _text(output, 4096).strip().splitlines() == [key]
+def _single_peer(output: str, key: str, *, exclusive: bool = False) -> bool:
+    """Core may host many peers; Edge must pin exactly one Core peer."""
+    peers = _text(output, 4096).strip().splitlines()
+    return peers == [key] if exclusive else (
+        peers.count(key) == 1 and len(peers) == len(set(peers))
+    )
 
 
 def _core_allowed(output: str, key: str, tunnel_ip: str) -> bool:
@@ -136,9 +140,19 @@ def _core_allowed(output: str, key: str, tunnel_ip: str) -> bool:
     if any(len(x) != 2 for x in matches):
         return False
     exact = [x for x in matches if x[0] == key]
-    return len(exact) == 1 and exact[0][1] == tunnel_ip + "/32" and not any(
-        tunnel_ip + "/" in x[1] for x in matches if x[0] != key
-    )
+    if len(exact) != 1 or exact[0][1] != tunnel_ip + "/32":
+        return False
+    address = ipaddress.IPv4Address(tunnel_ip)
+    for peer_key, networks in matches:
+        if peer_key == key:
+            continue
+        for item in networks.split(","):
+            try:
+                if address in ipaddress.ip_network(item.strip(), strict=True):
+                    return False
+            except ValueError:
+                return False
+    return True
 
 
 def _tokens(output: str, chain: str):
@@ -244,7 +258,7 @@ def validate_snapshot(
         raise AWGAdoptionHold("CORE_AWG_ALLOWED_IP_UNVERIFIED")
     if observation.core_ping_ok is not True:
         raise AWGAdoptionHold("CORE_EDGE_TUNNEL_PATH_UNVERIFIED")
-    if not _single_peer(observation.edge_peers, spec.core_public_key):
+    if not _single_peer(observation.edge_peers, spec.core_public_key, exclusive=True):
         raise AWGAdoptionHold("EDGE_AWG_PEER_UNVERIFIED")
     if spec.edge_tunnel_ip + "/32" not in _text(observation.edge_awg_address, 4096).split():
         raise AWGAdoptionHold("EDGE_AWG_ADDRESS_MISMATCH")

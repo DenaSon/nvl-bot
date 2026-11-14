@@ -7615,6 +7615,13 @@ async def _manual_edge_provision(ip, ssh_port, password, trusted_key, chat, app,
         manual_safe_bootstrap=True,
     )
 
+async def _manual_edge_provision_awg(ip, ssh_port, password, trusted_key, chat, app):
+    # Explicit, feature-gated AWG path only. Legacy callers keep WG untouched.
+    return await _manual_edge_provision(
+        ip, ssh_port, password, trusted_key, chat, app,
+        tunnel_backend="amneziawg",
+    )
+
 async def _manual_edge_verify(ip, details, ssh_port):
     with db_conn() as db:
         row=db.execute(
@@ -7682,6 +7689,7 @@ _manual_edge = ManualEdgeWizard(
     is_core_host=_manual_edge_is_core_ip,
     os_check=_manual_edge_verify_ubuntu,
     awg_preflight=_manual_awg_preflight,
+    awg_provision=_manual_edge_provision_awg,
 )
 
 # Phase 3: provider-independent manual Quick Switch. The legacy CZ07 queue and

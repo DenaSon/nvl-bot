@@ -12,6 +12,7 @@ import ipaddress
 import os
 from pathlib import Path
 import subprocess
+import time
 
 from nvl_tunnel_backend import TunnelHold, lookup_binding, probe_binding, _key
 from nvl_awg_nat_evidence import AWGNATEvidence, verify_awg_nat
@@ -103,7 +104,7 @@ def verify_awg_target(
                 "h.service_port,h.admin_ssh_port FROM manual_edge_operations m "
                 "JOIN host_pool h ON h.host=m.ip "
                 "WHERE m.ip=? AND m.tunnel_backend='amneziawg' "
-                "AND m.status IN ('EDGE_READY','STANDBY','ROUTING','ACTIVE')",
+                "AND m.status IN ('INSTALLING','EDGE_READY','STANDBY','ROUTING','ACTIVE')",
                 (host,),
             ).fetchall()
             if len(row) != 1 or row[0] != (
@@ -174,7 +175,7 @@ def core_limiter_canary_ready(edge_tunnel_ip: str, *,
             return False
         st = marker.stat()
         if (st.st_uid != 0 or st.st_mode & 0o077
-                or st.st_size > 256):
+                or st.st_size > 256 or time.time() - st.st_mtime > 300\n                or st.st_mtime > time.time() + 5):
             return False
         return marker.read_text().strip() == (
             "NVL_AWG_LIMITER_READY " + str(ipaddress.IPv4Address(edge_tunnel_ip))

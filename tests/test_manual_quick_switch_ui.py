@@ -312,8 +312,9 @@ class Phase3StaticIntegration(unittest.TestCase):
         self.assertNotIn("Cloudzy",text)
 
     def test_handlers_route_old_manual_and_cloudzy_home_to_new_ui(self):
-        self.assertIn('d.startswith("apps_edge_quick_") or d == "apps_cz_home"',
+        self.assertIn('if d.startswith("apps_cz") or d.startswith("u7:"):',
                       self.bot)
+        self.assertIn('if d.startswith("apps_edge_quick_"):',self.bot)
         self.assertIn('_manual_quick_ui.handle(',self.bot)
         self.assertIn('d.startswith(("apps_edge_manual_review_","apps_edge_manual_go_"))',
                       self.bot)

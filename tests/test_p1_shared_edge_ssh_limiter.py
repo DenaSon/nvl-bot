@@ -87,11 +87,11 @@ class SharedEdgeIPLimiterTests(unittest.TestCase):
     def test_verified_awg_shared_source_is_not_penalized(self):
         limiter = load_embedded_limiter()
         with mock.patch.object(limiter, "_awg_shared_ips",
-                               return_value=frozenset({"10.203.77.2"})):
-            self.assertTrue(limiter.is_shared_edge_ip("10.203.77.2"))
-            self.assertFalse(limiter.is_shared_edge_ip("10.203.77.3"))
+                               return_value=frozenset({"10.231.55.2"})):
+            self.assertTrue(limiter.is_shared_edge_ip("10.231.55.2"))
+            self.assertFalse(limiter.is_shared_edge_ip("10.231.55.3"))
             penalties, kills = tick_with_peers(
-                limiter, ("10.77.0.175", "10.203.77.2"), limit=1
+                limiter, ("10.77.0.175", "10.231.55.2"), limit=1
             )
             self.assertEqual(penalties, [])
             self.assertEqual(kills, [])

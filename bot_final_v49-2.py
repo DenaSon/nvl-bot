@@ -29100,6 +29100,31 @@ def _probe_wireguard_edge_sync(host):
     wakes an otherwise-idle WireGuard peer so an old handshake is not mistaken for
     a broken tunnel merely because no recent traffic crossed it.
     """
+    # NVL-AWG-01: explicit, verified alternate tunnel bindings only.
+    # No binding/schema: preserve the existing Legacy wg0 probe byte-for-byte.
+    # A present but invalid AWG binding must fail closed, not probe wg0 instead.
+    try:
+        from nvl_tunnel_backend import TunnelHold, lookup_binding, probe_binding
+    except ImportError:
+        pass  # Backward-compatible with older Core deployments.
+    else:
+        try:
+            with db_conn() as tunnel_db:
+                binding = lookup_binding(tunnel_db, str(host))
+            if binding is not None:
+                return probe_binding(
+                    binding, timeout=EDGE_OBSERVABILITY_PROBE_TIMEOUT_SECONDS,
+                    max_handshake_age=WG_HANDSHAKE_MAX_AGE_SECONDS,
+                )
+        except (TunnelHold, sqlite3.Error, OSError, ValueError):
+            return {
+                "wg_peer_ok": False,
+                "wg_last_handshake_at": None,
+                "wg_reason": "TUNNEL_REGISTRY_UNVERIFIED",
+                "core_path_ok": False,
+                "core_path_reason": "TUNNEL_REGISTRY_UNVERIFIED",
+            }
+
     edge_marker = f"# edge-{str(host).replace('.', '-')}"
     if not os.path.exists(WG_CONF_PATH):
         return {

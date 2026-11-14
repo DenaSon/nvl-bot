@@ -114,8 +114,21 @@ class ManualQuickSwitchUI:
         if rec and rec["kind"]=="QUICK" and rec["status"] not in ("DONE","ABORTED"):
             rows.append([("⚠️ بررسی انتقال ناتمام","apps_edge_quick_status")])
         for ip in standby[:6]:
-            rows.append([("🔁 انتقال کاربران و DNS به "+ip,
-                         "apps_edge_quick_select_"+ip)])
+            from nvl_awg_target import target_backend, core_limiter_canary_ready
+            from nvl_tunnel_backend import lookup_binding
+            try:
+                with self.db() as db:
+                    backend=target_backend(db,ip)
+                    binding=lookup_binding(db,ip)
+                ready=(backend=="wireguard" or (
+                    os.environ.get("NVL_AWG_CUTOVER_ENABLED")=="1"
+                    and binding is not None
+                    and core_limiter_canary_ready(binding.edge_tunnel_ip)))
+            except Exception:
+                ready=False
+            if ready:
+                rows.append([("🔁 انتقال کاربران و DNS به "+ip,
+                             "apps_edge_quick_select_"+ip)])
         rows.extend([
             [("🖥 مدیریت سرورها","apps_edge_manual_home")],
             [("📋 وضعیت و سوابق انتقال","apps_edge_quick_status")],
@@ -381,7 +394,7 @@ class ManualQuickSwitchUI:
                     f"از: <code>{escape(plan['source'])}</code>\n"
                     f"به: <code>{escape(plan['target'])}</code>\n"
                     f"حساب‌ها: <b>{plan['count']}</b>\n\n"
-                    "مسیر SSH/WireGuard بررسی شد. قبل از تأیید، "
+                    "مسیر سرویس و تونل بررسی شد. قبل از تأیید، "
                     "اتصال واقعی NPV Tunnel را روی مقصد مستقل تست کنید. "
                     "DNS به‌صورت خودکار تغییر می‌کند.",
                     [[("✅ تست اتصال واقعی انجام شد؛ تغییر IP",

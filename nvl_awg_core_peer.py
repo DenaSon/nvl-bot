@@ -6,7 +6,7 @@ apply a fresh, CAS-verified plan with awg set (never wg syncconf).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import ipaddress
 
@@ -19,7 +19,7 @@ from nvl_awg_new_edge import (
 @dataclass(frozen=True)
 class AWGCorePeerPlan:
     before_sha256: str
-    after_conf: str  # contains existing Core secrets; never log this value
+    after_conf: str = field(repr=False)  # contains Core secrets; never log
     edge_tunnel_ip: str
     edge_public_key: str
     edge_host: str

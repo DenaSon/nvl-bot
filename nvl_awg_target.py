@@ -146,10 +146,13 @@ def verify_awg_target(
             # Peer identity and exact AllowedIPs must match Core; an unrelated
             # working tunnel cannot be used to qualify the destination.
             peer = _remote(ssh, "awg show awg0 peers", timeout=8).splitlines()
-            allowed = _remote(ssh, "awg show awg0 allowed-ips", timeout=8).splitlines()
-            if peer != [core_key] or allowed != [
-                core_key + " " + binding.core_tunnel_ip + "/32"
-            ]:
+            # AWG's show output uses TAB between public key and CIDR.
+            # Check parsed fields, never a literal-space-joined string.
+            allowed = [line.split() for line in _remote(
+                ssh, "awg show awg0 allowed-ips", timeout=8
+            ).splitlines()]
+            if (peer != [core_key] or
+                    allowed != [[core_key, binding.core_tunnel_ip + "/32"]]):
                 return False
             addrs = _remote(ssh, "ip -4 -o addr show dev awg0", timeout=8)
             if binding.edge_tunnel_ip + "/32" not in addrs.split():

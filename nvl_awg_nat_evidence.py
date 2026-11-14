@@ -60,7 +60,8 @@ def verify_awg_nat(e: AWGNATEvidence) -> bool:
         edge = str(ipaddress.IPv4Address(e.edge_tunnel_ip))
         if core == edge:
             return False
-        if not (re.fullmatch(r"[a-zA-Z0-9_.:-]{1,15}", e.wan) is not None\n                and e.wan not in ("awg0", "lo")
+        if not (re.fullmatch(r"[a-zA-Z0-9_.:-]{1,15}", e.wan) is not None
+                and e.wan not in ("awg0", "lo")
                 and e.forwarding.strip() == "1"
                 and e.awg_service.strip() == "active"
                 and e.awg_autostart.strip() == "enabled"

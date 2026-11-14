@@ -88,13 +88,17 @@ if command -v iptables-save >/dev/null 2>&1; then
 fi
 
 echo "AWG_EDGE_INSTALL=BEGIN_FRESH_ONLY"
+echo "AWG_EDGE_PROGRESS=START"
 apt-get -o DPkg::Lock::Timeout=30 update -qq
 apt-get -o DPkg::Lock::Timeout=30 install -y software-properties-common \
   python3-launchpadlib gnupg2 "linux-headers-$(uname -r)" iptables iptables-persistent >/dev/null
 # Official Amnezia PPA; no third-party one-line scripts and no kernel upgrade.
+echo "AWG_EDGE_PROGRESS=BASE_PACKAGES"
 add-apt-repository -y ppa:amnezia/ppa >/dev/null
+echo "AWG_EDGE_PROGRESS=PPA_ENABLED"
 apt-get -o DPkg::Lock::Timeout=30 update -qq
 apt-get -o DPkg::Lock::Timeout=30 install -y amneziawg-dkms amneziawg-tools >/dev/null
+echo "AWG_EDGE_PROGRESS=AWG_PACKAGES"
 modprobe amneziawg
 command -v awg >/dev/null && command -v awg-quick >/dev/null || fail AWG_TOOLS_MISSING
 modinfo -F version amneziawg | grep -q '^3[.]1[.]' || fail AWG_31_MODULE_REQUIRED
@@ -106,6 +110,7 @@ install -o root -g root -m 600 "$STAGE" "$CONF"
 systemctl enable --now awg-quick@awg0.service
 ip -4 addr show awg0 | grep -Fq "$EDGE_TUNNEL_IP/32" || fail AWG_INTERFACE_NOT_READY
 
+echo "AWG_EDGE_PROGRESS=AWG_SERVICE"
 install -d -m 755 /etc/sysctl.d
 printf 'net.ipv4.ip_forward=1\n' > /etc/sysctl.d/90-nvl-awg.conf
 sysctl -p /etc/sysctl.d/90-nvl-awg.conf >/dev/null
@@ -130,6 +135,7 @@ for p in "$CUSTOMER_PORT" "$TLS_PORT"; do
 done
 netfilter-persistent save >/dev/null
 systemctl enable netfilter-persistent >/dev/null
+echo "AWG_EDGE_PROGRESS=NAT_PERSISTED"
 rm -f -- "$STAGE"
 echo "AWG_EDGE_STAGE=INSTALLED"
 echo "AWG_EDGE_BOOT=ENABLED"

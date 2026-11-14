@@ -306,7 +306,9 @@ class ManualEdgeWizard:
         if stage=="EDGE_READY" and (op.get("tunnel_backend")!="amneziawg"\n                                    or self.awg_check is not None):
             rows.append([("✅ بررسی و فعال‌سازی Standby",
                          "apps_edge_manual_standby_"+opid)])
-        if stage=="STANDBY" and role=="STANDBY":
+        if (stage=="STANDBY" and role=="STANDBY" and
+                (op.get("tunnel_backend")!="amneziawg" or
+                 os.environ.get("NVL_AWG_CUTOVER_ENABLED")=="1")):
             rows.append([("🚀 تبدیل به رله اصلی (کاربران + DNS)",
                          "apps_edge_quick_select_"+op["ip"])])
         if stage=="ACTIVE" and role=="FORMER":
@@ -695,7 +697,6 @@ class ManualEdgeWizard:
                 tls=await asyncio.to_thread(self._tls_port)
                 try:
                     if op.get("tunnel_backend")=="amneziawg":
-                        tls=await asyncio.to_thread(self._tls_port)
                         ok=await asyncio.to_thread(
                             self.awg_check,op["ip"],op["admin_port"],port,tls,
                             (op["pin_type"],op["pin_base64"]))

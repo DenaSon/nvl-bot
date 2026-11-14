@@ -729,7 +729,9 @@ class ManualEdgeJournal:
                     raise ManualEdgeHold("CORE_WG_INSTALL_BUSY")
                 count=db.execute(
                     "UPDATE manual_edge_operations SET status='CANCELLED',"
-                    "reason='ADMIN_FORCE_CANCELLED',updated_at=? "
+                    "reason=CASE WHEN status IN ('INSTALL_HOLD','HOLD') "
+                    "AND reason LIKE 'AWG:%' THEN reason "
+                    "ELSE 'ADMIN_FORCE_CANCELLED' END,updated_at=? "
                     "WHERE id=? AND actor=? AND chat=? AND status=? "
                     "AND route_job IS NULL AND archived_at IS NULL",
                     (int(self.now()),op_id,actor,chat,status),

@@ -34,9 +34,27 @@ class Target:
 
 
 def target_backend(db, host: str) -> str:
-    """Strictly separate absent legacy binding from invalid present binding."""
+    """Never treat a removed or inconsistent AWG binding as Legacy WG."""
     binding = lookup_binding(db, host)
-    return binding.backend if binding is not None else "wireguard"
+    backend = binding.backend if binding is not None else "wireguard"
+    exists = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='manual_edge_operations'"
+    ).fetchone()
+    if exists:
+        cols={r[1] for r in db.execute(
+            "PRAGMA table_info(manual_edge_operations)"
+        )}
+        if "tunnel_backend" in cols:
+            rows=db.execute(
+                "SELECT tunnel_backend FROM manual_edge_operations "
+                "WHERE ip=? AND status IN ('EDGE_READY','STANDBY',"
+                "'ROUTING','MIGRATING','ACTIVE')",
+                (host,),
+            ).fetchall()
+            if len(rows)>1 or (rows and rows[0][0]!=backend):
+                raise TunnelHold("TUNNEL_JOURNAL_BACKEND_MISMATCH")
+    return backend
 
 
 def _local_public_key(runner) -> str:

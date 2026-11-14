@@ -586,8 +586,14 @@ class ManualEdgeWizard:
                     raise ManualWizardHold("AWG_CORE_NOT_READY")
                 await asyncio.to_thread(preflight)
                 try:
-                    op=await asyncio.to_thread(self.journal.start,actor,chat,
-                                               tunnel_backend=backend)
+                    if backend=="amneziawg":
+                        op=await asyncio.to_thread(
+                            self.journal.start,actor,chat,
+                            tunnel_backend="amneziawg")
+                    else:
+                        # Preserve the original positional-only legacy
+                        # call contract for older extensions and mocks.
+                        op=await asyncio.to_thread(self.journal.start,actor,chat)
                 except ManualEdgeHold as exc:
                     if str(exc)!="ACTIVE_MANUAL_OPERATION_EXISTS":
                         raise

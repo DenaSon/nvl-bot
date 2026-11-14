@@ -304,7 +304,9 @@ class ManualEdgeWizard:
             rows.append([("🔐 بررسی هویت SSH","apps_edge_manual_key_"+opid)])
         if stage=="READY_INSTALL":
             rows.append([("📝 ورود امن رمز","apps_edge_manual_password_"+opid)])
-        if stage=="EDGE_READY" and (op.get("tunnel_backend")!="amneziawg"\n                                    or self.awg_check is not None):
+        if stage=="EDGE_READY" and (op.get("tunnel_backend")!="amneziawg"
+                                    or (self.awg_check is not None
+                                        and self._awg_available())):
             rows.append([("✅ بررسی و فعال‌سازی Standby",
                          "apps_edge_manual_standby_"+opid)])
         if (stage=="STANDBY" and role=="STANDBY" and

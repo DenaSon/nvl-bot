@@ -137,8 +137,8 @@ class WizardFailureDisplayTests(unittest.IsolatedAsyncioTestCase):
             },
         ))
         self.wizard = ManualEdgeWizard(
-            db=self.db, preflight=lambda _op: (2252, "legacy"),
-            awg_preflight=lambda _op: (2252, "awg"),
+            db=self.db, preflight=lambda: (2252, "legacy"),
+            awg_preflight=lambda: (2252, "awg"),
             provision=AsyncMock(),
             awg_provision=self.provider,
             awg_check=lambda *_: False,

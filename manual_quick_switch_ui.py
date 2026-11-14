@@ -29,6 +29,7 @@ _MESSAGES = {
     "OTHER_DNS_ROUTE_OPERATION": "یک تغییر DNS قبلی هنوز باز است.",
     "SINGLE_HOST_ROUTE_NOT_COHERENT": "اطلاعات مسیر و DNS هماهنگ نیستند.",
     "MANUAL_STANDBY_NOT_READY": "این Edge آماده‌به‌کار و تأییدشده نیست.",
+    "AWG_LIMITER_WITNESS_PENDING": "تأیید Limiter برای این Edge هنوز آماده یا معتبر نیست. وضعیت را تازه‌سازی کنید؛ بررسی مستقل Core خودکار انجام می‌شود.",
     "TARGET_NETWORK_NOT_VERIFIED": "سلامت SSH، WireGuard یا NAT مقصد تأیید نشد.",
     "DNS_NOT_ON_SOURCE": "DNS عمومی با IP فعلی هماهنگ نیست.",
     "DNS_UNCERTAIN_REVIEW_REQUIRED": "نتیجه DNS مشخص نیست؛ عملیات نیازمند بررسی است.",
@@ -111,6 +112,29 @@ class ManualQuickSwitchUI:
         return current[0][0] if len(current) == 1 else None, \
             [row[0] for row in standby], count
 
+    def _awg_witness_ready(self, host):
+        """Marker read only; never trigger root checks from Telegram callbacks."""
+        if os.environ.get("NVL_AWG_CUTOVER_ENABLED")!="1":
+            return False
+        from nvl_awg_target import target_backend, core_limiter_canary_ready
+        from nvl_tunnel_backend import lookup_binding
+        try:
+            with self.db() as db:
+                if target_backend(db,host)!="amneziawg":
+                    return False
+                binding=lookup_binding(db,host)
+            return (binding is not None and
+                    core_limiter_canary_ready(binding.edge_tunnel_ip))
+        except Exception:
+            return False
+
+    def _require_awg_witness(self, host):
+        from nvl_awg_target import target_backend
+        with self.db() as db:
+            backend=target_backend(db,host)
+        if backend=="amneziawg" and not self._awg_witness_ready(host):
+            raise QuickSwitchHold("AWG_LIMITER_WITNESS_PENDING")
+
     async def _home(self, context, chat):
         current,standby,count=await asyncio.to_thread(self._inventory)
         rec=await asyncio.to_thread(self.engine.latest)
@@ -123,24 +147,28 @@ class ManualQuickSwitchUI:
         rows=[]
         if rec and rec["kind"]=="QUICK" and rec["status"] not in ("DONE","ABORTED"):
             rows.append([("⚠️ بررسی انتقال ناتمام","apps_edge_quick_status")])
+        waiting=[]
         for ip in standby[:6]:
-            from nvl_awg_target import target_backend, core_limiter_canary_ready
-            from nvl_tunnel_backend import lookup_binding
+            from nvl_awg_target import target_backend
+            backend=None
             try:
                 with self.db() as db:
                     backend=target_backend(db,ip)
-                    binding=lookup_binding(db,ip)
                 ready=((backend=="wireguard" and
                         os.environ.get("NVL_LEGACY_WG_UI_ENABLED","0")=="1") or (
-                    backend=="amneziawg" and
-                    os.environ.get("NVL_AWG_CUTOVER_ENABLED")=="1"
-                    and binding is not None
-                    and core_limiter_canary_ready(binding.edge_tunnel_ip)))
+                    backend=="amneziawg" and self._awg_witness_ready(ip)))
             except Exception:
                 ready=False
             if ready:
                 rows.append([("🔁 انتقال کاربران و DNS به "+ip,
                              "apps_edge_quick_select_"+ip)])
+            elif backend=="amneziawg":
+                waiting.append(ip)
+        if waiting:
+            text+=("\n\n⏳ در انتظار تأیید مستقل Limiter برای: " +
+                   ", ".join(escape(ip) for ip in waiting) +
+                   "\nبعد از بررسی خودکار Core، این صفحه را تازه‌سازی کنید.")
+            rows.append([("🔄 تازه‌سازی آمادگی انتقال","apps_edge_quick_home")])
         rows.extend([
             [("🖥 مدیریت سرورها","apps_edge_manual_home")],
             [("📋 وضعیت و سوابق انتقال","apps_edge_quick_status")],
@@ -295,6 +323,8 @@ class ManualQuickSwitchUI:
                        chat=None, bot=None):
         def run():
             with self.effect_lock:
+                if plan and plan.get("target"):
+                    self._require_awg_witness(plan["target"])
                 if job:
                     return asyncio.run(self.engine.resume(
                         job,actor=actor,retry_dns=retry_dns))
@@ -406,6 +436,8 @@ class ManualQuickSwitchUI:
                 if (backend=="wireguard" and
                         os.environ.get("NVL_LEGACY_WG_UI_ENABLED","0")!="1"):
                     raise QuickSwitchHold("LEGACY_WG_NOT_AVAILABLE")
+                if backend=="amneziawg":
+                    self._require_awg_witness(ip)
                 plan=await self.engine.preview(ip)
                 nonce=secrets.token_hex(8)
                 self.pending[(actor,chat)]={"nonce":nonce,"plan":plan,
@@ -436,6 +468,9 @@ class ManualQuickSwitchUI:
                 if (not pending or pending["nonce"]!=nonce or
                         self.now()>pending["expires"]):
                     raise QuickSwitchHold("PREVIEW_EXPIRED")
+                # Recheck the short-lived witness at confirmation time;
+                # a cached Telegram preview never confers lasting permission.
+                self._require_awg_witness(pending["plan"]["target"])
                 if str(actor) in self.running:
                     raise QuickSwitchHold("OPERATION_ALREADY_RUNNING")
                 self.running.add(str(actor))

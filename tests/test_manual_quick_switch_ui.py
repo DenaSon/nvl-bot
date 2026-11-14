@@ -120,6 +120,30 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
                                     role=role,actor=actor,chat=chat,
                                     is_private=private)
 
+    async def test_awg_preview_refuses_missing_independent_witness(self):
+        with patch("nvl_awg_target.target_backend", return_value="amneziawg"), \
+             patch.object(self.ui, "_awg_witness_ready", return_value=False):
+            await self.cb("apps_edge_quick_select_45.59.126.73")
+        self.assertIn("تأیید Limiter", FakeHtml.cards[-1][0])
+        self.assertFalse(any(e[0]=="preview" for e in self.engine.events))
+
+    async def test_awg_expired_witness_rejects_old_confirm(self):
+        with patch("nvl_awg_target.target_backend", return_value="amneziawg"), \
+             patch.object(self.ui, "_awg_witness_ready", side_effect=[True,False]):
+            await self.cb("apps_edge_quick_select_45.59.126.73")
+            confirm=next(d for row in FakeHtml.cards[-1][1] for _,d in row
+                         if d.startswith("apps_edge_quick_confirm_"))
+            await self.cb(confirm)
+        self.assertIn("تأیید Limiter", FakeHtml.cards[-1][0])
+        self.assertFalse(any(e[0]=="start" for e in self.engine.events))
+
+    async def test_awg_worker_rechecks_witness_before_side_effects(self):
+        with patch("nvl_awg_target.target_backend", return_value="amneziawg"), \
+             patch.object(self.ui, "_awg_witness_ready", return_value=False):
+            await self.ui._execute(plan=self.engine.plan,actor=7)
+        self.assertEqual(self.ui.last_errors["7"], "AWG_LIMITER_WITNESS_PENDING")
+        self.assertFalse(any(e[0]=="start" for e in self.engine.events))
+
     async def test_home_contains_only_manual_edge_navigation(self):
         await self.cb("apps_edge_quick_home")
         text,rows=FakeHtml.cards[-1]

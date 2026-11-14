@@ -10,6 +10,7 @@ import base64
 from dataclasses import dataclass
 import ipaddress
 import os
+import stat
 from pathlib import Path
 import subprocess
 import time
@@ -198,27 +199,46 @@ def verify_awg_target(
         return False
 
 
-def core_limiter_canary_ready(edge_tunnel_ip: str, *,
-                             marker_path="/run/nvl-awg-limiter-ready",
-                             runner=subprocess.run) -> bool:
-    """Opt-in, short-lived runtime gate to fail closed before AWG cutover.
 
-    Marker must be created by a dedicated Core runtime reconciliation check
-    (not by the bot callback or a Telegram message). Until a trusted writer
-    exists, AWG QuickSwitch is deliberately HOLD-only.
-    """
+def _trusted_limiter_marker(marker: Path, source: str) -> bool:
     try:
-        marker = Path(marker_path)
         if marker.is_symlink() or not marker.is_file():
             return False
         st = marker.stat()
-        if (st.st_uid != 0 or st.st_mode & 0o077
-                or st.st_size > 256 or time.time() - st.st_mtime > 120
+        if (st.st_uid != 0 or not stat.S_ISREG(st.st_mode)
+                or st.st_mode & 0o077 or st.st_size > 256
+                or time.time() - st.st_mtime > 120
                 or st.st_mtime > time.time() + 5):
             return False
-        if marker.read_text().strip() != (
-            "NVL_AWG_LIMITER_READY " + str(ipaddress.IPv4Address(edge_tunnel_ip))
-        ):
+        return marker.read_text().strip() == ("NVL_AWG_LIMITER_READY " + source)
+    except (OSError, ValueError):
+        return False
+
+
+def core_limiter_canary_ready(edge_tunnel_ip: str, *,
+                             marker_path="/run/nvl-awg-limiter-ready",
+                             runner=subprocess.run,
+                             marker_dir="/run/nvl-awg-limiter-ready.d") -> bool:
+    """Read a short-lived, root-attested marker for this exact AWG /32.
+
+    Independent root timer writes per-Edge markers; the historic single
+    manual marker remains supported. This bot-side reader never runs the
+    privileged witness, renews a marker, or writes route/DNS/customer state.
+    """
+    try:
+        source = str(ipaddress.IPv4Address(edge_tunnel_ip))
+        directory = Path(marker_dir)
+        ready = False
+        if directory.is_dir() and not directory.is_symlink():
+            st = directory.stat()
+            if (st.st_uid == 0 and stat.S_ISDIR(st.st_mode)
+                    and not st.st_mode & 0o077):
+                ready = _trusted_limiter_marker(directory / source, source)
+        # The single-marker CLI remains a manual fallback for deployments
+        # that have not installed the independent refresh timer yet.
+        if not ready:
+            ready = _trusted_limiter_marker(Path(marker_path), source)
+        if not ready:
             return False
         live = runner(["systemctl","is-active","--quiet","ssh-limiter.service"],
                       capture_output=True,text=True,timeout=3)

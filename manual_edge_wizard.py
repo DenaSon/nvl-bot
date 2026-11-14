@@ -65,14 +65,14 @@ FA = {
     "SSH_PORT_INVALID":"پورت مدیریت SSH معتبر نیست.",
     "SSH_MANAGEMENT_PORT_CONFLICT":"پورت SSH مدیریت با پورت اتصال مشتری یا TLS یکسان است. پورت دیگری انتخاب کنید.",
     "EDGE_IP_ALREADY_REGISTERED":"این IP قبلاً در فهرست سرورها وجود دارد.",
-    "EDGE_IP_HAS_CLOUDZY_RECEIPT":"این IP متعلق به پرونده Cloudzy موجود است.",
+    "EDGE_IP_HAS_CLOUDZY_RECEIPT":"این IP قبلاً در یک پرونده ثبت سرور استفاده شده است.",
     "FORCE_CONFIRMATION_EXPIRED":"تأیید لغو منقضی شد؛ دوباره پرونده را باز کنید.",
     "FORCE_CANCEL_REQUIRES_MANUAL_REVIEW":"این پرونده در مسیر انتقال یا مرحله غیرقابل لغو است.",
     "ACTIVE_MANUAL_OPERATION_EXISTS":"یک پرونده ثبت سرور باز است؛ آن را ادامه دهید یا لغو اجباری کنید.",
     "OPERATOR_MISMATCH":"این پرونده متعلق به گفتگوی مدیر فعلی نیست.",
     "EDGE_NOT_READY":"این سرور هنوز در مرحله آماده‌سازی تأییدشده قرار ندارد.",
     "INSTALL_NOT_READY":"شروع نصب برای این پرونده مجاز نیست؛ وضعیت را دوباره بررسی کنید.",
-    "STANDBY_CORE_PATH_UNVERIFIED":"ارتباط پورت مشتری، SSH مدیریت یا مسیر WireGuard از Core تأیید نشد؛ پیش از ادامه مسیر شبکه را بررسی کنید.",
+    "STANDBY_CORE_PATH_UNVERIFIED":"اتصال مشتری، SSH مدیریت یا مسیر تونل تأیید نشد؛ تنظیمات شبکه را بررسی کنید.",
     "STANDBY_NAT_UNVERIFIED":"قوانین NAT یا دسترسی SSH با کلید تأییدشده روی Edge قابل تأیید نیست.",
     "STANDBY_PROBE_ERROR":"بررسی اتصال سرور با خطای اجرایی روبه‌رو شد؛ لاگ فنی سرور را بررسی کنید.",
     "STANDBY_NAT_ERROR":"بررسی قوانین NAT با خطای اجرایی روبه‌رو شد؛ لاگ فنی سرور را بررسی کنید.",
@@ -95,9 +95,10 @@ FA = {
     "RICH_OPERATOR_UNAVAILABLE":"ارسال صفحه مدیریتی ممکن نیست؛ گفتگو را از منوی برنامه‌ها باز کنید.",
     "SECURE_WEB_FORM_NOT_CONFIGURED":"آدرس فرم امن تنظیم نشده است.",
     "SESSION_EXPIRED":"زمان ورود اطلاعات پایان یافته؛ از ابتدا شروع کنید.",
-    "LEGACY_INSTALL_OR_TUNNEL_FAILED":"راه‌اندازی Relay یا تونل WireGuard تأیید نشد؛ نصب را تکرار نکنید.",
+    "LEGACY_INSTALL_OR_TUNNEL_FAILED":"راه‌اندازی Edge یا تونل تأیید نشد؛ نصب را تکرار نکنید.",
     "LEGACY_EDGE_POSTCHECK_FAILED":"نصب تمام شده اما آزمون نهایی ارتباط Edge موفق نبود؛ نصب را تکرار نکنید.",
     "HOST_KEY_CHANGED_AFTER_INSTALL":"اثر انگشت SSH بعد از نصب تغییر کرده؛ ادامه عملیات مجاز نیست.",
+    "EDGE_CREATION_UNAVAILABLE":"افزودن Edge از این مسیر در حال حاضر غیرفعال است.",
     "OLD_WEBAPP_CALLBACK_DISABLED":"این دکمه قدیمی غیرفعال است؛ از مدیریت سرورها وارد شوید.",
     "SSH_REVIEW_NOT_READY":"پرونده هنوز آماده تأیید هویت SSH نیست.",
     "SSH_APPROVAL_EXPIRED":"زمان تأیید اثر انگشت تمام شده؛ مجدداً بررسی کنید.",
@@ -115,9 +116,9 @@ FA = {
     "EDGE_IDENTITY_OR_OPERATOR_BUSY":"هویت سرور یا عملیات این مدیر درگیر است؛ پرونده را بررسی کنید.",
     "MANUAL_CAS_FAILED":"وضعیت پرونده هم‌زمان تغییر کرده؛ صفحه را تازه کنید.",
     "INVALID_SSH_HOSTKEY":"کلید هویت SSH سرور معتبر نیست.",
-    "CORE_WG_INSTALL_LOCK_UNAVAILABLE":"قفل نصب مشترک WireGuard در دسترس نیست؛ نصب دیگری را آغاز نکنید.",
-    "CORE_WG_INSTALL_LOCK_UNTRUSTED":"اعتبار قفل نصب WireGuard تأیید نشد؛ نیازمند بررسی مدیر سرور است.",
-    "CORE_WG_INSTALL_BUSY":"نصب دیگری از WireGuard در جریان است؛ پس از تکمیل آن اقدام کنید.",
+    "CORE_WG_INSTALL_LOCK_UNAVAILABLE":"قفل نصب در دسترس نیست؛ نصب دیگری را آغاز نکنید.",
+    "CORE_WG_INSTALL_LOCK_UNTRUSTED":"اعتبار قفل نصب تأیید نشد؛ بررسی سرور لازم است.",
+    "CORE_WG_INSTALL_BUSY":"یک نصب دیگر در حال اجراست؛ پس از تکمیل آن اقدام کنید.",
     "CORE_WG_INSTALL_LEASE_BUSY":"فرایند نصب دیگری در Core فعال است؛ نصب مجدد مجاز نیست.",
     "AUTO_FAILOVER_OR_K2_BUSY":"حالت Failover یا Egress محافظت‌شده با این عملیات تداخل دارد.",
     "ORIGINAL_FAILOVER_RUNNING":"یک انتقال دیگر قفل مسیر را نگه داشته است. از «وضعیت انتقال و بازیابی» آن را بررسی کنید؛ نصب دوباره لازم نیست.",
@@ -168,6 +169,15 @@ class ManualEdgeWizard:
         self.form_url=form_url or (lambda:os.environ.get("NVL_MANUAL_FORM_PUBLIC_URL",""))
         self.running=set()
 
+    def _legacy_intake_enabled(self):
+        """Emergency fallback, OFF by default; controls UI and all write callbacks."""
+        return os.environ.get("NVL_LEGACY_EDGE_UI_ENABLED","0")=="1"
+
+    def _intake_available(self, backend):
+        if backend=="amneziawg":
+            return self._awg_available()
+        return backend=="wireguard" and self._legacy_intake_enabled()
+
     def _awg_available(self):
         return (os.environ.get("NVL_AWG_NEW_EDGE_ENABLED")=="1"
                 and self.awg_preflight is not None
@@ -197,13 +207,13 @@ class ManualEdgeWizard:
         return self.awg_preflight is not None and self.awg_check is not None
 
     def _new_edge_buttons(self):
-        # Preserve the exact old user experience while the AWG feature is OFF.
-        if not self._awg_available():
-            return [[("➕ افزودن سرور جدید", "apps_edge_manual_new")]]
-        return [
-            [("➕ افزودن Edge با AmneziaWG", "apps_edge_manual_new_awg")],
-            [("➕ افزودن با WireGuard قدیمی", "apps_edge_manual_new")],
-        ]
+        """AWG-first menu; no legacy trace when the fallback is disabled."""
+        rows=[]
+        if self._awg_available():
+            rows.append([("➕ افزودن Edge جدید", "apps_edge_manual_new_awg")])
+        if self._legacy_intake_enabled():
+            rows.append([("➕ افزودن Edge با WireGuard", "apps_edge_manual_new")])
+        return rows
 
     def _preflight_for(self, op):
         if op.get("tunnel_backend", "wireguard")=="amneziawg":
@@ -280,7 +290,8 @@ class ManualEdgeWizard:
         if latest is None:
             return await self._view(query,
                 "🖥 <b>مدیریت سرورها</b>\n\n"
-                "برای شروع، یک سرور اضافه کنید.",
+                ("برای شروع، یک Edge جدید اضافه کنید." if self._new_edge_buttons()
+                 else "افزودن Edge جدید در حال حاضر غیرفعال است."),
                 self._new_edge_buttons()+
                 [[("↩️ مدیریت سرورها","apps_cz_home")]])
         if type(page) is not int or not 0<=page<=10000:
@@ -325,8 +336,8 @@ class ManualEdgeWizard:
         rows=[]
         if stage=="HOSTKEY_PENDING":
             rows.append([("🔐 بررسی هویت SSH","apps_edge_manual_key_"+opid)])
-        if stage=="READY_INSTALL" and (op.get("tunnel_backend")!="amneziawg"
-                                      or self._awg_available()):
+        if stage=="READY_INSTALL" and self._intake_available(
+                op.get("tunnel_backend","wireguard")):
             rows.append([("📝 ورود امن رمز","apps_edge_manual_password_"+opid)])
         if stage=="EDGE_READY" and (op.get("tunnel_backend")!="amneziawg"
                                     or self._awg_can_verify()):
@@ -378,8 +389,8 @@ class ManualEdgeWizard:
                     self.is_core_host,op["ip"]):
                 raise ManualWizardHold("CORE_IP_CANNOT_BE_EDGE")
             backend=op.get("tunnel_backend","wireguard")
-            if backend=="amneziawg" and not self._awg_available():
-                raise ManualWizardHold("AWG_CORE_NOT_READY")
+            if not self._intake_available(backend):
+                raise ManualWizardHold("EDGE_CREATION_UNAVAILABLE")
             customer_port,_ = await asyncio.to_thread(self._preflight_for(op))
             tls_port = await asyncio.to_thread(self._tls_port)
             self._assert_management_port_safe(
@@ -492,8 +503,8 @@ class ManualEdgeWizard:
                     "وضعیت قبلی: <b>"+escape(result["previous_status"])+"</b>\n"
                     "فقط پرونده ثبت/نصب بسته شد؛ حساب‌ها، DNS و شبکه دست‌نخورده‌اند. "
                     "این گزینه هیچ قفل انتقال کاربری را آزاد نمی‌کند.",
-                    [[("➕ افزودن سرور جدید","apps_edge_manual_new")],
-                     [("🖥 مدیریت سرورها","apps_edge_manual_home")]])
+                    self._new_edge_buttons()+
+                    [[("🖥 مدیریت سرورها","apps_edge_manual_home")]])
             if data.startswith("apps_edge_manual_force_review_"):
                 opid=data[len("apps_edge_manual_force_review_"):]
                 op=await asyncio.to_thread(self.journal.get,opid)
@@ -515,7 +526,7 @@ class ManualEdgeWizard:
                     "شناسه: <code>"+escape(opid)+"</code>\n"
                     "وضعیت: <b>"+escape(op["status"])+"</b>\n\n"
                     "این اقدام فقط پرونده ثبت/نصب را می‌بندد؛ قفل انتقال کاربران "
-                    "را آزاد نمی‌کند. تغییرات احتمالی VPS یا WireGuard برگردانده "
+                    "را آزاد نمی‌کند. تغییرات احتمالی سرور یا تونل برگردانده "
                     "نمی‌شود. اگر نصب هنوز اجرا شود، لغو مسدود خواهد شد.",
                     [[("⛔ تأیید لغو اجباری",
                        "apps_edge_manual_force_yes_"+nonce)],
@@ -539,7 +550,7 @@ class ManualEdgeWizard:
                     "🗂 <b>تأیید حذف از فهرست</b>\n\n"
                     "سرور: <code>"+escape(proof["ip"])+"</code>\n"
                     "فقط نمایش سرور از فهرست مخفی می‌شود. "
-                    "VPS، WireGuard، DNS، حساب‌ها و سوابق حذف نمی‌شوند.",
+                    "سرور، تونل، DNS، حساب‌ها و سوابق حذف نمی‌شوند.",
                     [[("✅ حذف فقط از فهرست",
                        "apps_edge_manual_archive_yes_"+opid)],
                      [("انصراف","apps_edge_manual_detail_"+opid)]])
@@ -625,8 +636,8 @@ class ManualEdgeWizard:
             if data in ("apps_edge_manual_new","apps_edge_manual_new_awg"):
                 backend = ("amneziawg" if data=="apps_edge_manual_new_awg"
                            else "wireguard")
-                if backend=="amneziawg" and not self._awg_available():
-                    raise ManualWizardHold("AWG_CORE_NOT_READY")
+                if not self._intake_available(backend):
+                    raise ManualWizardHold("EDGE_CREATION_UNAVAILABLE")
                 preflight = (self.awg_preflight if backend=="amneziawg"
                              else self.preflight)
                 if preflight is None:
@@ -662,7 +673,7 @@ class ManualEdgeWizard:
                 }
                 context.user_data["state"]="MANUAL_EDGE_IP"
                 return await self._view(query,
-                    "۱/۴ · <b>سرور جدید</b>\n\n"
+                    "۱/۳ · <b>افزودن Edge جدید</b>\n\n"
                     "IP عمومی سرور Ubuntu 24.04 را در این گفتگوی خصوصی ارسال کنید.\n"
                     "لغو: /cancel",
                     [[("↩️ وضعیت","apps_edge_manual_home")]])
@@ -681,7 +692,7 @@ class ManualEdgeWizard:
                     "expires":self.now()+180,
                 }
                 return await self._view(query,
-                    "۲/۴ · <b>تأیید هویت سرور</b>\n\n"
+                    "۲/۳ · <b>تأیید هویت سرور</b>\n\n"
                     f"IP: <code>{escape(op['ip'])}</code>\n"
                     f"اثر انگشت: <code>{escape(fingerprint)}</code>\n\n"
                     "اثر انگشت SSH را در کنسول مستقل سرور تطبیق دهید. "
@@ -711,8 +722,9 @@ class ManualEdgeWizard:
             if data.startswith("apps_edge_manual_password_"):
                 opid=data[len("apps_edge_manual_password_"):]
                 op=await asyncio.to_thread(self.journal.get,opid)
-                if op and op.get("tunnel_backend")=="amneziawg" and not self._awg_available():
-                    raise ManualWizardHold("AWG_CORE_NOT_READY")
+                if op and not self._intake_available(
+                        op.get("tunnel_backend","wireguard")):
+                    raise ManualWizardHold("EDGE_CREATION_UNAVAILABLE")
                 if (not op or (op["actor"],op["chat"])!=(actor,chat)
                         or op["status"]!="READY_INSTALL" or opid in self.running):
                     raise ManualWizardHold("INSTALL_NOT_READY")
@@ -722,7 +734,7 @@ class ManualEdgeWizard:
                 }
                 context.user_data["state"]="MANUAL_EDGE_PASSWORD"
                 return await self._view(query,
-                    "۳/۴ · <b>رمز Root</b>\n\n"
+                    "۳/۳ · <b>راه‌اندازی سرور</b>\n\n"
                     "رمز Root را در چت خصوصی ارسال کنید. "
                     "قبل از نصب پیام حذف می‌شود و رمز ذخیره نخواهد شد. "
                     "اگر حذف ممکن نباشد، نصب متوقف می‌شود.",

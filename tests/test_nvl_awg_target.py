@@ -89,6 +89,7 @@ class AWGTargetTests(unittest.TestCase):
         )
         self.remote_calls = []
         self.commands = []
+        self.route_present = True
 
     def runner(self, cmd, **kwargs):
         self.commands.append(cmd)
@@ -98,6 +99,13 @@ class AWGTargetTests(unittest.TestCase):
             data=EDGE_KEY+" "+str(int(time.time()))+"\n"
         elif cmd == ["awg","show","awg0","public-key"]:
             data=CORE_KEY+"\n"
+        elif cmd[:4] == ["ip","-4","route","show"]:
+            data=(EDGE_TUNNEL+" dev awg0 scope link src "+CORE_TUNNEL+"\n"
+                  if self.route_present else "")
+        elif cmd[:4] == ["ip","-4","route","get"]:
+            data=(EDGE_TUNNEL+" from "+CORE_TUNNEL+" dev awg0\n"
+                  if self.route_present else
+                  EDGE_TUNNEL+" from "+CORE_TUNNEL+" via 172.31.1.1 dev eth0\n")
         elif cmd[0]=="ping":
             data=""
         else:
@@ -106,6 +114,8 @@ class AWGTargetTests(unittest.TestCase):
 
     def remote(self, ssh, cmd, timeout=8):
         self.remote_calls.append(cmd)
+        if cmd.startswith("timeout 6 bash -c 'exec 3<>/dev/tcp/"):
+            return ""
         if cmd=="awg show awg0 peers":
             return CORE_KEY
         if cmd=="awg show awg0 allowed-ips":
@@ -142,6 +152,21 @@ class AWGTargetTests(unittest.TestCase):
                             for cmd in self.remote_calls if "route get" in cmd))
         self.assertFalse(any("10.203.77." in str(cmd)
                              for cmd in self.remote_calls))
+
+    def test_missing_core_return_route_blocks_standby(self):
+        self.route_present = False
+        self.assertFalse(self.verify())
+
+    def test_tcp_failure_blocks_standby_even_if_nat_and_ping_pass(self):
+        def refused(ssh, cmd, timeout=8):
+            if cmd.startswith("timeout 6 bash -c 'exec 3<>/dev/tcp/"):
+                raise RuntimeError("edge TCP failed")
+            return self.remote(ssh, cmd, timeout)
+        with patch("nvl_awg_target._remote", side_effect=refused):
+            self.assertFalse(verify_awg_target(
+                self.db_factory,self.target,
+                runner=self.runner,ssh_connect=lambda *a:FakeSSH(),
+            ))
 
     def test_wrong_allowed_ip_rejects_standby_even_with_correct_peer(self):
         def wrong_cidr(ssh, cmd, timeout=8):

@@ -7,7 +7,9 @@ is write-once; no retries after an ambiguous network/installer error.
 from __future__ import annotations
 
 import base64
+import logging
 import os
+import re
 from datetime import datetime
 import time
 from pathlib import Path
@@ -19,6 +21,9 @@ from legacy_wg_install_lease import exclusive_legacy_edge_install
 from nvl_awg_new_edge import AWGCoreProfile, public_key, render_new_edge_conf, ipv4, port
 from nvl_awg_core_peer import plan_core_peer, commit_core_peer
 from nvl_awg_nat_evidence import AWGNATEvidence, verify_awg_nat
+from nvl_awg_install_diagnostics import SHELL_HOLDS, PROGRESS, classify, validated
+
+log = logging.getLogger(__name__)
 
 
 class AWGProvisionHold(RuntimeError):
@@ -40,6 +45,7 @@ def _remote(ssh, cmd: str, *, timeout: int = 60) -> str:
     chan = stdout.channel
     deadline = time.monotonic() + timeout
     chunks = []
+    stderr_tail = b""
     total = 0
     while not chan.exit_status_ready() or chan.recv_ready() or chan.recv_stderr_ready():
         progressed = False
@@ -51,7 +57,7 @@ def _remote(ssh, cmd: str, *, timeout: int = 60) -> str:
             chunks.append(data)
             progressed = True
         if chan.recv_stderr_ready():
-            chan.recv_stderr(4096)  # never expose remote stderr
+            stderr_tail = (stderr_tail + chan.recv_stderr(4096))[-8192:]  # private
             progressed = True
         if not progressed:
             if time.monotonic() > deadline:
@@ -59,6 +65,20 @@ def _remote(ssh, cmd: str, *, timeout: int = 60) -> str:
             time.sleep(0.05)
     status = chan.recv_exit_status()
     if status != 0:
+        matches = re.findall(rb"AWG_NEW_EDGE_HOLD:\s*([A-Z0-9_]{3,60})", stderr_tail)
+        if matches:
+            symbol = matches[-1].decode("ascii")
+            if symbol in SHELL_HOLDS:
+                raise AWGProvisionHold("EDGE_INSTALL_" + symbol)
+        if status == 124:
+            raise AWGProvisionHold("EDGE_INSTALL_TIMEOUT")
+        progress = re.findall(
+            rb"AWG_EDGE_PROGRESS=([A-Z_]{3,32})", b"".join(chunks)
+        )
+        if progress and progress[-1].decode("ascii") in PROGRESS:
+            raise AWGProvisionHold(
+                "EDGE_INSTALL_AFTER_" + progress[-1].decode("ascii")
+            )
         raise AWGProvisionHold("EDGE_REMOTE_COMMAND_FAILED")
     return b"".join(chunks).decode("utf-8", "replace").strip()
 
@@ -84,6 +104,34 @@ def _registered_awg_ips(db_factory) -> tuple[str, ...]:
         ))
 
 
+def _preflight_registry(db_factory, host: str) -> None:
+    """Check schema/candidate state before remote or Core peer changes."""
+    with db_factory() as db:
+        if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise AWGProvisionHold("DATABASE_INTEGRITY_FAILED")
+        for table in ("host_pool", "manual_edge_operations", "settings"):
+            if not db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone():
+                raise AWGProvisionHold("DATABASE_SCHEMA_MISSING")
+        if db.execute("SELECT 1 FROM host_pool WHERE host=?", (host,)).fetchone():
+            raise AWGProvisionHold("EDGE_POOL_ALREADY_REGISTERED")
+        if db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='edge_tunnel_bindings'"
+        ).fetchone() and db.execute(
+            "SELECT 1 FROM edge_tunnel_bindings WHERE host=?", (host,)
+        ).fetchone():
+            raise AWGProvisionHold("AWG_BINDING_COLLISION")
+        rows = db.execute(
+            "SELECT status,tunnel_backend FROM manual_edge_operations "
+            "WHERE ip=? AND status!='CANCELLED'", (host,),
+        ).fetchall()
+        if rows != [("INSTALLING", "amneziawg")]:
+            raise AWGProvisionHold("AWG_INSTALL_JOURNAL_UNVERIFIED")
+
+
 @exclusive_legacy_edge_install
 def provision_awg_new_edge_sync(
     host: str, admin_port: int, password: str,
@@ -96,6 +144,7 @@ def provision_awg_new_edge_sync(
 ) -> tuple[bool, str, dict | None]:
     """Return (success, safe_code, nonsecret details), never print any key."""
     ssh = None
+    stage = "CORE_PREFLIGHT"
     try:
         if os.geteuid() != 0:
             raise AWGProvisionHold("CORE_ROOT_REQUIRED")
@@ -105,6 +154,7 @@ def provision_awg_new_edge_sync(
             raise AWGProvisionHold("SSH_PASSWORD_MISSING")
         host = ipv4(host, global_address=True)
         core_public_ip = ipv4(core_public_ip, global_address=True)
+        _preflight_registry(db_factory, host)
         if host == core_public_ip:
             raise AWGProvisionHold("EDGE_EQUALS_CORE")
         for p in (admin_port, customer_port, tls_port, edge_udp_port):
@@ -135,6 +185,7 @@ def provision_awg_new_edge_sync(
             edge_port=edge_udp_port,
         )
 
+        stage = "SSH_CONNECT"
         if pinned_key[0] != "ssh-ed25519":
             raise AWGProvisionHold("PINNED_SSH_HOSTKEY_TYPE_UNSUPPORTED")
         import paramiko
@@ -152,6 +203,7 @@ def provision_awg_new_edge_sync(
             look_for_keys=False, allow_agent=False,
             timeout=15, banner_timeout=15, auth_timeout=15,
         )
+        stage = "EDGE_PRECHECK"
         key_ok, _reason = install_management_key(ssh)
         if key_ok is not True:
             raise AWGProvisionHold("CORE_MANAGEMENT_KEY_INSTALL_FAILED")
@@ -168,6 +220,7 @@ def provision_awg_new_edge_sync(
         )
         _remote(ssh, "umask 077; install -d -m 700 /root/nvl-awg-stage",
                 timeout=10)
+        stage = "EDGE_STAGING"
         sftp = ssh.open_sftp()
         try:
             staged = "/root/nvl-awg-stage/awg0.conf"
@@ -185,17 +238,21 @@ def provision_awg_new_edge_sync(
                 plan.edge_tunnel_ip, customer_port, tls_port, admin_port,
             )
         )
+        stage = "EDGE_INSTALL"
         out = _remote(ssh, command, timeout=330)
         if "AWG_EDGE_STAGE=INSTALLED" not in out:
             raise AWGProvisionHold("EDGE_AWG_INSTALL_UNVERIFIED")
 
         # Atomic core config write + live peer update; NEVER restart awg0.
+        stage = "CORE_PEER"
         commit_core_peer(plan)
+        stage = "CORE_PATH"
         _run(["ping", "-I", "awg0", "-c", "2", "-W", "3",
               plan.edge_tunnel_ip], timeout=12)
 
         # Network evidence comes from the SAME pinned SSH transport used to
         # install the Edge. A live tunnel alone is insufficient for registration.
+        stage = "EDGE_NAT"
         wan = _remote(
             ssh, "ip -4 route get " + shlex.quote(core_public_ip) +
                  " | awk '{for(i=1;i<=NF;i++) if($i==\"dev\"){print $(i+1);exit}}'",
@@ -229,6 +286,7 @@ def provision_awg_new_edge_sync(
             raise AWGProvisionHold("AWG_NAT_PERSISTENCE_UNVERIFIED")
 
         # Only now attach a VERIFIED backend to an inactive manual Edge.
+        stage = "DB_REGISTER"
         with db_factory() as db:
             db.execute("BEGIN IMMEDIATE")
             from nvl_tunnel_backend import SCHEMA
@@ -267,11 +325,18 @@ def provision_awg_new_edge_sync(
             tunnel_ok=True, edge_wg_ip=plan.edge_tunnel_ip,
             edge_pubkey=edge_key, tunnel_backend="amneziawg",
         )
-    except Exception:
-        # Every failure after remote effect begins is a durable INSTALL_HOLD
-        # in ManualEdgeWizard: never retry or start another installer.
-        # No raw traceback/SSH error or profile/HPK are returned to Telegram.
-        return False, "AWG_NEW_EDGE_REQUIRES_MANUAL_REVIEW", None
+    except Exception as exc:
+        # Safe symbolic receipt; never forward raw stderr, errors or keys.
+        stage, code = validated(stage, classify(exc))
+        log.error(
+            "AWG new-edge install stopped host=%s stage=%s code=%s "
+            "exception_type=%s",
+            host if isinstance(host, str) else "UNKNOWN",
+            stage, code, type(exc).__name__,
+        )
+        return False, "AWG_NEW_EDGE_REQUIRES_MANUAL_REVIEW", {
+            "failure_stage": stage, "failure_code": code,
+        }
     finally:
         if ssh is not None:
             try:

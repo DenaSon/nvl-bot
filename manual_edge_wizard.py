@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 from manual_edge_secure_form import IntakeHold, ManualFormStore
 from manual_edge_journal import ManualEdgeHold, ManualEdgeJournal
+from nvl_awg_install_diagnostics import receipt as awg_receipt, describe as awg_describe, validated as awg_validated, classify as awg_classify
 from manual_edge_identity import assert_ref as assert_edge_ref
 from cloudzy_cz04b import _digest
 
@@ -374,10 +375,13 @@ class ManualEdgeWizard:
             [("↩️ همه سرورها","apps_edge_manual_home")],
             [("↩️ مدیریت سرورها","apps_cz_home")],
         ])
+        failure = (awg_describe(op.get("reason") or "", opid)
+                   if stage in ("INSTALL_HOLD", "HOLD") else "")
         warning=("\n⚠️ نصب قبلی را تکرار نکنید؛ وضعیت سرور باید مستقل بررسی شود."
                  if stage in ("INSTALL_HOLD","HOLD") else "")
         return await self._view(query,self._summary(op)+
-            "وضعیت: <b>"+escape(self._visible_status(stage,role))+"</b>"+warning,rows)
+            "وضعیت: <b>"+escape(self._visible_status(stage,role))+"</b>"+
+            ("\n\n"+failure if failure else warning),rows)
 
     @staticmethod
     def _assert_management_port_safe(admin_port, customer_port, tls_port):
@@ -388,6 +392,8 @@ class ManualEdgeWizard:
             raise ManualWizardHold("SSH_MANAGEMENT_PORT_CONFLICT")
 
     async def _install_task(self,app,op_id,actor,chat,password):
+        backend = None
+        stage = "WIZARD_PREFLIGHT"
         try:
             op=await asyncio.to_thread(self.journal.get,op_id)
             if self.is_core_host is None or await asyncio.to_thread(
@@ -423,7 +429,15 @@ class ManualEdgeWizard:
                 op["ip"],op["admin_port"],password,
                 (op["pin_type"],op["pin_base64"]),chat,app)
             if not ok or not isinstance(details,dict) or not details.get("tunnel_ok"):
+                if backend=="amneziawg":
+                    if isinstance(details,dict):
+                        phase,code=awg_validated(
+                            details.get("failure_stage"),details.get("failure_code"))
+                    else:
+                        phase,code=awg_validated("CORE_PREFLIGHT",ip)
+                    raise ManualWizardHold(awg_receipt(phase,code))
                 raise ManualWizardHold("LEGACY_INSTALL_OR_TUNNEL_FAILED")
+            stage = "WIZARD_POSTCHECK"
             if await self.verify(op["ip"],details,op["admin_port"]) is not True:
                 raise ManualWizardHold("EDGE_POSTCHECK_FAILED")
             observed=await asyncio.to_thread(
@@ -439,6 +453,8 @@ class ManualEdgeWizard:
                 rows=[[("🟢 وضعیت سرور دستی", "apps_edge_manual_home")]])
         except Exception as exc:
             safe=str(exc) if isinstance(exc,(ManualEdgeHold,ManualWizardHold)) else type(exc).__name__
+            if backend=="amneziawg" and not safe.startswith("AWG:"):
+                safe=awg_receipt(stage,awg_classify(exc))
             log.error("Manual Edge install stopped op=%s code=%s "
                       "exception_type=%s trace=%s",
                       op_id,safe,type(exc).__name__,_safe_trace_location(exc))
@@ -456,9 +472,11 @@ class ManualEdgeWizard:
                     except Exception:
                         pass
             try:
+                report=awg_describe(safe,op_id) if backend=="amneziawg" else ""
                 await ManualHtmlDelivery(app.bot).send(
                     chat=chat,
-                    text=("⛔️ آماده‌سازی به بررسی نیاز دارد.\n"
+                    text=(report or
+                          "⛔️ آماده‌سازی به بررسی نیاز دارد.\n"
                           "برای جلوگیری از تکرار نصب و قوانین شبکه، عملیات متوقف شد."),
                     rows=[[("🔄 وضعیت سرور", "apps_edge_manual_home")]])
             except Exception:

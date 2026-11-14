@@ -33,15 +33,33 @@ def _run(argv: list[str], *, input: str | None = None, timeout=10) -> str:
 
 
 def _remote(ssh, cmd: str, *, timeout: int = 60) -> str:
-    _stdin, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
-    # Read stderr only for drain; NEVER include it in operator/Telegram error,
-    # as third-party tools can emit sensitive information on failure.
-    status = stdout.channel.recv_exit_status()
-    out = stdout.read(4096).decode("utf-8", "replace")
-    stderr.read(4096)
+    # Drain both channel streams BEFORE recv_exit_status to avoid SSH deadlock
+    # when apt/dpkg output exceeds the remote channel's fixed window.
+    _stdin, stdout, _stderr = ssh.exec_command(cmd, timeout=timeout)
+    chan = stdout.channel
+    deadline = time.monotonic() + timeout
+    chunks = []
+    total = 0
+    while not chan.exit_status_ready() or chan.recv_ready() or chan.recv_stderr_ready():
+        progressed = False
+        if chan.recv_ready():
+            data = chan.recv(4096)
+            total += len(data)
+            if total > 32768:
+                raise AWGProvisionHold("EDGE_REMOTE_OUTPUT_EXCEEDED_LIMIT")
+            chunks.append(data)
+            progressed = True
+        if chan.recv_stderr_ready():
+            chan.recv_stderr(4096)  # never expose remote stderr
+            progressed = True
+        if not progressed:
+            if time.monotonic() > deadline:
+                raise AWGProvisionHold("EDGE_REMOTE_COMMAND_TIMEOUT")
+            time.sleep(0.05)
+    status = chan.recv_exit_status()
     if status != 0:
         raise AWGProvisionHold("EDGE_REMOTE_COMMAND_FAILED")
-    return out.strip()
+    return b"".join(chunks).decode("utf-8", "replace").strip()
 
 
 def _root_only(path: Path) -> str:

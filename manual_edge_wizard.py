@@ -684,6 +684,8 @@ class ManualEdgeWizard:
                 op=await asyncio.to_thread(self.journal.get,opid)
                 if not op or (op["actor"],op["chat"])!=(actor,chat) or op["status"]!="HOSTKEY_PENDING":
                     raise ManualWizardHold("SSH_REVIEW_NOT_READY")
+                if not self._intake_available(op.get("tunnel_backend","wireguard")):
+                    raise ManualWizardHold("EDGE_CREATION_UNAVAILABLE")
                 key_type,key_b64,fingerprint=await asyncio.to_thread(
                     self.key_reader,op["ip"],op["admin_port"])
                 context.user_data["manual_edge_pin"]={
@@ -708,6 +710,9 @@ class ManualEdgeWizard:
                         or self.now()>=proof["expires"]):
                     raise ManualWizardHold("SSH_APPROVAL_EXPIRED")
                 op=await asyncio.to_thread(self.journal.get,opid)
+                if not op or not self._intake_available(
+                        op.get("tunnel_backend","wireguard")):
+                    raise ManualWizardHold("EDGE_CREATION_UNAVAILABLE")
                 observed=await asyncio.to_thread(
                     self.key_reader,op["ip"],op["admin_port"])
                 if observed[:2]!=proof["key"][:2]:

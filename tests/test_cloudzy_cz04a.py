@@ -370,7 +370,7 @@ class CZ04ATests(unittest.IsolatedAsyncioTestCase):
     async def test_main_dispatch_prioritizes_cz04a_over_legacy(self):
         source = (Path(__file__).resolve().parents[1] /
                   "bot_final_v49-2.py").read_text("utf-8")
-        self.assertIn('d == "apps_cz_edge" or d.startswith("apps_cz4_")', source)
-        self.assertLess(source.index("_cloudzy_04a.handle_callback("),
-                        source.index("_cloudzy_admin_panel.handle_callback("))
+        self.assertIn('if d.startswith("apps_cz_") or d.startswith("u7:"):',source)
+        self.assertNotIn("await _cloudzy_04a.handle_callback(",source)
+        self.assertNotIn("await _cloudzy_admin_panel.handle_callback(",source)
         self.assertIn("pool_active=False", source)

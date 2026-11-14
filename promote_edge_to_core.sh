@@ -535,6 +535,7 @@ from __future__ import annotations
 import os
 import re
 import ipaddress
+import sqlite3
 import sys
 import time
 import signal
@@ -562,10 +563,35 @@ def setup_firewall_cooldown():
             subprocess.run(["iptables", "-I", "INPUT", "-m", "set", "--match-set", "ssh_penalty", "src", "-j", "DROP"])
     except Exception: pass
 
+# Only verified AWG /32 sources may represent shared customer ingress.
+# Cached for 15 seconds; legacy 10.77.0.0/24 behavior is unchanged.
+_AWG_SHARED_CACHE = frozenset()
+_AWG_SHARED_REFRESHED = -1.0
+
+def _awg_shared_ips():
+    global _AWG_SHARED_CACHE, _AWG_SHARED_REFRESHED
+    now = time.monotonic()
+    if now - _AWG_SHARED_REFRESHED < 15:
+        return _AWG_SHARED_CACHE
+    _AWG_SHARED_REFRESHED = now
+    try:
+        from nvl_tunnel_backend import verified_shared_edge_sources
+        with sqlite3.connect("file:/root/master_bot.db?mode=ro",
+                             uri=True, timeout=0.2) as db:
+            sources = verified_shared_edge_sources(db)
+    except (ImportError, sqlite3.Error, ValueError, OSError):
+        # Preserve the last verified snapshot on a temporary read failure.
+        return _AWG_SHARED_CACHE
+    _AWG_SHARED_CACHE = sources
+    return sources
+
 def is_shared_edge_ip(ip: str) -> bool:
     try:
-        return ipaddress.ip_address(ip) in SHARED_EDGE_NETWORK
-    except ValueError:
+        addr = ipaddress.ip_address(ip)
+        if addr in SHARED_EDGE_NETWORK:
+            return True
+        return str(addr) in _awg_shared_ips()
+    except (ValueError, TypeError):
         return False
 
 def apply_cooldown(ip: str):

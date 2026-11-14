@@ -162,7 +162,7 @@ def _allowed_peer(raw: str, binding: TunnelBinding) -> bool:
                 net = ipaddress.ip_network(text.strip(), strict=True)
             except ValueError as exc:
                 raise TunnelHold("TUNNEL_ALLOWED_IPS_INVALID") from exc
-            if binding.edge_tunnel_ip in net:
+            if ipaddress.IPv4Address(binding.edge_tunnel_ip) in net:
                 if key != binding.peer_public_key or net != expected:
                     raise TunnelHold("TUNNEL_PEER_OWNERSHIP_AMBIGUOUS")
                 matching += 1

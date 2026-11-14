@@ -96,18 +96,19 @@ class ManualEdgeJournal:
                            (op_id,)).fetchone()
             return dict(row) if row else None
 
-    def latest(self, actor, chat):
+    def latest(self, actor, chat, *, backend=None):
         with self.db() as db:
             self.initialize(db)
             row=db.execute(
                 "SELECT id FROM manual_edge_operations WHERE actor=? AND chat=? "
                 "AND status != 'CANCELLED' AND archived_at IS NULL "
-                "ORDER BY created_at DESC,rowid DESC LIMIT 1",
-                (actor,chat),
+                + ("AND tunnel_backend=? " if backend else "")
+                + "ORDER BY created_at DESC,rowid DESC LIMIT 1",
+                (actor,chat,backend) if backend else (actor,chat),
             ).fetchone()
             return self.get(row[0]) if row else None
 
-    def list_by_owner(self, actor, chat, *, limit=7, offset=0):
+    def list_by_owner(self, actor, chat, *, limit=7, offset=0, backend=None):
         """Read-only paginated inventory, scoped to the private admin owner."""
         if type(actor) is not int or type(chat) is not int or actor <= 0 or chat <= 0:
             raise ManualEdgeHold("ADMIN_IDENTITY_INVALID")
@@ -120,8 +121,10 @@ class ManualEdgeJournal:
                 "SELECT * FROM manual_edge_operations "
                 "WHERE actor=? AND chat=? AND status!='CANCELLED' "
                 "AND archived_at IS NULL "
-                "ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?",
-                (actor, chat, limit, offset),
+                + ("AND tunnel_backend=? " if backend else "")
+                + "ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?",
+                (actor, chat, backend, limit, offset) if backend
+                else (actor, chat, limit, offset),
             ).fetchall()
             return [dict(row) for row in rows]
 

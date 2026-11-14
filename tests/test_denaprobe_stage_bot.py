@@ -24,7 +24,7 @@ class TestStageBot(unittest.TestCase):
         b = source.index("    return rows", a)
         source = source[:a] + source[b:]
         a = source.index('    if d == "apps_dp3_home" or d.startswith("dp3:"):')
-        b = source.index('    if d in ("apps_cz_rich_home", ', a)
+        b = source.index("    if d == 'apps_home':", a)
         source = source[:a] + source[b:]
         a = source.index("async def _post_init(app):\n")
         b = source.index(

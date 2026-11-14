@@ -31,11 +31,12 @@ class AWGWizardGateTests(unittest.TestCase):
         )
 
     def test_flag_off_hides_new_intake_but_keeps_existing_awg_verification(self):
-        with patch.dict(os.environ, {"NVL_AWG_NEW_EDGE_ENABLED": "0"}):
+        with patch.dict(os.environ, {"NVL_AWG_NEW_EDGE_ENABLED": "0",
+                                     "NVL_LEGACY_WG_UI_ENABLED": "0"}):
             self.assertFalse(self.wizard._awg_available())
             self.assertEqual(
                 self.wizard._new_edge_buttons(),
-                [[("➕ افزودن سرور جدید", "apps_edge_manual_new")]],
+                [],
             )
             self.assertTrue(self.wizard._awg_can_verify())
             self.assertEqual(
@@ -48,7 +49,8 @@ class AWGWizardGateTests(unittest.TestCase):
             )
 
     def test_flag_on_permits_isolated_awg_wizard_not_automatic_standby(self):
-        with patch.dict(os.environ, {"NVL_AWG_NEW_EDGE_ENABLED": "1"}):
+        with patch.dict(os.environ, {"NVL_AWG_NEW_EDGE_ENABLED": "1",
+                                     "NVL_LEGACY_WG_UI_ENABLED": "0"}):
             self.assertTrue(self.wizard._awg_available())
             self.assertEqual(
                 self.wizard._new_edge_buttons()[0][0][1],
@@ -58,6 +60,15 @@ class AWGWizardGateTests(unittest.TestCase):
                 self.wizard._preflight_for({"tunnel_backend":"amneziawg"})()[1],
                 "awg",
             )
+            self.assertEqual(len(self.wizard._new_edge_buttons()),1)
+            self.assertNotIn("AmneziaWG",str(self.wizard._new_edge_buttons()))
+
+    def test_legacy_ui_only_behind_flag(self):
+        with patch.dict(os.environ, {"NVL_AWG_NEW_EDGE_ENABLED": "1",
+                                     "NVL_LEGACY_WG_UI_ENABLED": "1"}):
+            self.assertEqual(len(self.wizard._new_edge_buttons()),2)
+            self.assertEqual(self.wizard._new_edge_buttons()[1][0][1],
+                             "apps_edge_manual_new")
 
     def test_journal_backend_is_explicit_and_legacy_remains_default(self):
         first = self.wizard.journal.start(111, 111)

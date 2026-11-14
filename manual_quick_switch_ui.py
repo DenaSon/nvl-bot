@@ -94,6 +94,16 @@ class ManualQuickSwitchUI:
                 "AND h.provider_instance_id IS NULL "
                 "AND m.status='STANDBY' ORDER BY h.host"
             ).fetchall()
+            if os.environ.get("NVL_LEGACY_WG_UI_ENABLED","0")!="1":
+                from nvl_awg_target import target_backend
+                allowed=[]
+                for candidate in standby:
+                    try:
+                        if target_backend(db,candidate[0])=="amneziawg":
+                            allowed.append(candidate)
+                    except Exception:
+                        pass  # stale/unverified inventory cannot appear as selectable
+                standby=allowed
             count = db.execute(
                 "SELECT COUNT(*) FROM ssh_accounts WHERE service_type='ssh' "
                 "AND status LIKE '%فعال%' AND status NOT LIKE '%غیر%'"
@@ -104,7 +114,7 @@ class ManualQuickSwitchUI:
     async def _home(self, context, chat):
         current,standby,count=await asyncio.to_thread(self._inventory)
         rec=await asyncio.to_thread(self.engine.latest)
-        text = ("🖥 <b>مدیریت سرورها</b>\n\n"
+        text = ("🌐 <b>مدیریت Edge</b>\n\n"
                 f"🟢 رله اصلی: <code>{escape(current or 'نامشخص')}</code>\n"
                 f"👥 کاربران SSH: <b>{count}</b>\n"
                 f"🟡 آماده‌به‌کار: <b>{len(standby)}</b>")
@@ -120,7 +130,9 @@ class ManualQuickSwitchUI:
                 with self.db() as db:
                     backend=target_backend(db,ip)
                     binding=lookup_binding(db,ip)
-                ready=(backend=="wireguard" or (
+                ready=((backend=="wireguard" and
+                        os.environ.get("NVL_LEGACY_WG_UI_ENABLED","0")=="1") or (
+                    backend=="amneziawg" and
                     os.environ.get("NVL_AWG_CUTOVER_ENABLED")=="1"
                     and binding is not None
                     and core_limiter_canary_ready(binding.edge_tunnel_ip)))
@@ -377,13 +389,23 @@ class ManualQuickSwitchUI:
                     f"وضعیت: <b>{escape(rec['status'])}</b>\n\n"
                     +note+"\n\n"
                     "این اقدام فقط پرونده و Lease همان انتقال را می‌بندد. "
-                    "DNS، حساب‌ها و WireGuard برگردانده نمی‌شوند؛ "
+                    "DNS، حساب‌ها و تنظیمات شبکه برگردانده نمی‌شوند؛ "
                     "آزادسازی قفل به معنی وصل‌شدن کاربران نیست.",
                     [[("⛔ تأیید بستن انتقال و آزادسازی قفل",
                        "apps_edge_quick_force_yes_"+nonce)],
                      [("انصراف","apps_edge_quick_status")]])
             if data.startswith("apps_edge_quick_select_"):
                 ip=data[len("apps_edge_quick_select_"):]
+                from nvl_awg_target import target_backend
+                from nvl_tunnel_backend import TunnelHold
+                try:
+                    with self.db() as db:
+                        backend=target_backend(db,ip)
+                except (TunnelHold, ValueError, sqlite3.Error):
+                    raise QuickSwitchHold("TUNNEL_REGISTRY_UNVERIFIED") from None
+                if (backend=="wireguard" and
+                        os.environ.get("NVL_LEGACY_WG_UI_ENABLED","0")!="1"):
+                    raise QuickSwitchHold("LEGACY_WG_NOT_AVAILABLE")
                 plan=await self.engine.preview(ip)
                 nonce=secrets.token_hex(8)
                 self.pending[(actor,chat)]={"nonce":nonce,"plan":plan,
@@ -405,6 +427,12 @@ class ManualQuickSwitchUI:
                     raise QuickSwitchHold("QUICK_SWITCH_NOT_RELEASED")
                 nonce=data[len("apps_edge_quick_confirm_"):]
                 pending=self.pending.pop((actor,chat),None)
+                if pending and os.environ.get("NVL_LEGACY_WG_UI_ENABLED","0")!="1":
+                    from nvl_awg_target import target_backend
+                    with self.db() as db:
+                        backend=target_backend(db,pending["plan"]["target"])
+                    if backend=="wireguard":
+                        raise QuickSwitchHold("LEGACY_WG_NOT_AVAILABLE")
                 if (not pending or pending["nonce"]!=nonce or
                         self.now()>pending["expires"]):
                     raise QuickSwitchHold("PREVIEW_EXPIRED")

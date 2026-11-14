@@ -139,12 +139,10 @@ class Phase1PanelTests(unittest.TestCase):
     def test_cz03_wizard_operations_and_key_add_dispatched_first(self):
         # The read-only presentation module should never intercept CZ-03 actions.
         source = (Path(__file__).resolve().parents[1] / "bot_final_v49-2.py").read_text("utf-8")
-        self.assertIn('"apps_cz_operations", "apps_cz6_start"', source)
-        self.assertIn('"apps_cz6_status"', source)
-        self.assertIn('d == "apps_cz_edge" or d.startswith("apps_cz4_")', source)
-        self.assertIn('d.startswith(("apps_cz_q", "apps_cz6_resume_"))', source)
-        self.assertLess(source.index("_cloudzy_quick_edge.handle_callback("),
-                        source.index("_cloudzy_admin_panel.handle_callback("))
+        self.assertIn('if d.startswith("apps_cz_") or d.startswith("u7:"):', source)
+        self.assertIn('query,context,"apps_edge_quick_home",role=role',source)
+        self.assertNotIn("await _cloudzy_quick_edge.handle_callback(",source)
+        self.assertNotIn("await _cloudzy_admin_panel.handle_callback(",source)
         self.cb("apps_cz_keys_0")
         self.assertIn("apps_cz_qsavekey", self.query.callbacks)
         self.assertIn("ثبت کلید عمومی Core", self.query.text)
@@ -244,7 +242,7 @@ class Phase1PanelTests(unittest.TestCase):
                          'elif d.startswith(("hpdef_migrate_", "hpdefmig_yes_", "hpdef_"))',
                          'elif d == "hpeg_status"'):
             self.assertIn(original, source)
-        self.assertIn('elif d.startswith("apps_cz_")', source)
+        self.assertIn('if d.startswith("apps_cz_") or d.startswith("u7:"):', source)
         for cb in ("apps_cz_home", "apps_cz_servers_0", "apps_cz_regions_0",
                    "apps_cz_keys_0", "apps_cz_balance"):
             self.cb(cb)

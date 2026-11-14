@@ -1,5 +1,7 @@
 """Native IP+SSH management port+password intake; no Cloudzy/HTTPS effects."""
 import asyncio
+import os
+from unittest.mock import patch
 from types import SimpleNamespace
 from unittest.mock import AsyncMock,Mock
 import unittest
@@ -8,6 +10,11 @@ from manual_edge_wizard import ManualEdgeWizard
 
 
 class PrivateIntakeTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        feature=patch.dict(os.environ, {"NVL_LEGACY_WG_UI_ENABLED":"1"})
+        feature.start()
+        self.addCleanup(feature.stop)
+
     def wizard(self):
         calls=[]
         w=ManualEdgeWizard(
@@ -81,7 +88,7 @@ class PrivateIntakeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(coros),1)
         self.assertNotIn(secret,str(ctx.user_data))
         self.assertNotIn("state",ctx.user_data)
-        self.assertIn("آغاز",w._view.await_args.args[1])
+        self.assertIn("راه‌اندازی AWG",w._view.await_args.args[1])
 
     async def test_bot_routes_command_shaped_secret_before_commandhandlers(self):
         from pathlib import Path

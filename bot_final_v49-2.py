@@ -417,7 +417,6 @@ from edge_egress_k2_m4_status import (
     root_checkpoint_status_html as k2_m44_root_status_html,
 )
 import edge_egress_k2_root_direct as k2_root_direct_flags
-from cloudzy_quick_edge import QuickEdgeWizard
 from cloudzy_cz04a import Cloudzy04A
 from cloudzy_cz04b_guarded import GuardedCloudzy04B
 from cloudzy_cz07_queue import DurableCutoverQueue
@@ -426,7 +425,6 @@ from manual_edge_wizard import ManualEdgeWizard
 from manual_quick_switch import ManualQuickSwitch, check_manual_relay_via_cz04b, QuickSwitchHold
 from manual_quick_switch_ui import ManualQuickSwitchUI
 from manual_edge_secure_form import ManualFormStore, serve_private
-from cloudzy_admin_panel import CloudzyAdminPanel
 from edge_egress_k2_root_direct import (
     bound_root_client as k2_root_direct_client,
     native_review as k2_native_review,
@@ -3896,7 +3894,7 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
     core_port, core_pubkey = _get_core_wg_identity()
     core_public_ip = _get_core_public_ip_cached()
     if not core_port or not core_pubkey:
-        return False, "❌ نتوانستم هویت WireGuard خودِ Core را از /etc/wireguard بخوانم. مطمئن شوید setup_core_wireguard.sh قبلاً روی Core اجرا شده.", None
+        return False, "❌ هویت تونل Core قابل بررسی نیست. تنظیمات شبکه سرور را بررسی کنید.", None
     if not core_public_ip:
         return False, "❌ نتوانستم IP عمومی Core را تشخیص دهم (هر ۴ سرویس تشخیص IP بی‌پاسخ ماندند؛ اتصال خروجی HTTPS این سرور را چک کنید).", None
     if not os.path.exists(EDGE_SETUP_SCRIPT_LOCAL_PATH):
@@ -4287,7 +4285,7 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
                                     [InlineKeyboardButton("🛡 وضعیت و مسدودسازی IPها", callback_data="hp_menu")]])
               if pool_active else InlineKeyboardMarkup(
                   [[InlineKeyboardButton(
-                      "🛟 ادامه نصب دستی و بررسی Standby" if manual_safe_bootstrap else "📋 وضعیت خرید Cloudzy",
+                      "🛟 ادامه نصب دستی و بررسی Standby" if manual_safe_bootstrap else "📋 وضعیت نصب سرور",
                       callback_data="apps_edge_manual_home" if manual_safe_bootstrap else "apps_cz_operations")]]))
         await app.bot.send_message(
             chat_id,
@@ -7281,36 +7279,6 @@ async def require_login(update):
 
 PORTAL_DISPLAY_NAME = "NeVeL"  # 🔒 نام ثابت پورتال و مدیریت — با تغییر «نام برند» در تنظیمات عوض نمی‌شود
 
-_cloudzy_admin_panel = CloudzyAdminPanel()
-
-
-def _cloudzy_quick_preflight():
-    """Fail closed before paid create AND before mutating Core/Legacy WG."""
-    if paramiko is None or os.geteuid() != 0:
-        raise RuntimeError("CORE_ROOT_PARAMIKO_REQUIRED")
-    if not os.path.isfile(EDGE_SETUP_SCRIPT_LOCAL_PATH) or not os.path.isfile(WG_CONF_PATH):
-        raise RuntimeError("LEGACY_WG_INSTALLER_NOT_AVAILABLE")
-    if not all(_get_core_wg_identity()) or not _get_core_public_ip_cached():
-        raise RuntimeError("CORE_WG_IDENTITY_NOT_READY")
-    with db_conn() as conn:
-        _db_assert_legacy_host_mutation_allowed(conn)
-        if _db_running_failover_id(conn) is not None:
-            raise RuntimeError("ORIGINAL_6G_FAILOVER_BUSY")
-        row = conn.execute(
-            "SELECT value FROM settings WHERE key='edge_egress_v1_onboard_enabled'"
-        ).fetchone()
-        if row is not None and row[0] == '1':
-            raise RuntimeError("EXPLICIT_K2_ONBOARDING_MUST_BE_DISABLED")
-    if any_protected_bindings(db_conn):
-        raise RuntimeError("PROTECTED_K2_BINDINGS_PRESENT")
-    ok, error, pubkey = _ensure_local_ssh_keypair_sync()
-    if not ok or not pubkey or not os.path.isfile(DO_SSH_KEY_PATH):
-        raise RuntimeError("LEGACY_ED25519_KEY_MISSING")
-    if os.stat(DO_SSH_KEY_PATH).st_mode & 0o077:
-        raise RuntimeError("LEGACY_ED25519_KEY_INSECURE_PERMISSIONS")
-    return _normalize_ssh_port(_db_get_setting('port', '22'), 22), pubkey
-
-
 def _manual_edge_preflight():
     """Read-only Core identity and SSH/WG checks; never queries Cloudzy.
 
@@ -7329,57 +7297,6 @@ def _manual_edge_preflight():
     if os.stat(DO_SSH_KEY_PATH).st_mode & 0o077:
         raise RuntimeError("LEGACY_ED25519_KEY_INSECURE_PERMISSIONS")
     return _normalize_ssh_port(_db_get_setting('port','2252'),2252),pubkey
-
-
-async def _cloudzy_quick_provision(ip, port, hostname, chat, app, server_id, trusted_host_key):
-    if await asyncio.to_thread(_db_host_exists, ip):
-        raise RuntimeError("CLOUDZY_IP_ALREADY_REGISTERED")
-    # Legacy wg0 peer removal identifies entries by edge-<IPv4>, not the
-    # Cloudzy provider hostname used to reconcile a potentially charged order.
-    legacy_peer_name = "edge-" + ip.replace(".", "-")
-    return await _provision_new_edge(
-        ip, None, port, legacy_peer_name, chat, app,
-        private_key_path=DO_SSH_KEY_PATH, connect_retries=3,
-        provider="cloudzy", provider_instance_id=server_id,
-        egress_stage_requested=False, trusted_host_key=trusted_host_key,
-        pool_active=False,
-    )
-
-
-async def _cloudzy_quick_verify(ip, port, server_id):
-    """CZ-03 acceptance: installed, SSH service responds, no customer assignment."""
-    with db_conn() as conn:
-        row = conn.execute(
-            "SELECT active,is_default,service_port,provider,provider_instance_id "
-            "FROM host_pool WHERE host=?", (ip,)
-        ).fetchone()
-        if not row or row[0] or row[1] or int(row[2]) != port:
-            raise RuntimeError("CLOUDZY_LEGACY_EDGE_NOT_INACTIVE")
-        if row[3] != "cloudzy" or row[4] != server_id:
-            raise RuntimeError("CLOUDZY_PROVIDER_OWNERSHIP_MISMATCH")
-        users = conn.execute(
-            "SELECT COUNT(*) FROM ssh_accounts WHERE host=?", (ip,)
-        ).fetchone()[0]
-        hosts_row = conn.execute(
-            "SELECT value FROM settings WHERE key='hosts'"
-        ).fetchone()
-        dns_row = conn.execute(
-            "SELECT value FROM settings WHERE key='dns_current_ip'"
-        ).fetchone()
-        if users or ip in (hosts_row[0] if hosts_row else "").split(","):
-            raise RuntimeError("CLOUDZY_EDGE_ALREADY_SELECTABLE")
-        if dns_row and dns_row[0] == ip:
-            raise RuntimeError("CLOUDZY_EDGE_SELECTED_PUBLIC_DNS")
-    reachable, _reason = await _check_ssh_reachable(ip, port, timeout=7)
-    return bool(reachable)
-
-
-_cloudzy_quick_edge = QuickEdgeWizard(
-    conn_factory=db_conn,
-    preflight=_cloudzy_quick_preflight,
-    provision=_cloudzy_quick_provision,
-    verify=_cloudzy_quick_verify,
-)
 
 
 def _cloudzy_04a_guard(conn):
@@ -7413,7 +7330,6 @@ _cloudzy_04a = Cloudzy04A(
 )
 
 # CZ-06: reuse the existing CZ-04A protected standby operation after CZ-03.
-_cloudzy_quick_edge.standby_service = _cloudzy_04a
 
 
 def _cloudzy_04b_guard(conn):
@@ -7762,9 +7678,6 @@ _manual_quick_ui = ManualQuickSwitchUI(
 
 # Phase 7 is opt-in and strictly a read-only Rich admin view. No effectful
 # Cloudzy/CZ07 callback is forwarded through this bridge.
-from cloudzy_rich_bridge import (
-    handle_rich_admin_callback as _cloudzy_rich_admin_callback,
-)
 
 # DenaProbe R3: optional admin dashboard and independently gated alerts.
 # Both run in the existing bot; the Collector remains isolated.
@@ -14398,6 +14311,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML",
             )
         safe_clear_context(context); await show_main_menu(update, context)
+    elif state == 'HOSTPOOL_ADD_INPUT' and os.environ.get(
+            "NVL_LEGACY_WG_UI_ENABLED","0")!="1":
+        safe_clear_context(context)
+        await update.message.reply_text(
+            "⛔️ افزودن از این مسیر غیرفعال است. از مدیریت Edge استفاده کنید.")
+        return
+
     elif state == 'HOSTPOOL_ADD_INPUT':
         # Register inventory ONLY. This does not authorize DNS, default,
         # customer routing, SSH provisioning or replay of the old cutover.
@@ -14414,7 +14334,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             friendly = {
                 "EDGE_ALREADY_REGISTERED": "این IP قبلاً در فهرست سرورها وجود دارد.",
                 "MANUAL_EDGE_OPERATION_EXISTS": "این IP پروندهٔ افزودن دستی دارد؛ ابتدا همان پرونده را بررسی کنید.",
-                "CLOUDZY_EDGE_ALREADY_EXISTS": "این IP قبلاً در پروندهٔ Cloudzy ثبت شده است.",
+                "CLOUDZY_EDGE_ALREADY_EXISTS": "این IP قبلاً در پرونده دیگری ثبت شده است.",
                 "CORE_CANNOT_BE_EDGE": "آدرس Core نمی‌تواند به‌عنوان Edge ثبت شود.",
                 "CORE_IDENTITY_UNAVAILABLE": "هویت Core مشخص نیست؛ ثبت IP متوقف شد.",
                 "CUSTOMER_PORT_INVALID": "پورت سرویس مشتری در تنظیمات معتبر نیست.",
@@ -14433,11 +14353,19 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "▫️ وضعیت: غیرفعال، در انتظار بررسی اتصال Edge\n"
             f"▫️ پورت مشتری: <code>{added['service_port']}</code>\n\n"
             "DNS، کاربران و Relay فعلی تغییر نکردند. "
-            "تا پیش از تأیید SSH/WireGuard و مسیر برگشت، این IP وارد ترافیک مشتری نمی‌شود.",
+            "تا پیش از تأیید اتصال امن و مسیر برگشت، این IP وارد ترافیک مشتری نمی‌شود.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🌐 فهرست و بررسی IPها",callback_data="hp_menu")]
             ]))
+        return
+
+    elif (state in ('EDGE_NEW_IP','EDGE_NEW_ROOTPASS','EDGE_NEW_PORT')
+          and os.environ.get("NVL_LEGACY_WG_UI_ENABLED","0")!="1"):
+        _EDGE_PROVISION_SECRETS.pop(update.effective_chat.id,None)
+        safe_clear_context(context)
+        await update.message.reply_text(
+            "⛔️ این مسیر در دسترس نیست. از مدیریت Edge استفاده کنید.")
         return
 
     elif state == 'EDGE_NEW_IP':
@@ -15150,7 +15078,7 @@ async def _render_host_pool_panel(query, page=0):
             f"   🧩 Diagnostic: <code>{_panel_value(diagnostic_reason)}</code>\n"
             f"   🌐 Service <code>{service_port}</code> — {_panel_value(service_status)}\n"
             f"   🔐 Admin SSH <code>{admin_port}</code> — {_panel_value(admin_status)}\n"
-            f"   🔗 WireGuard — {_probe_badge(ph.get('wg_peer_ok'))}\n"
+            f"   🔗 تونل — {_probe_badge(ph.get('wg_peer_ok'))}\n"
             f"   🛣 Core path — {_probe_badge(ph.get('core_path_ok'))}\n"
             f"   🌍 External — {_probe_badge(ph.get('external_service_ok'))}\n"
             f"   📡 Regional — {_probe_badge(ph.get('regional_service_ok'))}\n"
@@ -15223,8 +15151,9 @@ async def _render_host_pool_panel(query, page=0):
         kb.append(nav)
 
     kb.append([InlineKeyboardButton("⚡ تست سرعت همه IPها (Speed Test)", callback_data="hp_speedtest_all")])
-    kb.append([InlineKeyboardButton("➕ افزودن IP جدید به استخر", callback_data="hp_add")])
-    kb.append([InlineKeyboardButton("🚀 افزودن Edge جدید (VPS از قبل‌خریداری‌شده)", callback_data="hp_addedge")])
+    if os.environ.get("NVL_LEGACY_WG_UI_ENABLED","0")=="1":
+        kb.append([InlineKeyboardButton("➕ ثبت IP در استخر قدیمی", callback_data="hp_add")])
+        kb.append([InlineKeyboardButton("🚀 افزودن Edge با WireGuard", callback_data="hp_addedge")])
     kb.append([InlineKeyboardButton("🌍 دامنهٔ ثابت + Cloudflare", callback_data="hp_cf_settings")])
     kb.append([InlineKeyboardButton("🛡 فیلترینگ و دسترسی", callback_data="hp_filtering")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="ipsvc_menu")])
@@ -15276,7 +15205,7 @@ def _failover_preflight_error_label_fa(error):
     if raw.startswith("TARGET_ADMIN_DOWN:"):
         return "دسترسی مدیریتی سرور جایگزین در دسترس نیست"
     if raw.startswith("TARGET_WG_NOT_HEALTHY:"):
-        return "ارتباط WireGuard سرور جایگزین سالم نیست"
+        return "ارتباط تونل سرور جایگزین سالم نیست"
     if raw.startswith("TARGET_CORE_PATH_NOT_HEALTHY:"):
         return "مسیر ارتباط سرور جایگزین با هسته سالم نیست"
     if raw.startswith("CORE_FALLBACK_SERVICE_DOWN:"):
@@ -15706,7 +15635,7 @@ async def _render_filtering_edge_detail(query, host):
         f"اطمینان: <b>{_confidence_label_fa(ph.get('filter_confidence'))}</b>\n\n"
         f"🌐 سرویس کاربران: {_probe_state_text(ph.get('service_ok'))}\n"
         f"🔐 دسترسی مدیریتی: {_probe_state_text(ph.get('admin_ok'))}\n"
-        f"🔗 WireGuard: {_probe_state_text(ph.get('wg_peer_ok'))}\n"
+        f"🔗 تونل: {_probe_state_text(ph.get('wg_peer_ok'))}\n"
         f"🛣 مسیر هسته: {_probe_state_text(ph.get('core_path_ok'))}\n"
         f"🌍 دسترسی بیرونی: {_probe_state_text(ph.get('external_service_ok'))}\n\n"
         f"📡 نتیجه بررسی منطقه‌ای: <b>{_filter_state_label_fa(ph.get('regional_filter_state'))}</b>\n"
@@ -17349,7 +17278,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Read-only Rich card entry/refresh/details. Recheck live active-admin
     # membership, private chat, original journal owner and message pointer.
     # The input never reaches Cloudzy purchase/DNS, CZ07 mutation or K2.
-    if d.startswith("apps_edge_quick_") or d == "apps_cz_home":
+    # Retired provider callbacks from old Telegram messages can only return to
+    # the provider-independent Edge dashboard. No provider purchase, old
+    # Standby, DNS, or account mutation can be reached from these callbacks.
+    if d.startswith("apps_cz_") or d.startswith("u7:"):
+        await _manual_quick_ui.handle(
+            query,context,"apps_edge_quick_home",role=role,
+            actor=update.effective_user.id,chat=update.effective_chat.id,
+            is_private=(getattr(update.effective_chat,"type",None)=="private"),
+        )
+        return
+    if d.startswith("apps_edge_quick_"):
         await _manual_quick_ui.handle(
             query,context,d,role=role,actor=update.effective_user.id,
             chat=update.effective_chat.id,
@@ -17403,61 +17342,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if result in ("RICH_UNAVAILABLE", "STALE_OR_FORWARDED_CARD"):
                 log.warning("DenaProbe R3 dashboard hold code=%s", result)
         return
-    if d in ("apps_cz_rich_home", "apps_cz_rich_migration") or d.startswith("u7:"):
-        active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
-        await _cloudzy_rich_admin_callback(
-            data=d, query=query, context=context, db_factory=db_conn,
-            role=role, actor=update.effective_user.id,
-            chat=update.effective_chat.id,
-            is_private=(getattr(update.effective_chat, "type", None) == "private"),
-            active_admin_ids=active_admin_ids,
-        )
-        return
     if d == 'apps_home':
         context.user_data.pop("mza_nodes_origin", None)
         await _show_admin_programs_hub(query, context)
-        return
-    elif d.startswith("apps_cz7_"):
-        await _cloudzy_07.handle_callback(
-            query, context, d, role=role,
-            actor=update.effective_user.id, chat=update.effective_chat.id,
-            markup=_cloudzy_markup, app=context.application,
-        )
-        return
-    elif d.startswith("apps_cz5_"):
-        await _cloudzy_04b.handle_callback(
-            query, context, d, role=role,
-            actor=update.effective_user.id, chat=update.effective_chat.id,
-            markup=_cloudzy_markup,
-        )
-        return
-    elif d == "apps_cz_edge" or d.startswith("apps_cz4_"):
-        await _cloudzy_04a.handle_callback(
-            query, context, d, role=role,
-            actor=update.effective_user.id, chat=update.effective_chat.id,
-            markup=_cloudzy_markup,
-        )
-        return
-    elif (d in ("apps_cz_wizard", "apps_cz_operations", "apps_cz6_start",
-                "apps_cz6_status")
-          or d.startswith(("apps_cz_q", "apps_cz6_resume_"))):
-        await _cloudzy_quick_edge.handle_callback(
-            query, context, d, role=role,
-            actor=update.effective_user.id, chat=update.effective_chat.id,
-            markup=_cloudzy_markup, app=context.application,
-        )
         return
     elif d.startswith("apps_edge_manual_"):
         await _manual_edge.handle(
             query,context,d,role=role,actor=update.effective_user.id,
             chat=update.effective_chat.id,app=context.application,
-        )
-        return
-    elif d.startswith("apps_cz_"):
-        await _cloudzy_admin_panel.handle_callback(
-            query, context, d, role=role,
-            actor=update.effective_user.id, chat=update.effective_chat.id,
-            markup=_cloudzy_markup,
         )
         return
     elif d == 'apps_marzban_nodes':
@@ -22896,7 +22788,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🗑 <b>حذف رکورد سرور</b>\n\n"
             + "🌐 IP: <code>" + esc(target_ip) + "</code>\n"
             + esc(reason) + "\n\n"
-            + ("⚠️ فقط رکورد مدیریتی حذف می‌شود؛ VPS، SSH، DNS، WireGuard و کاربران تغییر نمی‌کنند."
+            + ("⚠️ فقط رکورد مدیریتی حذف می‌شود؛ سرور، SSH، DNS، تونل و کاربران تغییر نمی‌کنند."
                if ok else "⛔ حذف تا رفع وابستگی‌های موجود مجاز نیست."),
             reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML",
         )
@@ -22963,7 +22855,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # The native protected K2 branch above remains a separate guarded path.
         await query.message.reply_text(
             "⛔️ فعال‌سازی Relay از این مسیر قدیمی متوقف است. "
-            "برای تغییر DNS و Default از مسیر Journalدار Cloudzy/CZ04B استفاده کنید. "
+            "برای تغییر مسیر از «مدیریت Edge» و بخش انتقال کاربران و DNS استفاده کنید. "
             "هیچ Default، DNS، NAT یا حسابی تغییر نکرد."
         )
         return
@@ -26365,8 +26257,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             egress_steps_html(), parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("➕ افزودن سرور", callback_data="hpeg_wizard"),
-                 InlineKeyboardButton("◀️ سرورها", callback_data="hpeg_status")],
+                ([InlineKeyboardButton("➕ افزودن سرور", callback_data="hpeg_wizard")]
+                 if os.environ.get("NVL_LEGACY_WG_UI_ENABLED","0")=="1" else [])
+                + [InlineKeyboardButton("◀️ سرورها", callback_data="hpeg_status")],
             ]),
         )
         return
@@ -26583,7 +26476,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"پورت سرویس: <code>{preflight.get('source_service_port')}</code>\n\n"
             f"🌐 سرویس کاربران: {_probe_state_text(preflight.get('target_service_ok'))}\n"
             f"🔐 دسترسی مدیریتی: {_probe_state_text(preflight.get('target_admin_ok'))}\n"
-            f"🔗 WireGuard: {_probe_state_text(preflight.get('target_wg_ok'))}\n"
+            f"🔗 تونل: {_probe_state_text(preflight.get('target_wg_ok'))}\n"
             f"🛣 مسیر هسته: {_probe_state_text(preflight.get('target_core_path_ok'))}\n"
             f"🛟 مسیر پشتیبان هسته: {_probe_state_text(preflight.get('core_service_ok'))}\n"
             f"📡 وضعیت منطقه‌ای: <b>{_filter_state_label_fa(preflight.get('target_filter_state'))}</b>\n"
@@ -26845,7 +26738,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⛔️ این IP هنوز آمادهٔ فعال‌سازی نیست: <code>{esc(host)}:{service_port}</code>\n"
                 f"Service: {'✅' if service_ok else '❌'} | "
                 f"Admin SSH: {'✅' if admin_ok else '❌'} | "
-                f"WireGuard: {'✅' if local_path.get('wg_peer_ok') is True else '❌'} | "
+                f"تونل: {'✅' if local_path.get('wg_peer_ok') is True else '❌'} | "
                 f"مسیر Core: {'✅' if local_path.get('core_path_ok') is True else '❌'}\n"
                 "IP غیرفعال ماند؛ DNS و کاربران دست‌نخورده‌اند.",
                 parse_mode="HTML",
@@ -26869,8 +26762,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                      InlineKeyboardButton("❌ انصراف", callback_data="hp_menu")]])
         await query.edit_message_text(
             f"⚠️ <b>حذف کامل {esc(host)}</b>\n\n"
-            f"این کار هم ردیف این IP را از دیتابیس ربات پاک می‌کند، هم (اگر این IP یک Edge با تونل WireGuard بود) "
-            f"Peer متناظرش را از wg0.conf همین Core و از رابط زندهٔ WireGuard حذف می‌کند — یعنی دیگر هیچ ترافیکی "
+            f"این کار هم ردیف این IP را از دیتابیس ربات پاک می‌کند، هم (اگر این IP دارای تونل ارتباطی بود) "
+            f"Peer متناظرش را از تنظیمات Core و رابط زندهٔ تونل حذف می‌کند — یعنی دیگر هیچ ترافیکی "
             f"از این سرور به Core راه پیدا نمی‌کند.\n\n"
             f"ℹ️ خودِ VPS همچنان روشن/فعال می‌ماند (اگر دیگر لازمش ندارید، باید جدا از پیش این سرویس‌دهنده‌اش کنسل/حذفش کنید).\n\n"
             f"مطمئنید؟",
@@ -26949,6 +26842,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     elif d == "hp_add" and role == 'admin':
+        if os.environ.get("NVL_LEGACY_WG_UI_ENABLED","0")!="1":
+            await query.message.reply_text("⛔️ این مسیر در دسترس نیست؛ از مدیریت Edge استفاده کنید.")
+            return
         context.user_data['state'] = 'HOSTPOOL_ADD_INPUT'
         await query.message.reply_text(
             "➕ IP عمومی IPv4 سرور آماده را بفرستید (فقط یک مورد):\n"
@@ -26957,6 +26853,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     elif d in ("hp_addedge", "hpeg_wizard"):
+        if os.environ.get("NVL_LEGACY_WG_UI_ENABLED","0")!="1":
+            await query.message.reply_text("⛔️ این مسیر در دسترس نیست؛ از مدیریت Edge استفاده کنید.")
+            return
         # 🔧 رفع باگ اصلی: چون بالای callback_handler همیشه یک‌بار await query.answer() خالی زده
         # می‌شود، هر تلاش دوم برای answer-کردن همان کوئری (حتی با show_alert=True) توسط تلگرام
         # نادیده گرفته می‌شود — API با 200 OK برمی‌گردد ولی هیچ popup ای به کاربر نشان داده
@@ -26988,7 +26887,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # recognizable, but deny mutation (including stale Telegram buttons).
         await query.message.reply_text(
             "⛔️ تغییر Relay پیش‌فرض یا انتقال کاربران از این منوی قدیمی متوقف است. "
-            "از «Cloudzy | Edge و Relay» و مسیر تأییدشده CZ04B/CZ07 استفاده کنید. "
+            "از «مدیریت Edge» و بخش انتقال کاربران و DNS استفاده کنید. "
             "هیچ DNS، Default یا حسابی تغییر نکرد."
         )
         return
@@ -29697,7 +29596,7 @@ async def _notify_filter_state_transition(app, host, recompute_result, regional_
         f"ASNهای ناموفق: <code>{esc(failed_asns)}</code>\n"
         f"شهرهای ناموفق: <code>{esc(failed_cities)}</code>\n"
         f"دسترسی بیرونی: {_probe_state_text(ph.get('external_service_ok'))}\n"
-        f"WireGuard: {_probe_state_text(ph.get('wg_peer_ok'))}\n"
+        f"تونل: {_probe_state_text(ph.get('wg_peer_ok'))}\n"
         f"مسیر هسته: {_probe_state_text(ph.get('core_path_ok'))}\n\n"
         + (
             "🤖 انتقال خودکار روشن است؛ پس از تکمیل تأیید مقایسه‌ای و بررسی‌های ایمنی ارزیابی می‌شود."

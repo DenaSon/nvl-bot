@@ -60,7 +60,7 @@ class StandbyDrillSafetyTests(unittest.TestCase):
         )
         self.assertIn("تنظیمات دامنه و Cloudflare کامل نیست", helper)
         self.assertIn("دسترسی مدیریتی سرور جایگزین در دسترس نیست", helper)
-        self.assertIn("ارتباط WireGuard سرور جایگزین سالم نیست", helper)
+        self.assertIn("ارتباط تونل سرور جایگزین سالم نیست", helper)
         self.assertIn("مسیر ارتباط سرور جایگزین با هسته سالم نیست", helper)
 
     def test_relevant_telegram_paths_do_not_show_development_phase_labels(self):

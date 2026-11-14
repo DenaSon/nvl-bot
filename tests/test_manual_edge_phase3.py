@@ -11,6 +11,7 @@ import tempfile
 import time
 import unittest
 from urllib.parse import urlencode
+from unittest.mock import patch
 
 from manual_edge_secure_form import (
     ManualFormStore, IntakeHold, public_ip, ssh_port, validate_init_data,
@@ -21,6 +22,9 @@ from manual_edge_identity import resolve, assert_ref, EdgeIdentityHold
 
 class Phase3ManualTests(unittest.TestCase):
     def setUp(self):
+        feature=patch.dict(os.environ, {"NVL_LEGACY_WG_UI_ENABLED":"1"})
+        feature.start()
+        self.addCleanup(feature.stop)
         self.temp=tempfile.TemporaryDirectory()
         self.path=os.path.join(self.temp.name,"manual.sqlite3")
         def factory():
@@ -261,7 +265,7 @@ class Phase3ManualTests(unittest.TestCase):
                 SimpleNamespace(),context,"apps_edge_manual_home",
                 role="admin",actor=77,chat=77,app=app))
             view=factory.return_value.show.call_args.kwargs
-            self.assertIn("مدیریت سرورها",view["text"])
+            self.assertIn("مدیریت Edge",view["text"])
             self.assertEqual(view["rows"][0][0][1],"apps_edge_manual_new")
             asyncio.run(wizard.handle(
                 SimpleNamespace(),context,"apps_edge_manual_new",
@@ -305,7 +309,7 @@ class Phase3ManualTests(unittest.TestCase):
         body=calls[0][1]
         self.assertEqual(body["parse_mode"],"HTML")
         self.assertEqual(body["chat_id"],77)
-        self.assertIn("مدیریت سرورها",body["text"])
+        self.assertIn("مدیریت Edge",body["text"])
         self.assertIs(body["protect_content"], False)
         self.assertEqual(context.user_data["manual_edge_rich_pointer"],101)
 
@@ -508,7 +512,7 @@ class Phase3ManualTests(unittest.TestCase):
         asyncio.run(wizard.handle(SimpleNamespace(),context,
                 "apps_edge_manual_home",role="admin",actor=77,chat=77,app=app))
         text,rows=wizard._view.await_args.args[1:]
-        self.assertIn("مدیریت سرورها",text)
+        self.assertIn("مدیریت Edge",text)
         actions=[action for row in rows for _,action in row]
         self.assertIn("apps_edge_manual_new",actions)
         self.assertIn("apps_edge_manual_list_1",actions)

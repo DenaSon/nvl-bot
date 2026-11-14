@@ -119,8 +119,12 @@ class CutoverGateTests(unittest.TestCase):
     def test_wizard_cannot_advertise_awg_cutover_when_gate_off(self):
         wizard = object.__new__(ManualEdgeWizard)
         wizard._awg_cutover_ready = lambda host: False
-        self.assertTrue(wizard._cutover_visible(
-            {"tunnel_backend": "wireguard", "ip": EDGE}))
+        with patch.dict(os.environ, {"NVL_LEGACY_WG_UI_ENABLED":"0"}):
+            self.assertFalse(wizard._cutover_visible(
+                {"tunnel_backend": "wireguard", "ip": EDGE}))
+        with patch.dict(os.environ, {"NVL_LEGACY_WG_UI_ENABLED":"1"}):
+            self.assertTrue(wizard._cutover_visible(
+                {"tunnel_backend": "wireguard", "ip": EDGE}))
         self.assertFalse(wizard._cutover_visible(
             {"tunnel_backend": "amneziawg", "ip": EDGE}))
 

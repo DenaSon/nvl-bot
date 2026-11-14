@@ -111,6 +111,12 @@ def verify_awg_target(
                 target.admin_port, target.service_port, target.admin_port,
             ):
                 return False
+            core_row = db.execute(
+                "SELECT value FROM settings WHERE key='core_wg_public_ip'"
+            ).fetchone()
+            if not core_row:
+                return False
+            core_public_ip = str(ipaddress.IPv4Address(core_row[0]))
         proof = probe_binding(binding, runner=runner)
         if proof.get("wg_peer_ok") is not True or proof.get("core_path_ok") is not True:
             return False
@@ -129,7 +135,7 @@ def verify_awg_target(
             addrs = _remote(ssh, "ip -4 -o addr show dev awg0", timeout=8)
             if binding.edge_tunnel_ip + "/32" not in addrs.split():
                 return False
-            wan = _remote(ssh, "ip -4 route get " + binding.core_tunnel_ip +
+            wan = _remote(ssh, "ip -4 route get " + core_public_ip +
                           " | awk '{for(i=1;i<=NF;i++)if($i==\"dev\")"
                           "{print $(i+1);exit}}'", timeout=8)
             nat = AWGNATEvidence(
@@ -147,7 +153,7 @@ def verify_awg_target(
             return verify_awg_nat(nat)
         finally:
             ssh.close()
-    except (Exception,):
+    except Exception:
         # Read-only target checks never throw raw SSH errors/key material into
         # Telegram. The caller returns a generic HOLD and logs a safe code.
         return False

@@ -1,0 +1,11 @@
+[Unit]
+Description=NVL independent AWG STANDBY Limiter witness refresh
+After=ssh-limiter.service awg-quick@awg0.service
+ConditionPathExists=/root/master_bot.db
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 -B /root/nvl_awg_witness_refresh.py --refresh-standby
+TimeoutStartSec=90
+NoNewPrivileges=true

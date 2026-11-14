@@ -16,6 +16,7 @@ import time
 
 from nvl_tunnel_backend import TunnelHold, lookup_binding, probe_binding, _key
 from nvl_awg_nat_evidence import AWGNATEvidence, verify_awg_nat
+from nvl_awg_core_routes import verify_core_route
 from nvl_awg_provision import _remote
 
 
@@ -139,6 +140,10 @@ def verify_awg_target(
         proof = probe_binding(binding, runner=runner)
         if proof.get("wg_peer_ok") is not True or proof.get("core_path_ok") is not True:
             return False
+        # A forced-interface ping can pass even when normal TCP replies go
+        # via eth0. Reject standby and cutover without a real /32 route.
+        verify_core_route(binding.edge_tunnel_ip, binding.core_tunnel_ip,
+                          runner=runner)
         core_key = _local_public_key(runner)
         connector = ssh_connect or _ssh_connect
         ssh = connector(target, management_key_path)
@@ -172,7 +177,19 @@ def verify_awg_target(
                 awg_autostart=_remote(ssh, "systemctl is-enabled awg-quick@awg0", timeout=8),
                 netfilter_autostart=_remote(ssh, "systemctl is-enabled netfilter-persistent", timeout=8),
             )
-            return verify_awg_nat(nat)
+            if not verify_awg_nat(nat):
+                return False
+            # Probe both Core TCP listeners from the pinned Edge transport.
+            # This catches the exact outage that ping and NAT-list checks missed.
+            for service_port in (target.service_port, target.tls_port):
+                if type(service_port) is not int or not 1 <= service_port <= 65535:
+                    return False
+                _remote(
+                    ssh, "timeout 6 bash -c 'exec 3<>/dev/tcp/" +
+                    binding.core_tunnel_ip + "/" + str(service_port) + "'",
+                    timeout=8,
+                )
+            return True
         finally:
             ssh.close()
     except Exception:

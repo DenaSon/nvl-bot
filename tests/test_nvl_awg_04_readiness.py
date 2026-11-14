@@ -82,7 +82,7 @@ class LimiterWitnessTests(unittest.TestCase):
 
     def test_witness_success_creates_only_private_exact_source_marker(self):
         marker = self.root / "witness"
-        binding = SimpleNamespace(edge_tunnel_ip=SOURCE)
+        binding = SimpleNamespace(edge_tunnel_ip=SOURCE, core_tunnel_ip="10.203.77.1")
         with (patch("nvl_awg_limiter_witness.os.geteuid", return_value=0),
               patch("nvl_awg_limiter_witness._witness_guard",
                     return_value=nullcontext()),
@@ -90,6 +90,8 @@ class LimiterWitnessTests(unittest.TestCase):
                     return_value=binding),
               patch("nvl_awg_limiter_witness.probe_binding",
                     return_value={"wg_peer_ok": True, "core_path_ok": True}),
+              patch("nvl_awg_limiter_witness.verify_core_route",
+                    return_value=True),
               patch("nvl_awg_limiter_witness._approved_source",
                     return_value=SimpleNamespace(st_mtime=0)),
               patch("nvl_awg_limiter_witness._live_service_matches_script"),
@@ -101,6 +103,23 @@ class LimiterWitnessTests(unittest.TestCase):
         self.assertEqual(marker.read_text(),
                          "NVL_AWG_LIMITER_READY " + SOURCE + "\n")
         self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
+
+    def test_missing_return_route_rejects_witness_and_clears_marker(self):
+        marker = self.root / "witness"
+        marker.write_text("NVL_AWG_LIMITER_READY " + SOURCE + "\n")
+        binding = SimpleNamespace(edge_tunnel_ip=SOURCE, core_tunnel_ip="10.203.77.1")
+        with (patch("nvl_awg_limiter_witness.os.geteuid", return_value=0),
+              patch("nvl_awg_limiter_witness._witness_guard",
+                    return_value=nullcontext()),
+              patch("nvl_awg_limiter_witness._registered_binding",
+                    return_value=binding),
+              patch("nvl_awg_limiter_witness.probe_binding",
+                    return_value={"wg_peer_ok": True, "core_path_ok": True}),
+              patch("nvl_awg_limiter_witness.verify_core_route",
+                    side_effect=RuntimeError("wrong device"))):
+            with self.assertRaisesRegex(LimiterWitnessHold, "CORE_AWG_RETURN_ROUTE_UNVERIFIED"):
+                attest(EDGE, marker=marker)
+        self.assertFalse(marker.exists())
 
     def test_failed_check_revokes_previous_marker(self):
         marker = self.root / "witness"

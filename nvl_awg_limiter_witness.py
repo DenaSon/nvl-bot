@@ -21,6 +21,7 @@ import tempfile
 import time
 
 from nvl_tunnel_backend import lookup_binding, probe_binding
+from nvl_awg_core_routes import verify_core_route
 
 
 class LimiterWitnessHold(RuntimeError):
@@ -217,6 +218,11 @@ def _attest_locked(host, *, marker=MARKER):
     proof = probe_binding(binding)
     if proof.get("wg_peer_ok") is not True or proof.get("core_path_ok") is not True:
         raise LimiterWitnessHold("CORE_AWG_PATH_UNVERIFIED")
+    # Never attest a cutover when replies to the Edge would use eth0.
+    try:
+        verify_core_route(binding.edge_tunnel_ip, binding.core_tunnel_ip)
+    except Exception:
+        raise LimiterWitnessHold("CORE_AWG_RETURN_ROUTE_UNVERIFIED") from None
     st = _approved_source()
     _live_service_matches_script(st)
     if not _functional_test(binding.edge_tunnel_ip):

@@ -285,6 +285,19 @@ def provision_awg_new_edge_sync(
         if not verify_awg_nat(nat):
             raise AWGProvisionHold("AWG_NAT_PERSISTENCE_UNVERIFIED")
 
+        # NAT rules can be correct even while Core replies route via eth0.
+        # Prove both TCP listeners over the pinned Edge->Core AWG path before
+        # the new Edge can become READY and later be promoted.
+        stage = "CORE_PATH"
+        for service_port in (customer_port, tls_port):
+            probe = ("exec 3<>/dev/tcp/" + profile.core_tunnel_ip +
+                     "/" + str(service_port))
+            try:
+                _remote(ssh, "timeout 6 bash -c " + shlex.quote(probe),
+                        timeout=8)
+            except Exception:
+                raise AWGProvisionHold("AWG_CORE_TCP_PATH_UNVERIFIED") from None
+
         # Only now attach a VERIFIED backend to an inactive manual Edge.
         stage = "DB_REGISTER"
         with db_factory() as db:

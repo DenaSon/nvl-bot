@@ -21,6 +21,9 @@ from nvl_awg_new_edge import (
     AWGPlanHold, AWGCoreProfile, allocated_edge_ip, expected_peer_block,
     ipv4, public_key, port,
 )
+from nvl_awg_core_routes import (
+    AWGRouteHold, ensure_core_route, remove_owned_core_route,
+)
 
 
 @dataclass(frozen=True)
@@ -168,8 +171,10 @@ def commit_core_peer(
                     nxt.write(plan.after_conf.encode("utf-8"))
                     nxt.flush()
                     os.fsync(nxt.fileno())
-                # Atomic persistence before live set; peer is never lost on reboot.
+                # Persistent peer config is atomic. 'awg set' alone does
+                # not add the Linux /32 return route needed for Core TCP.
                 os.replace(next_path, conf)
+                route_added = False
                 try:
                     runner(list(plan.apply_argv), capture_output=True, text=True,
                            timeout=15, check=True)
@@ -185,8 +190,26 @@ def commit_core_peer(
                     if target != [[plan.edge_public_key,
                                    plan.edge_tunnel_ip + "/32"]]:
                         raise AWGPlanHold("AWG_PEER_LIVE_POSTCHECK_FAILED")
+                    route_added = ensure_core_route(
+                        plan.edge_tunnel_ip,
+                        AWGCoreProfile.parse(plan.after_conf).core_tunnel_ip,
+                        runner=runner,
+                    )
                 except BaseException as exc:
-                    # Peer was absent before our operation, so removal is safe.
+                    core_ip = AWGCoreProfile.parse(plan.after_conf).core_tunnel_ip
+                    if isinstance(exc, AWGRouteHold) and str(exc) == (
+                            "AWG_CORE_ROUTE_ROLLBACK_UNCERTAIN"):
+                        # Preserve config/peer if route rollback was ambiguous.
+                        raise AWGPlanHold(
+                            "AWG_CORE_ROUTE_ROLLBACK_UNCERTAIN") from None
+                    if route_added:
+                        try:
+                            remove_owned_core_route(
+                                plan.edge_tunnel_ip, core_ip, runner=runner)
+                        except Exception:
+                            raise AWGPlanHold(
+                                "AWG_CORE_ROUTE_ROLLBACK_UNCERTAIN") from None
+                    # This peer was absent before the operation.
                     try:
                         runner(
                             ["awg", "set", "awg0", "peer",
@@ -195,19 +218,16 @@ def commit_core_peer(
                             check=True,
                         )
                     except Exception as rollback:
-                        # Do not restore persistent config if live is uncertain;
-                        # retaining the backup and new peer is safer for recovery.
                         raise AWGPlanHold(
                             "AWG_PEER_ROLLBACK_UNCERTAIN_MANUAL_HOLD"
                         ) from rollback
                     os.replace(backup_path, conf)
-                    # Distinguish a genuine live-state mismatch from an awg
-                    # set execution failure; both remain fail-closed.
-                    code = ("AWG_PEER_LIVE_POSTCHECK_FAILED"
-                            if isinstance(exc, AWGPlanHold)
-                            and str(exc) == "AWG_PEER_LIVE_POSTCHECK_FAILED"
+                    code = (str(exc) if isinstance(exc, AWGRouteHold)
+                            else "AWG_PEER_LIVE_POSTCHECK_FAILED"
+                            if isinstance(exc, AWGPlanHold) and str(exc) ==
+                            "AWG_PEER_LIVE_POSTCHECK_FAILED"
                             else "AWG_PEER_LIVE_INSTALL_FAILED")
-                    raise AWGPlanHold(code) from exc
+                    raise AWGPlanHold(code) from None
             finally:
                 if next_path.exists():
                     next_path.unlink()

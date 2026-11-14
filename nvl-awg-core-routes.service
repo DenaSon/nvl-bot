@@ -1,0 +1,12 @@
+[Unit]
+Description=NVL AWG Core verified /32 return route reconciliation
+Documentation=man:ip-route(8)
+After=awg-quick@awg0.service
+
+[Service]
+Type=oneshot
+ExecStart=/root/venv/bin/python3 -B /root/nvl_awg_core_routes.py --ensure
+TimeoutStartSec=60
+
+[Install]
+WantedBy=awg-quick@awg0.service

@@ -174,6 +174,12 @@ class AWGTargetTests(unittest.TestCase):
         with self.db_factory() as db:
             db.execute("DELETE FROM edge_tunnel_bindings")
         with self.db_factory() as db:
+            with self.assertRaisesRegex(TunnelHold, "JOURNAL_BACKEND_MISMATCH"):
+                target_backend(db,HOST)
+            db.execute(
+                "UPDATE manual_edge_operations SET tunnel_backend='wireguard'"
+            )
+        with self.db_factory() as db:
             self.assertEqual(target_backend(db,HOST),"wireguard")
 
     def test_limiter_gate_rejects_missing_file(self):

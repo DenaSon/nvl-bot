@@ -96,6 +96,34 @@ class SharedEdgeIPLimiterTests(unittest.TestCase):
             self.assertEqual(penalties, [])
             self.assertEqual(kills, [])
 
+    def test_live_awg_peer_source_without_bot_enrollment(self):
+        limiter = load_embedded_limiter()
+        from subprocess import CompletedProcess
+        key = "A" * 43 + "="
+        output = key + " 10.231.55.2/32\\n"
+        with mock.patch.object(
+            limiter.subprocess, "run",
+            return_value=CompletedProcess([], 0, output, ""),
+        ) as run:
+            sources = limiter._live_awg_shared_ips()
+            self.assertEqual(sources, frozenset({"10.231.55.2"}))
+            self.assertEqual(
+                run.call_args.args[0],
+                ["awg", "show", "awg0", "allowed-ips"],
+            )
+        self.assertTrue(limiter.is_shared_edge_ip("10.77.0.175"))
+
+    def test_invalid_awg_live_inventory_does_not_widen_exemption(self):
+        limiter = load_embedded_limiter()
+        from subprocess import CompletedProcess
+        key = "A" * 43 + "="
+        for rows in (key + " 10.231.55.0/24\\n", "broken\\n"):
+            with self.subTest(rows=rows), mock.patch.object(
+                limiter.subprocess, "run",
+                return_value=CompletedProcess([], 0, rows, ""),
+            ):
+                self.assertIsNone(limiter._live_awg_shared_ips())
+
     def test_two_direct_ips_keep_existing_penalty_behavior(self):
         limiter = load_embedded_limiter()
         direct_ips = ("203.0.113.10", "198.51.100.20")

@@ -7622,6 +7622,21 @@ async def _manual_edge_provision_awg(ip, ssh_port, password, trusted_key, chat, 
         tunnel_backend="amneziawg",
     )
 
+def _manual_awg_check(ip, admin_port, service_port, tls_port, pinned):
+    """Read-only Core+Edge AWG verification via the operator-approved SSH pin."""
+    from nvl_awg_target import Target, verify_awg_target
+    return verify_awg_target(
+        db_conn,
+        Target(
+            host=str(ip), admin_port=int(admin_port),
+            service_port=int(service_port), tls_port=int(tls_port),
+            ssh_host_key_type=pinned[0],
+            ssh_host_key_base64=pinned[1],
+        ),
+        management_key_path=DO_SSH_KEY_PATH,
+    )
+
+
 async def _manual_edge_verify(ip, details, ssh_port):
     with db_conn() as db:
         row=db.execute(
@@ -7631,6 +7646,21 @@ async def _manual_edge_verify(ip, details, ssh_port):
         ).fetchone()
     if not row or tuple(row[:5])!=(0,0,0,"manual",None) or row[6]!=ssh_port:
         return False
+    if details.get("tunnel_backend")=="amneziawg":
+        with db_conn() as db:
+            rec=db.execute(
+                "SELECT pin_type,pin_base64 FROM manual_edge_operations "
+                "WHERE ip=? AND admin_port=? AND tunnel_backend='amneziawg' "
+                "AND status='INSTALLING'",
+                (ip,ssh_port),
+            ).fetchall()
+        if len(rec)!=1 or not all(rec[0]):
+            return False
+        return await asyncio.to_thread(
+            _manual_awg_check, ip, ssh_port, row[5],
+            _normalize_ssh_port(_db_get_setting("tls_port","2088"),2088),
+            tuple(rec[0]),
+        )
     return await _cloudzy_04a_probe(ip,row[5],ssh_port)
 
 def _manual_edge_is_core_ip(ip):
@@ -7690,14 +7720,40 @@ _manual_edge = ManualEdgeWizard(
     os_check=_manual_edge_verify_ubuntu,
     awg_preflight=_manual_awg_preflight,
     awg_provision=_manual_edge_provision_awg,
+    awg_check=_manual_awg_check,
 )
 
 # Phase 3: provider-independent manual Quick Switch. The legacy CZ07 queue and
 # all Cloudzy engines remain installed, but are no longer advertised in UI.
+async def _manual_target_backend_preflight(plan):
+    """Backend-aware checks invoked before, during, and after DNS cutover."""
+    from nvl_awg_target import target_backend, core_limiter_canary_ready
+    from nvl_tunnel_backend import lookup_binding
+    with db_conn() as db:
+        try:
+            backend=target_backend(db,plan["target"])
+            binding=lookup_binding(db,plan["target"])
+        except Exception:
+            raise QuickSwitchHold("TUNNEL_REGISTRY_UNVERIFIED") from None
+    if backend!="amneziawg":
+        return await check_manual_relay_via_cz04b(_cloudzy_04b,plan)
+    if (os.environ.get("NVL_AWG_CUTOVER_ENABLED")!="1" or not binding
+            or not core_limiter_canary_ready(binding.edge_tunnel_ip)):
+        raise QuickSwitchHold("AWG_CUTOVER_LIMITER_GATE_NOT_READY")
+    identity=plan["identity"]
+    ok=await asyncio.to_thread(
+        _manual_awg_check, plan["target"], plan["admin_port"],
+        plan["service_port"], plan["tls_port"], identity["pinned_key"],
+    )
+    if not ok:
+        raise QuickSwitchHold("AWG_PINNED_TARGET_UNVERIFIED")
+    return True
+
+
 _manual_quick_engine = ManualQuickSwitch(
     db_conn=db_conn,
     dns=_cloudzy_04b.dns,
-    check_target=lambda plan: check_manual_relay_via_cz04b(_cloudzy_04b,plan),
+    check_target=_manual_target_backend_preflight,
     guard=_cloudzy_04b_guard,
 )
 _manual_quick_ui = ManualQuickSwitchUI(

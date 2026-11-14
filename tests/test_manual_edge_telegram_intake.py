@@ -1,13 +1,19 @@
 """Native IP+SSH management port+password intake; no Cloudzy/HTTPS effects."""
 import asyncio
+import os
 from types import SimpleNamespace
-from unittest.mock import AsyncMock,Mock
+from unittest.mock import AsyncMock,Mock,patch
 import unittest
 
 from manual_edge_wizard import ManualEdgeWizard
 
 
 class PrivateIntakeTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        fallback=patch.dict(os.environ,{"NVL_LEGACY_EDGE_UI_ENABLED":"1"})
+        fallback.start()
+        self.addCleanup(fallback.stop)
+
     def wizard(self):
         calls=[]
         w=ManualEdgeWizard(

@@ -6,6 +6,7 @@ SQLite. Never forward stderr, exception strings, credentials or AWG key data.
 from __future__ import annotations
 
 import re
+import sqlite3
 import subprocess
 
 STAGES = {

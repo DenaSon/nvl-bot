@@ -583,13 +583,26 @@ class ManualEdgeJournal:
         with self.db() as db:
             self.initialize(db);db.execute("BEGIN IMMEDIATE")
             row=db.execute(
-                "SELECT ip FROM manual_edge_operations "
+                "SELECT ip,tunnel_backend FROM manual_edge_operations "
                 "WHERE id=? AND actor=? AND chat=? AND status='EDGE_READY'",
                 (op_id,actor,chat),
             ).fetchone()
             if not row:
                 raise ManualEdgeHold("EDGE_NOT_READY")
-            ip=row[0]
+            ip,backend=row
+            if backend=="amneziawg":
+                # A stale or forged AWG receipt cannot become Standby even
+                # if a previous read-only network probe succeeded.
+                from nvl_tunnel_backend import lookup_binding, TunnelHold
+                try:
+                    binding=lookup_binding(db,ip)
+                except TunnelHold:
+                    raise ManualEdgeHold("AWG_BINDING_UNVERIFIED") from None
+                if (binding is None or binding.backend!="amneziawg"
+                        or binding.interface!="awg0"):
+                    raise ManualEdgeHold("AWG_BINDING_UNVERIFIED")
+            elif backend!="wireguard":
+                raise ManualEdgeHold("EDGE_BACKEND_UNSUPPORTED")
             unrelated_lease=False
             try:
                 self._protected(db)

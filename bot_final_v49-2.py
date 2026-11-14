@@ -426,7 +426,6 @@ from manual_edge_wizard import ManualEdgeWizard
 from manual_quick_switch import ManualQuickSwitch, check_manual_relay_via_cz04b, QuickSwitchHold
 from manual_quick_switch_ui import ManualQuickSwitchUI
 from manual_edge_secure_form import ManualFormStore, serve_private
-from cloudzy_admin_panel import CloudzyAdminPanel
 from edge_egress_k2_root_direct import (
     bound_root_client as k2_root_direct_client,
     native_review as k2_native_review,
@@ -4287,7 +4286,7 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
                                     [InlineKeyboardButton("🛡 وضعیت و مسدودسازی IPها", callback_data="hp_menu")]])
               if pool_active else InlineKeyboardMarkup(
                   [[InlineKeyboardButton(
-                      "🛟 ادامه نصب دستی و بررسی Standby" if manual_safe_bootstrap else "📋 وضعیت خرید Cloudzy",
+                      "🛟 ادامه نصب و بررسی Standby" if manual_safe_bootstrap else "📋 وضعیت سرور",
                       callback_data="apps_edge_manual_home" if manual_safe_bootstrap else "apps_cz_operations")]]))
         await app.bot.send_message(
             chat_id,
@@ -7281,8 +7280,6 @@ async def require_login(update):
 
 PORTAL_DISPLAY_NAME = "NeVeL"  # 🔒 نام ثابت پورتال و مدیریت — با تغییر «نام برند» در تنظیمات عوض نمی‌شود
 
-_cloudzy_admin_panel = CloudzyAdminPanel()
-
 
 def _cloudzy_quick_preflight():
     """Fail closed before paid create AND before mutating Core/Legacy WG."""
@@ -7860,7 +7857,7 @@ async def _show_admin_programs_hub(target, context):
         "🧩 <b>برنامه‌ها</b>\n"
         "━━━━━━━━━━━━━━\n"
         "یک ابزار را انتخاب کنید.\n\n"
-        "🌐 <b>مدیریت Edge</b> — افزودن سرور دستی و تغییر سریع IP کاربران\n"
+        "🌐 <b>مدیریت Edge</b> — ساخت سرور، آماده‌سازی و انتقال کنترل‌شده کاربران\n"
         "🖥 <b>نودها</b> — وضعیت، تنظیمات، راه‌اندازی و اتصال Node\n"
         "🌐 <b>هاست‌ها</b> — Inboundها و Public Hostها\n"
         "🚚 <b>انتقال</b> — مهاجرت کنترل‌شده سرور اصلی Marzban\n"
@@ -14414,7 +14411,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             friendly = {
                 "EDGE_ALREADY_REGISTERED": "این IP قبلاً در فهرست سرورها وجود دارد.",
                 "MANUAL_EDGE_OPERATION_EXISTS": "این IP پروندهٔ افزودن دستی دارد؛ ابتدا همان پرونده را بررسی کنید.",
-                "CLOUDZY_EDGE_ALREADY_EXISTS": "این IP قبلاً در پروندهٔ Cloudzy ثبت شده است.",
+                "CLOUDZY_EDGE_ALREADY_EXISTS": "این IP قبلاً در یک پرونده ثبت سرور استفاده شده است.",
                 "CORE_CANNOT_BE_EDGE": "آدرس Core نمی‌تواند به‌عنوان Edge ثبت شود.",
                 "CORE_IDENTITY_UNAVAILABLE": "هویت Core مشخص نیست؛ ثبت IP متوقف شد.",
                 "CUSTOMER_PORT_INVALID": "پورت سرویس مشتری در تنظیمات معتبر نیست.",
@@ -17349,7 +17346,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Read-only Rich card entry/refresh/details. Recheck live active-admin
     # membership, private chat, original journal owner and message pointer.
     # The input never reaches Cloudzy purchase/DNS, CZ07 mutation or K2.
-    if d.startswith("apps_edge_quick_") or d == "apps_cz_home":
+    # Removed provider UI: stale provider buttons lead only to the safe Edge hub.
+    # No historical provider callback is permitted to purchase, mutate DNS or
+    # provision a server; this denial is independent of the WG fallback flag.
+    if d.startswith("apps_cz") or d.startswith("u7:"):
+        await _manual_quick_ui.handle(
+            query,context,"apps_edge_quick_home",role=role,
+            actor=update.effective_user.id,chat=update.effective_chat.id,
+            is_private=(getattr(update.effective_chat,"type",None)=="private"),
+        )
+        return
+    if d.startswith("apps_edge_quick_"):
         await _manual_quick_ui.handle(
             query,context,d,role=role,actor=update.effective_user.id,
             chat=update.effective_chat.id,
@@ -17403,61 +17410,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if result in ("RICH_UNAVAILABLE", "STALE_OR_FORWARDED_CARD"):
                 log.warning("DenaProbe R3 dashboard hold code=%s", result)
         return
-    if d in ("apps_cz_rich_home", "apps_cz_rich_migration") or d.startswith("u7:"):
-        active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
-        await _cloudzy_rich_admin_callback(
-            data=d, query=query, context=context, db_factory=db_conn,
-            role=role, actor=update.effective_user.id,
-            chat=update.effective_chat.id,
-            is_private=(getattr(update.effective_chat, "type", None) == "private"),
-            active_admin_ids=active_admin_ids,
-        )
-        return
     if d == 'apps_home':
         context.user_data.pop("mza_nodes_origin", None)
         await _show_admin_programs_hub(query, context)
-        return
-    elif d.startswith("apps_cz7_"):
-        await _cloudzy_07.handle_callback(
-            query, context, d, role=role,
-            actor=update.effective_user.id, chat=update.effective_chat.id,
-            markup=_cloudzy_markup, app=context.application,
-        )
-        return
-    elif d.startswith("apps_cz5_"):
-        await _cloudzy_04b.handle_callback(
-            query, context, d, role=role,
-            actor=update.effective_user.id, chat=update.effective_chat.id,
-            markup=_cloudzy_markup,
-        )
-        return
-    elif d == "apps_cz_edge" or d.startswith("apps_cz4_"):
-        await _cloudzy_04a.handle_callback(
-            query, context, d, role=role,
-            actor=update.effective_user.id, chat=update.effective_chat.id,
-            markup=_cloudzy_markup,
-        )
-        return
-    elif (d in ("apps_cz_wizard", "apps_cz_operations", "apps_cz6_start",
-                "apps_cz6_status")
-          or d.startswith(("apps_cz_q", "apps_cz6_resume_"))):
-        await _cloudzy_quick_edge.handle_callback(
-            query, context, d, role=role,
-            actor=update.effective_user.id, chat=update.effective_chat.id,
-            markup=_cloudzy_markup, app=context.application,
-        )
         return
     elif d.startswith("apps_edge_manual_"):
         await _manual_edge.handle(
             query,context,d,role=role,actor=update.effective_user.id,
             chat=update.effective_chat.id,app=context.application,
-        )
-        return
-    elif d.startswith("apps_cz_"):
-        await _cloudzy_admin_panel.handle_callback(
-            query, context, d, role=role,
-            actor=update.effective_user.id, chat=update.effective_chat.id,
-            markup=_cloudzy_markup,
         )
         return
     elif d == 'apps_marzban_nodes':
@@ -22963,7 +22923,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # The native protected K2 branch above remains a separate guarded path.
         await query.message.reply_text(
             "⛔️ فعال‌سازی Relay از این مسیر قدیمی متوقف است. "
-            "برای تغییر DNS و Default از مسیر Journalدار Cloudzy/CZ04B استفاده کنید. "
+            "برای تغییر DNS و رله اصلی از مسیر «مدیریت Edge» استفاده کنید. "
             "هیچ Default، DNS، NAT یا حسابی تغییر نکرد."
         )
         return
@@ -26988,7 +26948,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # recognizable, but deny mutation (including stale Telegram buttons).
         await query.message.reply_text(
             "⛔️ تغییر Relay پیش‌فرض یا انتقال کاربران از این منوی قدیمی متوقف است. "
-            "از «Cloudzy | Edge و Relay» و مسیر تأییدشده CZ04B/CZ07 استفاده کنید. "
+            "از «مدیریت Edge» و مسیر انتقال تأییدشده استفاده کنید. "
             "هیچ DNS، Default یا حسابی تغییر نکرد."
         )
         return

@@ -193,11 +193,15 @@ def core_limiter_canary_ready(edge_tunnel_ip: str, *,
             return False
         st = marker.stat()
         if (st.st_uid != 0 or st.st_mode & 0o077
-                or st.st_size > 256 or time.time() - st.st_mtime > 300
+                or st.st_size > 256 or time.time() - st.st_mtime > 120
                 or st.st_mtime > time.time() + 5):
             return False
-        return marker.read_text().strip() == (
+        if marker.read_text().strip() != (
             "NVL_AWG_LIMITER_READY " + str(ipaddress.IPv4Address(edge_tunnel_ip))
-        )
+        ):
+            return False
+        live = runner(["systemctl","is-active","--quiet","ssh-limiter.service"],
+                      capture_output=True,text=True,timeout=3)
+        return live.returncode == 0
     except (ValueError, OSError):
         return False

@@ -1460,9 +1460,10 @@ class JournalTests(unittest.TestCase):
                     'elif d == "hpeg_status"'):
             self.assertIn(old, source)
         self.assertIn("pool_active=False", source)
-        self.assertIn('trusted_host_key=trusted_host_key', source)
         self.assertIn('paramiko.RejectPolicy()', source)
-        self.assertIn('legacy_peer_name = "edge-" + ip.replace(".", "-")', source)
+        self.assertIn('NVL_LEGACY_WG_UI_ENABLED',source)
+        self.assertNotIn('await _cloudzy_quick_edge.handle_callback(',source)
+        self.assertNotIn('await _cloudzy_admin_panel.handle_callback(',source)
 
 
 if __name__ == "__main__":

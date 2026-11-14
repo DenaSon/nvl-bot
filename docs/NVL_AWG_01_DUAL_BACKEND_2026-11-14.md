@@ -4,9 +4,9 @@ Status: first code increment; NOT Production migration authorization.
 
 ## Confirmed infrastructure pilot (operator evidence, 2026-11-14)
 
-- Core 91.107.170.239: AWG 3.1, awg0 10.203.77.1/32.
-- Edge 149.104.110.138: AWG 3.1, awg0 10.203.77.2/32, UDP 42371.
-- SSH customer ingress through Edge public TCP 2252; egress IP was Core public 91.107.170.239.
+- Core <CORE_PUBLIC_IP>: AWG 3.1, awg0 10.203.77.1/32.
+- Edge <EXISTING_EDGE_PUBLIC_IP>: AWG 3.1, awg0 <EXISTING_EDGE_TUNNEL_IP>/32, UDP 42371.
+- SSH customer ingress through Edge public TCP 2252; egress IP was Core public <CORE_PUBLIC_IP>.
 - Edge reboot restored awg0/NAT/forwarding; operator retested NPV Tunnel successfully.
 - These are operator runtime observations, not proof of bot registration.
 
@@ -42,4 +42,4 @@ Run existing repository CI as well. These tests use in-memory SQLite and fake co
 
 ## Deployment boundary
 
-Merge is NOT deploy. Confirm deployed Core SHA, snapshot SQLite/host state and use pinned release after separate approval. Before AWG adoption, ensure Core limiter really exempts 10.203.77.2 and that host identity/NAT checks are updated. The AWG test server is NOT registered as a selectable relay by this PR.
+Merge is NOT deploy. Confirm deployed Core SHA, snapshot SQLite/host state and use pinned release after separate approval. Before AWG adoption, ensure Core limiter really exempts <EXISTING_EDGE_TUNNEL_IP> and that host identity/NAT checks are updated. The AWG test server is NOT registered as a selectable relay by this PR.

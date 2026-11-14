@@ -45,12 +45,16 @@ class ManualEdgeJournal:
             status TEXT NOT NULL, reason TEXT,
             created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
             route_job TEXT,
-            archived_at INTEGER
+            archived_at INTEGER,
+            tunnel_backend TEXT NOT NULL DEFAULT 'wireguard'
         )""")
         # Schema-only compatible extension for existing Core databases.
         columns={r[1] for r in db.execute("PRAGMA table_info(manual_edge_operations)")}
         if "archived_at" not in columns:
             db.execute("ALTER TABLE manual_edge_operations ADD COLUMN archived_at INTEGER")
+        if "tunnel_backend" not in columns:
+            db.execute("ALTER TABLE manual_edge_operations ADD COLUMN "
+                       "tunnel_backend TEXT NOT NULL DEFAULT 'wireguard'")
         db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS manual_edge_host_identity
             ON manual_edge_operations(ip)
             WHERE ip IS NOT NULL AND status != 'CANCELLED'""")
@@ -399,7 +403,9 @@ class ManualEdgeJournal:
             ).fetchone()
             return dict(row) if row else None
 
-    def start(self, actor, chat):
+    def start(self, actor, chat, *, tunnel_backend="wireguard"):
+        if tunnel_backend not in ("wireguard", "amneziawg"):
+            raise ManualEdgeHold("EDGE_BACKEND_UNSUPPORTED")
         if type(actor) is not int or type(chat) is not int or actor <= 0 or chat <= 0:
             raise ManualEdgeHold("ADMIN_IDENTITY_INVALID")
         with self.db() as db:
@@ -416,9 +422,9 @@ class ManualEdgeJournal:
             now=int(self.now())
             db.execute(
                 "INSERT INTO manual_edge_operations "
-                "(id,actor,chat,status,created_at,updated_at) "
-                "VALUES (?,?,?,'DRAFT',?,?)",
-                (op,actor,chat,now,now),
+                "(id,actor,chat,status,created_at,updated_at,tunnel_backend) "
+                "VALUES (?,?,?,'DRAFT',?,?,?)",
+                (op,actor,chat,now,now,tunnel_backend),
             )
             self._log(db,op,actor,"DRAFT","CREATED")
             return op

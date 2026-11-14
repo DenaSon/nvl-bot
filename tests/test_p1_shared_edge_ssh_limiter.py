@@ -87,14 +87,42 @@ class SharedEdgeIPLimiterTests(unittest.TestCase):
     def test_verified_awg_shared_source_is_not_penalized(self):
         limiter = load_embedded_limiter()
         with mock.patch.object(limiter, "_awg_shared_ips",
-                               return_value=frozenset({"10.203.77.2"})):
-            self.assertTrue(limiter.is_shared_edge_ip("10.203.77.2"))
-            self.assertFalse(limiter.is_shared_edge_ip("10.203.77.3"))
+                               return_value=frozenset({"10.231.55.2"})):
+            self.assertTrue(limiter.is_shared_edge_ip("10.231.55.2"))
+            self.assertFalse(limiter.is_shared_edge_ip("10.231.55.3"))
             penalties, kills = tick_with_peers(
-                limiter, ("10.77.0.175", "10.203.77.2"), limit=1
+                limiter, ("10.77.0.175", "10.231.55.2"), limit=1
             )
             self.assertEqual(penalties, [])
             self.assertEqual(kills, [])
+
+    def test_live_awg_peer_source_without_bot_enrollment(self):
+        limiter = load_embedded_limiter()
+        from subprocess import CompletedProcess
+        key = "A" * 43 + "="
+        output = key + " 10.231.55.2/32\n"
+        with mock.patch.object(
+            limiter.subprocess, "run",
+            return_value=CompletedProcess([], 0, output, ""),
+        ) as run:
+            sources = limiter._live_awg_shared_ips()
+            self.assertEqual(sources, frozenset({"10.231.55.2"}))
+            self.assertEqual(
+                run.call_args.args[0],
+                ["awg", "show", "awg0", "allowed-ips"],
+            )
+        self.assertTrue(limiter.is_shared_edge_ip("10.77.0.175"))
+
+    def test_invalid_awg_live_inventory_does_not_widen_exemption(self):
+        limiter = load_embedded_limiter()
+        from subprocess import CompletedProcess
+        key = "A" * 43 + "="
+        for rows in (key + " 10.231.55.0/24\n", "broken\n"):
+            with self.subTest(rows=rows), mock.patch.object(
+                limiter.subprocess, "run",
+                return_value=CompletedProcess([], 0, rows, ""),
+            ):
+                self.assertIsNone(limiter._live_awg_shared_ips())
 
     def test_two_direct_ips_keep_existing_penalty_behavior(self):
         limiter = load_embedded_limiter()

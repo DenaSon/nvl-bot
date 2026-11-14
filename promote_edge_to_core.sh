@@ -549,6 +549,8 @@ SSH_PORTS = [p.strip() for p in os.environ.get("IP_LIMITER_PORTS", "22,2252").sp
 EXCLUDE_USERS = {u.strip() for u in os.environ.get("IP_LIMITER_EXCLUDE_USERS", "root").split(",") if u.strip()}
 # Legacy ingress SNAT makes this subnet identify shared Edges, not individual users.
 SHARED_EDGE_NETWORK = ipaddress.ip_network("10.77.0.0/24")
+AWG_SHARED_SOURCE_NETWORKS = tuple(ipaddress.ip_network(net) for net in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [ip-limiter] %(levelname)s: %(message)s", stream=sys.stdout)
 log = logging.getLogger("ip_limiter")
@@ -568,28 +570,60 @@ def setup_firewall_cooldown():
 _AWG_SHARED_CACHE = frozenset()
 _AWG_SHARED_REFRESHED = -1.0
 
+def _live_awg_shared_ips():
+    # Current Core AWG peer /32 ownership is valid even if an active Edge is
+    # deliberately NOT in the bot's database. Failure returns None (unknown).
+    try:
+        out = subprocess.run(["awg", "show", "awg0", "allowed-ips"],
+                             capture_output=True, text=True, timeout=4)
+        if out.returncode != 0 or len(out.stdout) > 131072:
+            return None
+        sources = set()
+        keys = set()
+        for line in out.stdout.splitlines():
+            parts = line.split(None, 1)
+            if len(parts) != 2 or parts[0] in keys:
+                return None
+            keys.add(parts[0])
+            for item in parts[1].split(","):
+                net = ipaddress.ip_network(item.strip(), strict=True)
+                if net.version != 4 or net.prefixlen != 32:
+                    return None
+                sources.add(str(net.network_address))
+        return frozenset(sources)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
 def _awg_shared_ips():
     global _AWG_SHARED_CACHE, _AWG_SHARED_REFRESHED
     now = time.monotonic()
     if now - _AWG_SHARED_REFRESHED < 15:
         return _AWG_SHARED_CACHE
     _AWG_SHARED_REFRESHED = now
+    live = _live_awg_shared_ips()
     try:
         from nvl_tunnel_backend import verified_shared_edge_sources
         with sqlite3.connect("file:/root/master_bot.db?mode=ro",
                              uri=True, timeout=0.2) as db:
-            sources = verified_shared_edge_sources(db)
+            registered = verified_shared_edge_sources(db)
     except (ImportError, sqlite3.Error, ValueError, OSError):
-        # Preserve the last verified snapshot on a temporary read failure.
-        return _AWG_SHARED_CACHE
-    _AWG_SHARED_CACHE = sources
-    return sources
+        registered = None
+    # If both reads fail, preserve the last trusted snapshot. Otherwise a
+    # successful authoritative refresh can remove retired Edge exemptions.
+    if live is not None or registered is not None:
+        _AWG_SHARED_CACHE = (live or frozenset()) | (registered or frozenset())
+    return _AWG_SHARED_CACHE
 
 def is_shared_edge_ip(ip: str) -> bool:
     try:
         addr = ipaddress.ip_address(ip)
         if addr in SHARED_EDGE_NETWORK:
             return True
+        # Only RFC1918 tunnel SNAT sources can be considered a shared AWG
+        # ingress. Public/direct client IPs never invoke an AWG peer scan.
+        if not isinstance(addr, ipaddress.IPv4Address) or not any(
+                addr in network for network in AWG_SHARED_SOURCE_NETWORKS):
+            return False
         return str(addr) in _awg_shared_ips()
     except (ValueError, TypeError):
         return False

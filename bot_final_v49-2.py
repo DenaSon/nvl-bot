@@ -7554,7 +7554,54 @@ def _manual_register_inactive_host(ip, customer_port, admin_port):
         )
 
 
-async def _manual_edge_provision(ip, ssh_port, password, trusted_key, chat, app):
+def _manual_awg_preflight():
+    """Fail closed before AWG new-Edge intake, without touching active tunnels."""
+    if paramiko is None or os.geteuid() != 0:
+        raise RuntimeError("AWG_ROOT_PARAMIKO_REQUIRED")
+    from nvl_awg_new_edge import AWGCoreProfile
+    from nvl_awg_provision import _root_only
+    path="/etc/amnezia/amneziawg/awg0.conf"
+    installer="/root/setup_edge_awg_relay.sh"
+    if not os.path.isfile(installer) or not os.path.isfile(path):
+        raise RuntimeError("AWG_INSTALLER_OR_PROFILE_MISSING")
+    profile=AWGCoreProfile.parse(_root_only(__import__("pathlib").Path(path)))
+    awg=subprocess.run(["awg","show","awg0","public-key"],
+                       capture_output=True,text=True,timeout=8)
+    if awg.returncode != 0 or not awg.stdout.strip():
+        raise RuntimeError("AWG_CORE_INTERFACE_NOT_READY")
+    core_ip=str(_db_get_setting("core_wg_public_ip","") or "").strip()
+    if not core_ip:
+        raise RuntimeError("AWG_CORE_IDENTITY_MISSING")
+    ok,err,pubkey=_ensure_local_ssh_keypair_sync()
+    if not ok or not pubkey or not os.path.isfile(DO_SSH_KEY_PATH):
+        raise RuntimeError("AWG_MANAGEMENT_KEY_MISSING")
+    if os.stat(DO_SSH_KEY_PATH).st_mode & 0o077:
+        raise RuntimeError("AWG_MANAGEMENT_KEY_PERMISSIONS")
+    return _normalize_ssh_port(_db_get_setting("port","2252"),2252),pubkey
+
+
+async def _manual_edge_provision(ip, ssh_port, password, trusted_key, chat, app, *, tunnel_backend="wireguard"):
+    if tunnel_backend == "amneziawg":
+        if await asyncio.to_thread(_db_host_exists,ip):
+            return False,None,{"tunnel_ok":False}
+        try:
+            customer_port,_=await asyncio.to_thread(_manual_awg_preflight)
+            tls_port=_normalize_ssh_port(_db_get_setting("tls_port","2088"),2088)
+            from nvl_awg_provision import provision_awg_new_edge_sync
+            ok,reason,result=await asyncio.to_thread(
+                provision_awg_new_edge_sync,
+                ip,ssh_port,password,trusted_key,
+                core_public_ip=_db_get_setting("core_wg_public_ip",""),
+                customer_port=customer_port,tls_port=tls_port,
+                db_factory=db_conn,
+                install_management_key=_install_local_pubkey_on_open_ssh,
+            )
+            return ok,ip,result
+        except Exception:
+            log.exception("Manual AWG new-edge installation halted without retry")
+            return False,None,{"tunnel_ok":False}
+    if tunnel_backend != "wireguard":
+        return False,None,{"tunnel_ok":False}
     if await asyncio.to_thread(_db_host_exists,ip):
         raise RuntimeError("MANUAL_EDGE_ALREADY_REGISTERED")
     customer_port,_pub = await asyncio.to_thread(_manual_edge_preflight)
@@ -7566,6 +7613,13 @@ async def _manual_edge_provision(ip, ssh_port, password, trusted_key, chat, app)
         egress_stage_requested=False,trusted_host_key=trusted_key,
         pool_active=False,admin_ssh_port=ssh_port,
         manual_safe_bootstrap=True,
+    )
+
+async def _manual_edge_provision_awg(ip, ssh_port, password, trusted_key, chat, app):
+    # Explicit, feature-gated AWG path only. Legacy callers keep WG untouched.
+    return await _manual_edge_provision(
+        ip, ssh_port, password, trusted_key, chat, app,
+        tunnel_backend="amneziawg",
     )
 
 async def _manual_edge_verify(ip, details, ssh_port):
@@ -7634,6 +7688,8 @@ _manual_edge = ManualEdgeWizard(
     guard=_cloudzy_04a_guard,
     is_core_host=_manual_edge_is_core_ip,
     os_check=_manual_edge_verify_ubuntu,
+    awg_preflight=_manual_awg_preflight,
+    awg_provision=_manual_edge_provision_awg,
 )
 
 # Phase 3: provider-independent manual Quick Switch. The legacy CZ07 queue and

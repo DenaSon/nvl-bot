@@ -7,6 +7,8 @@ short-lived /32 marker only while every production check stays green.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import ipaddress
 import os
@@ -26,6 +28,7 @@ class LimiterWitnessHold(RuntimeError):
 
 
 MARKER = Path("/run/nvl-awg-limiter-ready")
+LOCK = Path("/run/lock/nvl-awg-limiter-witness.lock")
 LIMITER = Path("/root/ip_limiter.py")
 PROMOTER = Path("/root/promote_edge_to_core.sh")
 DB = Path("/root/master_bot.db")
@@ -176,9 +179,36 @@ def _write_marker(source, path=MARKER):
             os.unlink(tmp)
 
 
+@contextmanager
+def _witness_guard(path=LOCK):
+    """Serialize independent renewals; never allow cross-Edge marker races."""
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        st = os.fstat(fd)
+        if (not stat.S_ISREG(st.st_mode) or st.st_uid != 0
+                or st.st_mode & 0o077):
+            raise LimiterWitnessHold("WITNESS_LOCK_UNTRUSTED")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise LimiterWitnessHold("WITNESS_ALREADY_RUNNING") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def attest(host, *, marker=MARKER):
     if os.geteuid() != 0:
         raise LimiterWitnessHold("ROOT_REQUIRED")
+    with _witness_guard():
+        return _attest_locked(host, marker=marker)
+
+
+def _attest_locked(host, *, marker=MARKER):
     # An unavailable witness must never leave a previous permission active.
     # A newer independent run may re-attest after the failure is resolved.
     if os.path.lexists(marker):

@@ -4,6 +4,7 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from nvl_awg_new_edge import (
     AWGPlanHold, AWGCoreProfile, allocated_edge_ip, render_new_edge_conf,
@@ -144,11 +145,15 @@ class NewEdgePlanTests(unittest.TestCase):
             conf = pathlib.Path(tmp) / "awg0.conf"
             conf.write_text(CORE_CONF)
             os.chmod(conf, 0o600)
-            backup = commit_core_peer(
-                plan, config_path=str(conf),
-                lock_path=str(pathlib.Path(tmp) / "peer.lock"),
-                runner=runner, root_check=lambda: 0,
-            )
+            with patch("nvl_awg_core_peer.ensure_core_route",
+                       return_value=True) as route_add:
+                backup = commit_core_peer(
+                    plan, config_path=str(conf),
+                    lock_path=str(pathlib.Path(tmp) / "peer.lock"),
+                    runner=runner, root_check=lambda: 0,
+                )
+            route_add.assert_called_once_with(
+                plan.edge_tunnel_ip, CORE_IP, runner=runner)
             self.assertTrue(pathlib.Path(backup).exists())
             self.assertEqual(conf.read_text(), plan.after_conf)
         self.assertEqual(state["set"], 1)

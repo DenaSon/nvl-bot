@@ -1,7 +1,8 @@
 """Manual Edge entrypoint is native, owner-bound and without Cloudzy/WebApp."""
 import asyncio
+import os
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock,patch
 import unittest
 
 from manual_edge_wizard import ManualEdgeWizard
@@ -9,6 +10,11 @@ from manual_edge_rich import ManualRichHold, render_manual_card
 
 
 class ManualEdgeEntryTests(unittest.TestCase):
+    def setUp(self):
+        fallback=patch.dict(os.environ,{"NVL_LEGACY_EDGE_UI_ENABLED":"1"})
+        fallback.start()
+        self.addCleanup(fallback.stop)
+
     def wizard(self):
         wizard=ManualEdgeWizard(
             db=lambda: None,preflight=lambda:(2252,"ssh-pub"),
@@ -28,7 +34,7 @@ class ManualEdgeEntryTests(unittest.TestCase):
             app=SimpleNamespace(bot=SimpleNamespace(token="123:TEST"))))
         return wizard._view.await_args.args,ctx
 
-    def test_owner_sees_new_wizard_even_when_legacy_flag_disabled(self):
+    def test_owner_sees_legacy_fallback_only_when_flag_enabled(self):
         w=self.wizard()
         (q,txt,rows),_=self.invoke(w,"apps_edge_manual_home")
         self.assertIn("مدیریت سرورها",txt)
@@ -39,6 +45,15 @@ class ManualEdgeEntryTests(unittest.TestCase):
         (q,txt,rows),ctx=self.invoke(w,"apps_edge_manual_new")
         self.assertIn("IP عمومی",txt)
         self.assertEqual(ctx.user_data["state"],"MANUAL_EDGE_IP")
+
+    def test_flag_off_hides_legacy_and_blocks_old_callback(self):
+        with patch.dict(os.environ,{"NVL_LEGACY_EDGE_UI_ENABLED":"0"}):
+            w=self.wizard()
+            (_,txt,rows),_=self.invoke(w,"apps_edge_manual_home")
+            self.assertNotIn("apps_edge_manual_new",str(rows))
+            (_,txt,rows),ctx=self.invoke(w,"apps_edge_manual_new")
+            self.assertIn("عملیات متوقف شد",txt)
+            self.assertNotIn("MANUAL_EDGE_IP",str(ctx.user_data))
 
     def test_nonadmin_or_group_sees_no_registration_action(self):
         for role,actor,chat in [("member",77,77),("admin",77,78)]:

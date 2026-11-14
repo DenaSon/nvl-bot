@@ -94,6 +94,16 @@ class ManualQuickSwitchUI:
                 "AND h.provider_instance_id IS NULL "
                 "AND m.status='STANDBY' ORDER BY h.host"
             ).fetchall()
+            if os.environ.get("NVL_LEGACY_WG_UI_ENABLED","0")!="1":
+                from nvl_awg_target import target_backend
+                allowed=[]
+                for candidate in standby:
+                    try:
+                        if target_backend(db,candidate[0])=="amneziawg":
+                            allowed.append(candidate)
+                    except Exception:
+                        pass  # stale/unverified inventory cannot appear as selectable
+                standby=allowed
             count = db.execute(
                 "SELECT COUNT(*) FROM ssh_accounts WHERE service_type='ssh' "
                 "AND status LIKE '%فعال%' AND status NOT LIKE '%غیر%'"

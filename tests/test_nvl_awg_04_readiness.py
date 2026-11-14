@@ -1,5 +1,6 @@
 """AWG-04 offline regression: witness, live gate, and backend reuse."""
 import os
+from contextlib import nullcontext
 from pathlib import Path
 import sqlite3
 import stat
@@ -83,6 +84,8 @@ class LimiterWitnessTests(unittest.TestCase):
         marker = self.root / "witness"
         binding = SimpleNamespace(edge_tunnel_ip=SOURCE)
         with (patch("nvl_awg_limiter_witness.os.geteuid", return_value=0),
+              patch("nvl_awg_limiter_witness._witness_guard",
+                    return_value=nullcontext()),
               patch("nvl_awg_limiter_witness._registered_binding",
                     return_value=binding),
               patch("nvl_awg_limiter_witness.probe_binding",
@@ -103,6 +106,8 @@ class LimiterWitnessTests(unittest.TestCase):
         marker = self.root / "witness"
         marker.write_text("NVL_AWG_LIMITER_READY " + SOURCE + "\n")
         with (patch("nvl_awg_limiter_witness.os.geteuid", return_value=0),
+              patch("nvl_awg_limiter_witness._witness_guard",
+                    return_value=nullcontext()),
               patch("nvl_awg_limiter_witness._registered_binding",
                     side_effect=LimiterWitnessHold("NO_BINDING"))):
             with self.assertRaises(LimiterWitnessHold):

@@ -334,7 +334,8 @@ class ManualEdgeWizard:
         role=await asyncio.to_thread(
             self.journal.display_state,opid,actor,chat)
         rows=[]
-        if stage=="HOSTKEY_PENDING":
+        if stage=="HOSTKEY_PENDING" and self._intake_available(
+                op.get("tunnel_backend","wireguard")):
             rows.append([("🔐 بررسی هویت SSH","apps_edge_manual_key_"+opid)])
         if stage=="READY_INSTALL" and self._intake_available(
                 op.get("tunnel_backend","wireguard")):

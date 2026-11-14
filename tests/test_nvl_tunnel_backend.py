@@ -11,7 +11,7 @@ from nvl_tunnel_backend import (
 
 CORE_KEY = "MjJZ0TMjrkwJEZhsHYjH1del3JtIcSA/5Q8xv+5KlnQ="
 EDGE_KEY = "Isv5UL+ufARwGoYfhj5P+K7vp53OmArFWjpB+F4mYCw="
-HOST = "149.104.110.138"
+HOST = "8.8.4.4"
 
 
 class RegistryTests(unittest.TestCase):

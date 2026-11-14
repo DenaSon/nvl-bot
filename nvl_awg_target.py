@@ -203,5 +203,5 @@ def core_limiter_canary_ready(edge_tunnel_ip: str, *,
         live = runner(["systemctl","is-active","--quiet","ssh-limiter.service"],
                       capture_output=True,text=True,timeout=3)
         return live.returncode == 0
-    except (ValueError, OSError):
+    except (ValueError, OSError, subprocess.TimeoutExpired):
         return False

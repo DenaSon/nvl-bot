@@ -155,12 +155,14 @@ class WizardFailureDisplayTests(unittest.IsolatedAsyncioTestCase):
         self.wizard._tls_port = lambda: 2088
 
     async def test_immediate_telegram_message_shows_stage_code_and_case(self):
+        delivery = MagicMock()
+        delivery.send = AsyncMock(return_value=42)
         with patch.dict(os.environ, {"NVL_AWG_NEW_EDGE_ENABLED": "1"}), \
-             patch("manual_edge_wizard.ManualHtmlDelivery.send", new_callable=AsyncMock) as send:
+             patch("manual_edge_wizard.ManualHtmlDelivery", return_value=delivery):
             await self.wizard._install_task(
                 SimpleNamespace(bot=object()), "abcdef123456", 77, 77, "SECRET_PASSWORD"
             )
-        text = send.call_args.kwargs["text"]
+        text = delivery.send.call_args.kwargs["text"]
         self.assertIn("ثبت Peer جدید در Core", text)
         self.assertIn("CORE_AWG_CONFIG_CHANGED", text)
         self.assertIn("abcdef123456", text)

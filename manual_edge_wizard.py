@@ -144,12 +144,13 @@ class ManualEdgeWizard:
     def __init__(self, *, db, preflight, provision, verify, probe, nat, queue,
                  form_store=None, now=time.time, key_reader=fingerprint_ssh,
                  enabled=None, form_url=None, guard=None, is_core_host=None,
-                 os_check=None):
+                 os_check=None, awg_preflight=None):
         self.journal=ManualEdgeJournal(db,now=now,guard=guard)
         # Production wires the authoritative Core-host validator. Without
         # this callback the mutating wizard must fail closed, not guess.
         self.is_core_host=is_core_host
         self.os_check=os_check
+        self.awg_preflight=awg_preflight
         self.db=db
         self.preflight=preflight
         self.provision=provision
@@ -163,6 +164,13 @@ class ManualEdgeWizard:
         self.enabled=enabled or (lambda:os.environ.get("NVL_EDGE_MANUAL_ENABLED")=="1")
         self.form_url=form_url or (lambda:os.environ.get("NVL_MANUAL_FORM_PUBLIC_URL",""))
         self.running=set()
+
+    def _preflight_for(self, op):
+        if op.get("tunnel_backend", "wireguard")=="amneziawg":
+            if self.awg_preflight is None:
+                raise ManualWizardHold("AWG_CORE_NOT_READY")
+            return self.awg_preflight
+        return self.preflight
 
     async def _view(self,query,text,rows):
         # Bot identity is task-local; no edit pointer or Rich delivery lock.
@@ -233,13 +241,15 @@ class ManualEdgeWizard:
             return await self._view(query,
                 "🖥 <b>مدیریت سرورها</b>\n\n"
                 "برای شروع، یک سرور اضافه کنید.",
-                [[("➕ افزودن سرور", "apps_edge_manual_new")],
+                [[("➕ افزودن Edge با AmneziaWG", "apps_edge_manual_new_awg")],
+                 [("➕ افزودن با WireGuard قدیمی", "apps_edge_manual_new")],
                  [("↩️ مدیریت سرورها","apps_cz_home")]])
         if type(page) is not int or not 0<=page<=10000:
             raise ManualWizardHold("INVALID_PAGE")
         items=await asyncio.to_thread(
             self.journal.list_by_owner,actor,chat,limit=8,offset=page*7)
-        rows=[[("➕ افزودن سرور جدید","apps_edge_manual_new")]]
+        rows=[[("➕ افزودن Edge با AmneziaWG","apps_edge_manual_new_awg")],
+              [("➕ افزودن با WireGuard قدیمی","apps_edge_manual_new")]]
         for op in items[:7]:
             label=str(op.get("ip") or "در انتظار IP")
             if len(label)>25:
@@ -279,7 +289,7 @@ class ManualEdgeWizard:
             rows.append([("🔐 بررسی هویت SSH","apps_edge_manual_key_"+opid)])
         if stage=="READY_INSTALL":
             rows.append([("📝 ورود امن رمز","apps_edge_manual_password_"+opid)])
-        if stage=="EDGE_READY":
+        if stage=="EDGE_READY" and op.get("tunnel_backend")!="amneziawg":
             rows.append([("✅ بررسی و فعال‌سازی Standby",
                          "apps_edge_manual_standby_"+opid)])
         if stage=="STANDBY" and role=="STANDBY":
@@ -302,7 +312,8 @@ class ManualEdgeWizard:
             rows.append([("🗂 حذف از فهرست (بایگانی)",
                          "apps_edge_manual_archive_"+opid)])
         rows.extend([
-            [("➕ افزودن سرور جدید","apps_edge_manual_new")],
+            [("➕ افزودن Edge با AmneziaWG","apps_edge_manual_new_awg")],
+            [("➕ افزودن با WireGuard قدیمی","apps_edge_manual_new")],
             [("↩️ همه سرورها","apps_edge_manual_home")],
             [("↩️ مدیریت سرورها","apps_cz_home")],
         ])
@@ -325,7 +336,8 @@ class ManualEdgeWizard:
             if self.is_core_host is None or await asyncio.to_thread(
                     self.is_core_host,op["ip"]):
                 raise ManualWizardHold("CORE_IP_CANNOT_BE_EDGE")
-            customer_port,_ = await asyncio.to_thread(self.preflight)
+            backend=op.get("tunnel_backend","wireguard")
+            customer_port,_ = await asyncio.to_thread(self._preflight_for(op))
             tls_port = await asyncio.to_thread(self._tls_port)
             self._assert_management_port_safe(
                 op["admin_port"],customer_port,tls_port)
@@ -342,9 +354,10 @@ class ManualEdgeWizard:
             # The journal commits intent before any remote mutation. Never
             # automatically rerun the Legacy installer after an ambiguous exit.
             await asyncio.to_thread(self.journal.begin_install,op_id,actor,chat)
+            extra = {"tunnel_backend": backend} if backend=="amneziawg" else {}
             ok,ip,details=await self.provision(
                 op["ip"],op["admin_port"],password,
-                (op["pin_type"],op["pin_base64"]),chat,app)
+                (op["pin_type"],op["pin_base64"]),chat,app,**extra)
             if not ok or not isinstance(details,dict) or not details.get("tunnel_ok"):
                 raise ManualWizardHold("LEGACY_INSTALL_OR_TUNNEL_FAILED")
             if await self.verify(op["ip"],details,op["admin_port"]) is not True:
@@ -353,7 +366,7 @@ class ManualEdgeWizard:
                 self.key_reader,op["ip"],op["admin_port"])
             if tuple(observed[:2])!=(op["pin_type"],op["pin_base64"]):
                 raise ManualWizardHold("HOST_KEY_CHANGED_AFTER_INSTALL")
-            port,_pub=await asyncio.to_thread(self.preflight)
+            port,_pub=await asyncio.to_thread(self._preflight_for(op))
             await asyncio.to_thread(
                 self.journal.mark_edge_ready,op_id,actor,chat,port)
             await ManualHtmlDelivery(app.bot).send(
@@ -548,10 +561,17 @@ class ManualEdgeWizard:
                     [[("✅ بررسی مجدد و تبدیل به Standby",
                        "apps_edge_manual_rearm_yes_"+opid)],
                      [("انصراف","apps_edge_manual_detail_"+opid)]])
-            if data=="apps_edge_manual_new":
-                await asyncio.to_thread(self.preflight)
+            if data in ("apps_edge_manual_new","apps_edge_manual_new_awg"):
+                backend = ("amneziawg" if data=="apps_edge_manual_new_awg"
+                           else "wireguard")
+                preflight = (self.awg_preflight if backend=="amneziawg"
+                             else self.preflight)
+                if preflight is None:
+                    raise ManualWizardHold("AWG_CORE_NOT_READY")
+                await asyncio.to_thread(preflight)
                 try:
-                    op=await asyncio.to_thread(self.journal.start,actor,chat)
+                    op=await asyncio.to_thread(self.journal.start,actor,chat,
+                                               tunnel_backend=backend)
                 except ManualEdgeHold as exc:
                     if str(exc)!="ACTIVE_MANUAL_OPERATION_EXISTS":
                         raise
@@ -639,6 +659,8 @@ class ManualEdgeWizard:
             if data.startswith("apps_edge_manual_standby_"):
                 opid=data[len("apps_edge_manual_standby_"):]
                 op=await asyncio.to_thread(self.journal.get,opid)
+                if op and op.get("tunnel_backend")=="amneziawg":
+                    raise ManualWizardHold("AWG_STANDBY_REQUIRES_GUARDED_CUTOVER")
                 if not op or (op["actor"],op["chat"])!=(actor,chat) or op["status"]!="EDGE_READY":
                     raise ManualWizardHold("EDGE_NOT_READY")
                 port,pub=await asyncio.to_thread(self.preflight)
@@ -902,7 +924,8 @@ class ManualEdgeWizard:
                 from manual_edge_secure_form import ssh_port
                 admin_port=ssh_port(text.strip())
                 ip=context.user_data["manual_edge_candidate_ip"]
-                customer_port,_=await asyncio.to_thread(self.preflight)
+                op=await asyncio.to_thread(self.journal.get,opid)
+                customer_port,_=await asyncio.to_thread(self._preflight_for(op))
                 tls_port=await asyncio.to_thread(self._tls_port)
                 self._assert_management_port_safe(
                     admin_port,customer_port,tls_port)

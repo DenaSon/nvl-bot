@@ -568,22 +568,46 @@ def setup_firewall_cooldown():
 _AWG_SHARED_CACHE = frozenset()
 _AWG_SHARED_REFRESHED = -1.0
 
+def _live_awg_shared_ips():
+    # The live AWG /32 peer list is authoritative even for a working Edge
+    # that is intentionally NOT registered in NVL host_pool.
+    try:
+        out = subprocess.run(["awg", "show", "awg0", "allowed-ips"],
+                             capture_output=True, text=True, timeout=4)
+        if out.returncode != 0 or len(out.stdout) > 131072:
+            return frozenset()
+        sources = set()
+        keys = set()
+        for line in out.stdout.splitlines():
+            parts = line.split(None, 1)
+            if len(parts) != 2 or parts[0] in keys:
+                return frozenset()
+            keys.add(parts[0])
+            for item in parts[1].split(","):
+                net = ipaddress.ip_network(item.strip(), strict=True)
+                if net.version != 4 or net.prefixlen != 32:
+                    return frozenset()
+                sources.add(str(net.network_address))
+        return frozenset(sources)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return frozenset()
+
 def _awg_shared_ips():
     global _AWG_SHARED_CACHE, _AWG_SHARED_REFRESHED
     now = time.monotonic()
     if now - _AWG_SHARED_REFRESHED < 15:
         return _AWG_SHARED_CACHE
     _AWG_SHARED_REFRESHED = now
+    live = _live_awg_shared_ips()
     try:
         from nvl_tunnel_backend import verified_shared_edge_sources
         with sqlite3.connect("file:/root/master_bot.db?mode=ro",
                              uri=True, timeout=0.2) as db:
-            sources = verified_shared_edge_sources(db)
+            registered = verified_shared_edge_sources(db)
     except (ImportError, sqlite3.Error, ValueError, OSError):
-        # Preserve the last verified snapshot on a temporary read failure.
-        return _AWG_SHARED_CACHE
-    _AWG_SHARED_CACHE = sources
-    return sources
+        registered = frozenset()
+    _AWG_SHARED_CACHE = _AWG_SHARED_CACHE | live | registered
+    return _AWG_SHARED_CACHE
 
 def is_shared_edge_ip(ip: str) -> bool:
     try:

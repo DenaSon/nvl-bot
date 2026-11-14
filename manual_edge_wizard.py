@@ -349,10 +349,23 @@ class ManualEdgeWizard:
                                     or self._awg_can_verify()):
             rows.append([("✅ بررسی و فعال‌سازی Standby",
                          "apps_edge_manual_standby_"+opid)])
-        if (stage=="STANDBY" and role=="STANDBY"
-                and self._cutover_visible(op)):
-            rows.append([("🚀 تبدیل به رله اصلی (کاربران + DNS)",
-                         "apps_edge_quick_select_"+op["ip"])])
+        standby_notice=""
+        if stage=="STANDBY" and role=="STANDBY":
+            if self._cutover_visible(op):
+                rows.append([("🚀 تبدیل به رله اصلی (کاربران + DNS)",
+                             "apps_edge_quick_select_"+op["ip"])])
+                if op.get("tunnel_backend")=="amneziawg":
+                    standby_notice="\n\n✅ تأیید Limiter این Edge معتبر است."
+            elif op.get("tunnel_backend")=="amneziawg":
+                if os.environ.get("NVL_AWG_CUTOVER_ENABLED")!="1":
+                    standby_notice="\n\n⚠️ انتقال AWG در تنظیمات غیرفعال است."
+                else:
+                    standby_notice=(
+                        "\n\n⏳ تأیید Limiter این Edge آماده نیست. "
+                        "بررسی مستقل Core خودکار انجام می‌شود؛ "
+                        "در صورت تداوم، لاگ nvl-awg-witness-refresh را بررسی کنید.")
+                rows.append([("🔄 تازه‌سازی تأییدیه انتقال",
+                             "apps_edge_manual_detail_"+opid)])
         if (stage=="ACTIVE" and role=="FORMER" and
                 (op.get("tunnel_backend")!="amneziawg" or
                  self._awg_can_verify())):
@@ -381,7 +394,7 @@ class ManualEdgeWizard:
                  if stage in ("INSTALL_HOLD","HOLD") else "")
         return await self._view(query,self._summary(op)+
             "وضعیت: <b>"+escape(self._visible_status(stage,role))+"</b>"+
-            ("\n\n"+failure if failure else warning),rows)
+            ("\n\n"+failure if failure else warning)+standby_notice,rows)
 
     @staticmethod
     def _assert_management_port_safe(admin_port, customer_port, tls_port):
@@ -664,7 +677,9 @@ class ManualEdgeWizard:
                     "حساب‌ها و DNS هنوز تغییر نکرده‌اند.",
                     (([[("🚀 تبدیل به رله اصلی (کاربران + DNS)",
                          "apps_edge_quick_select_"+proof["ip"])]]
-                      if self._cutover_visible(proof) else []) +
+                      if self._cutover_visible(proof) else
+                      [[("🔄 بررسی تأیید Limiter",
+                         "apps_edge_manual_detail_"+opid)]]) +
                      [[("↩️ مدیریت سرورها","apps_edge_manual_home")]]))
             if data.startswith("apps_edge_manual_rearm_"):
                 opid=data[len("apps_edge_manual_rearm_"):]
@@ -842,7 +857,9 @@ class ManualEdgeWizard:
                     "حساب‌ها و DNS بدون تغییرند.",
                     (([[("🔁 بررسی انتقال کاربران",
                          "apps_edge_quick_select_"+op["ip"])]]
-                      if self._cutover_visible(op) else []) +
+                      if self._cutover_visible(op) else
+                      [[("🔄 بررسی تأیید Limiter",
+                         "apps_edge_manual_detail_"+opid)]]) +
                      [[("↩️ وضعیت","apps_edge_manual_home")]]))
             if data.startswith("apps_edge_manual_review_"):
                 opid=data[len("apps_edge_manual_review_"):]

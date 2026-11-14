@@ -18,6 +18,7 @@ import subprocess
 from legacy_wg_install_lease import exclusive_legacy_edge_install
 from nvl_awg_new_edge import AWGCoreProfile, public_key, render_new_edge_conf, ipv4, port
 from nvl_awg_core_peer import plan_core_peer, commit_core_peer
+from nvl_awg_nat_evidence import AWGNATEvidence, verify_awg_nat
 
 
 class AWGProvisionHold(RuntimeError):
@@ -189,6 +190,40 @@ def provision_awg_new_edge_sync(
         commit_core_peer(plan)
         _run(["ping", "-I", "awg0", "-c", "2", "-W", "3",
               plan.edge_tunnel_ip], timeout=12)
+
+        # Network evidence comes from the SAME pinned SSH transport used to
+        # install the Edge. A live tunnel alone is insufficient for registration.
+        wan = _remote(
+            ssh, "ip -4 route get " + shlex.quote(core_public_ip) +
+                 " | awk '{for(i=1;i<=NF;i++) if($i==\"dev\"){print $(i+1);exit}}'",
+            timeout=8,
+        ).strip()
+        nat = AWGNATEvidence(
+            wan=wan,
+            core_tunnel_ip=profile.core_tunnel_ip,
+            edge_tunnel_ip=plan.edge_tunnel_ip,
+            customer_port=customer_port,
+            tls_port=tls_port,
+            live_nat=_remote(ssh, "iptables -t nat -S", timeout=8),
+            saved_rules=_remote(
+                ssh, "cat /etc/iptables/rules.v4", timeout=8,
+            ),
+            live_forward=_remote(ssh, "iptables -S FORWARD", timeout=8),
+            forwarding=_remote(
+                ssh, "sysctl -n net.ipv4.ip_forward", timeout=8,
+            ),
+            awg_service=_remote(
+                ssh, "systemctl is-active awg-quick@awg0.service", timeout=8,
+            ),
+            awg_autostart=_remote(
+                ssh, "systemctl is-enabled awg-quick@awg0.service", timeout=8,
+            ),
+            netfilter_autostart=_remote(
+                ssh, "systemctl is-enabled netfilter-persistent", timeout=8,
+            ),
+        )
+        if not verify_awg_nat(nat):
+            raise AWGProvisionHold("AWG_NAT_PERSISTENCE_UNVERIFIED")
 
         # Only now attach a VERIFIED backend to an inactive manual Edge.
         with db_factory() as db:

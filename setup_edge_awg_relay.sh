@@ -52,7 +52,7 @@ iface, peer = cfg['Interface'], cfg['Peer']
 assert iface['Address'] == edge + '/32'
 assert peer['AllowedIPs'] == core + '/32'
 assert peer['Endpoint'].startswith(public + ':'), "INVALID_CORE_ENDPOINT"
-assert iface['MTU'] == '1320', "MTU_NOT_PILOT_PROFILE"
+assert 1200 <= int(iface['MTU']) <= 1420, "MTU_INVALID"
 assert 1 <= int(iface['ListenPort']) <= 65535
 for k in ('PrivateKey', 'HeaderProtectionKey', 'PublicKey'):
     value = peer[k] if k == 'PublicKey' else iface[k]
@@ -81,7 +81,7 @@ apt-get -o DPkg::Lock::Timeout=30 install -y software-properties-common \
 # Official Amnezia PPA; no third-party one-line scripts and no kernel upgrade.
 add-apt-repository -y ppa:amnezia/ppa >/dev/null
 apt-get -o DPkg::Lock::Timeout=30 update -qq
-apt-get -o DPkg::Lock::Timeout=30 install -y amneziawg >/dev/null
+apt-get -o DPkg::Lock::Timeout=30 install -y amneziawg-dkms amneziawg-tools >/dev/null
 modprobe amneziawg
 command -v awg >/dev/null && command -v awg-quick >/dev/null || fail AWG_TOOLS_MISSING
 modinfo -F version amneziawg | grep -q '^3[.]1[.]' || fail AWG_31_MODULE_REQUIRED

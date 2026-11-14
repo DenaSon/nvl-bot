@@ -68,7 +68,7 @@ class PublisherTests(unittest.TestCase):
         b = live.index("    return rows", a)
         live = live[:a] + live[b:]
         a = live.index('    if d == "apps_dp3_home" or d.startswith("dp3:"):')
-        b = live.index('    if d in ("apps_cz_rich_home", ', a)
+        b = live.index("    if d == 'apps_home':", a)
         live = live[:a] + live[b:]
         a = live.index("async def _post_init(app):\n")
         b = live.index(

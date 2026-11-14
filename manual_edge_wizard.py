@@ -173,6 +173,25 @@ class ManualEdgeWizard:
                 and self.awg_preflight is not None
                 and self.awg_provision is not None)
 
+    def _awg_cutover_ready(self, host):
+        """Display-only mirror of the actual AWG cutover gate."""
+        if os.environ.get("NVL_AWG_CUTOVER_ENABLED")!="1":
+            return False
+        try:
+            from nvl_tunnel_backend import lookup_binding
+            from nvl_awg_target import target_backend, core_limiter_canary_ready
+            with self.db() as db:
+                backend=target_backend(db,host)
+                binding=lookup_binding(db,host)
+            return (backend=="amneziawg" and binding is not None
+                    and core_limiter_canary_ready(binding.edge_tunnel_ip))
+        except Exception:
+            return False
+
+    def _cutover_visible(self, op):
+        return (op.get("tunnel_backend","wireguard")=="wireguard"
+                or self._awg_cutover_ready(op.get("ip","")))
+
     def _new_edge_buttons(self):
         # Preserve the exact old user experience while the AWG feature is OFF.
         if not self._awg_available():
@@ -309,12 +328,13 @@ class ManualEdgeWizard:
                                         and self._awg_available())):
             rows.append([("✅ بررسی و فعال‌سازی Standby",
                          "apps_edge_manual_standby_"+opid)])
-        if (stage=="STANDBY" and role=="STANDBY" and
-                (op.get("tunnel_backend")!="amneziawg" or
-                 os.environ.get("NVL_AWG_CUTOVER_ENABLED")=="1")):
+        if (stage=="STANDBY" and role=="STANDBY"
+                and self._cutover_visible(op)):
             rows.append([("🚀 تبدیل به رله اصلی (کاربران + DNS)",
                          "apps_edge_quick_select_"+op["ip"])])
-        if stage=="ACTIVE" and role=="FORMER":
+        if (stage=="ACTIVE" and role=="FORMER" and
+                (op.get("tunnel_backend")!="amneziawg" or
+                 (self._awg_available() and self.awg_check is not None))):
             rows.append([("🔄 بررسی و تبدیل رله سابق به Standby",
                          "apps_edge_manual_rearm_"+opid)])
         if stage=="ROUTING":
@@ -519,7 +539,10 @@ class ManualEdgeWizard:
                      [("انصراف","apps_edge_manual_detail_"+opid)]])
             if data.startswith("apps_edge_manual_rearm_yes_"):
                 opid=data[len("apps_edge_manual_rearm_yes_"):]
-                port,_=await asyncio.to_thread(self.preflight)
+                op=await asyncio.to_thread(self.journal.get,opid)
+                if not op:
+                    raise ManualWizardHold("FORMER_NOT_ELIGIBLE")
+                port,_=await asyncio.to_thread(self._preflight_for(op))
                 # Snapshot is advisory only: every mutable guard will be
                 # checked again in one BEGIN IMMEDIATE transaction.
                 proof=await asyncio.to_thread(
@@ -537,7 +560,14 @@ class ManualEdgeWizard:
                 if tuple(observed[:2]) != (proof["pin_type"],proof["pin_base64"]):
                     raise ManualWizardHold("FORMER_HOSTKEY_CHANGED")
                 try:
-                    ok=await self.probe(proof["ip"],port,proof["admin_port"])
+                    if proof["tunnel_backend"]=="amneziawg":
+                        if self.awg_check is None:
+                            raise ManualWizardHold("AWG_STANDBY_BACKEND_DISABLED")
+                        ok=await asyncio.to_thread(
+                            self.awg_check,proof["ip"],proof["admin_port"],
+                            port,tls,(proof["pin_type"],proof["pin_base64"]))
+                    else:
+                        ok=await self.probe(proof["ip"],port,proof["admin_port"])
                 except Exception as exc:
                     log.warning("Manual former rearm probe failed op=%s "
                                 "stage=CORE_PATH type=%s trace=%s",
@@ -546,9 +576,10 @@ class ManualEdgeWizard:
                 if ok is not True:
                     raise ManualWizardHold("STANDBY_CORE_PATH_UNVERIFIED")
                 try:
-                    nat=await self.nat(
-                        proof["ip"],proof["admin_port"],port,tls,
-                        (proof["pin_type"],proof["pin_base64"]))
+                    nat=(True if proof["tunnel_backend"]=="amneziawg"
+                         else await self.nat(
+                             proof["ip"],proof["admin_port"],port,tls,
+                             (proof["pin_type"],proof["pin_base64"])))
                 except Exception as exc:
                     log.warning("Manual former rearm probe failed op=%s "
                                 "stage=NAT type=%s trace=%s",
@@ -564,12 +595,16 @@ class ManualEdgeWizard:
                     "✅ <b>سرور آماده‌به‌کار شد.</b>\n"
                     "IP: <code>"+escape(proof["ip"])+"</code>\n"
                     "حساب‌ها و DNS هنوز تغییر نکرده‌اند.",
-                    [[("🚀 تبدیل به رله اصلی (کاربران + DNS)",
-                       "apps_edge_quick_select_"+proof["ip"])],
-                     [("↩️ مدیریت سرورها","apps_edge_manual_home")]])
+                    (([[("🚀 تبدیل به رله اصلی (کاربران + DNS)",
+                         "apps_edge_quick_select_"+proof["ip"])]]
+                      if self._cutover_visible(proof) else []) +
+                     [[("↩️ مدیریت سرورها","apps_edge_manual_home")]]))
             if data.startswith("apps_edge_manual_rearm_"):
                 opid=data[len("apps_edge_manual_rearm_"):]
-                port,_=await asyncio.to_thread(self.preflight)
+                op=await asyncio.to_thread(self.journal.get,opid)
+                if not op:
+                    raise ManualWizardHold("FORMER_NOT_ELIGIBLE")
+                port,_=await asyncio.to_thread(self._preflight_for(op))
                 proof=await asyncio.to_thread(
                     self.journal.preview_former_standby,opid,actor,chat,port)
                 return await self._view(query,
@@ -732,9 +767,10 @@ class ManualEdgeWizard:
                 return await self._view(query,
                     "✅ <b>سرور آماده‌به‌کار شد.</b>\n"
                     "حساب‌ها و DNS بدون تغییرند.",
-                    [[("🔁 بررسی انتقال کاربران",
-                       "apps_edge_quick_select_"+op["ip"])],
-                     [("↩️ وضعیت","apps_edge_manual_home")]])
+                    (([[("🔁 بررسی انتقال کاربران",
+                         "apps_edge_quick_select_"+op["ip"])]]
+                      if self._cutover_visible(op) else []) +
+                     [[("↩️ وضعیت","apps_edge_manual_home")]]))
             if data.startswith("apps_edge_manual_review_"):
                 opid=data[len("apps_edge_manual_review_"):]
                 candidate=await asyncio.to_thread(self.queue.manual_candidate,actor,chat)

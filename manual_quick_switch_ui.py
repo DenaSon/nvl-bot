@@ -323,7 +323,7 @@ class ManualQuickSwitchUI:
                        chat=None, bot=None):
         def run():
             with self.effect_lock:
-                if plan is not None:
+                if plan and plan.get("target"):
                     self._require_awg_witness(plan["target"])
                 if job:
                     return asyncio.run(self.engine.resume(

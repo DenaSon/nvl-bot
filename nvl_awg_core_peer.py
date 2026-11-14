@@ -174,8 +174,16 @@ def commit_core_peer(
                     runner(list(plan.apply_argv), capture_output=True, text=True,
                            timeout=15, check=True)
                     observed = _core_allowed_ip_output(runner, "awg0")
-                    expected = plan.edge_public_key + " " + plan.edge_tunnel_ip + "/32"
-                    if expected not in observed.splitlines():
+                    # awg show <interface> allowed-ips emits a TAB between
+                    # the peer key and its CIDR, not a literal space. Compare
+                    # parsed fields and require exactly one exact /32 entry.
+                    # The prior string comparison always rejected a healthy
+                    # newly admitted peer, then rolled it back.
+                    rows = [line.split() for line in observed.splitlines()]
+                    target = [row for row in rows
+                              if row and row[0] == plan.edge_public_key]
+                    if target != [[plan.edge_public_key,
+                                   plan.edge_tunnel_ip + "/32"]]:
                         raise AWGPlanHold("AWG_PEER_LIVE_POSTCHECK_FAILED")
                 except BaseException as exc:
                     # Peer was absent before our operation, so removal is safe.
@@ -193,7 +201,13 @@ def commit_core_peer(
                             "AWG_PEER_ROLLBACK_UNCERTAIN_MANUAL_HOLD"
                         ) from rollback
                     os.replace(backup_path, conf)
-                    raise AWGPlanHold("AWG_PEER_LIVE_INSTALL_FAILED") from exc
+                    # Distinguish a genuine live-state mismatch from an awg
+                    # set execution failure; both remain fail-closed.
+                    code = ("AWG_PEER_LIVE_POSTCHECK_FAILED"
+                            if isinstance(exc, AWGPlanHold)
+                            and str(exc) == "AWG_PEER_LIVE_POSTCHECK_FAILED"
+                            else "AWG_PEER_LIVE_INSTALL_FAILED")
+                    raise AWGPlanHold(code) from exc
             finally:
                 if next_path.exists():
                     next_path.unlink()

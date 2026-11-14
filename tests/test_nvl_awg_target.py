@@ -109,7 +109,8 @@ class AWGTargetTests(unittest.TestCase):
         if cmd=="awg show awg0 peers":
             return CORE_KEY
         if cmd=="awg show awg0 allowed-ips":
-            return CORE_KEY+" "+CORE_TUNNEL+"/32"
+            # Actual AWG outputs a TAB, not a space, between peer and CIDR.
+            return CORE_KEY+"\t"+CORE_TUNNEL+"/32"
         if cmd.startswith("ip -4 -o addr show"):
             return "10: awg0 inet "+EDGE_TUNNEL+"/32 scope global"
         if cmd.startswith("ip -4 route get"):
@@ -141,6 +142,18 @@ class AWGTargetTests(unittest.TestCase):
                             for cmd in self.remote_calls if "route get" in cmd))
         self.assertFalse(any("10.203.77." in str(cmd)
                              for cmd in self.remote_calls))
+
+    def test_wrong_allowed_ip_rejects_standby_even_with_correct_peer(self):
+        def wrong_cidr(ssh, cmd, timeout=8):
+            if cmd=="awg show awg0 allowed-ips":
+                return CORE_KEY+"\t10.231.55.99/32"
+            return self.remote(ssh, cmd, timeout)
+        with patch("nvl_awg_target._remote", side_effect=wrong_cidr):
+            result=verify_awg_target(
+                self.db_factory,self.target,
+                runner=self.runner,ssh_connect=lambda *a:FakeSSH(),
+            )
+        self.assertFalse(result)
 
     def test_invalid_edge_peer_blocks_before_nat(self):
         with patch("nvl_awg_target._remote", side_effect=lambda ssh,cmd,timeout=8:

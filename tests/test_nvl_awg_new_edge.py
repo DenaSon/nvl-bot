@@ -1,13 +1,15 @@
 """Hermetic AWG 3.1 new-Edge planning and installer contract tests."""
+import os
 import pathlib
 import subprocess
+import tempfile
 import unittest
 
 from nvl_awg_new_edge import (
     AWGPlanHold, AWGCoreProfile, allocated_edge_ip, render_new_edge_conf,
     expected_peer_block,
 )
-from nvl_awg_core_peer import plan_core_peer, verify_core_peer_plan
+from nvl_awg_core_peer import plan_core_peer, verify_core_peer_plan, commit_core_peer
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 KEY_CORE = "A" * 43 + "="
@@ -113,6 +115,80 @@ class NewEdgePlanTests(unittest.TestCase):
             plan_core_peer(CORE_CONF, KEY_CORE + f" {EDGE_IP}/32",
                            edge_host=HOST, edge_udp_port=42371,
                            edge_public_key=KEY_CORE)
+
+
+    def test_core_peer_commit_accepts_actual_tab_delimited_awg_output(self):
+        """awgs show allowed-ips separates key/CIDR with TAB in production."""
+        live_before = KEY_CORE + "\t" + EDGE_IP + "/32\n"
+        plan = plan_core_peer(
+            CORE_CONF, live_before, edge_host=HOST,
+            edge_udp_port=42371, edge_public_key=KEY_EDGE,
+        )
+        state = {"live": live_before, "set": 0, "remove": 0}
+
+        def runner(argv, **_kwargs):
+            if argv == ["awg", "show", "awg0", "allowed-ips"]:
+                return subprocess.CompletedProcess(argv, 0, state["live"], "")
+            if tuple(argv) == plan.apply_argv:
+                state["set"] += 1
+                state["live"] = (live_before + KEY_EDGE + "\t" +
+                                 plan.edge_tunnel_ip + "/32\n")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            if argv == ["awg", "set", "awg0", "peer", KEY_EDGE, "remove"]:
+                state["remove"] += 1
+                state["live"] = live_before
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            raise AssertionError("unexpected AWG operation")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = pathlib.Path(tmp) / "awg0.conf"
+            conf.write_text(CORE_CONF)
+            os.chmod(conf, 0o600)
+            backup = commit_core_peer(
+                plan, config_path=str(conf),
+                lock_path=str(pathlib.Path(tmp) / "peer.lock"),
+                runner=runner, root_check=lambda: 0,
+            )
+            self.assertTrue(pathlib.Path(backup).exists())
+            self.assertEqual(conf.read_text(), plan.after_conf)
+        self.assertEqual(state["set"], 1)
+        self.assertEqual(state["remove"], 0)
+
+    def test_peer_postcheck_rejects_wrong_cidr_and_rolls_back(self):
+        live_before = KEY_CORE + "\t" + EDGE_IP + "/32\n"
+        plan = plan_core_peer(
+            CORE_CONF, live_before, edge_host=HOST,
+            edge_udp_port=42371, edge_public_key=KEY_EDGE,
+        )
+        state = {"live": live_before, "removed": False}
+
+        def runner(argv, **_kwargs):
+            if argv == ["awg", "show", "awg0", "allowed-ips"]:
+                return subprocess.CompletedProcess(argv, 0, state["live"], "")
+            if tuple(argv) == plan.apply_argv:
+                # Simulate a kernel/peer mismatch: do not claim healthy /32.
+                state["live"] = (live_before + KEY_EDGE + "\t" +
+                                 "10.231.55.99/32\n")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            if argv == ["awg", "set", "awg0", "peer", KEY_EDGE, "remove"]:
+                state["removed"] = True
+                state["live"] = live_before
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            raise AssertionError("unexpected AWG operation")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = pathlib.Path(tmp) / "awg0.conf"
+            conf.write_text(CORE_CONF)
+            os.chmod(conf, 0o600)
+            with self.assertRaisesRegex(AWGPlanHold, "AWG_PEER_LIVE_POSTCHECK_FAILED"):
+                commit_core_peer(
+                    plan, config_path=str(conf),
+                    lock_path=str(pathlib.Path(tmp) / "peer.lock"),
+                    runner=runner, root_check=lambda: 0,
+                )
+            self.assertEqual(conf.read_text(), CORE_CONF)
+        self.assertTrue(state["removed"])
+        self.assertEqual(state["live"], live_before)
 
     def test_shell_is_not_core_installer_or_existing_tunnel_reset(self):
         text = (ROOT / "setup_edge_awg_relay.sh").read_text()

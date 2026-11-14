@@ -17,7 +17,7 @@ class ManualEdgeEntryTests(unittest.TestCase):
             probe=lambda *_: None,nat=lambda *_: None,
             queue=SimpleNamespace(),enabled=lambda:False,form_url=lambda:"")
         wizard.journal.latest=lambda *_,**kwargs: None
-        wizard.journal.start=lambda *_: "a"*32
+        wizard.journal.start=lambda *_,**kwargs: "a"*32
         wizard._view=AsyncMock(return_value=1)
         return wizard
 

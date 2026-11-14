@@ -146,7 +146,7 @@ class LegacyHostProjectionTests(unittest.TestCase):
         block=source.split('elif d.startswith("srv_mkactive_")')[1]
         block=block.split('elif d == "srv_wiz_promote_start"')[0]
         self.assertIn("k2_native_operations_registered()",block)
-        self.assertIn("CZ04B",block)
+        self.assertIn("مدیریت Edge",block)
         for unsafe in ("_db_set_default_host", "_cf_update_dns_record_sync",
                        "_update_cloudflare_dns", "spawn_bg_task(_make_edge_active())"):
             self.assertNotIn(unsafe,block)

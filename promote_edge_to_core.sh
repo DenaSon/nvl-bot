@@ -549,6 +549,8 @@ SSH_PORTS = [p.strip() for p in os.environ.get("IP_LIMITER_PORTS", "22,2252").sp
 EXCLUDE_USERS = {u.strip() for u in os.environ.get("IP_LIMITER_EXCLUDE_USERS", "root").split(",") if u.strip()}
 # Legacy ingress SNAT makes this subnet identify shared Edges, not individual users.
 SHARED_EDGE_NETWORK = ipaddress.ip_network("10.77.0.0/24")
+AWG_SHARED_SOURCE_NETWORKS = tuple(ipaddress.ip_network(net) for net in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [ip-limiter] %(levelname)s: %(message)s", stream=sys.stdout)
 log = logging.getLogger("ip_limiter")
@@ -617,6 +619,11 @@ def is_shared_edge_ip(ip: str) -> bool:
         addr = ipaddress.ip_address(ip)
         if addr in SHARED_EDGE_NETWORK:
             return True
+        # Only RFC1918 tunnel SNAT sources can be considered a shared AWG
+        # ingress. Public/direct client IPs never invoke an AWG peer scan.
+        if not isinstance(addr, ipaddress.IPv4Address) or not any(
+                addr in network for network in AWG_SHARED_SOURCE_NETWORKS):
+            return False
         return str(addr) in _awg_shared_ips()
     except (ValueError, TypeError):
         return False

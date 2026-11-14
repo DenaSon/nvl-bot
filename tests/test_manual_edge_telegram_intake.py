@@ -88,7 +88,7 @@ class PrivateIntakeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(coros),1)
         self.assertNotIn(secret,str(ctx.user_data))
         self.assertNotIn("state",ctx.user_data)
-        self.assertIn("آغاز",w._view.await_args.args[1])
+        self.assertIn("راه‌اندازی AWG",w._view.await_args.args[1])
 
     async def test_bot_routes_command_shaped_secret_before_commandhandlers(self):
         from pathlib import Path

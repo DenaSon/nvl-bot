@@ -144,13 +144,14 @@ class ManualEdgeWizard:
     def __init__(self, *, db, preflight, provision, verify, probe, nat, queue,
                  form_store=None, now=time.time, key_reader=fingerprint_ssh,
                  enabled=None, form_url=None, guard=None, is_core_host=None,
-                 os_check=None, awg_preflight=None):
+                 os_check=None, awg_preflight=None, awg_provision=None):
         self.journal=ManualEdgeJournal(db,now=now,guard=guard)
         # Production wires the authoritative Core-host validator. Without
         # this callback the mutating wizard must fail closed, not guess.
         self.is_core_host=is_core_host
         self.os_check=os_check
         self.awg_preflight=awg_preflight
+        self.awg_provision=awg_provision
         self.db=db
         self.preflight=preflight
         self.provision=provision
@@ -165,9 +166,21 @@ class ManualEdgeWizard:
         self.form_url=form_url or (lambda:os.environ.get("NVL_MANUAL_FORM_PUBLIC_URL",""))
         self.running=set()
 
+    def _awg_available(self):
+        return (os.environ.get("NVL_AWG_NEW_EDGE_ENABLED")=="1"
+                and self.awg_preflight is not None
+                and self.awg_provision is not None)
+
+    def _new_edge_buttons(self):
+        rows=[[("➕ افزودن با WireGuard قدیمی", "apps_edge_manual_new")]]
+        if self._awg_available():
+            rows.insert(0,[("➕ افزودن Edge با AmneziaWG",
+                            "apps_edge_manual_new_awg")])
+        return rows
+
     def _preflight_for(self, op):
         if op.get("tunnel_backend", "wireguard")=="amneziawg":
-            if self.awg_preflight is None:
+            if not self._awg_available():
                 raise ManualWizardHold("AWG_CORE_NOT_READY")
             return self.awg_preflight
         return self.preflight
@@ -241,15 +254,13 @@ class ManualEdgeWizard:
             return await self._view(query,
                 "🖥 <b>مدیریت سرورها</b>\n\n"
                 "برای شروع، یک سرور اضافه کنید.",
-                [[("➕ افزودن Edge با AmneziaWG", "apps_edge_manual_new_awg")],
-                 [("➕ افزودن با WireGuard قدیمی", "apps_edge_manual_new")],
-                 [("↩️ مدیریت سرورها","apps_cz_home")]])
+                self._new_edge_buttons()+
+                [[("↩️ مدیریت سرورها","apps_cz_home")]])
         if type(page) is not int or not 0<=page<=10000:
             raise ManualWizardHold("INVALID_PAGE")
         items=await asyncio.to_thread(
             self.journal.list_by_owner,actor,chat,limit=8,offset=page*7)
-        rows=[[("➕ افزودن Edge با AmneziaWG","apps_edge_manual_new_awg")],
-              [("➕ افزودن با WireGuard قدیمی","apps_edge_manual_new")]]
+        rows=self._new_edge_buttons()
         for op in items[:7]:
             label=str(op.get("ip") or "در انتظار IP")
             if len(label)>25:
@@ -311,9 +322,7 @@ class ManualEdgeWizard:
                 "FORMER","EDGE_READY","POOL_MISSING"):
             rows.append([("🗂 حذف از فهرست (بایگانی)",
                          "apps_edge_manual_archive_"+opid)])
-        rows.extend([
-            [("➕ افزودن Edge با AmneziaWG","apps_edge_manual_new_awg")],
-            [("➕ افزودن با WireGuard قدیمی","apps_edge_manual_new")],
+        rows.extend(self._new_edge_buttons() + [
             [("↩️ همه سرورها","apps_edge_manual_home")],
             [("↩️ مدیریت سرورها","apps_cz_home")],
         ])
@@ -354,10 +363,13 @@ class ManualEdgeWizard:
             # The journal commits intent before any remote mutation. Never
             # automatically rerun the Legacy installer after an ambiguous exit.
             await asyncio.to_thread(self.journal.begin_install,op_id,actor,chat)
-            extra = {"tunnel_backend": backend} if backend=="amneziawg" else {}
-            ok,ip,details=await self.provision(
+            installer = (self.awg_provision if backend=="amneziawg"
+                         else self.provision)
+            if installer is None:
+                raise ManualWizardHold("AWG_INSTALLER_NOT_CONFIGURED")
+            ok,ip,details=await installer(
                 op["ip"],op["admin_port"],password,
-                (op["pin_type"],op["pin_base64"]),chat,app,**extra)
+                (op["pin_type"],op["pin_base64"]),chat,app)
             if not ok or not isinstance(details,dict) or not details.get("tunnel_ok"):
                 raise ManualWizardHold("LEGACY_INSTALL_OR_TUNNEL_FAILED")
             if await self.verify(op["ip"],details,op["admin_port"]) is not True:
@@ -564,6 +576,8 @@ class ManualEdgeWizard:
             if data in ("apps_edge_manual_new","apps_edge_manual_new_awg"):
                 backend = ("amneziawg" if data=="apps_edge_manual_new_awg"
                            else "wireguard")
+                if backend=="amneziawg" and not self._awg_available():
+                    raise ManualWizardHold("AWG_CORE_NOT_READY")
                 preflight = (self.awg_preflight if backend=="amneziawg"
                              else self.preflight)
                 if preflight is None:

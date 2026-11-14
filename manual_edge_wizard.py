@@ -144,7 +144,7 @@ class ManualEdgeWizard:
     def __init__(self, *, db, preflight, provision, verify, probe, nat, queue,
                  form_store=None, now=time.time, key_reader=fingerprint_ssh,
                  enabled=None, form_url=None, guard=None, is_core_host=None,
-                 os_check=None, awg_preflight=None, awg_provision=None):
+                 os_check=None, awg_preflight=None, awg_provision=None,\n                 awg_check=None):
         self.journal=ManualEdgeJournal(db,now=now,guard=guard)
         # Production wires the authoritative Core-host validator. Without
         # this callback the mutating wizard must fail closed, not guess.
@@ -152,6 +152,7 @@ class ManualEdgeWizard:
         self.os_check=os_check
         self.awg_preflight=awg_preflight
         self.awg_provision=awg_provision
+        self.awg_check=awg_check
         self.db=db
         self.preflight=preflight
         self.provision=provision
@@ -302,7 +303,7 @@ class ManualEdgeWizard:
             rows.append([("🔐 بررسی هویت SSH","apps_edge_manual_key_"+opid)])
         if stage=="READY_INSTALL":
             rows.append([("📝 ورود امن رمز","apps_edge_manual_password_"+opid)])
-        if stage=="EDGE_READY" and op.get("tunnel_backend")!="amneziawg":
+        if stage=="EDGE_READY" and (op.get("tunnel_backend")!="amneziawg"\n                                    or self.awg_check is not None):
             rows.append([("✅ بررسی و فعال‌سازی Standby",
                          "apps_edge_manual_standby_"+opid)])
         if stage=="STANDBY" and role=="STANDBY":
@@ -375,7 +376,7 @@ class ManualEdgeWizard:
             if not ok or not isinstance(details,dict) or not details.get("tunnel_ok"):
                 raise ManualWizardHold("LEGACY_INSTALL_OR_TUNNEL_FAILED")
             if await self.verify(op["ip"],details,op["admin_port"]) is not True:
-                raise ManualWizardHold("LEGACY_EDGE_POSTCHECK_FAILED")
+                raise ManualWizardHold("EDGE_POSTCHECK_FAILED")
             observed=await asyncio.to_thread(
                 self.key_reader,op["ip"],op["admin_port"])
             if tuple(observed[:2])!=(op["pin_type"],op["pin_base64"]):
@@ -682,17 +683,24 @@ class ManualEdgeWizard:
                 opid=data[len("apps_edge_manual_standby_"):]
                 op=await asyncio.to_thread(self.journal.get,opid)
                 if op and op.get("tunnel_backend")=="amneziawg":
-                    raise ManualWizardHold("AWG_STANDBY_REQUIRES_GUARDED_CUTOVER")
+                    if not self._awg_available() or self.awg_check is None:
+                        raise ManualWizardHold("AWG_STANDBY_BACKEND_DISABLED")
                 if not op or (op["actor"],op["chat"])!=(actor,chat) or op["status"]!="EDGE_READY":
                     raise ManualWizardHold("EDGE_NOT_READY")
-                port,pub=await asyncio.to_thread(self.preflight)
+                port,pub=await asyncio.to_thread(self._preflight_for(op))
                 # A missing or mismatched host_pool receipt must be diagnosed
                 # BEFORE any remote/network checks; do not forge recovery.
                 await asyncio.to_thread(
                     self.journal.assert_standby_candidate,opid,actor,chat,port)
                 tls=await asyncio.to_thread(self._tls_port)
                 try:
-                    ok=await self.probe(op["ip"],port,op["admin_port"])
+                    if op.get("tunnel_backend")=="amneziawg":
+                        tls=await asyncio.to_thread(self._tls_port)
+                        ok=await asyncio.to_thread(
+                            self.awg_check,op["ip"],op["admin_port"],port,tls,
+                            (op["pin_type"],op["pin_base64"]))
+                    else:
+                        ok=await self.probe(op["ip"],port,op["admin_port"])
                 except Exception:
                     log.exception("Manual Edge standby Core path probe failed op=%s ip=%s",
                                   opid,op["ip"])
@@ -703,8 +711,10 @@ class ManualEdgeWizard:
                                 opid,op["ip"],port,op["admin_port"])
                     raise ManualWizardHold("STANDBY_CORE_PATH_UNVERIFIED")
                 try:
-                    nat=await self.nat(op["ip"],op["admin_port"],port,tls,
-                                       (op["pin_type"],op["pin_base64"]))
+                    nat=(True if op.get("tunnel_backend")=="amneziawg"
+                         else await self.nat(
+                             op["ip"],op["admin_port"],port,tls,
+                             (op["pin_type"],op["pin_base64"])))
                 except Exception:
                     log.exception("Manual Edge standby NAT probe failed op=%s ip=%s",
                                   opid,op["ip"])

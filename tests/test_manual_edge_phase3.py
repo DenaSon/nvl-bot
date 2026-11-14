@@ -10,6 +10,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from urllib.parse import urlencode
 
 from manual_edge_secure_form import (
@@ -21,6 +22,10 @@ from manual_edge_identity import resolve, assert_ref, EdgeIdentityHold
 
 class Phase3ManualTests(unittest.TestCase):
     def setUp(self):
+        # Exercise historical WG lifecycle explicitly, despite AWG-first default.
+        old_ui=patch.dict(os.environ,{"NVL_LEGACY_EDGE_UI_ENABLED":"1"})
+        old_ui.start()
+        self.addCleanup(old_ui.stop)
         self.temp=tempfile.TemporaryDirectory()
         self.path=os.path.join(self.temp.name,"manual.sqlite3")
         def factory():

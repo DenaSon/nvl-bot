@@ -29,7 +29,7 @@ _MESSAGES = {
     "OTHER_DNS_ROUTE_OPERATION": "یک تغییر DNS قبلی هنوز باز است.",
     "SINGLE_HOST_ROUTE_NOT_COHERENT": "اطلاعات مسیر و DNS هماهنگ نیستند.",
     "MANUAL_STANDBY_NOT_READY": "این Edge آماده‌به‌کار و تأییدشده نیست.",
-    "TARGET_NETWORK_NOT_VERIFIED": "سلامت SSH، WireGuard یا NAT مقصد تأیید نشد.",
+    "TARGET_NETWORK_NOT_VERIFIED": "اتصال SSH، تونل یا تنظیمات شبکه مقصد تأیید نشد.",
     "DNS_NOT_ON_SOURCE": "DNS عمومی با IP فعلی هماهنگ نیست.",
     "DNS_UNCERTAIN_REVIEW_REQUIRED": "نتیجه DNS مشخص نیست؛ عملیات نیازمند بررسی است.",
     "DNS_WRITE_RESULT_UNCERTAIN": "پاسخ Cloudflare نامشخص است؛ درخواست را کورکورانه تکرار نکنید.",
@@ -130,7 +130,7 @@ class ManualQuickSwitchUI:
                 rows.append([("🔁 انتقال کاربران و DNS به "+ip,
                              "apps_edge_quick_select_"+ip)])
         rows.extend([
-            [("🖥 مدیریت سرورها","apps_edge_manual_home")],
+            [("🖥 سرورها و ساخت Edge","apps_edge_manual_home")],
             [("📋 وضعیت و سوابق انتقال","apps_edge_quick_status")],
         ])
         if current==HISTORICAL_TARGET:
@@ -265,7 +265,7 @@ class ManualQuickSwitchUI:
               "وضعیت: <b>تکمیل فنی</b>\n\n"
               "اتصال واقعی مشتری پس از انتقال نیز بررسی شود.")
         rows=[[("📋 گزارش انتقال","apps_edge_quick_status")],
-              [("🖥 مدیریت سرورها","apps_edge_manual_home")]]
+              [("🖥 سرورها و ساخت Edge","apps_edge_manual_home")]]
         try:
             await ManualHtmlDelivery(bot).send(
                 chat=chat,text=text,rows=rows)
@@ -350,7 +350,7 @@ class ManualQuickSwitchUI:
                     "⚠️ بازگشت DNS یا برقرارشدن اتصال کاربران تأیید نشده است؛ "
                     "پیش از انتقال بعدی مسیر واقعی را بررسی کنید.",
                     [[("📋 وضعیت و سوابق","apps_edge_quick_status")],
-                     [("🖥 مدیریت سرورها","apps_edge_manual_home")]])
+                     [("🖥 سرورها و ساخت Edge","apps_edge_manual_home")]])
             if data.startswith("apps_edge_quick_force_review_"):
                 job=data[len("apps_edge_quick_force_review_"):]
                 rec=await asyncio.to_thread(self.engine.get,job)
@@ -377,7 +377,7 @@ class ManualQuickSwitchUI:
                     f"وضعیت: <b>{escape(rec['status'])}</b>\n\n"
                     +note+"\n\n"
                     "این اقدام فقط پرونده و Lease همان انتقال را می‌بندد. "
-                    "DNS، حساب‌ها و WireGuard برگردانده نمی‌شوند؛ "
+                    "DNS، حساب‌ها و تنظیمات تونل برگردانده نمی‌شوند؛ "
                     "آزادسازی قفل به معنی وصل‌شدن کاربران نیست.",
                     [[("⛔ تأیید بستن انتقال و آزادسازی قفل",
                        "apps_edge_quick_force_yes_"+nonce)],

@@ -64,7 +64,8 @@ def _remote(ssh, cmd: str, *, timeout: int = 60) -> str:
 
 
 def _root_only(path: Path) -> str:
-    if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
+    if (path.is_symlink() or not path.is_file()
+            or path.stat().st_uid != 0 or path.stat().st_mode & 0o077):
         raise AWGProvisionHold("CORE_FILE_MISSING_OR_NOT_PRIVATE")
     return path.read_text(encoding="utf-8")
 

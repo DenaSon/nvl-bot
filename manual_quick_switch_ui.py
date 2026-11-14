@@ -386,6 +386,16 @@ class ManualQuickSwitchUI:
                      [("انصراف","apps_edge_quick_status")]])
             if data.startswith("apps_edge_quick_select_"):
                 ip=data[len("apps_edge_quick_select_"):]
+                from nvl_awg_target import target_backend
+                from nvl_tunnel_backend import TunnelHold
+                try:
+                    with self.db() as db:
+                        backend=target_backend(db,ip)
+                except (TunnelHold, ValueError, sqlite3.Error):
+                    raise QuickSwitchHold("TUNNEL_REGISTRY_UNVERIFIED") from None
+                if (backend=="wireguard" and
+                        os.environ.get("NVL_LEGACY_WG_UI_ENABLED","0")!="1"):
+                    raise QuickSwitchHold("LEGACY_WG_NOT_AVAILABLE")
                 plan=await self.engine.preview(ip)
                 nonce=secrets.token_hex(8)
                 self.pending[(actor,chat)]={"nonce":nonce,"plan":plan,
@@ -407,6 +417,12 @@ class ManualQuickSwitchUI:
                     raise QuickSwitchHold("QUICK_SWITCH_NOT_RELEASED")
                 nonce=data[len("apps_edge_quick_confirm_"):]
                 pending=self.pending.pop((actor,chat),None)
+                if pending and os.environ.get("NVL_LEGACY_WG_UI_ENABLED","0")!="1":
+                    from nvl_awg_target import target_backend
+                    with self.db() as db:
+                        backend=target_backend(db,pending["plan"]["target"])
+                    if backend=="wireguard":
+                        raise QuickSwitchHold("LEGACY_WG_NOT_AVAILABLE")
                 if (not pending or pending["nonce"]!=nonce or
                         self.now()>pending["expires"]):
                     raise QuickSwitchHold("PREVIEW_EXPIRED")

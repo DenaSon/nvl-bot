@@ -14311,6 +14311,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML",
             )
         safe_clear_context(context); await show_main_menu(update, context)
+    elif state == 'HOSTPOOL_ADD_INPUT' and os.environ.get(
+            "NVL_LEGACY_WG_UI_ENABLED","0")!="1":
+        safe_clear_context(context)
+        await update.message.reply_text(
+            "⛔️ افزودن از این مسیر غیرفعال است. از مدیریت Edge استفاده کنید.")
+        return
+
     elif state == 'HOSTPOOL_ADD_INPUT':
         # Register inventory ONLY. This does not authorize DNS, default,
         # customer routing, SSH provisioning or replay of the old cutover.
@@ -14351,6 +14358,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🌐 فهرست و بررسی IPها",callback_data="hp_menu")]
             ]))
+        return
+
+    elif (state in ('EDGE_NEW_IP','EDGE_NEW_ROOTPASS','EDGE_NEW_PORT')
+          and os.environ.get("NVL_LEGACY_WG_UI_ENABLED","0")!="1"):
+        _EDGE_PROVISION_SECRETS.pop(update.effective_chat.id,None)
+        safe_clear_context(context)
+        await update.message.reply_text(
+            "⛔️ این مسیر در دسترس نیست. از مدیریت Edge استفاده کنید.")
         return
 
     elif state == 'EDGE_NEW_IP':
@@ -15136,8 +15151,9 @@ async def _render_host_pool_panel(query, page=0):
         kb.append(nav)
 
     kb.append([InlineKeyboardButton("⚡ تست سرعت همه IPها (Speed Test)", callback_data="hp_speedtest_all")])
-    kb.append([InlineKeyboardButton("➕ افزودن IP جدید به استخر", callback_data="hp_add")])
-    kb.append([InlineKeyboardButton("🚀 افزودن Edge جدید (VPS از قبل‌خریداری‌شده)", callback_data="hp_addedge")])
+    if os.environ.get("NVL_LEGACY_WG_UI_ENABLED","0")=="1":
+        kb.append([InlineKeyboardButton("➕ ثبت IP در استخر قدیمی", callback_data="hp_add")])
+        kb.append([InlineKeyboardButton("🚀 افزودن Edge با WireGuard", callback_data="hp_addedge")])
     kb.append([InlineKeyboardButton("🌍 دامنهٔ ثابت + Cloudflare", callback_data="hp_cf_settings")])
     kb.append([InlineKeyboardButton("🛡 فیلترینگ و دسترسی", callback_data="hp_filtering")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="ipsvc_menu")])
@@ -26241,8 +26257,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             egress_steps_html(), parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("➕ افزودن سرور", callback_data="hpeg_wizard"),
-                 InlineKeyboardButton("◀️ سرورها", callback_data="hpeg_status")],
+                ([InlineKeyboardButton("➕ افزودن سرور", callback_data="hpeg_wizard")]
+                 if os.environ.get("NVL_LEGACY_WG_UI_ENABLED","0")=="1" else [])
+                + [InlineKeyboardButton("◀️ سرورها", callback_data="hpeg_status")],
             ]),
         )
         return
@@ -26825,6 +26842,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     elif d == "hp_add" and role == 'admin':
+        if os.environ.get("NVL_LEGACY_WG_UI_ENABLED","0")!="1":
+            await query.message.reply_text("⛔️ این مسیر در دسترس نیست؛ از مدیریت Edge استفاده کنید.")
+            return
         context.user_data['state'] = 'HOSTPOOL_ADD_INPUT'
         await query.message.reply_text(
             "➕ IP عمومی IPv4 سرور آماده را بفرستید (فقط یک مورد):\n"
@@ -26833,6 +26853,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     elif d in ("hp_addedge", "hpeg_wizard"):
+        if os.environ.get("NVL_LEGACY_WG_UI_ENABLED","0")!="1":
+            await query.message.reply_text("⛔️ این مسیر در دسترس نیست؛ از مدیریت Edge استفاده کنید.")
+            return
         # 🔧 رفع باگ اصلی: چون بالای callback_handler همیشه یک‌بار await query.answer() خالی زده
         # می‌شود، هر تلاش دوم برای answer-کردن همان کوئری (حتی با show_alert=True) توسط تلگرام
         # نادیده گرفته می‌شود — API با 200 OK برمی‌گردد ولی هیچ popup ای به کاربر نشان داده

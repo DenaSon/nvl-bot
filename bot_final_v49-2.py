@@ -7822,8 +7822,8 @@ def _build_admin_programs_kb(*, actor=None, chat=None, active_admin_ids=()):
         [InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")],
     ]
     # Only current private-chat admins see the active Edge entry.
-    # Historical provider cards remain callable from old messages, but are
-    # not advertised in the Programs navigation.
+    # Historical provider messages are redirected to this safe hub; retired
+    # provider callbacks cannot launch purchases or operations.
     if (type(actor) is int and type(chat) is int
             and actor > 0 and actor == chat and actor in active_admin_ids):
         rows.insert(0,[InlineKeyboardButton(

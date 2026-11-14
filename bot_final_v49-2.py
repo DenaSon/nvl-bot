@@ -3894,7 +3894,7 @@ def _provision_new_edge_sync(edge_ip, root_password, customer_port, edge_name, p
     core_port, core_pubkey = _get_core_wg_identity()
     core_public_ip = _get_core_public_ip_cached()
     if not core_port or not core_pubkey:
-        return False, "❌ نتوانستم هویت WireGuard خودِ Core را از /etc/wireguard بخوانم. مطمئن شوید setup_core_wireguard.sh قبلاً روی Core اجرا شده.", None
+        return False, "❌ هویت تونل Core قابل بررسی نیست. تنظیمات شبکه سرور را بررسی کنید.", None
     if not core_public_ip:
         return False, "❌ نتوانستم IP عمومی Core را تشخیص دهم (هر ۴ سرویس تشخیص IP بی‌پاسخ ماندند؛ اتصال خروجی HTTPS این سرور را چک کنید).", None
     if not os.path.exists(EDGE_SETUP_SCRIPT_LOCAL_PATH):
@@ -4285,7 +4285,7 @@ async def _provision_new_edge(edge_ip, root_password, customer_port, edge_name, 
                                     [InlineKeyboardButton("🛡 وضعیت و مسدودسازی IPها", callback_data="hp_menu")]])
               if pool_active else InlineKeyboardMarkup(
                   [[InlineKeyboardButton(
-                      "🛟 ادامه نصب دستی و بررسی Standby" if manual_safe_bootstrap else "📋 وضعیت خرید Cloudzy",
+                      "🛟 ادامه نصب دستی و بررسی Standby" if manual_safe_bootstrap else "📋 وضعیت نصب سرور",
                       callback_data="apps_edge_manual_home" if manual_safe_bootstrap else "apps_cz_operations")]]))
         await app.bot.send_message(
             chat_id,
@@ -14346,7 +14346,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "▫️ وضعیت: غیرفعال، در انتظار بررسی اتصال Edge\n"
             f"▫️ پورت مشتری: <code>{added['service_port']}</code>\n\n"
             "DNS، کاربران و Relay فعلی تغییر نکردند. "
-            "تا پیش از تأیید SSH/WireGuard و مسیر برگشت، این IP وارد ترافیک مشتری نمی‌شود.",
+            "تا پیش از تأیید اتصال امن و مسیر برگشت، این IP وارد ترافیک مشتری نمی‌شود.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🌐 فهرست و بررسی IPها",callback_data="hp_menu")]
@@ -15063,7 +15063,7 @@ async def _render_host_pool_panel(query, page=0):
             f"   🧩 Diagnostic: <code>{_panel_value(diagnostic_reason)}</code>\n"
             f"   🌐 Service <code>{service_port}</code> — {_panel_value(service_status)}\n"
             f"   🔐 Admin SSH <code>{admin_port}</code> — {_panel_value(admin_status)}\n"
-            f"   🔗 WireGuard — {_probe_badge(ph.get('wg_peer_ok'))}\n"
+            f"   🔗 تونل — {_probe_badge(ph.get('wg_peer_ok'))}\n"
             f"   🛣 Core path — {_probe_badge(ph.get('core_path_ok'))}\n"
             f"   🌍 External — {_probe_badge(ph.get('external_service_ok'))}\n"
             f"   📡 Regional — {_probe_badge(ph.get('regional_service_ok'))}\n"
@@ -15189,7 +15189,7 @@ def _failover_preflight_error_label_fa(error):
     if raw.startswith("TARGET_ADMIN_DOWN:"):
         return "دسترسی مدیریتی سرور جایگزین در دسترس نیست"
     if raw.startswith("TARGET_WG_NOT_HEALTHY:"):
-        return "ارتباط WireGuard سرور جایگزین سالم نیست"
+        return "ارتباط تونل سرور جایگزین سالم نیست"
     if raw.startswith("TARGET_CORE_PATH_NOT_HEALTHY:"):
         return "مسیر ارتباط سرور جایگزین با هسته سالم نیست"
     if raw.startswith("CORE_FALLBACK_SERVICE_DOWN:"):
@@ -15619,7 +15619,7 @@ async def _render_filtering_edge_detail(query, host):
         f"اطمینان: <b>{_confidence_label_fa(ph.get('filter_confidence'))}</b>\n\n"
         f"🌐 سرویس کاربران: {_probe_state_text(ph.get('service_ok'))}\n"
         f"🔐 دسترسی مدیریتی: {_probe_state_text(ph.get('admin_ok'))}\n"
-        f"🔗 WireGuard: {_probe_state_text(ph.get('wg_peer_ok'))}\n"
+        f"🔗 تونل: {_probe_state_text(ph.get('wg_peer_ok'))}\n"
         f"🛣 مسیر هسته: {_probe_state_text(ph.get('core_path_ok'))}\n"
         f"🌍 دسترسی بیرونی: {_probe_state_text(ph.get('external_service_ok'))}\n\n"
         f"📡 نتیجه بررسی منطقه‌ای: <b>{_filter_state_label_fa(ph.get('regional_filter_state'))}</b>\n"
@@ -22772,7 +22772,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🗑 <b>حذف رکورد سرور</b>\n\n"
             + "🌐 IP: <code>" + esc(target_ip) + "</code>\n"
             + esc(reason) + "\n\n"
-            + ("⚠️ فقط رکورد مدیریتی حذف می‌شود؛ VPS، SSH، DNS، WireGuard و کاربران تغییر نمی‌کنند."
+            + ("⚠️ فقط رکورد مدیریتی حذف می‌شود؛ سرور، SSH، DNS، تونل و کاربران تغییر نمی‌کنند."
                if ok else "⛔ حذف تا رفع وابستگی‌های موجود مجاز نیست."),
             reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML",
         )
@@ -26459,7 +26459,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"پورت سرویس: <code>{preflight.get('source_service_port')}</code>\n\n"
             f"🌐 سرویس کاربران: {_probe_state_text(preflight.get('target_service_ok'))}\n"
             f"🔐 دسترسی مدیریتی: {_probe_state_text(preflight.get('target_admin_ok'))}\n"
-            f"🔗 WireGuard: {_probe_state_text(preflight.get('target_wg_ok'))}\n"
+            f"🔗 تونل: {_probe_state_text(preflight.get('target_wg_ok'))}\n"
             f"🛣 مسیر هسته: {_probe_state_text(preflight.get('target_core_path_ok'))}\n"
             f"🛟 مسیر پشتیبان هسته: {_probe_state_text(preflight.get('core_service_ok'))}\n"
             f"📡 وضعیت منطقه‌ای: <b>{_filter_state_label_fa(preflight.get('target_filter_state'))}</b>\n"
@@ -26721,7 +26721,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⛔️ این IP هنوز آمادهٔ فعال‌سازی نیست: <code>{esc(host)}:{service_port}</code>\n"
                 f"Service: {'✅' if service_ok else '❌'} | "
                 f"Admin SSH: {'✅' if admin_ok else '❌'} | "
-                f"WireGuard: {'✅' if local_path.get('wg_peer_ok') is True else '❌'} | "
+                f"تونل: {'✅' if local_path.get('wg_peer_ok') is True else '❌'} | "
                 f"مسیر Core: {'✅' if local_path.get('core_path_ok') is True else '❌'}\n"
                 "IP غیرفعال ماند؛ DNS و کاربران دست‌نخورده‌اند.",
                 parse_mode="HTML",
@@ -26745,8 +26745,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                      InlineKeyboardButton("❌ انصراف", callback_data="hp_menu")]])
         await query.edit_message_text(
             f"⚠️ <b>حذف کامل {esc(host)}</b>\n\n"
-            f"این کار هم ردیف این IP را از دیتابیس ربات پاک می‌کند، هم (اگر این IP یک Edge با تونل WireGuard بود) "
-            f"Peer متناظرش را از wg0.conf همین Core و از رابط زندهٔ WireGuard حذف می‌کند — یعنی دیگر هیچ ترافیکی "
+            f"این کار هم ردیف این IP را از دیتابیس ربات پاک می‌کند، هم (اگر این IP دارای تونل ارتباطی بود) "
+            f"Peer متناظرش را از تنظیمات Core و رابط زندهٔ تونل حذف می‌کند — یعنی دیگر هیچ ترافیکی "
             f"از این سرور به Core راه پیدا نمی‌کند.\n\n"
             f"ℹ️ خودِ VPS همچنان روشن/فعال می‌ماند (اگر دیگر لازمش ندارید، باید جدا از پیش این سرویس‌دهنده‌اش کنسل/حذفش کنید).\n\n"
             f"مطمئنید؟",
@@ -29573,7 +29573,7 @@ async def _notify_filter_state_transition(app, host, recompute_result, regional_
         f"ASNهای ناموفق: <code>{esc(failed_asns)}</code>\n"
         f"شهرهای ناموفق: <code>{esc(failed_cities)}</code>\n"
         f"دسترسی بیرونی: {_probe_state_text(ph.get('external_service_ok'))}\n"
-        f"WireGuard: {_probe_state_text(ph.get('wg_peer_ok'))}\n"
+        f"تونل: {_probe_state_text(ph.get('wg_peer_ok'))}\n"
         f"مسیر هسته: {_probe_state_text(ph.get('core_path_ok'))}\n\n"
         + (
             "🤖 انتقال خودکار روشن است؛ پس از تکمیل تأیید مقایسه‌ای و بررسی‌های ایمنی ارزیابی می‌شود."

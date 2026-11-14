@@ -172,11 +172,13 @@ class ManualEdgeWizard:
                 and self.awg_provision is not None)
 
     def _new_edge_buttons(self):
-        rows=[[("➕ افزودن با WireGuard قدیمی", "apps_edge_manual_new")]]
-        if self._awg_available():
-            rows.insert(0,[("➕ افزودن Edge با AmneziaWG",
-                            "apps_edge_manual_new_awg")])
-        return rows
+        # Preserve the exact old user experience while the AWG feature is OFF.
+        if not self._awg_available():
+            return [[("➕ افزودن سرور جدید", "apps_edge_manual_new")]]
+        return [
+            [("➕ افزودن Edge با AmneziaWG", "apps_edge_manual_new_awg")],
+            [("➕ افزودن با WireGuard قدیمی", "apps_edge_manual_new")],
+        ]
 
     def _preflight_for(self, op):
         if op.get("tunnel_backend", "wireguard")=="amneziawg":

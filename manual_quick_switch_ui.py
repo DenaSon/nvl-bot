@@ -401,7 +401,7 @@ class ManualQuickSwitchUI:
                 rec=await asyncio.to_thread(self.engine.get,job)
                 if (not rec or rec.get("kind")!="QUICK"
                         or rec.get("status") not in ("DNS_INTENT","HOLD")
-                        or not getattr(self.engine,"operator_allowed",lambda *_a:False)(rec,actor)):
+                        or not (rec.get("actor")==str(actor) or getattr(self.engine,"operator_allowed",lambda *_a:False)(rec,actor))):
                     raise QuickSwitchHold("FORCE_ABORT_ONLY_HOLD")
                 nonce=secrets.token_hex(8)
                 self.pending[(actor,chat)]={
@@ -505,7 +505,7 @@ class ManualQuickSwitchUI:
                 job=data[len("apps_edge_quick_retry_review_"):]
                 rec=await asyncio.to_thread(self.engine.get,job)
                 if (not rec or rec["status"]!="HOLD"
-                        or not getattr(self.engine,"operator_allowed",lambda *_a:False)(rec,actor)):
+                        or not (rec.get("actor")==str(actor) or getattr(self.engine,"operator_allowed",lambda *_a:False)(rec,actor))):
                     raise QuickSwitchHold("RECOVERY_NOT_READY")
                 nonce=secrets.token_hex(8)
                 self.pending[(actor,chat)]={"nonce":nonce,"retry_job":job,

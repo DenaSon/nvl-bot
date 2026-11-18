@@ -43,6 +43,10 @@ def preflight_ssh_delete(
     ):
         raise SSHDeleteSettlementHold("ACCOUNT_SNAPSHOT_CHANGED")
 
+    if agent and conn.execute(
+        "SELECT 1 FROM agents WHERE id=?", (agent,)
+    ).fetchone() is None:
+        raise SSHDeleteSettlementHold("OWNER_AGENT_MISSING")
     refund = preview_delete(
         conn, username, agent=agent, created=created, expiry=expiry,
         users=users, hold=bool(hold), today=today,

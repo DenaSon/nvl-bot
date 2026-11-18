@@ -121,11 +121,19 @@ class SSHRefundSettlementTests(unittest.TestCase):
         with self.assertRaisesRegex(SSHDeleteSettlementHold, "ACCOUNT_SNAPSHOT_CHANGED"):
             self.preflight()
 
+    def test_missing_agent_preflight_blocks_before_userdel(self):
+        with self.conn:
+            self.conn.execute("DELETE FROM agents WHERE id=7")
+        with self.assertRaisesRegex(SSHDeleteSettlementHold, "OWNER_AGENT_MISSING"):
+            self.preflight()
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM ssh_accounts").fetchone()[0], 1)
+
     def test_delete_credit_ledger_and_historical_debt_are_atomic(self):
         with self.conn:
             amount, repaid, reason, days = self.settle()
         self.assertEqual((amount, repaid, reason, days),
-                         (100000, 15000, "UNUSED_DAYS", 15))
+                         (100000, 15000, "PAID_UNUSED", 15))
         self.assertEqual(
             self.conn.execute("SELECT balance,emergency_used FROM agents WHERE id=7").fetchone(),
             (150000, 0),

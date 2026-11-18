@@ -94,6 +94,12 @@ import qrcode
 from ssh_credential_ui import credential_fields_text, napsternet_qr_png, ssh_connection_action_rows
 import v2ray_engine
 import marzban_admin
+from emergency_credit_policy import (
+    emergency_approval_active, is_emergency_credit_callback,
+    is_emergency_credit_enabled,
+)
+from subscription_refund import RefundCalculationError, calculate_time_based_refund
+from agent_renewal_policy import can_reduce_renewal
 # A partially copied release must not bring down the production bot while the
 # opt-in reseller feature is OFF. Fail closed until the module is deployed.
 try:
@@ -5307,6 +5313,9 @@ def _check_emergency_option(ainf, cost):
     آیا امکان تکمیل این خرید با «شارژ اضطراری» وجود دارد یا نه.
     خروجی: (has_option, remaining_emergency, shortfall, used, req_count)
     """
+    if not is_emergency_credit_enabled():
+        shortfall = max(0.0, float(cost) - float(ainf[2] or 0))
+        return False, 0.0, shortfall, 0.0, 0
     used = ainf[12] if len(ainf) > 12 and ainf[12] else 0.0
     req_count = ainf[13] if len(ainf) > 13 and ainf[13] else 0
     remaining_emergency = EMERGENCY_CREDIT_LIMIT - used
@@ -5336,6 +5345,8 @@ def _get_active_account_count_by_agent(agent_id: int) -> int:
 
 def _agent_can_use_emergency_credit(agent_id: int) -> tuple[bool, int]:
     """بررسی اینکه آیا نماینده واجد شرایط استفاده از شارژ اضطراری است (حداقل ۵۰ اکانت فعال)."""
+    if not is_emergency_credit_enabled():
+        return False, 0
     active_count = _get_active_account_count_by_agent(agent_id)
     can_use = active_count >= EMERGENCY_MIN_ACTIVE_ACCOUNTS
     return can_use, active_count
@@ -5357,60 +5368,92 @@ def _activate_expired_hidden_holds(checked_at=None, set_linux_expiry=None):
         return list(activate_expired_holds(conn, checked_at=checked_at, set_linux_expiry=set_linux_expiry))
 
 async def _calc_account_refund(username: str) -> tuple[float, str]:
-    """محاسبهٔ مبلغ بازگشتی هنگام حذف اکانت (پشتیبانی از SSH و V2Ray)."""
+    """محاسبهٔ بازپرداخت بر مبنای نرخ ماهانه، تعداد کاربران و مدت واقعی خرید."""
     def _get_row():
         with db_conn() as conn:
             return conn.execute(
-                "SELECT a.expire_date, a.creation_date, a.hold_active, a.users_limit, ag.base_price, a.service_type, ag.v2ray_base_price, ag.v2ray_vol_price "
-                "FROM ssh_accounts a LEFT JOIN agents ag ON ag.id = a.agent_id WHERE a.username = ?", (username,)
+                "SELECT a.expire_date, a.hold_active, a.hold_duration_days, "
+                "a.users_limit, ag.base_price, a.service_type, "
+                "ag.v2ray_base_price, ag.v2ray_vol_price "
+                "FROM ssh_accounts a LEFT JOIN agents ag ON ag.id = a.agent_id "
+                "WHERE a.username = ?",
+                (username,),
             ).fetchone()
+
     row = await asyncio.to_thread(_get_row)
-    if not row: return 0.0, "اکانت یافت نشد"
-    expire_date, creation_date, hold_active, users_limit, ssh_bp_raw, stype, v2_bp_raw, v2_vol_bp_raw = row
-    
+    if not row:
+        raise RefundCalculationError("اکانت یافت نشد؛ بازپرداخت قابل محاسبه نیست.")
+
+    (expire_date, hold_active, hold_duration_days, users_limit,
+     ssh_bp_raw, stype, v2_bp_raw, v2_vol_bp_raw) = row
+
     if stype == 'v2ray_vol':
-        try: base_price = float(str(v2_vol_bp_raw or '4000').replace(",", "").strip())
-        except: base_price = 4000.0
-        
+        base_price = _parse_price_to_decimal(v2_vol_bp_raw, Decimal("4000"))
+        if base_price <= 0:
+            raise RefundCalculationError("قیمت هر گیگابایت معتبر نیست.")
         m_admin = await _get_marzban_admin_service()
         ok, m_data = await m_admin.get_user(username)
+        if not ok or not isinstance(m_data, dict):
+            raise RefundCalculationError("دریافت مصرف V2Ray ناموفق بود؛ حذف انجام نشد.")
+        try:
+            used_bytes = float(m_data.get('used_traffic', 0) or 0)
+            limit_bytes = float(m_data.get('data_limit', 0) or 0)
+        except (TypeError, ValueError) as exc:
+            raise RefundCalculationError("اطلاعات مصرف V2Ray معتبر نیست.") from exc
+        if limit_bytes <= 0:
+            raise RefundCalculationError("سقف حجم V2Ray معتبر نیست.")
+        used_gb = used_bytes / (1024 ** 3)
+        total_gb = limit_bytes / (1024 ** 3)
+        effective_used_gb = max(1.0, used_gb)
+        remaining_gb = max(0.0, total_gb - effective_used_gb)
+        refund_dec = (Decimal(str(remaining_gb)) * base_price).quantize(
+            Decimal("1"), rounding=ROUND_HALF_UP
+        )
+        return float(refund_dec), (
+            f"بازگشت {remaining_gb:.2f} گیگ از {total_gb:.2f} گیگ "
+            f"(حداقل مصرف ۱ گیگ لحاظ شد): {refund_dec:,.0f} تومان"
+        )
 
-        if ok and isinstance(m_data, dict):
-            used_bytes = m_data.get('used_traffic', 0)
-            limit_bytes = m_data.get('data_limit', 0)
-            if limit_bytes > 0:
-                used_gb = used_bytes / (1024**3)
-                total_gb = limit_bytes / (1024**3)
-                effective_used_gb = max(1.0, used_gb)
-                remaining_gb = max(0.0, total_gb - effective_used_gb)
-                refund = remaining_gb * base_price
-                return float(refund), f"بازگشت {remaining_gb:.2f} گیگ از {total_gb:.2f} گیگ (حداقل مصرف ۱ گیگ لحاظ شد): {refund:,.0f} تومان"
-        return 0.0, "خطا در دریافت حجم مصرفی از سرور V2Ray، بازپرداختی انجام نشد."
-        
-    # 🌟 انتخاب هوشمند قیمت پایه بر اساس نوع سرویس
+    if stype not in ('ssh', 'v2ray'):
+        raise RefundCalculationError("نوع سرویس برای محاسبه بازپرداخت پشتیبانی نمی‌شود.")
+
     bp_raw = v2_bp_raw if stype == 'v2ray' else ssh_bp_raw
-    if stype == 'v2ray' and not bp_raw: bp_raw = '160000'
-    
-    try: base_price = float(str(bp_raw).replace(",", "").strip())
-    except: base_price = 0.0
-    if base_price <= 0: return 0.0, "قیمت پایه تنظیم نشده"
-    
-    if hold_active: 
-        cost = base_price * users_limit
-        return cost, f"بازگشت کامل (استفاده نشده): {cost:,.0f} تومان"
-    
-    if not expire_date or not creation_date: return 0.0, "تاریخ ناقص"
+    base_price = _parse_price_to_decimal(bp_raw, Decimal("0"))
     try:
-        exp_dt = datetime.strptime(expire_date[:10], "%Y-%m-%d")
-        cre_dt = datetime.strptime(creation_date[:10], "%Y-%m-%d")
-        now = datetime.now()
-        if exp_dt <= now: return 0.0, "منقضی شده"
-        total_days = (exp_dt - cre_dt).days
-        if total_days <= 0: return 0.0, "پلن نامعتبر"
-        rem_days = (exp_dt - now).days
-        refund = round((base_price * users_limit / total_days) * max(0, rem_days))
-        return float(refund), f"بازگشت {rem_days} روز از {total_days} روز: {refund:,.0f} تومان"
-    except: return 0.0, "خطا در محاسبه"
+        users = int(users_limit or 0)
+    except (TypeError, ValueError) as exc:
+        raise RefundCalculationError("تعداد کاربران مجاز معتبر نیست.") from exc
+    if base_price <= 0 or users <= 0:
+        raise RefundCalculationError("قیمت پایه یا تعداد کاربران معتبر نیست.")
+
+    if bool(hold_active):
+        try:
+            hold_days = int(hold_duration_days or 0)
+        except (TypeError, ValueError) as exc:
+            raise RefundCalculationError("مدت پلن Hidden Hold معتبر نیست.") from exc
+        amount = calculate_time_based_refund(
+            base_price, users, hold_active=True, hold_duration_days=hold_days
+        )
+        return float(amount), (
+            f"بازگشت کامل پلن Hidden Hold ({hold_days} روز، {users} کاربر): "
+            f"{amount:,.0f} تومان"
+        )
+
+    try:
+        exp_dt = datetime.strptime(str(expire_date), "%Y-%m-%d")
+    except (TypeError, ValueError) as exc:
+        raise RefundCalculationError("تاریخ انقضای اکانت معتبر نیست.") from exc
+
+    remaining_days = max(0, (exp_dt - datetime.now()).days)
+    amount = calculate_time_based_refund(
+        base_price, users, remaining_days=remaining_days
+    )
+    if amount <= 0:
+        return 0.0, "مدت باقی‌مانده‌ای برای بازپرداخت وجود ندارد."
+    return float(amount), (
+        f"بازگشت {remaining_days} روز با نرخ ماهانه {base_price:,.0f} تومان "
+        f"برای {users} کاربر: {amount:,.0f} تومان"
+    )
 
 
 async def _delete_marzban_user_consistent(username: str):
@@ -5436,8 +5479,9 @@ async def _delete_marzban_user_consistent(username: str):
     if owner_agent_id:
         try:
             refund, refund_desc = await _calc_account_refund(username)
-        except Exception:
+        except Exception as exc:
             log.exception("خطا در محاسبه بازپرداخت حذف اکانت V2Ray %s", username)
+            return False, f"محاسبه بازپرداخت ناموفق بود؛ حذف اکانت انجام نشد: {esc(str(exc))}", ""
 
     service = await _get_marzban_admin_service()
     ok_del, del_err = await service.delete_user(username)
@@ -9036,7 +9080,7 @@ async def _show_v2ray_user_detail(update_or_query, username, context, db_res, v2
     
     if not is_vol:
         rn_row = [InlineKeyboardButton("🔄 تمدید اکانت", callback_data=f"v2act_rn_{username}")]
-        if role == 'admin':
+        if can_reduce_renewal(role, ag_id, owner_aid, stype, volumetric=is_vol):
             rn_row.append(InlineKeyboardButton("🔻 کاهش زمان", callback_data=f"v2act_rd_{username}"))
         kb.append(rn_row)
         
@@ -11609,6 +11653,8 @@ async def _show_renew_confirm(target, context, un, days, label, edit=True, mode=
 # ورودی دلخواه (کاستوم) استفاده می‌شود تا هیچ منطقی دوبار نوشته نشود.
 # ==========================================
 async def _apply_user_limit_increase(context, role, ag_id, un, new_limit, emergency_approved=False):
+    if emergency_approved and not is_emergency_credit_enabled():
+        return False, "⛔️ شارژ اضطراری غیرفعال است؛ ابتدا کیف‌پول را شارژ کنید.", None
     """
     تلاش برای افزایش «تعداد کاربر مجاز» یک اکانت به new_limit.
     خروجی: (ok: bool, text: str, emergency_kb: InlineKeyboardMarkup|None)
@@ -11772,7 +11818,7 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
             retail_per_dec = base_price_dec * Decimal(m) * Decimal(u)
             cost_per = float(retail_per_dec)
             total_cost = cost_per * count
-            if ainf[2] < total_cost and not context.user_data.get('emergency_approved'):
+            if ainf[2] < total_cost and not emergency_approval_active(context.user_data.get("emergency_approved")):
                 has_opt, remaining_em, shortfall, used_em, req_cnt = _check_emergency_option(ainf, total_cost)
                 can_use_em, active_count = _agent_can_use_emergency_credit(ag_id)
                 if has_opt and can_use_em:
@@ -16998,7 +17044,16 @@ async def _show_v2_renew_confirm(target, context, un, days):
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_auth(context): return
-    query = update.callback_query; await query.answer(); d = query.data
+    query = update.callback_query
+    d = query.data
+    if not is_emergency_credit_enabled():
+        context.user_data.pop('emergency_approved', None)
+        if is_emergency_credit_callback(d):
+            await query.answer("شارژ اضطراری غیرفعال است.", show_alert=True)
+            with contextlib.suppress(Exception):
+                await query.edit_message_reply_markup(reply_markup=None)
+            return
+    await query.answer()
     role, ag_id = context.user_data.get('role'), context.user_data.get('agent_id', 0)
     # Finance V1 uses one isolated, opt-in read-only callback namespace.
     # Keep this path out of the legacy callback chain and enforce Telegram
@@ -22243,6 +22298,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d.startswith("v2act_rn_"):
         un = d.split("_", 2)[2]
+        _ok_access, _, _reason = await _authorize_v2ray_account(context, un)
+        cur = await asyncio.to_thread(_db_get_user, un)
+        if not _ok_access or not cur or cur[6] != 'v2ray':
+            safe_clear_context(context)
+            return await query.message.reply_text("⛔️ دسترسی تمدید این اکانت مجاز نیست.")
         context.user_data['v2_renew_un'] = un
         context.user_data['v2_renew_mode'] = 'extend'
         kb = [[InlineKeyboardButton("۱ ماهه", callback_data="v2rn_30"), InlineKeyboardButton("۲ ماهه", callback_data="v2rn_60")],
@@ -22250,8 +22310,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
               [InlineKeyboardButton("🔙 بازگشت", callback_data=f"udet_{un}")]]
         await query.edit_message_text(f"🔄 تمدید اکانت V2Ray <code>{esc(un)}</code>\nچه مقدار تمدید شود؟", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
-    elif d.startswith("v2act_rd_") and role == 'admin':
+    elif d.startswith("v2act_rd_") and role in ('admin', 'agent'):
         un = d.split("_", 2)[2]
+        _ok_access, _, _reason = await _authorize_v2ray_account(context, un)
+        cur = await asyncio.to_thread(_db_get_user, un)
+        if (not _ok_access or not cur
+                or not can_reduce_renewal(role, ag_id, cur[5], cur[6], volumetric=(cur[6] == 'v2ray_vol'))):
+            safe_clear_context(context)
+            return await query.message.reply_text("⛔️ دسترسی کاهش زمان این اکانت مجاز نیست.")
         context.user_data['v2_renew_un'] = un
         context.user_data['v2_renew_mode'] = 'reduce'
         kb = [[InlineKeyboardButton("۱ ماهه", callback_data="v2rn_30"), InlineKeyboardButton("۲ ماهه", callback_data="v2rn_60")],
@@ -22261,6 +22327,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d.startswith("v2rnd_custom_") or d.startswith("v2rdd_custom_"):
         un = d.split("_", 2)[2]
+        _ok_access, _, _reason = await _authorize_v2ray_account(context, un)
+        cur = await asyncio.to_thread(_db_get_user, un)
+        _is_reduce = d.startswith("v2rdd_custom_")
+        if (not _ok_access or not cur or cur[6] != 'v2ray'
+                or (_is_reduce and not can_reduce_renewal(role, ag_id, cur[5], cur[6]))):
+            safe_clear_context(context)
+            return await query.message.reply_text("⛔️ دسترسی تغییر زمان این اکانت مجاز نیست.")
         context.user_data['v2_renew_un'] = un
         context.user_data['state'] = 'V2_RENEW_DAYS_INPUT'
         kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data=f"udet_{un}")]]
@@ -22275,6 +22348,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         days = int(d.split("_")[1])
         un = context.user_data.get('v2_renew_un')
         if not un: return await query.message.reply_text("❌ تراکنش منقضی شده است.")
+        _ok_access, _, _reason = await _authorize_v2ray_account(context, un)
+        cur = await asyncio.to_thread(_db_get_user, un)
+        mode = context.user_data.get('v2_renew_mode', 'extend')
+        if (not _ok_access or not cur or cur[6] != 'v2ray'
+                or (mode == 'reduce' and not can_reduce_renewal(role, ag_id, cur[5], cur[6]))):
+            safe_clear_context(context)
+            return await query.message.reply_text("⛔️ دسترسی تغییر زمان این اکانت مجاز نیست.")
         await _show_v2_renew_confirm(query, context, un, days)
 
     elif d in ("v2rnyes", "v2rn_emergency_yes"):
@@ -22288,6 +22368,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         cur = await asyncio.to_thread(_db_get_user, un)
         if not cur: return await query.edit_message_text("❌ اکانت یافت نشد.")
+        _ok_access, _, _reason = await _authorize_v2ray_account(context, un)
+        if (not _ok_access or cur[6] != 'v2ray'
+                or (mode == 'reduce' and not can_reduce_renewal(role, ag_id, cur[5], cur[6]))):
+            safe_clear_context(context)
+            return await query.edit_message_text("⛔️ دسترسی تغییر زمان این اکانت مجاز نیست.")
 
         try:
             cost = 0.0
@@ -22305,7 +22390,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 retail_dec = Decimal(math.ceil(daily_price * days * limit))
                 cost = float(retail_dec)
 
-                if mode == 'extend' and ainf[2] < cost and not context.user_data.get('emergency_approved'):
+                if mode == 'extend' and ainf[2] < cost and not emergency_approval_active(context.user_data.get("emergency_approved")):
                     has_opt, remaining_em, shortfall, used_em, req_cnt = _check_emergency_option(ainf, cost)
                     can_use_em, active_count = _agent_can_use_emergency_credit(ag_id)
                     if has_opt and can_use_em:
@@ -22454,7 +22539,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 retail_dec = base_price_dec * Decimal(gb)
                 cost = float(retail_dec)
                 
-                if ainf[2] < cost and not context.user_data.get('emergency_approved'):
+                if ainf[2] < cost and not emergency_approval_active(context.user_data.get("emergency_approved")):
                     has_opt, remaining_em, shortfall, used_em, req_cnt = _check_emergency_option(ainf, cost)
                     can_use_em, active_count = _agent_can_use_emergency_credit(ag_id)
                     if has_opt and can_use_em:
@@ -24321,7 +24406,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 retail_dec = base_price_dec * Decimal(gb)
                 cost = float(retail_dec)
                 
-                if ainf[2] < cost and not context.user_data.get('emergency_approved'):
+                if ainf[2] < cost and not emergency_approval_active(context.user_data.get("emergency_approved")):
                     has_opt, remaining_em, shortfall, used_em, req_cnt = _check_emergency_option(ainf, cost)
                     can_use_em, active_count = _agent_can_use_emergency_credit(ag_id)
                     if has_opt and can_use_em:
@@ -24532,7 +24617,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 retail_dec = Decimal(math.ceil(daily_price * days * int(u)))
                 cost = float(retail_dec)
                 
-                if ainf[2] < cost and not context.user_data.get('emergency_approved'):
+                if ainf[2] < cost and not emergency_approval_active(context.user_data.get("emergency_approved")):
                     has_opt, remaining_em, shortfall, used_em, req_cnt = _check_emergency_option(ainf, cost)
                     can_use_em, active_count = _agent_can_use_emergency_credit(ag_id)
                     if has_opt and can_use_em:
@@ -24794,7 +24879,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 retail_dec = base_price_dec * Decimal(m) * Decimal(u)
                 cost_dec = retail_dec
                 cost = float(cost_dec)
-                if ainf[2] < cost and not context.user_data.get('emergency_approved'):
+                if ainf[2] < cost and not emergency_approval_active(context.user_data.get("emergency_approved")):
                     has_opt, remaining_em, shortfall, used_em, req_cnt = _check_emergency_option(ainf, cost)
                     can_use_em, active_count = _agent_can_use_emergency_credit(ag_id)
                     if has_opt and can_use_em:
@@ -25029,8 +25114,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     refund_note = f"\n💸 {refund_desc}"
                     if emergency_repaid > 0:
                         refund_note += f"\n🆘 از همین مبلغ، {int(emergency_repaid):,} تومان بدهیِ شارژ اضطراری نماینده نیز پاک شد."
-            except Exception:
+            except Exception as exc:
                 log.exception("خطا در اعمال بازپرداخت حذف اکانت %s", un)
+                await query.edit_message_text(
+                    f"❌ حذف اکانت انجام نشد؛ بازپرداخت قابل محاسبه/ثبت نبود: {esc(str(exc))}"
+                )
+                return
 
         # Linux account lives on Core; owner.host is endpoint/routing metadata only.
         ok, err, kind = await run_cmd("sudo", "userdel", "-f", un)
@@ -27554,7 +27643,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🔻 کاهش تمدید اکانت — برای مواقعی که اشتباهی اکانت بیش‌ازحد تمدید شده و باید تعداد
     # روز/ماه آن کم شود. دقیقاً همان منوی ۱/۲/۳ ماهه + «تعداد روز دلخواه» را نمایش می‌دهد،
     # اما در انتها به‌جای افزودن، از تاریخ انقضا کم می‌کند.
-    elif d.startswith("uact_rd_") and role == 'admin':
+    elif d.startswith("uact_rd_") and role in ('admin', 'agent'):
         un = d.split("_", 2)[2]
         cur = await asyncio.to_thread(_db_get_user, un)
         if not cur: return await query.edit_message_text("❌ این کاربر دیگر وجود ندارد.")
@@ -27623,7 +27712,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # تمدید کسر نمی‌شود؛ هزینهٔ تمدید همیشه دقیقاً برابر قیمت پایه × (روز/۳۰) × تعداد کاربر است.
                 cost_dec = retail_dec
                 cost = float(cost_dec)
-                if mode == 'extend' and ainf[2] < cost and not context.user_data.get('emergency_approved'):
+                if mode == 'extend' and ainf[2] < cost and not emergency_approval_active(context.user_data.get("emergency_approved")):
                     has_opt, remaining_em, shortfall, used_em, req_cnt = _check_emergency_option(ainf, cost)
                     can_use_em, active_count = _agent_can_use_emergency_credit(ag_id)
                     if has_opt and can_use_em:

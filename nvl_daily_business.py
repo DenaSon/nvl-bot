@@ -90,20 +90,13 @@ def record_event(conn, *, kind, agent_id=None, amount=0,
 
 
 def charge_purchase(conn, agent_id, amount):
-    """Debit only funded purchases, atomically with the purchase ledger.
-
-    Emergency borrowing is retired: a concurrent or stale purchase callback
-    cannot overdraw the representative wallet.
-    """
-    debit = Decimal(str(amount))
-    if not debit.is_finite() or debit < 0:
-        raise ValueError("invalid purchase amount")
+    """Use at existing wallet debit sites; debit and ledger are atomic."""
     if conn.execute(
-        "UPDATE agents SET balance = balance - ? WHERE id=? AND balance >= ?",
-        (amount, agent_id, amount),
+        "UPDATE agents SET balance = balance - ? WHERE id=?",
+        (amount, agent_id),
     ).rowcount != 1:
-        raise ValueError("agent not found or insufficient wallet balance")
-    if debit > 0:
+        raise ValueError("agent not found for purchase")
+    if Decimal(str(amount)) > 0:
         record_event(conn, kind="PURCHASE", agent_id=agent_id, amount=amount)
 
 

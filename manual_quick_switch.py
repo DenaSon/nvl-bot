@@ -152,7 +152,17 @@ class ManualQuickSwitch:
     def operator_allowed(self, rec, actor, *, db=None):
         """Original author remains owner; a second *active* Super Admin may recover."""
         from nvl_superadmin_access import is_revoked_principal
-        if not rec or is_revoked_principal(actor):
+        if not rec or type(actor) not in (int, str):
+            return False
+        # Normalize historical string actor IDs before revocation checks.
+        # The legacy owner path must never bypass the revoked-principal denylist.
+        if type(actor) is str:
+            if not (actor.isascii() and actor.isdigit()):
+                return False
+            principal_id = int(actor)
+        else:
+            principal_id = actor
+        if principal_id <= 0 or is_revoked_principal(principal_id):
             return False
         # Legacy internal recovery calls supply the original owner as a
         # decimal string. Preserve that existing contract; only NEW

@@ -4640,6 +4640,14 @@ def _db_get_user(un):
     # 🆕 ستون conn_mode هم به همین ترتیب در انتها اضافه شد (index=7) تا هیچ فراخوانی قدیمیِ
     # _db_get_user که فقط از cur[0..6] استفاده می‌کند خراب نشود.
     with db_conn() as conn: return conn.execute("SELECT password, expire_date, creation_date, users_limit, status, agent_id, host, conn_mode FROM ssh_accounts WHERE username=?", (un,)).fetchone()
+def _db_get_user_service_type(un):
+    # Reject expired Telegram callbacks targeting V2Ray volume plans.
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT service_type FROM ssh_accounts WHERE username=?", (un,)
+        ).fetchone()
+        return row[0] if row else None
+
 def _db_set_conn_mode(un, mode):
     """'direct' یا 'tls' — برای تغییر حالت اتصال یک اکانت از قبل‌ساخته‌شده."""
     with db_conn() as conn: conn.execute("UPDATE ssh_accounts SET conn_mode=? WHERE username=?", (mode, un))
@@ -9050,7 +9058,7 @@ async def _show_v2ray_user_detail(update_or_query, username, context, db_res, v2
     
     if not is_vol:
         rn_row = [InlineKeyboardButton("🔄 تمدید اکانت", callback_data=f"v2act_rn_{username}")]
-        if role == 'admin':
+        if role in ('admin', 'agent'):
             rn_row.append(InlineKeyboardButton("🔻 کاهش زمان", callback_data=f"v2act_rd_{username}"))
         kb.append(rn_row)
         
@@ -22271,6 +22279,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d.startswith("v2act_rn_"):
         un = d.split("_", 2)[2]
+        cur = await asyncio.to_thread(_db_get_user, un)
+        if not cur:
+            return await query.edit_message_text("❌ اکانت یافت نشد.")
+        if not _can_manage_user(role, ag_id, cur[5]):
+            return await query.message.reply_text("⛔️ شما مجاز به مدیریت این اکانت نیستید.")
+        if await asyncio.to_thread(_db_get_user_service_type, un) != 'v2ray':
+            return await query.edit_message_text("⛔️ تغییر زمان برای این نوع سرویس مجاز نیست.")
         context.user_data['v2_renew_un'] = un
         context.user_data['v2_renew_mode'] = 'extend'
         kb = [[InlineKeyboardButton("۱ ماهه", callback_data="v2rn_30"), InlineKeyboardButton("۲ ماهه", callback_data="v2rn_60")],
@@ -22278,8 +22293,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
               [InlineKeyboardButton("🔙 بازگشت", callback_data=f"udet_{un}")]]
         await query.edit_message_text(f"🔄 تمدید اکانت V2Ray <code>{esc(un)}</code>\nچه مقدار تمدید شود؟", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
-    elif d.startswith("v2act_rd_") and role == 'admin':
+    elif d.startswith("v2act_rd_") and role in ('admin', 'agent'):
         un = d.split("_", 2)[2]
+        cur = await asyncio.to_thread(_db_get_user, un)
+        if not cur: return await query.edit_message_text("❌ اکانت یافت نشد.")
+        if not _can_manage_user(role, ag_id, cur[5]):
+            return await query.message.reply_text("⛔️ شما مجاز به مدیریت این اکانت نیستید.")
+        if await asyncio.to_thread(_db_get_user_service_type, un) != 'v2ray':
+            return await query.edit_message_text("⛔️ کاهش زمان برای این نوع سرویس مجاز نیست.")
         context.user_data['v2_renew_un'] = un
         context.user_data['v2_renew_mode'] = 'reduce'
         kb = [[InlineKeyboardButton("۱ ماهه", callback_data="v2rn_30"), InlineKeyboardButton("۲ ماهه", callback_data="v2rn_60")],
@@ -22316,6 +22337,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         cur = await asyncio.to_thread(_db_get_user, un)
         if not cur: return await query.edit_message_text("❌ اکانت یافت نشد.")
+        if not _can_manage_user(role, ag_id, cur[5]):
+            return await query.message.reply_text("⛔️ شما مجاز به مدیریت این اکانت نیستید.")
+        if await asyncio.to_thread(_db_get_user_service_type, un) != 'v2ray':
+            return await query.edit_message_text("⛔️ تغییر زمان برای این نوع سرویس مجاز نیست.")
 
         try:
             cost = 0.0
@@ -27582,7 +27607,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🔻 کاهش تمدید اکانت — برای مواقعی که اشتباهی اکانت بیش‌ازحد تمدید شده و باید تعداد
     # روز/ماه آن کم شود. دقیقاً همان منوی ۱/۲/۳ ماهه + «تعداد روز دلخواه» را نمایش می‌دهد،
     # اما در انتها به‌جای افزودن، از تاریخ انقضا کم می‌کند.
-    elif d.startswith("uact_rd_") and role == 'admin':
+    elif d.startswith("uact_rd_") and role in ('admin', 'agent'):
         un = d.split("_", 2)[2]
         cur = await asyncio.to_thread(_db_get_user, un)
         if not cur: return await query.edit_message_text("❌ این کاربر دیگر وجود ندارد.")

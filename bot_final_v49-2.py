@@ -5313,6 +5313,9 @@ def _check_emergency_option(ainf, cost):
     آیا امکان تکمیل این خرید با «شارژ اضطراری» وجود دارد یا نه.
     خروجی: (has_option, remaining_emergency, shortfall, used, req_count)
     """
+    if not EMERGENCY_CREDIT_ENABLED:
+        # Do not advertise historical emergency borrowing when disabled.
+        return False, 0.0, 0.0, 0.0, 0
     used = ainf[12] if len(ainf) > 12 and ainf[12] else 0.0
     req_count = ainf[13] if len(ainf) > 13 and ainf[13] else 0
     remaining_emergency = EMERGENCY_CREDIT_LIMIT - used

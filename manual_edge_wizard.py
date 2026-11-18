@@ -298,6 +298,17 @@ class ManualEdgeWizard:
         if type(page) is not int or not 0<=page<=10000:
             raise ManualWizardHold("INVALID_PAGE")
         shared=self._shared_viewer(actor,chat)
+        # Preserve the legacy owner-only empty-list fast path. It is also
+        # relied upon by the native wizard's isolated menu tests.
+        if not shared:
+            latest=await asyncio.to_thread(self.journal.latest,actor,chat,
+                                           backend=backend_filter)
+            if latest is None:
+                return await self._view(query,
+                    "🖥 <b>مدیریت Edge</b>\n\n"
+                    "برای راه‌اندازی یک سرور جدید، گزینه افزودن Edge را انتخاب کنید.",
+                    self._new_edge_buttons()+
+                    [[("↩️ مدیریت سرورها","apps_cz_home")]])
         listing=(self.journal.list_shared if shared else self.journal.list_by_owner)
         items=await asyncio.to_thread(
             listing,actor,chat,limit=8,offset=page*7,backend=backend_filter)

@@ -14,25 +14,15 @@ class SSHDeleteSettlementHold(RuntimeError):
     pass
 
 
-def finalize_ssh_delete(
-    conn,
-    *,
-    username,
-    expected_agent_id,
-    expected_expiry,
-    expected_created,
-    expected_users,
-    expected_status,
-    repay_emergency,
-    today=None,
+def preflight_ssh_delete(
+    conn, *, username, expected_agent_id, expected_expiry,
+    expected_created, expected_users, expected_status, today=None,
 ):
-    """Consume one existing SSH account exactly once, with its wallet refund.
+    """Check type, ownership, snapshot and refund data before Linux userdel.
 
-    The SELECT, DELETE, PURCHASE_REFUND event, wallet credit and old emergency
-    debt repayment are committed together by the caller's connection context.
-    BEGIN IMMEDIATE serializes simultaneous confirmation callbacks.
+    Read-only; settlement validates again under BEGIN IMMEDIATE because
+    Linux user deletion and SQLite cannot form one distributed transaction.
     """
-    conn.execute("BEGIN IMMEDIATE")
     row = conn.execute(
         "SELECT a.agent_id, a.expire_date, a.creation_date, a.users_limit, "
         "a.status, a.hold_active, a.hold_duration_days, ag.base_price, "
@@ -67,6 +57,34 @@ def finalize_ssh_delete(
             raise SSHDeleteSettlementHold(refund.reason)
     else:
         refund = SSHRefund(0, 0, "DIRECT_ADMIN")
+    return agent, refund
+
+
+def finalize_ssh_delete(
+    conn,
+    *,
+    username,
+    expected_agent_id,
+    expected_expiry,
+    expected_created,
+    expected_users,
+    expected_status,
+    repay_emergency,
+    today=None,
+):
+    """Consume one existing SSH account exactly once, with its wallet refund.
+
+    The SELECT, DELETE, PURCHASE_REFUND event, wallet credit and old emergency
+    debt repayment are committed together by the caller's connection context.
+    BEGIN IMMEDIATE serializes simultaneous confirmation callbacks.
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    agent, refund = preflight_ssh_delete(
+        conn, username=username, expected_agent_id=expected_agent_id,
+        expected_expiry=expected_expiry, expected_created=expected_created,
+        expected_users=expected_users, expected_status=expected_status,
+        today=today,
+    )
 
     removed = conn.execute(
         "DELETE FROM ssh_accounts WHERE username=? AND service_type='ssh'",

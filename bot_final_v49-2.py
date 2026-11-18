@@ -119,7 +119,9 @@ import marzban_observability
 import marzban_alerting
 import nvl_daily_business
 from ssh_refund_policy import calculate_ssh_refund
-from ssh_delete_settlement import finalize_ssh_delete, SSHDeleteSettlementHold
+from ssh_delete_settlement import (
+    finalize_ssh_delete, preflight_ssh_delete, SSHDeleteSettlementHold,
+)
 from cloudzy_rich_transport import RichBotAPI as NVLDailyRichBotAPI
 import secrets
 from nvl_superadmin_access import (
@@ -25076,6 +25078,27 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await query.edit_message_text("❌ این کاربر دیگر وجود ندارد.")
         if not _can_manage_user(role, ag_id, owner[5]):
             return await query.message.reply_text("⛔️ شما مجاز به مدیریت این اکانت نیستید.")
+
+        # Reject stale/wrong-type SSH accounts and invalid refund inputs
+        # BEFORE the irreversible Linux user deletion. SQLite settlement still
+        # rechecks the same snapshot after the OS operation.
+        try:
+            def _preflight_ssh_delete():
+                with db_conn() as conn:
+                    return preflight_ssh_delete(
+                        conn, username=un, expected_agent_id=owner[5],
+                        expected_expiry=owner[1], expected_created=owner[2],
+                        expected_users=owner[3], expected_status=owner[4],
+                        today=datetime.now(IRAN_TZ).date(),
+                    )
+            await asyncio.to_thread(_preflight_ssh_delete)
+        except Exception:
+            log.exception("SSH delete preflight HOLD before userdel: %s", un)
+            return await query.edit_message_text(
+                "⛔️ حذف قبل از عملیات لینوکس متوقف شد؛ اطلاعات حساب یا "
+                "مبنای محاسبه بازپرداخت معتبر نیست. هیچ حساب یا اعتباری "
+                "تغییر نکرده است؛ لطفاً با سوپرادمین هماهنگ کنید."
+            )
 
         # External Linux delete is the first commit point. Never credit the
         # wallet or delete the local record when Core userdel reports failure.

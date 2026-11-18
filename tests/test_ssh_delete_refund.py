@@ -5,7 +5,9 @@ import unittest
 
 import nvl_daily_business as business
 from ssh_refund_policy import calculate_ssh_refund
-from ssh_delete_settlement import finalize_ssh_delete, SSHDeleteSettlementHold
+from ssh_delete_settlement import (
+    finalize_ssh_delete, preflight_ssh_delete, SSHDeleteSettlementHold,
+)
 
 
 TODAY = date(2026, 11, 18)
@@ -87,6 +89,33 @@ class SSHRefundSettlementTests(unittest.TestCase):
             expected_users=2, expected_status="🟢 فعال",
             repay_emergency=repay or self.repay, today=TODAY,
         )
+
+    def preflight(self):
+        return preflight_ssh_delete(
+            self.conn, username="sample", expected_agent_id=7,
+            expected_expiry="2026-12-03", expected_created="2026-10-01",
+            expected_users=2, expected_status="🟢 فعال", today=TODAY,
+        )
+
+    def test_preflight_is_read_only_and_quotes_expected_refund(self):
+        before = list(self.conn.iterdump())
+        agent, refund = self.preflight()
+        self.assertEqual((agent, refund.amount, refund.days), (7, 100000, 15))
+        self.assertEqual(before, list(self.conn.iterdump()))
+
+    def test_preflight_blocks_invalid_price_before_userdel(self):
+        with self.conn:
+            self.conn.execute("UPDATE agents SET base_price='invalid' WHERE id=7")
+        with self.assertRaisesRegex(SSHDeleteSettlementHold, "INVALID_"):
+            self.preflight()
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM ssh_accounts").fetchone()[0], 1)
+        self.assertEqual(self.conn.execute("SELECT balance FROM agents").fetchone()[0], 50000)
+
+    def test_preflight_blocks_non_ssh_account_before_userdel(self):
+        with self.conn:
+            self.conn.execute("UPDATE ssh_accounts SET service_type='v2ray' WHERE username='sample'")
+        with self.assertRaisesRegex(SSHDeleteSettlementHold, "ACCOUNT_SNAPSHOT_CHANGED"):
+            self.preflight()
 
     def test_delete_credit_ledger_and_historical_debt_are_atomic(self):
         with self.conn:

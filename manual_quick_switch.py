@@ -150,30 +150,35 @@ class ManualQuickSwitch:
         )
 
     def operator_allowed(self, rec, actor, *, db=None):
-        """Original author remains owner; a second *active* Super Admin may recover."""
+        """Preserve exact legacy-owner recovery; verify new cross-owner admins.
+
+        Historical operations can store opaque actor strings such as
+        "telegram:7". Those legacy engine calls must remain functional,
+        but they confer no cross-owner rights. Only a *typed* Telegram int
+        can act on a different operator's record, after a DB role check.
+        """
         from nvl_superadmin_access import is_revoked_principal
         if not rec or type(actor) not in (int, str):
             return False
-        # Normalize historical string actor IDs before revocation checks.
-        # The legacy owner path must never bypass the revoked-principal denylist.
-        if type(actor) is str:
-            if not (actor.isascii() and actor.isdigit()):
-                return False
-            principal_id = int(actor)
-        else:
-            principal_id = actor
-        if principal_id <= 0 or is_revoked_principal(principal_id):
+        original = str(rec.get("actor") or "")
+        candidate = str(actor)
+        if not candidate or not candidate.strip():
             return False
-        # Legacy internal recovery calls supply the original owner as a
-        # decimal string. Preserve that existing contract; only NEW
-        # cross-owner handoffs require a real positive Telegram integer ID.
-        if rec.get("actor") == str(actor) and (
-            (type(actor) is int and actor > 0)
-            or (type(actor) is str and actor.isascii() and actor.isdigit()
-                and int(actor) > 0)
-        ):
+        if type(actor) is int:
+            if actor <= 0 or is_revoked_principal(actor):
+                return False
+        else:
+            # Deny the revoked principal even when represented by a legacy
+            # numeric or telegram:-prefixed actor string.
+            raw = candidate.removeprefix("telegram:")
+            if raw.isascii() and raw.isdigit():
+                if int(raw) <= 0 or is_revoked_principal(int(raw)):
+                    return False
+        if original == candidate:
             return True
-        if type(actor) is not int or actor <= 0:
+
+        # A caller-provided legacy string is never an authorization token.
+        if type(actor) is not int:
             return False
         try:
             def admitted(conn):

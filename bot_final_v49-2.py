@@ -9036,7 +9036,7 @@ async def _show_v2ray_user_detail(update_or_query, username, context, db_res, v2
     
     if not is_vol:
         rn_row = [InlineKeyboardButton("🔄 تمدید اکانت", callback_data=f"v2act_rn_{username}")]
-        if role == 'admin':
+        if role in ('admin', 'agent'):
             rn_row.append(InlineKeyboardButton("🔻 کاهش زمان", callback_data=f"v2act_rd_{username}"))
         kb.append(rn_row)
         
@@ -22250,8 +22250,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
               [InlineKeyboardButton("🔙 بازگشت", callback_data=f"udet_{un}")]]
         await query.edit_message_text(f"🔄 تمدید اکانت V2Ray <code>{esc(un)}</code>\nچه مقدار تمدید شود؟", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
-    elif d.startswith("v2act_rd_") and role == 'admin':
+    elif d.startswith("v2act_rd_") and role in ('admin', 'agent'):
         un = d.split("_", 2)[2]
+        cur = await asyncio.to_thread(_db_get_user, un)
+        if not cur: return await query.edit_message_text("❌ اکانت یافت نشد.")
+        if not _can_manage_user(role, ag_id, cur[5]):
+            return await query.message.reply_text("⛔️ شما مجاز به مدیریت این اکانت نیستید.")
         context.user_data['v2_renew_un'] = un
         context.user_data['v2_renew_mode'] = 'reduce'
         kb = [[InlineKeyboardButton("۱ ماهه", callback_data="v2rn_30"), InlineKeyboardButton("۲ ماهه", callback_data="v2rn_60")],
@@ -22288,6 +22292,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         cur = await asyncio.to_thread(_db_get_user, un)
         if not cur: return await query.edit_message_text("❌ اکانت یافت نشد.")
+        if not _can_manage_user(role, ag_id, cur[5]):
+            return await query.message.reply_text("⛔️ شما مجاز به مدیریت این اکانت نیستید.")
 
         try:
             cost = 0.0
@@ -27554,7 +27560,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🔻 کاهش تمدید اکانت — برای مواقعی که اشتباهی اکانت بیش‌ازحد تمدید شده و باید تعداد
     # روز/ماه آن کم شود. دقیقاً همان منوی ۱/۲/۳ ماهه + «تعداد روز دلخواه» را نمایش می‌دهد،
     # اما در انتها به‌جای افزودن، از تاریخ انقضا کم می‌کند.
-    elif d.startswith("uact_rd_") and role == 'admin':
+    elif d.startswith("uact_rd_") and role in ('admin', 'agent'):
         un = d.split("_", 2)[2]
         cur = await asyncio.to_thread(_db_get_user, un)
         if not cur: return await query.edit_message_text("❌ این کاربر دیگر وجود ندارد.")

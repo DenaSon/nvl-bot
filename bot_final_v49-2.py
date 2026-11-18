@@ -122,6 +122,7 @@ from ssh_refund_policy import calculate_ssh_refund
 from ssh_delete_settlement import (
     finalize_ssh_delete, preflight_ssh_delete, SSHDeleteSettlementHold,
 )
+from ssh_paid_ledger import create_paid_purchase
 from cloudzy_rich_transport import RichBotAPI as NVLDailyRichBotAPI
 import secrets
 from nvl_superadmin_access import (
@@ -5037,7 +5038,7 @@ def _db_cancel_reservation(un: str):
     with db_conn() as conn:
         conn.execute("DELETE FROM ssh_accounts WHERE username=? AND status='⏳ درحال ساخت'", (un,))
 
-def _db_finalize_reserved_user(un, pw, exp, cr, lim, cnt, br, agid=0, conn_mode='direct', hold_deadline=None, hold_duration_days=None, host=None):
+def _db_finalize_reserved_user(un, pw, exp, cr, lim, cnt, br, agid=0, conn_mode='direct', hold_deadline=None, hold_duration_days=None, host=None, paid_cost=None):
     """Finalize one reserved SSH account atomically with its owning Edge.
 
     Phase 6G forbids this transition while a manual failover is RUNNING so an
@@ -5065,6 +5066,15 @@ def _db_finalize_reserved_user(un, pw, exp, cr, lim, cnt, br, agid=0, conn_mode=
         )
         if cur.rowcount != 1:
             raise RuntimeError(f"SSH_RESERVATION_FINALIZE_MISMATCH:{un}")
+        # Atomic paid finalization: wallet charge and immutable per-account
+        # journal must commit with SSH metadata, otherwise rollback all three.
+        if agid:
+            if paid_cost is None:
+                raise RuntimeError("SSH_AGENT_PURCHASE_AMOUNT_REQUIRED")
+            create_paid_purchase(
+                conn, username=un, agent=agid, amount=paid_cost,
+                created=cr, expiry=exp, users=lim,
+            )
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (f"counter_{br}", cnt))
 def _db_finalize_v2ray_user(un, pw, exp, cr, lim, cnt, br, agid, data_limit, sub_url, hold_deadline, hold_duration_days):
     with db_conn() as conn:
@@ -11929,7 +11939,7 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
 
             # گام ۴: تکمیل نهایی رکورد دیتابیس
             try:
-                await asyncio.to_thread(_db_finalize_reserved_user, un, pw, exp_db, cr_db, u, str(c + 1).zfill(4), br, ag_id, chosen_conn_mode, hold_sched.hold_deadline, exp_days, target_host)
+                await asyncio.to_thread(_db_finalize_reserved_user, un, pw, exp_db, cr_db, u, str(c + 1).zfill(4), br, ag_id, chosen_conn_mode, hold_sched.hold_deadline, exp_days, target_host, cost_per if role == 'agent' else None)
             except Exception:
                 log.exception("خطا در ثبت نهایی اکانت bulk %s در دیتابیس؛ کاربر لینوکسی حذف می‌شود (Rollback).", un)
                 await run_cmd("sudo", "userdel", "-f", un)
@@ -11949,7 +11959,6 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
             # گام ۵: کسر هزینهٔ همین اکانت از کیف‌پول نماینده و توزیع کمیسیون (خطای احتمالی اینجا اکانت را باطل نمی‌کند)
             if role == 'agent':
                 try:
-                    with db_conn() as conn: nvl_daily_business.charge_purchase(conn, ag_id, cost_per)
                     await asyncio.to_thread(_db_distribute_commission, ag_id, retail_per_dec)
                     # 🎁 کش‌بک ترغیبی نمایندگان پرفروش (۵۰+ اکانت فعال): ۷٪ از هزینهٔ همین اکانت
                     await _apply_agent_cashback_if_eligible(ag_id, retail_per_dec)
@@ -11958,7 +11967,7 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
                     if emergency_shortfall > 0:
                         await asyncio.to_thread(_db_agent_register_emergency_use, ag_id, emergency_shortfall)
                 except Exception:
-                    log.exception("خطا در کسر کیف‌پول/توزیع کمیسیون برای اکانت bulk %s (اکانت ساخته‌شده باقی می‌ماند).", un)
+                    log.exception("خطا در توزیع کمیسیون/کش‌بک برای اکانت bulk %s (اکانت ساخته‌شده باقی می‌ماند).", un)
 
             created.append((un, pw))
 
@@ -24974,7 +24983,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # گام ۴: تکمیل نهایی رکورد دیتابیس (فقط پس از موفقیت کامل مراحل لینوکسی)
             try:
-                await asyncio.to_thread(_db_finalize_reserved_user, un, pw, exp_db, cr_db, u, str(c + 1).zfill(4), br, ag_id, chosen_conn_mode, hold_deadline_db, exp_days, target_host)
+                await asyncio.to_thread(_db_finalize_reserved_user, un, pw, exp_db, cr_db, u, str(c + 1).zfill(4), br, ag_id, chosen_conn_mode, hold_deadline_db, exp_days, target_host, cost if role == 'agent' else None)
             except Exception:
                 log.exception("خطا در ثبت نهایی اکانت %s در دیتابیس؛ کاربر لینوکسی حذف می‌شود (Rollback).", un)
                 await run_cmd("sudo", "userdel", "-f", un)
@@ -25001,7 +25010,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # گام ۵: کسر هزینه از کیف پول نماینده و توزیع پورسانت لایه‌ای (خطای احتمالی اینجا اکانت را باطل نمی‌کند)
             if role == 'agent':
                 try:
-                    with db_conn() as conn: nvl_daily_business.charge_purchase(conn, ag_id, cost)
                     await asyncio.to_thread(_db_distribute_commission, ag_id, retail_dec)
                     # 🎁 کش‌بک ترغیبی نمایندگان پرفروش (۵۰+ اکانت فعال): ۷٪ از هزینهٔ همین خرید
                     await _apply_agent_cashback_if_eligible(ag_id, retail_dec)
@@ -25015,7 +25023,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 f"🆘 <b>استفاده از شارژ اضطراری</b>\nنمایندهٔ «{esc(ainf[0])}» برای ساخت اکانت <code>{esc(un)}</code> "
                                 f"مبلغ {int(emergency_shortfall):,} تومان از شارژ اضطراری استفاده کرد.")
                 except Exception:
-                    log.exception("خطا در کسر کیف‌پول/توزیع کمیسیون برای اکانت %s (اکانت ساخته شده باقی می‌ماند).", un)
+                    log.exception("خطا در توزیع کمیسیون/کش‌بک برای اکانت %s (اکانت ساخته شده باقی می‌ماند).", un)
 
             # گام ۶: ارسال فاکتور
             try:

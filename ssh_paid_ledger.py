@@ -226,7 +226,8 @@ def _charge(conn, agent, money):
 def create_paid_purchase(conn, *, username, agent, amount,
                          created, expiry, users):
     """Use INSIDE with db_conn() after successful Linux provisioning."""
-    conn.execute("BEGIN IMMEDIATE")
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     install_schema(conn)
     live = _live(conn, username)
     if not _matches_live(live, agent, created, expiry, users):
@@ -238,6 +239,8 @@ def create_paid_purchase(conn, *, username, agent, amount,
     if _day(expiry) <= _day(created):
         raise SSHFinanceHold("INVALID_PAID_INTERVAL")
     cost = _amount(amount)
+    if cost <= 0:
+        raise SSHFinanceHold("ZERO_COST_PAID_ACCOUNT")
     _charge(conn, agent, cost)
     conn.execute(
         "INSERT INTO ssh_paid_accounts "

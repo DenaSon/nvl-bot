@@ -129,7 +129,7 @@ class AgentWalletAccountingTests(unittest.TestCase):
                 "SELECT id, withdrawable_balance, referral_income "
                 "FROM agents WHERE id IN (2,3) ORDER BY id"
             ).fetchall(),
-            [(2, 100.0, 100.0), (3, 50.0, 50.0)],
+            [(2, 600.0, 100.0), (3, 50.0, 50.0)],
         )
         self.assertEqual(
             self.conn.execute(

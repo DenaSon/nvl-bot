@@ -1,6 +1,7 @@
 """Hermetic tests for independent per-Edge Limiter witness refresh."""
 from __future__ import annotations
 
+import io
 import os
 from pathlib import Path
 import sqlite3
@@ -9,9 +10,11 @@ import subprocess
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stderr
 from unittest.mock import patch
 
 from nvl_awg_witness_refresh import refresh, WitnessRefreshHold
+from nvl_awg_limiter_witness import LimiterWitnessHold
 from nvl_awg_target import core_limiter_canary_ready
 
 
@@ -97,6 +100,29 @@ class WitnessRefreshTests(unittest.TestCase):
         self.assertEqual((ready, failed), (1, 1))
         self.assertTrue((self.directory / EDGE1).exists())
         self.assertFalse((self.directory / EDGE2).exists())
+
+    def test_failed_candidate_logs_safe_edge_specific_reason(self):
+        stderr = io.StringIO()
+
+        def fail_second(host, *, marker):
+            if host == HOST2:
+                raise LimiterWitnessHold("CORE_AWG_RETURN_ROUTE_UNVERIFIED")
+            return self.fake_attest(host, marker=marker)
+
+        with patch.object(Path, "lstat",
+                          lambda path, *a, **kw: self._as_root(path, *a, **kw)):
+            with redirect_stderr(stderr):
+                ready, failed = refresh(
+                    db_path=self.db, marker_dir=self.directory,
+                    attest_fn=fail_second, root_check=lambda: 0)
+
+        self.assertEqual((ready, failed), (1, 1))
+        self.assertIn(
+            f"AWG_WITNESS_EDGE=HOLD host={HOST2} tunnel={EDGE2} "
+            "reason=CORE_AWG_RETURN_ROUTE_UNVERIFIED",
+            stderr.getvalue(),
+        )
+        self.assertNotIn("probe failure", stderr.getvalue())
 
     def test_retired_edge_is_pruned_and_never_attested(self):
         with patch.object(Path, "lstat",

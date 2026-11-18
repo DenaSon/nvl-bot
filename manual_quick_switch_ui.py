@@ -196,7 +196,7 @@ class ManualQuickSwitchUI:
                "DONE":"تکمیل فنی","EXTERNAL_VERIFIED":"بازیابی دستی ثبت شد",
                "ABORTED":"لغوشده"}.get(status,status)
         rows=[]
-        if (rec["kind"]=="QUICK" and rec["actor"]==str(chat)
+        if (rec["kind"]=="QUICK"
                 and status in ("DNS_INTENT","HOLD","DB_COMMITTED")):
             rows.append([("🔎 بررسی وضعیت DNS و ادامه ایمن",
                          "apps_edge_quick_resume_"+rec["id"])])
@@ -252,8 +252,11 @@ class ManualQuickSwitchUI:
                 "SELECT kind,status,actor,source,target,account_count "
                 "FROM manual_quick_switch_jobs WHERE id=?", (job,)
             ).fetchone()
-            if (not rec or rec[:3]!=("QUICK","DONE",str(actor))
-                    or type(chat) is not int or chat!=actor):
+            if (not rec or rec[:2]!=("QUICK","DONE")
+                    or type(chat) is not int or chat!=actor
+                    or (rec[2]!=str(actor) and not getattr(
+                        self.engine,"operator_allowed",lambda *_a,**_k:False
+                    )({"actor":rec[2]},actor,db=db))):
                 db.rollback()
                 return None
             defaults=db.execute(
@@ -398,7 +401,7 @@ class ManualQuickSwitchUI:
                 rec=await asyncio.to_thread(self.engine.get,job)
                 if (not rec or rec.get("kind")!="QUICK"
                         or rec.get("status") not in ("DNS_INTENT","HOLD")
-                        or rec.get("actor")!=str(actor)):
+                        or not getattr(self.engine,"operator_allowed",lambda *_a:False)(rec,actor)):
                     raise QuickSwitchHold("FORCE_ABORT_ONLY_HOLD")
                 nonce=secrets.token_hex(8)
                 self.pending[(actor,chat)]={
@@ -501,7 +504,8 @@ class ManualQuickSwitchUI:
             if data.startswith("apps_edge_quick_retry_review_"):
                 job=data[len("apps_edge_quick_retry_review_"):]
                 rec=await asyncio.to_thread(self.engine.get,job)
-                if not rec or rec["actor"]!=str(actor) or rec["status"]!="HOLD":
+                if (not rec or rec["status"]!="HOLD"
+                        or not getattr(self.engine,"operator_allowed",lambda *_a:False)(rec,actor)):
                     raise QuickSwitchHold("RECOVERY_NOT_READY")
                 nonce=secrets.token_hex(8)
                 self.pending[(actor,chat)]={"nonce":nonce,"retry_job":job,

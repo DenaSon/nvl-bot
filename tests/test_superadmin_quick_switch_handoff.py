@@ -74,6 +74,14 @@ class SuperAdminHandoffTests(unittest.TestCase):
         self.assertFalse(self.engine.operator_allowed(old_record, 1947045855))
         self.assertFalse(self.engine.operator_allowed(old_record, "1947045855"))
 
+    def test_historical_opaque_owner_still_recovers_without_cross_owner_access(self):
+        old_record = dict(self.record, actor="telegram:7")
+        self.assertTrue(self.engine.operator_allowed(old_record, "telegram:7"))
+        self.assertFalse(self.engine.operator_allowed(old_record, "telegram:8"))
+        self.assertFalse(self.engine.operator_allowed(
+            dict(self.record, actor="telegram:1947045855"), "telegram:1947045855"
+        ))
+
     def test_resume_done_job_by_another_admin_is_idempotent(self):
         self.engine.get = lambda job: self.record if job == "job-1" else None
         result = asyncio.run(self.engine._resume_once("job-1", actor=8))

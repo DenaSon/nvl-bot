@@ -308,9 +308,6 @@ def apply_paid_change(conn, *, username, agent, expected_created,
                                 expected_expiry, expected_users, today=now)
         # Partial interval removal is valued using the ACTUAL amount paid,
         # never the new agent tariff.
-        diff = _paid_quote(conn, username, agent, expected_created,
-                           expected_expiry, expected_users,
-                           today=now).amount
         # Compute the interval that is no longer entitled without changing
         # the durable snapshot until the transaction commits.
         old_lots = conn.execute(
@@ -398,3 +395,26 @@ def apply_paid_change(conn, *, username, agent, expected_created,
             old_expiry=expected_expiry, new_expiry=new_expiry,
             old_users=expected_users, new_users=new_users)
     return float(refunded if kind == "TIME_REDUCE" else cost)
+
+
+def close_paid_account(conn, *, username, agent, amount):
+    """Append immutable settlement outcome and mark proved account closed.
+
+    Must run inside the SAME SQLite transaction as DELETE and wallet credit.
+    Legacy expired accounts (zero credit) have no verified account to close.
+    """
+    state = _account(conn, username)
+    if state is None:
+        if _amount(amount) != 0:
+            raise SSHFinanceHold("UNVERIFIED_ACCOUNT_CANNOT_BE_CREDITED")
+        return
+    if state[5] or state[0] != agent:
+        raise SSHFinanceHold("PAID_ACCOUNT_ALREADY_CLOSED_OR_OWNER_CHANGED")
+    if conn.execute(
+        "UPDATE ssh_paid_accounts SET closed=1 WHERE username=? "
+        "AND agent_id=? AND closed=0", (username, agent)
+    ).rowcount != 1:
+        raise SSHFinanceHold("PAID_ACCOUNT_CLOSE_CAS_FAILED")
+    _append(conn, username, agent,
+            "DELETE_REFUND" if _amount(amount) > 0 else "DELETE_ZERO",
+            amount, old_expiry=state[2], old_users=state[3])

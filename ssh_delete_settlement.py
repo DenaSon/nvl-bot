@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 import nvl_daily_business
-from ssh_refund_policy import SSHRefund, calculate_ssh_refund
+from ssh_paid_ledger import preview_delete, close_paid_account
 
 
 class SSHDeleteSettlementHold(RuntimeError):
@@ -43,20 +43,10 @@ def preflight_ssh_delete(
     ):
         raise SSHDeleteSettlementHold("ACCOUNT_SNAPSHOT_CHANGED")
 
-    if agent:
-        refund = calculate_ssh_refund(
-            monthly_price=monthly_price,
-            users_limit=users,
-            expire_date=expiry,
-            creation_date=created,
-            hold_active=hold,
-            hold_duration_days=held_days,
-            today=today,
-        )
-        if refund.reason.startswith("INVALID_"):
-            raise SSHDeleteSettlementHold(refund.reason)
-    else:
-        refund = SSHRefund(0, 0, "DIRECT_ADMIN")
+    refund = preview_delete(
+        conn, username, agent=agent, created=created, expiry=expiry,
+        users=users, hold=bool(hold), today=today,
+    )
     return agent, refund
 
 
@@ -103,4 +93,6 @@ def finalize_ssh_delete(
         nvl_daily_business.refund_purchase(conn, agent, refund.amount)
         repaid = min(Decimal(str(used[0] or 0)), Decimal(refund.amount))
         repay_emergency(conn, agent, refund.amount)
+    close_paid_account(conn, username=username, agent=agent,
+                       amount=refund.amount if agent else 0)
     return refund.amount if agent else 0, int(repaid), refund.reason, refund.days

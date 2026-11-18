@@ -4,6 +4,7 @@ import sqlite3
 import unittest
 
 import nvl_daily_business as business
+from ssh_paid_ledger import create_paid_purchase, SSHFinanceHold
 from ssh_refund_policy import calculate_ssh_refund
 from ssh_delete_settlement import (
     finalize_ssh_delete, preflight_ssh_delete, SSHDeleteSettlementHold,
@@ -17,7 +18,7 @@ def quote(users, remaining, *, price=100000, plan_days=60, hold=False, hold_days
     return calculate_ssh_refund(
         monthly_price=price,
         users_limit=users,
-        creation_date="2026-10-01",
+        creation_date="2026-11-03",
         expire_date=date.fromordinal(TODAY.toordinal() + remaining),
         hold_active=hold,
         hold_duration_days=hold_days,
@@ -63,14 +64,19 @@ class SSHRefundSettlementTests(unittest.TestCase):
                 status TEXT, hold_active INTEGER, hold_duration_days INTEGER,
                 service_type TEXT
             );
-            INSERT INTO agents VALUES (7, 50000, '100000', 15000);
+            INSERT INTO agents VALUES (7, 250000, '100000', 15000);
             INSERT INTO ssh_accounts VALUES (
-                'sample', 7, '2026-12-03', '2026-10-01', 2,
+                'sample', 7, '2026-12-03', '2026-11-03', 2,
                 '🟢 فعال', 0, NULL, 'ssh'
             );
         """)
         business.install_schema(self.conn)
         self.conn.commit()
+        with self.conn:
+            create_paid_purchase(
+                self.conn, username="sample", agent=7, amount=200000,
+                created="2026-11-03", expiry="2026-12-03", users=2,
+            )
 
     def tearDown(self):
         self.conn.close()
@@ -85,7 +91,7 @@ class SSHRefundSettlementTests(unittest.TestCase):
     def settle(self, *, expiry="2026-12-03", repay=None):
         return finalize_ssh_delete(
             self.conn, username="sample", expected_agent_id=7,
-            expected_expiry=expiry, expected_created="2026-10-01",
+            expected_expiry=expiry, expected_created="2026-11-03",
             expected_users=2, expected_status="🟢 فعال",
             repay_emergency=repay or self.repay, today=TODAY,
         )
@@ -93,7 +99,7 @@ class SSHRefundSettlementTests(unittest.TestCase):
     def preflight(self):
         return preflight_ssh_delete(
             self.conn, username="sample", expected_agent_id=7,
-            expected_expiry="2026-12-03", expected_created="2026-10-01",
+            expected_expiry="2026-12-03", expected_created="2026-11-03",
             expected_users=2, expected_status="🟢 فعال", today=TODAY,
         )
 
@@ -103,13 +109,11 @@ class SSHRefundSettlementTests(unittest.TestCase):
         self.assertEqual((agent, refund.amount, refund.days), (7, 100000, 15))
         self.assertEqual(before, list(self.conn.iterdump()))
 
-    def test_preflight_blocks_invalid_price_before_userdel(self):
+    def test_preflight_ignores_current_tariff_changes(self):
         with self.conn:
             self.conn.execute("UPDATE agents SET base_price='invalid' WHERE id=7")
-        with self.assertRaisesRegex(SSHDeleteSettlementHold, "INVALID_"):
-            self.preflight()
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM ssh_accounts").fetchone()[0], 1)
-        self.assertEqual(self.conn.execute("SELECT balance FROM agents").fetchone()[0], 50000)
+        agent, refund = self.preflight()
+        self.assertEqual((agent, refund.amount), (7, 100000))
 
     def test_preflight_blocks_non_ssh_account_before_userdel(self):
         with self.conn:
@@ -129,7 +133,7 @@ class SSHRefundSettlementTests(unittest.TestCase):
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM ssh_accounts").fetchone()[0], 0)
         self.assertEqual(self.conn.execute(
             "SELECT kind,amount_toman FROM nvl_business_events"
-        ).fetchall(), [("PURCHASE_REFUND", 100000)])
+        ).fetchall(), [("PURCHASE", 200000), ("PURCHASE_REFUND", 100000)])
 
     def test_stale_double_callback_cannot_refund_twice(self):
         with self.conn:
@@ -138,7 +142,7 @@ class SSHRefundSettlementTests(unittest.TestCase):
             with self.conn:
                 self.settle()
         self.assertEqual(self.conn.execute("SELECT balance FROM agents").fetchone()[0], 150000)
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM nvl_business_events").fetchone()[0], 1)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM nvl_business_events").fetchone()[0], 2)
 
     def test_stale_account_snapshot_blocks_settlement(self):
         with self.assertRaisesRegex(SSHDeleteSettlementHold, "ACCOUNT_SNAPSHOT_CHANGED"):
@@ -155,7 +159,7 @@ class SSHRefundSettlementTests(unittest.TestCase):
                 self.settle(repay=fail_repay)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM ssh_accounts").fetchone()[0], 1)
         self.assertEqual(self.conn.execute("SELECT balance FROM agents").fetchone()[0], 50000)
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM nvl_business_events").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM nvl_business_events").fetchone()[0], 1)
 
 
 if __name__ == "__main__":

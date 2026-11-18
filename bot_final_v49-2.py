@@ -5314,14 +5314,28 @@ def _db_admin_topup_agent(aid, amount):
                              (datetime.now(IRAN_TZ).strftime("%Y-%m-%d %H:%M:%S"), agent_name, "شارژ دستی", "-", amount, "توسط ادمین"))
             acc_conn.commit()
     except Exception: pass
-def _db_admin_deduct_agent(aid, amount):
-    """🆕 کاهش دستی مستقیم کیف‌پول یک نماینده توسط ادمین — برای اصلاح شارژهای اشتباهی
-    (مثلاً وقتی ادمین با تایپ غلط، مبلغی را به‌اشتباه به حساب یک نماینده اضافه کرده).
-    برخلاف تابع شارژ، این عملیات ربطی به جریان «شارژ اضطراری» ندارد (چون کاهش موجودی، بازپرداخت
-    شارژ اضطراری محسوب نمی‌شود) و صرفاً مبلغ داده‌شده را از موجودی کم می‌کند؛ موجودی می‌تواند
-    منفی هم بشود (تشخیص با خودِ ادمین است، مثلاً برای ثبت بدهی)."""
-    with db_conn() as conn:
-        conn.execute("UPDATE agents SET balance = balance - ? WHERE id=?", (amount, aid))
+def _db_admin_deduct_agent(aid, amount, source_key):
+    """کاهش دستی کیف‌پول و ثبت اتمیک رویداد مالی؛ کلید منبع از پیام تایید می‌آید."""
+    if amount <= 0 or not source_key:
+        return False
+    try:
+        with db_conn() as conn:
+            updated = conn.execute(
+                "UPDATE agents SET balance = balance - ? WHERE id=?", (amount, aid)
+            ).rowcount
+            if updated != 1:
+                return False
+            inserted = nvl_daily_business.record_event(
+                conn, kind="MANUAL_DEDUCT", agent_id=aid, amount=amount,
+                source_key=source_key,
+            )
+            if not inserted:
+                raise sqlite3.IntegrityError("DUPLICATE_MANUAL_DEDUCT")
+    except sqlite3.IntegrityError as exc:
+        if str(exc) == "DUPLICATE_MANUAL_DEDUCT":
+            return False
+        raise
+    return True
 def _apply_emergency_repayment(conn, aid, topup_amount):
     """با هر شارژ واقعی (دستی توسط ادمین یا تاییدِ رسید)، تا سقفِ همان مبلغِ واریزی از emergency_used
     کسر می‌شود و emergency_request_count صفر می‌گردد. باید با کانکشن دیتابیسِ باز فراخوانی شود."""
@@ -5665,14 +5679,30 @@ def _db_distribute_commission(aid, retail_amount):
             return
         p2, pct2 = ag2
         share2 = float(retail_amount * Decimal(str(pct2)) / Decimal("100"))
-        conn.execute("UPDATE agents SET withdrawable_balance = withdrawable_balance + ?, referral_income = referral_income + ? WHERE id=?",
-                     (share2, share2, p1))
+        if share2 > 0:
+            updated = conn.execute(
+                "UPDATE agents SET withdrawable_balance = withdrawable_balance + ?, referral_income = referral_income + ? WHERE id=?",
+                (share2, share2, p1),
+            ).rowcount
+            if updated != 1:
+                raise ValueError("REFERRAL_PARENT_NOT_FOUND")
+            nvl_daily_business.record_event(
+                conn, kind="REFERRAL_COMMISSION", agent_id=p1, amount=share2,
+            )
         if p2:
             ag3 = conn.execute("SELECT l3_pct FROM agents WHERE id=?", (p2,)).fetchone()
             if ag3:
                 share3 = float(retail_amount * Decimal(str(ag3[0])) / Decimal("100"))
-                conn.execute("UPDATE agents SET withdrawable_balance = withdrawable_balance + ?, referral_income = referral_income + ? WHERE id=?",
-                             (share3, share3, p2))
+                if share3 > 0:
+                    updated = conn.execute(
+                        "UPDATE agents SET withdrawable_balance = withdrawable_balance + ?, referral_income = referral_income + ? WHERE id=?",
+                        (share3, share3, p2),
+                    ).rowcount
+                    if updated != 1:
+                        raise ValueError("REFERRAL_GRANDPARENT_NOT_FOUND")
+                    nvl_daily_business.record_event(
+                        conn, kind="REFERRAL_COMMISSION", agent_id=p2, amount=share3,
+                    )
 
 # ==========================================
 # 🎁 کش‌بک ترغیبی نمایندگان پرفروش: اگر نمایندهٔ خریدار، از قبل (پیش از همین خرید) ۵۰ اکانت
@@ -5706,36 +5736,80 @@ async def _apply_agent_cashback_if_eligible(aid: int, retail_amount):
     if cashback <= 0:
         return 0.0
     with db_conn() as conn:
-        conn.execute("UPDATE agents SET withdrawable_balance = withdrawable_balance + ?, cashback_income = cashback_income + ? WHERE id=?",
-                     (cashback, cashback, aid))
+        updated = conn.execute(
+            "UPDATE agents SET withdrawable_balance = withdrawable_balance + ?, cashback_income = cashback_income + ? WHERE id=?",
+            (cashback, cashback, aid),
+        ).rowcount
+        if updated != 1:
+            return 0.0
+        nvl_daily_business.record_event(
+            conn, kind="AGENT_CASHBACK", agent_id=aid, amount=cashback,
+        )
     log.info("کش‌بک %s تومان به نمایندهٔ %s تعلق گرفت (کل فروش تابه‌حال: %s).", cashback, aid, lifetime_sold)
     return cashback
 
 # ==========================================
 # 💵 مدیریت استخر «قابل‌برداشت» (پورسانت شبکه + کش‌بک) — انتقال به کیف‌پول یا درخواست برداشت نقدی
 # ==========================================
-def _db_move_withdrawable_to_wallet(aid: int, amount: float) -> bool:
-    """مبلغ داده‌شده را از withdrawable_balance کم و به balance (قابل‌خرج) اضافه می‌کند.
-    اگر مبلغ بیشتر از موجودی استخر باشد، هیچ تغییری اعمال نمی‌شود و False برمی‌گردد."""
-    with db_conn() as conn:
-        row = conn.execute("SELECT withdrawable_balance FROM agents WHERE id=?", (aid,)).fetchone()
-        if not row or row[0] < amount:
+def _db_move_withdrawable_to_wallet(aid: int, amount: float, source_key: str) -> bool:
+    """انتقال اتمیک از استخر قابل‌برداشت به کیف‌پول؛ انتقال تکراری دوباره اعمال نمی‌شود."""
+    if amount <= 0 or not source_key:
+        return False
+    try:
+        with db_conn() as conn:
+            updated = conn.execute(
+                "UPDATE agents SET withdrawable_balance = withdrawable_balance - ?, "
+                "balance = balance + ? WHERE id=? AND withdrawable_balance >= ?",
+                (amount, amount, aid, amount),
+            ).rowcount
+            if updated != 1:
+                return False
+            inserted = nvl_daily_business.record_event(
+                conn, kind="WITHDRAWABLE_TRANSFER", agent_id=aid,
+                amount=amount, source_key=source_key,
+            )
+            if not inserted:
+                raise sqlite3.IntegrityError("DUPLICATE_WITHDRAWABLE_TRANSFER")
+    except sqlite3.IntegrityError as exc:
+        if str(exc) == "DUPLICATE_WITHDRAWABLE_TRANSFER":
             return False
-        conn.execute("UPDATE agents SET withdrawable_balance = withdrawable_balance - ?, balance = balance + ? WHERE id=?", (amount, amount, aid))
-        return True
+        raise
+    return True
 
-def _db_create_withdrawal_request(aid: int, amount: float, card_number: str, full_name: str):
-    """ثبت درخواست برداشت نقدی و رزرو (کسر) همان لحظهٔ مبلغ از withdrawable_balance تا دوبار
-    قابل برداشت/انتقال نباشد. اگر موجودی استخر کافی نباشد، None برمی‌گرداند."""
-    with db_conn() as conn:
-        row = conn.execute("SELECT withdrawable_balance FROM agents WHERE id=?", (aid,)).fetchone()
-        if not row or row[0] < amount:
+def _db_create_withdrawal_request(
+    aid: int, amount: float, card_number: str, full_name: str, source_key: str,
+):
+    """رزرو اتمیک موجودی و ثبت درخواست برداشت؛ درخواست تکراری دوباره رزرو نمی‌شود."""
+    if amount <= 0 or not source_key:
+        return None
+    try:
+        with db_conn() as conn:
+            updated = conn.execute(
+                "UPDATE agents SET withdrawable_balance = withdrawable_balance - ? "
+                "WHERE id=? AND withdrawable_balance >= ?",
+                (amount, aid, amount),
+            ).rowcount
+            if updated != 1:
+                return None
+            inserted = nvl_daily_business.record_event(
+                conn, kind="WITHDRAWAL_REQUEST", agent_id=aid,
+                amount=amount, source_key=source_key,
+            )
+            if not inserted:
+                raise sqlite3.IntegrityError("DUPLICATE_WITHDRAWAL_REQUEST")
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO withdrawal_requests "
+                "(agent_id, amount, card_number, full_name, status, created_at) "
+                "VALUES (?, ?, ?, ?, 'pending', ?)",
+                (aid, amount, card_number, full_name,
+                 datetime.now().strftime("%Y-%m-%d %H:%M")),
+            )
+            return cur.lastrowid
+    except sqlite3.IntegrityError as exc:
+        if str(exc) == "DUPLICATE_WITHDRAWAL_REQUEST":
             return None
-        conn.execute("UPDATE agents SET withdrawable_balance = withdrawable_balance - ? WHERE id=?", (amount, aid))
-        cur = conn.cursor()
-        cur.execute("INSERT INTO withdrawal_requests (agent_id, amount, card_number, full_name, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
-                    (aid, amount, card_number, full_name, datetime.now().strftime("%Y-%m-%d %H:%M")))
-        return cur.lastrowid
+        raise
 
 def _db_get_withdrawal_request(req_id: int):
     with db_conn() as conn:
@@ -5745,19 +5819,68 @@ def _db_get_agent_pending_withdrawals(aid: int):
     with db_conn() as conn:
         return conn.execute("SELECT id, amount, card_number, full_name, created_at FROM withdrawal_requests WHERE agent_id=? AND status='pending' ORDER BY id", (aid,)).fetchall()
 
-def _db_mark_withdrawal_done(req_id: int):
-    with db_conn() as conn:
-        conn.execute("UPDATE withdrawal_requests SET status='done', done_at=? WHERE id=?", (datetime.now().strftime("%Y-%m-%d %H:%M"), req_id))
+def _db_mark_withdrawal_done(req_id: int) -> bool:
+    """یک درخواست pending را فقط یک‌بار به done منتقل و پرداخت را ثبت می‌کند."""
+    try:
+        with db_conn() as conn:
+            row = conn.execute(
+                "SELECT agent_id, amount FROM withdrawal_requests "
+                "WHERE id=? AND status='pending'", (req_id,),
+            ).fetchone()
+            if not row:
+                return False
+            updated = conn.execute(
+                "UPDATE withdrawal_requests SET status='done', done_at=? "
+                "WHERE id=? AND status='pending'",
+                (datetime.now().strftime("%Y-%m-%d %H:%M"), req_id),
+            ).rowcount
+            if updated != 1:
+                return False
+            inserted = nvl_daily_business.record_event(
+                conn, kind="WITHDRAWAL_PAID", agent_id=row[0], amount=row[1],
+                source_key=f"withdrawal-paid:{req_id}",
+            )
+            if not inserted:
+                raise sqlite3.IntegrityError("DUPLICATE_WITHDRAWAL_PAID")
+    except sqlite3.IntegrityError as exc:
+        if str(exc) == "DUPLICATE_WITHDRAWAL_PAID":
+            return False
+        raise
+    return True
 
 def _db_cancel_withdrawal_request(req_id: int):
-    """لغو یک درخواست برداشتِ در انتظار و بازگرداندن مبلغ رزروشده به withdrawable_balance."""
-    with db_conn() as conn:
-        row = conn.execute("SELECT agent_id, amount, status FROM withdrawal_requests WHERE id=?", (req_id,)).fetchone()
-        if not row or row[2] != 'pending':
+    """لغو اتمیک درخواست pending و بازگرداندن رزرو فقط یک‌بار."""
+    try:
+        with db_conn() as conn:
+            row = conn.execute(
+                "SELECT agent_id, amount FROM withdrawal_requests "
+                "WHERE id=? AND status='pending'", (req_id,),
+            ).fetchone()
+            if not row:
+                return False
+            updated = conn.execute(
+                "UPDATE withdrawal_requests SET status='cancelled' "
+                "WHERE id=? AND status='pending'", (req_id,),
+            ).rowcount
+            if updated != 1:
+                return False
+            restored = conn.execute(
+                "UPDATE agents SET withdrawable_balance = withdrawable_balance + ? "
+                "WHERE id=?", (row[1], row[0]),
+            ).rowcount
+            if restored != 1:
+                raise ValueError("WITHDRAWAL_AGENT_NOT_FOUND")
+            inserted = nvl_daily_business.record_event(
+                conn, kind="WITHDRAWAL_CANCELLED", agent_id=row[0], amount=row[1],
+                source_key=f"withdrawal-cancelled:{req_id}",
+            )
+            if not inserted:
+                raise sqlite3.IntegrityError("DUPLICATE_WITHDRAWAL_CANCELLED")
+    except sqlite3.IntegrityError as exc:
+        if str(exc) == "DUPLICATE_WITHDRAWAL_CANCELLED":
             return False
-        conn.execute("UPDATE agents SET withdrawable_balance = withdrawable_balance + ? WHERE id=?", (row[1], row[0]))
-        conn.execute("UPDATE withdrawal_requests SET status='cancelled' WHERE id=?", (req_id,))
-        return True
+        raise
+    return True
 
 
 
@@ -14062,6 +14185,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # ⚠️ قبل از اعمال واقعی، تاییدیهٔ بله/خیر گرفته می‌شود تا کاهش اشتباهی/تایپی روی یک
         # حساب واقعی اعمال نشود؛ اگر مبلغ از موجودی فعلی بیشتر باشد، هشدار اضافه نمایش داده می‌شود.
         context.user_data['pending_deduct_amount'] = amount
+        context.user_data['pending_deduct_source_key'] = (
+            f"manual-deduct:{update.effective_chat.id}:"
+            f"{update.effective_message.message_id}"
+        )
         context.user_data['state'] = 'AGENT_MANUAL_DEDUCT_CONFIRM'
         kb = [[InlineKeyboardButton("✅ بله، کم شود", callback_data="deductconf_yes"), InlineKeyboardButton("↩️ خیر، انصراف", callback_data="deductconf_no")]]
         warn = ""
@@ -14866,7 +14993,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         withdrawable = info[14] if info and len(info) > 14 and info[14] is not None else 0.0
         if amount > withdrawable:
             await update.message.reply_text(f"❌ مبلغ از موجودی استخر ({int(withdrawable):,} تومان) بیشتر است. عدد کوچک‌تری بفرستید:"); return
-        ok = await asyncio.to_thread(_db_move_withdrawable_to_wallet, role_agent_id, amount)
+        source_key = (
+            f"withdrawable-transfer:{update.effective_chat.id}:"
+            f"{update.effective_message.message_id}"
+        )
+        ok = await asyncio.to_thread(
+            _db_move_withdrawable_to_wallet, role_agent_id, amount, source_key,
+        )
         safe_clear_context(context)
         if ok:
             await update.message.reply_text(f"✅ مبلغ {int(amount):,} تومان به کیف‌پول قابل‌خرج شما منتقل شد.")
@@ -14899,6 +15032,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['wd_full_name'] = full_name
         amount = context.user_data.get('wd_amount'); card = context.user_data.get('wd_card')
         context.user_data['pending_wd_amount'] = amount
+        context.user_data['pending_wd_source_key'] = (
+            f"withdrawal-request:{update.effective_chat.id}:"
+            f"{update.effective_message.message_id}"
+        )
         context.user_data['state'] = 'WD_CONFIRM'
         kb = [[InlineKeyboardButton("✅ بله، ثبت شود", callback_data="wdconf_yes"), InlineKeyboardButton("↩️ خیر، انصراف", callback_data="wdconf_no")]]
         await update.message.reply_text(
@@ -15070,12 +15207,16 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     caption=f"🧾 <b>رسید واریز درخواست برداشت شما</b>\n\n💰 مبلغ واریزشده: {int(amount):,} تومان\n👤 نام: {esc(full_name)}\n💳 کارت: <code>{esc(card)}</code>\n\n✅ این درخواست تکمیل شد.",
                     parse_mode="HTML")
                 sent_ok = True
-        await asyncio.to_thread(_db_mark_withdrawal_done, req_id)
+        marked_done = await asyncio.to_thread(_db_mark_withdrawal_done, req_id)
         safe_clear_context(context)
-        if sent_ok:
+        if sent_ok and marked_done:
             await update.message.reply_text(f"✅ رسید برای «{esc(agent_info[0]) if agent_info else a_id}» ارسال شد و درخواست #{req_id} تکمیل‌شده علامت خورد.", parse_mode="HTML")
-        else:
+        elif sent_ok:
+            await update.message.reply_text(f"⚠️ رسید ارسال شد، اما وضعیت درخواست #{req_id} هم‌زمان تغییر کرده است؛ دوباره آن را پردازش نکنید.")
+        elif marked_done:
             await update.message.reply_text(f"⚠️ نماینده هنوز از طریق ربات وارد نشده (chat_id ندارد)؛ رسید ارسال نشد اما درخواست #{req_id} تکمیل‌شده علامت خورد.")
+        else:
+            await update.message.reply_text(f"⚠️ درخواست #{req_id} هم‌زمان پردازش شده یا دیگر در انتظار نیست.")
 
 # ==========================================
 # 🔘 هندلر جامع کالبک‌های شیشه‌ای (Callback)
@@ -24120,7 +24261,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         withdrawable = info[14] if info and len(info) > 14 and info[14] is not None else 0.0
         if withdrawable <= 0:
             await query.message.reply_text("موجودی استخر قابل‌برداشت صفر است."); return
-        ok = await asyncio.to_thread(_db_move_withdrawable_to_wallet, ag_id, withdrawable)
+        source_key = f"withdrawable-transfer:{ag_id}:{query.message.message_id}"
+        ok = await asyncio.to_thread(
+            _db_move_withdrawable_to_wallet, ag_id, withdrawable, source_key,
+        )
         safe_clear_context(context)
         if ok:
             await query.edit_message_text(f"✅ مبلغ {int(withdrawable):,} تومان به کیف‌پول قابل‌خرج شما منتقل شد.")
@@ -24253,15 +24397,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         a_id_local = context.user_data.get('agent_id', ag_id); amount = context.user_data.get('pending_wd_amount', 0)
         card = context.user_data.get('wd_card'); full_name = context.user_data.get('wd_full_name')
         # انصراف قبل از ثبت نهایی؛ چون هنوز چیزی از استخر کسر نشده، فقط context پاک می‌شود
-        for k in ('wd_amount', 'pending_wd_amount', 'wd_card', 'wd_full_name'): context.user_data.pop(k, None)
+        for k in ('wd_amount', 'pending_wd_amount', 'wd_card', 'wd_full_name', 'pending_wd_source_key'): context.user_data.pop(k, None)
         context.user_data['state'] = None
         await query.edit_message_text("✅ انصراف داده شد؛ درخواست برداشتی ثبت نشد.")
     elif d == "wdconf_yes" and role == 'agent':
-        amount = context.user_data.get('pending_wd_amount'); card = context.user_data.get('wd_card'); full_name = context.user_data.get('wd_full_name')
-        if not amount or not card or not full_name:
+        amount = context.user_data.get('pending_wd_amount')
+        card = context.user_data.get('wd_card')
+        full_name = context.user_data.get('wd_full_name')
+        source_key = context.user_data.get('pending_wd_source_key')
+        if not amount or not card or not full_name or not source_key:
             await query.edit_message_text("❌ اطلاعات درخواست ناقص است؛ دوباره تلاش کنید."); safe_clear_context(context); return
-        req_id = await asyncio.to_thread(_db_create_withdrawal_request, ag_id, amount, card, full_name)
-        for k in ('wd_amount', 'pending_wd_amount', 'wd_card', 'wd_full_name'): context.user_data.pop(k, None)
+        req_id = await asyncio.to_thread(
+            _db_create_withdrawal_request, ag_id, amount, card, full_name, source_key,
+        )
+        for k in ('wd_amount', 'pending_wd_amount', 'wd_card', 'wd_full_name', 'pending_wd_source_key'): context.user_data.pop(k, None)
         context.user_data['state'] = None
         if req_id is None:
             await query.edit_message_text("❌ موجودی استخر شما تغییر کرده؛ لطفاً دوباره تلاش کنید."); return
@@ -25339,13 +25488,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ➖ تاییدیهٔ نهایی کاهش شارژ کیف‌پول یک نماینده از پنل ادمین (برای اصلاح شارژهای اشتباهی)
     elif d == "deductconf_yes":
-        a_id = context.user_data.get('deduct_ag_id'); amount = context.user_data.get('pending_deduct_amount')
-        if not a_id or not amount:
+        a_id = context.user_data.get('deduct_ag_id')
+        amount = context.user_data.get('pending_deduct_amount')
+        source_key = context.user_data.get('pending_deduct_source_key')
+        if not a_id or not amount or not source_key:
             await query.edit_message_text("❌ تراکنش منقضی شده است."); safe_clear_context(context); return
         info = await asyncio.to_thread(_db_get_agent_info, a_id)
         if not info:
             await query.edit_message_text("❌ این نماینده دیگر وجود ندارد."); safe_clear_context(context); return
-        await asyncio.to_thread(_db_admin_deduct_agent, a_id, amount)
+        applied = await asyncio.to_thread(
+            _db_admin_deduct_agent, a_id, amount, source_key,
+        )
+        if not applied:
+            await query.edit_message_text("❌ این عملیات قبلاً ثبت شده یا موجودی نماینده تغییر کرده است.")
+            safe_clear_context(context)
+            return
         new_balance = info[2] - amount
         await query.edit_message_text(f"✅ مبلغ {int(amount):,} تومان از کیف‌پول «{esc(info[0])}» کم شد.\n💰 موجودی جدید: {int(new_balance):,} تومان")
         if info[8]:  # telegram_id نماینده — در صورت وجود، به او هم اطلاع داده می‌شود

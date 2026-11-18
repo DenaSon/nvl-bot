@@ -15197,11 +15197,6 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ این درخواست دیگر معتبر نیست (شاید قبلاً پردازش یا لغو شده)."); safe_clear_context(context); return
         _, a_id, amount, card, full_name, status, created_at = req
         agent_info = await asyncio.to_thread(_db_get_agent_info, a_id)
-        marked_done = await asyncio.to_thread(_db_mark_withdrawal_done, req_id)
-        if not marked_done:
-            await update.message.reply_text("❌ این درخواست هم‌زمان پردازش شده یا دیگر در انتظار نیست.")
-            safe_clear_context(context)
-            return
         agent_chat_id = agent_info[8] if agent_info and len(agent_info) > 8 else None
         photo_id = update.message.photo[-1].file_id
         sent_ok = False
@@ -15212,11 +15207,16 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     caption=f"🧾 <b>رسید واریز درخواست برداشت شما</b>\n\n💰 مبلغ واریزشده: {int(amount):,} تومان\n👤 نام: {esc(full_name)}\n💳 کارت: <code>{esc(card)}</code>\n\n✅ این درخواست تکمیل شد.",
                     parse_mode="HTML")
                 sent_ok = True
+        marked_done = await asyncio.to_thread(_db_mark_withdrawal_done, req_id)
         safe_clear_context(context)
-        if sent_ok:
+        if sent_ok and marked_done:
             await update.message.reply_text(f"✅ رسید برای «{esc(agent_info[0]) if agent_info else a_id}» ارسال شد و درخواست #{req_id} تکمیل‌شده علامت خورد.", parse_mode="HTML")
-        else:
+        elif sent_ok:
+            await update.message.reply_text(f"⚠️ رسید ارسال شد، اما وضعیت درخواست #{req_id} هم‌زمان تغییر کرده است؛ دوباره آن را پردازش نکنید.")
+        elif marked_done:
             await update.message.reply_text(f"⚠️ نماینده هنوز از طریق ربات وارد نشده (chat_id ندارد)؛ رسید ارسال نشد اما درخواست #{req_id} تکمیل‌شده علامت خورد.")
+        else:
+            await update.message.reply_text(f"⚠️ درخواست #{req_id} هم‌زمان پردازش شده یا دیگر در انتظار نیست.")
 
 # ==========================================
 # 🔘 هندلر جامع کالبک‌های شیشه‌ای (Callback)

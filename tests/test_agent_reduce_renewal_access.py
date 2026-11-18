@@ -44,6 +44,15 @@ class AgentReduceRenewalTests(unittest.TestCase):
         )[0]
         self.assertIn("_can_manage_user(role, ag_id, cur[5])", commit)
 
+    def test_v2_time_callbacks_reject_volumetric_services(self):
+        handler = self.source.split("async def callback_handler(", 1)[1]
+        for marker in ('elif d.startswith("v2act_rn_"):', 'elif d.startswith("v2act_rd_")',
+                       'elif d in ("v2rnyes", "v2rn_emergency_yes"):'):
+            with self.subTest(marker=marker):
+                region = handler.split(marker, 1)[1].split("elif ", 1)[0]
+                self.assertIn("_db_get_user_service_type", region)
+                self.assertIn("_can_manage_user(role, ag_id, cur[5])", region)
+
     def test_both_reduce_paths_keep_no_past_expiry_and_refund(self):
         self.assertIn("if mode == 'reduce' and new_exp_dt <= datetime.now():", self.source)
         self.assertIn("nvl_daily_business.refund_purchase(conn, ag_id, cost)", self.source)

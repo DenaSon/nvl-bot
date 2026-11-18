@@ -7632,6 +7632,7 @@ _manual_edge = ManualEdgeWizard(
     # No Cloudzy API, HTTPS WebApp or new opt-in flag for native manual path.
     enabled=lambda: True,
     guard=_cloudzy_04a_guard,
+    shared_superadmin=lambda actor, chat: is_private_superadmin(DB_PATH,actor,chat,"private"),
     is_core_host=_manual_edge_is_core_ip,
     os_check=_manual_edge_verify_ubuntu,
     awg_preflight=_manual_awg_preflight,

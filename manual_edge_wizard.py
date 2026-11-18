@@ -303,7 +303,7 @@ class ManualEdgeWizard:
             listing,actor,chat,limit=8,offset=page*7,backend=backend_filter)
         if not items and page==0:
             return await self._view(query,
-                "🖥 <b>مدیریت Edge</b>\\n\\n"
+                "🖥 <b>مدیریت Edge</b>\n\n"
                 "برای راه‌اندازی یک سرور جدید، گزینه افزودن Edge را انتخاب کنید.",
                 self._new_edge_buttons()+
                 [[("↩️ مدیریت سرورها","apps_cz_home")]])
@@ -352,7 +352,7 @@ class ManualEdgeWizard:
         if not owned:
             return await self._view(
                 query,self._summary(op)+
-                "وضعیت: <b>"+escape(self._visible_status(op["status"],role))+"</b>\\n"
+                "وضعیت: <b>"+escape(self._visible_status(op["status"],role))+"</b>\n"
                 "🔐 این پرونده متعلق به مدیر دیگری است؛ فعلاً فقط مشاهده مجاز است.",
                 [[("↩️ همه سرورها","apps_edge_manual_home")],
                  [("↩️ مدیریت سرورها","apps_cz_home")]],

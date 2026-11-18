@@ -148,16 +148,23 @@ def _registered_binding(host, db=DB):
         binding = lookup_binding(con, host)
         if binding is None or binding.backend != "amneziawg" or binding.interface != "awg0":
             raise LimiterWitnessHold("AWG_TARGET_BINDING_NOT_VERIFIED")
-        row = con.execute(
+        # CANCELLED/archived rows are retained as audit history. They must
+        # never shadow the one operation that currently owns this Edge.
+        # Match operation status to host_pool's live role as a second fence;
+        # if more than one row still claims that role, remain fail-closed.
+        rows = con.execute(
             "SELECT m.status,h.active,h.is_default,h.is_standby "
             "FROM manual_edge_operations m JOIN host_pool h ON h.host=m.ip "
-            "WHERE m.ip=? AND m.tunnel_backend='amneziawg'", (host,)
+            "WHERE m.ip=? AND m.tunnel_backend='amneziawg' "
+            "AND m.archived_at IS NULL "
+            "AND m.status IN ('STANDBY','ROUTING','ACTIVE')", (host,)
         ).fetchall()
-        if len(row) != 1 or row[0] not in (
-                ("STANDBY", 1, 0, 1),
-                ("ROUTING", 1, 0, 1),
-                ("ACTIVE", 1, 1, 0),
-        ):
+        current_rows = [item for item in rows if item in (
+            ("STANDBY", 1, 0, 1),
+            ("ROUTING", 1, 0, 1),
+            ("ACTIVE", 1, 1, 0),
+        )]
+        if len(current_rows) != 1:
             raise LimiterWitnessHold("AWG_TARGET_NOT_IN_MANAGED_LIFECYCLE")
         return binding
     finally:

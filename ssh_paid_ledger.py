@@ -253,6 +253,41 @@ def create_paid_purchase(conn, *, username, agent, amount,
     return cost
 
 
+
+
+def quote_time_reduction(conn, *, username, agent, created, expiry, users,
+                         new_expiry, today=None):
+    """Read-only, paid-price value of DAYS being removed; fail closed on legacy."""
+    now = _day(today) if today is not None else date.today()
+    old_end, new_end = _day(expiry), _day(new_expiry)
+    if not now < new_end < old_end:
+        raise SSHFinanceHold("INVALID_PAID_REDUCTION")
+    prior = _paid_quote(
+        conn, username, agent, created, expiry, users, today=now,
+    )
+    if not _exists(conn, "ssh_paid_events"):
+        raise SSHFinanceHold("PAID_EVENTS_MISSING")
+    lots = conn.execute(
+        "SELECT amount_toman,period_from,period_to FROM ssh_paid_events "
+        "WHERE username=? AND agent_id=? "
+        "AND kind IN('PURCHASE','EXTEND','SEAT_INCREASE')",
+        (username, agent),
+    ).fetchall()
+    removed = Decimal("0")
+    for money, started, ended in lots:
+        begin, finish = _day(started), _day(ended)
+        total = (finish-begin).days
+        if total <= 0:
+            raise SSHFinanceHold("INVALID_PAID_INTERVAL")
+        start = max(begin, now, new_end)
+        stop = min(finish, old_end)
+        if stop > start:
+            removed += _amount(money) * Decimal((stop-start).days) / Decimal(total)
+    return int(min(
+        removed.quantize(Decimal("1"), rounding=ROUND_HALF_UP),
+        Decimal(prior.amount),
+    ))
+
 def apply_paid_change(conn, *, username, agent, expected_created,
                       expected_expiry, expected_users, expected_status,
                       new_expiry, new_users, kind, amount=0, today=None,
@@ -307,31 +342,11 @@ def apply_paid_change(conn, *, username, agent, expected_created,
             raise SSHFinanceHold("HISTORICAL_PAYMENT_UNVERIFIED")
         if new_users != expected_users or _day(new_expiry) >= _day(expected_expiry):
             raise SSHFinanceHold("INVALID_PAID_REDUCTION")
-        old_quote = _paid_quote(conn, username, agent, expected_created,
-                                expected_expiry, expected_users, today=now)
-        # Partial interval removal is valued using the ACTUAL amount paid,
-        # never the new agent tariff.
-        # Compute the interval that is no longer entitled without changing
-        # the durable snapshot until the transaction commits.
-        old_lots = conn.execute(
-            "SELECT amount_toman,period_from,period_to FROM ssh_paid_events "
-            "WHERE username=? AND kind IN('PURCHASE','EXTEND','SEAT_INCREASE')",
-            (username,),
-        ).fetchall()
-        cut = Decimal("0")
-        for raw, start_text, stop_text in old_lots:
-            start, stop = _day(start_text), _day(stop_text)
-            length = (stop-start).days
-            if length <= 0:
-                raise SSHFinanceHold("INVALID_PAID_INTERVAL")
-            a = max(start, now, _day(new_expiry))
-            b = min(stop, _day(expected_expiry))
-            if b > a:
-                cut += _amount(raw) * Decimal((b-a).days) / Decimal(length)
-        refunded = min(
-            cut.quantize(Decimal("1"), rounding=ROUND_HALF_UP),
-            Decimal(old_quote.amount),
-        )
+        refunded = Decimal(quote_time_reduction(
+            conn, username=username, agent=agent, created=expected_created,
+            expiry=expected_expiry, users=expected_users,
+            new_expiry=new_expiry, today=now,
+        ))
         if refunded < 0:
             raise SSHFinanceHold("NEGATIVE_REFUND")
         if refunded > 0:

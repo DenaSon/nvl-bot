@@ -7,7 +7,7 @@ import unittest
 import nvl_daily_business
 from ssh_paid_ledger import (
     SSHFinanceHold, apply_paid_change, create_paid_purchase,
-    preview_delete, install_schema,
+    preview_delete, quote_time_reduction, install_schema,
 )
 
 TODAY = date(2026, 11, 18)
@@ -112,6 +112,25 @@ class PaidSSHJournalTests(unittest.TestCase):
         self.assertEqual(self.db.execute(
             "SELECT kind,amount_toman FROM ssh_paid_events ORDER BY id DESC LIMIT 1"
         ).fetchone(),("EXTEND","30000"))
+
+    def test_time_reduction_quote_is_read_only_and_not_current_tariff(self):
+        self.buy()
+        self.change(kind="EXTEND")
+        before = list(self.db.iterdump())
+        result = quote_time_reduction(
+            self.db, username="sample", agent=7, created="2026-11-01",
+            expiry="2026-12-31", users=2,
+            new_expiry="2026-12-21", today=TODAY,
+        )
+        self.assertEqual(result,10000)
+        self.assertEqual(before,list(self.db.iterdump()))
+        self.db.execute("UPDATE agents SET base_price='1000000'")
+        self.db.commit()
+        self.assertEqual(quote_time_reduction(
+            self.db, username="sample", agent=7, created="2026-11-01",
+            expiry="2026-12-31", users=2,
+            new_expiry="2026-12-21", today=TODAY,
+        ),10000)
 
     def test_time_reduction_refunds_only_removed_paid_entitlement(self):
         self.buy()

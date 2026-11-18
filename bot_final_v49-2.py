@@ -7734,7 +7734,8 @@ _manual_quick_engine = ManualQuickSwitch(
     guard=_cloudzy_04b_guard,
 )
 _manual_quick_ui = ManualQuickSwitchUI(
-    engine=_manual_quick_engine, db=db_conn, admin_ids=_db_get_admin_chat_ids,
+    engine=_manual_quick_engine, db=db_conn,
+    admin_ids=lambda: active_superadmin_ids(DB_PATH),
 )
 
 # Phase 7 is opt-in and strictly a read-only Rich admin view. No effectful

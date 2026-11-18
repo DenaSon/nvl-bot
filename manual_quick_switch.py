@@ -149,6 +149,72 @@ class ManualQuickSwitch:
             (job, status, code, int(self.now())),
         )
 
+    def operator_allowed(self, rec, actor, *, db=None):
+        """Preserve exact legacy-owner recovery; verify new cross-owner admins.
+
+        Historical operations can store opaque actor strings such as
+        "telegram:7". Those legacy engine calls must remain functional,
+        but they confer no cross-owner rights. Only a *typed* Telegram int
+        can act on a different operator's record, after a DB role check.
+        """
+        from nvl_superadmin_access import is_revoked_principal
+        if not rec or type(actor) not in (int, str):
+            return False
+        original = str(rec.get("actor") or "")
+        candidate = str(actor)
+        if not candidate or not candidate.strip():
+            return False
+        if type(actor) is int:
+            if actor <= 0 or is_revoked_principal(actor):
+                return False
+        else:
+            # Deny the revoked principal even when represented by a legacy
+            # numeric or telegram:-prefixed actor string.
+            raw = candidate.removeprefix("telegram:")
+            if raw.isascii() and raw.isdigit():
+                if int(raw) <= 0 or is_revoked_principal(int(raw)):
+                    return False
+        if original == candidate:
+            return True
+
+        # A caller-provided legacy string is never an authorization token.
+        if type(actor) is not int:
+            return False
+        try:
+            def admitted(conn):
+                return bool(conn.execute(
+                    "SELECT 1 FROM bot_access WHERE telegram_id=? "
+                    "AND role='super_admin' AND active=1 LIMIT 1",
+                    (actor,),
+                ).fetchone())
+            if db is not None:
+                return admitted(db)
+            with self.db() as conn:
+                return admitted(conn)
+        except sqlite3.Error:
+            return False
+
+    def _audit_other_operator(self, rec, actor, action):
+        """Persist the current executor separately; never overwrite rec.actor."""
+        if rec["actor"] == str(actor):
+            return
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not self.operator_allowed(rec, actor, db=db):
+                raise QuickSwitchHold("OPERATOR_OR_JOB_MISMATCH")
+            db.execute("""CREATE TABLE IF NOT EXISTS manual_quick_operator_audit(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL, original_actor TEXT NOT NULL,
+                executing_actor TEXT NOT NULL, action TEXT NOT NULL,
+                happened INTEGER NOT NULL
+            )""")
+            db.execute(
+                "INSERT INTO manual_quick_operator_audit "
+                "(job_id,original_actor,executing_actor,action,happened) "
+                "VALUES (?,?,?,?,?)",
+                (rec["id"],rec["actor"],str(actor),action,int(self.now())),
+            )
+
     def _conflicts(self, db, source, target, *, own_lease=None):
         if _has(db, "failover_operations"):
             rows = db.execute(
@@ -390,8 +456,9 @@ class ManualQuickSwitch:
         """
         rec = self.get(job)
         if (not rec or rec["kind"] != "QUICK"
-                or rec["actor"] != str(actor)):
+                or not self.operator_allowed(rec, actor)):
             raise QuickSwitchHold("OPERATOR_OR_JOB_MISMATCH")
+        self._audit_other_operator(rec, actor, "FORCE_ABORT_REQUESTED")
         if rec["status"] == "ABORTED":
             return "ABORTED"
         if rec["status"] not in ("DNS_INTENT", "HOLD"):
@@ -415,7 +482,8 @@ class ManualQuickSwitch:
                 "SELECT kind,status,actor,source,target,lease_id,updated_at "
                 "FROM manual_quick_switch_jobs WHERE id=?", (job,)
             ).fetchone()
-            if not row or row[0] != "QUICK" or row[2] != str(actor):
+            if (not row or row[0] != "QUICK" or row[2] != rec["actor"]
+                    or not self.operator_allowed(rec, actor, db=db)):
                 raise QuickSwitchHold("OPERATOR_OR_JOB_MISMATCH")
             if row[1] == "ABORTED":
                 return "ABORTED"
@@ -459,7 +527,7 @@ class ManualQuickSwitch:
                 "UPDATE manual_quick_switch_jobs SET status='ABORTED',"
                 "error_code='ADMIN_FORCE_ABORT_UNRECONCILED',updated_at=? "
                 "WHERE id=? AND actor=? AND status=? AND updated_at=?",
-                (now, job, str(actor), row[1], row[6]),
+                (now, job, rec["actor"], row[1], row[6]),
             ).rowcount
             if changed != 1:
                 raise QuickSwitchHold("JOURNAL_CHANGED")
@@ -639,7 +707,7 @@ class ManualQuickSwitch:
             # error and no safe Force recovery path.
             rec = self.get(job)
             if (rec and rec["kind"] == "QUICK"
-                    and rec["actor"] == str(actor)
+                    and self.operator_allowed(rec, actor)
                     and rec["status"] in ("DNS_INTENT","HOLD","DB_COMMITTED")):
                 code = (str(exc) if isinstance(exc, QuickSwitchHold)
                         or (type(exc) is RuntimeError and
@@ -654,12 +722,14 @@ class ManualQuickSwitch:
 
     async def _resume_once(self, job, *, actor, retry_dns=False):
         rec = self.get(job)
-        if not rec or rec["kind"] != "QUICK" or rec["actor"] != str(actor):
+        if (not rec or rec["kind"] != "QUICK"
+                or not self.operator_allowed(rec, actor)):
             raise QuickSwitchHold("OPERATOR_OR_JOB_MISMATCH")
         if rec["status"] == "DONE":
             return "DONE"
         if rec["status"] not in ("DNS_INTENT","HOLD","DB_COMMITTED"):
             raise QuickSwitchHold("UNSUPPORTED_RECOVERY_STATE")
+        self._audit_other_operator(rec, actor, "RESUME_WITH_DNS_RETRY" if retry_dns else "RESUME_READ_AND_RECONCILE")
         expected = json.loads(rec["dns_before_json"])
         with self.db() as db:
             self._check_lease(db, rec)
@@ -675,6 +745,8 @@ class ManualQuickSwitch:
                         or plan["count"] != rec["account_count"]):
                     raise QuickSwitchHold("ACCOUNT_SNAPSHOT_CHANGED")
             await self._check(plan)
+            if not self.operator_allowed(rec, actor):
+                raise QuickSwitchHold("OPERATOR_OR_JOB_MISMATCH")
             try:
                 self.dns.set_all(expected,rec["target"])
             except Exception:

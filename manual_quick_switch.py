@@ -152,10 +152,19 @@ class ManualQuickSwitch:
     def operator_allowed(self, rec, actor, *, db=None):
         """Original author remains owner; a second *active* Super Admin may recover."""
         from nvl_superadmin_access import is_revoked_principal
-        if not rec or type(actor) is not int or actor <= 0 or is_revoked_principal(actor):
+        if not rec or is_revoked_principal(actor):
             return False
-        if rec.get("actor") == str(actor):
+        # Legacy internal recovery calls supply the original owner as a
+        # decimal string. Preserve that existing contract; only NEW
+        # cross-owner handoffs require a real positive Telegram integer ID.
+        if rec.get("actor") == str(actor) and (
+            (type(actor) is int and actor > 0)
+            or (type(actor) is str and actor.isascii() and actor.isdigit()
+                and int(actor) > 0)
+        ):
             return True
+        if type(actor) is not int or actor <= 0:
+            return False
         try:
             def admitted(conn):
                 return bool(conn.execute(

@@ -7,7 +7,7 @@ import unittest
 import nvl_daily_business
 from ssh_paid_ledger import (
     SSHFinanceHold, apply_paid_change, create_paid_purchase,
-    preview_delete, quote_time_reduction, install_schema,
+    preview_delete, quote_time_reduction, record_hold_activation, install_schema,
 )
 
 TODAY = date(2026, 11, 18)
@@ -103,6 +103,29 @@ class PaidSSHJournalTests(unittest.TestCase):
         self.assertFalse(self.db.execute(
             "SELECT 1 FROM sqlite_master WHERE name='ssh_paid_accounts'"
         ).fetchone())
+
+    def test_hidden_hold_activation_shifts_original_paid_period(self):
+        self.buy()
+        with self.db:
+            self.db.execute(
+                "UPDATE ssh_accounts SET hold_active=1 WHERE username='sample'"
+            )
+        self.assertEqual(self.quote().amount,30000)
+        with self.db:
+            self.db.execute(
+                "UPDATE ssh_accounts SET expire_date='2026-12-04',hold_active=0 "
+                "WHERE username='sample'"
+            )
+            record_hold_activation(
+                self.db, username="sample",
+                old_expiry="2026-12-01", new_expiry="2026-12-04",
+                started_on=date(2026,11,4),
+            )
+        # 30 paid days shift forward 3; today's quote is 16/30.
+        self.assertEqual(self.quote().amount,16000)
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM ssh_paid_events WHERE kind='HOLD_ACTIVATE'"
+        ).fetchone()[0],1)
 
     def test_extension_has_its_own_paid_interval_and_real_rate(self):
         self.buy()

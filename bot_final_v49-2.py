@@ -124,7 +124,7 @@ from ssh_delete_settlement import (
 )
 from ssh_paid_ledger import (
     create_paid_purchase, apply_paid_change, preview_delete,
-    quote_time_reduction, SSHFinanceHold,
+    quote_time_reduction, record_hold_activation, SSHFinanceHold,
 )
 from cloudzy_rich_transport import RichBotAPI as NVLDailyRichBotAPI
 import secrets
@@ -722,7 +722,7 @@ def _parse_flexible_datetime(s: str) -> datetime:
         return datetime.strptime(s, "%Y-%m-%d")
 
 def activate_on_first_connection(connection: sqlite3.Connection, username: str, connected_at: Optional[datetime] = None, set_linux_expiry: Optional[Callable[[str, str], None]] = None) -> Optional[HoldActivation]:
-    row = connection.execute("SELECT hold_active, hold_deadline, hold_duration_days FROM ssh_accounts WHERE username=?", (username,)).fetchone()
+    row = connection.execute("SELECT hold_active, hold_deadline, hold_duration_days, expire_date FROM ssh_accounts WHERE username=?", (username,)).fetchone()
     if not row or not row[0]: return None
     duration = row[2]; observed = connected_at or datetime.now()
     deadline = _parse_flexible_datetime(row[1])
@@ -730,13 +730,15 @@ def activate_on_first_connection(connection: sqlite3.Connection, username: str, 
     expiry = (started + timedelta(days=duration)).date().strftime("%Y-%m-%d")
     if set_linux_expiry: set_linux_expiry(username, expiry)
     connection.execute("UPDATE ssh_accounts SET expire_date=?, hold_active=0, hold_deadline=NULL, hold_duration_days=NULL, first_connected_at=? WHERE username=?", (expiry, observed.strftime("%Y-%m-%d %H:%M:%S"), username))
+    record_hold_activation(connection, username=username, old_expiry=row[3],
+                           new_expiry=expiry, started_on=started.date())
     return HoldActivation(username, observed.strftime("%Y-%m-%d %H:%M:%S"), expiry, "first_connection")
 
 def activate_expired_holds(connection: sqlite3.Connection, checked_at: Optional[datetime] = None, set_linux_expiry: Optional[Callable[[str, str], None]] = None) -> Iterable[HoldActivation]:
     now = (checked_at or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
-    rows = connection.execute("SELECT username, hold_deadline, hold_duration_days FROM ssh_accounts WHERE hold_active=1 AND hold_deadline <= ?", (now,)).fetchall()
+    rows = connection.execute("SELECT username, hold_deadline, hold_duration_days, expire_date FROM ssh_accounts WHERE hold_active=1 AND hold_deadline <= ?", (now,)).fetchall()
     results = []
-    for un, deadline_s, duration in rows:
+    for un, deadline_s, duration, old_expiry in rows:
         started = _parse_flexible_datetime(deadline_s)
         expiry = (started + timedelta(days=duration)).date().strftime("%Y-%m-%d")
 
@@ -758,6 +760,8 @@ def activate_expired_holds(connection: sqlite3.Connection, checked_at: Optional[
             "hold_deadline=NULL, hold_duration_days=NULL WHERE username=?",
             (expiry, un)
         )
+        record_hold_activation(connection, username=un, old_expiry=old_expiry,
+                               new_expiry=expiry, started_on=started.date())
         results.append(HoldActivation(un, deadline_s, expiry, "hold_deadline"))
     return results
 
@@ -5102,7 +5106,11 @@ def _db_get_hold_accounts():
 def _db_activate_hold_account(un, real_exp_db):
     """پایان دادن به دوران آنهولد: انقضای واقعی‌محاسبه‌شده در دیتابیس ثبت و حالت آنهولد خاموش می‌شود."""
     with db_conn() as conn:
+        previous = conn.execute("SELECT expire_date FROM ssh_accounts WHERE username=?", (un,)).fetchone()
         conn.execute("UPDATE ssh_accounts SET expire_date=?, hold_active=0 WHERE username=?", (real_exp_db, un))
+        if previous:
+            record_hold_activation(conn, username=un, old_expiry=previous[0],
+                                   new_expiry=real_exp_db, started_on=datetime.now().date())
 
 # ==========================================
 # 🔢 شمارندهٔ اختصاصیِ هر پیشوند/برند یوزرنیم

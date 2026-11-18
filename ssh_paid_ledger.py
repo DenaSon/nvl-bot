@@ -7,7 +7,7 @@ must pass through the same SQLite transaction as wallet accounting.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from uuid import uuid4
 
@@ -66,7 +66,7 @@ def install_schema(conn):
         agent_id INTEGER NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN (
             'PURCHASE','EXTEND','SEAT_INCREASE','TIME_REDUCE',
-            'ADMIN_ADJUST','DELETE_REFUND','DELETE_ZERO'
+            'ADMIN_ADJUST','HOLD_ACTIVATE','DELETE_REFUND','DELETE_ZERO'
         )),
         amount_toman TEXT NOT NULL,
         period_from TEXT,
@@ -135,6 +135,59 @@ def _prove(conn, username, agent, created, expiry, users):
     return state
 
 
+
+
+def record_hold_activation(conn, *, username, old_expiry, new_expiry,
+                           started_on):
+    """Capture an existing paid hold's real start/expiry without rewriting history.
+
+    Called inside the same transaction as the existing SSH hold activation.
+    Unknown historical accounts remain unknown. A broken paid snapshot loses
+    automatic refund eligibility rather than fabricating a paid period.
+    """
+    state = _account(conn, username)
+    if state is None:
+        return
+    if state[5]:
+        raise SSHFinanceHold("PAID_ACCOUNT_ALREADY_CLOSED")
+    if state[2] != old_expiry:
+        conn.execute(
+            "UPDATE ssh_paid_accounts SET expected_expiry=?, verified=0 "
+            "WHERE username=?", (new_expiry, username),
+        )
+        _append(conn, username, state[0], "ADMIN_ADJUST", 0,
+                old_expiry=old_expiry, new_expiry=new_expiry)
+        return
+    conn.execute(
+        "UPDATE ssh_paid_accounts SET expected_expiry=? WHERE username=?",
+        (new_expiry, username),
+    )
+    _append(
+        conn, username, state[0],
+        "HOLD_ACTIVATE" if state[4] else "ADMIN_ADJUST", 0,
+        from_day=_day(started_on), to_day=new_expiry,
+        old_expiry=old_expiry, new_expiry=new_expiry,
+        old_users=state[3], new_users=state[3],
+    )
+
+
+def _paid_intervals(entries):
+    """Project immutable paid events through each later hold activation."""
+    lots = []
+    for kind, amount, started, ended, old_end, new_end in entries:
+        if kind in ("PURCHASE", "EXTEND", "SEAT_INCREASE"):
+            if not started or not ended:
+                raise SSHFinanceHold("INVALID_PAID_INTERVAL")
+            lots.append([kind, _amount(amount), _day(started), _day(ended)])
+        elif kind == "HOLD_ACTIVATE":
+            if not old_end or not new_end:
+                raise SSHFinanceHold("INVALID_HOLD_ACTIVATION")
+            shift = (_day(new_end) - _day(old_end)).days
+            for lot in lots:
+                lot[2] += timedelta(days=shift)
+                lot[3] += timedelta(days=shift)
+    return lots
+
 def _paid_quote(conn, username, agent, created, expiry, users, *,
                 today=None, hold=False):
     """Exact unused share of verified debit intervals; no current-tariff guess.
@@ -149,41 +202,39 @@ def _paid_quote(conn, username, agent, created, expiry, users, *,
     if not _exists(conn, "ssh_paid_events"):
         raise SSHFinanceHold("PAID_EVENTS_MISSING")
     entries = conn.execute(
-        "SELECT kind,amount_toman,period_from,period_to "
+        "SELECT kind,amount_toman,period_from,period_to,old_expiry,new_expiry "
         "FROM ssh_paid_events WHERE username=? AND agent_id=? ORDER BY id",
         (username, agent)
     ).fetchall()
-    lots = [row for row in entries if row[0] in
-            ("PURCHASE", "EXTEND", "SEAT_INCREASE")]
+    lots = _paid_intervals(entries)
     if not lots or lots[0][0] != "PURCHASE":
         raise SSHFinanceHold("PAID_PURCHASE_MISSING")
     paid = Decimal("0")
     credited = Decimal("0")
     unearned = Decimal("0")
-    for kind, value, start_text, stop_text in entries:
+    for kind, value, *_ in entries:
         amount = _amount(value)
         if kind in ("PURCHASE", "EXTEND", "SEAT_INCREASE"):
             paid += amount
-            if start_text is None or stop_text is None:
-                raise SSHFinanceHold("INVALID_PAID_INTERVAL")
-            start, stop = _day(start_text), _day(stop_text)
-            length = (stop - start).days
-            if length <= 0:
-                raise SSHFinanceHold("INVALID_PAID_INTERVAL")
-            if hold:
-                # An unused Hidden Hold has not started consuming paid time.
-                days = max(0, (min(stop,end)-start).days)
-            else:
-                days = max(0, (min(stop,end)-max(start,now)).days)
-            unearned += amount * Decimal(days) / Decimal(length)
         elif kind in ("TIME_REDUCE", "DELETE_REFUND"):
             credited += amount
         elif kind == "ADMIN_ADJUST":
             raise SSHFinanceHold("MANUAL_PAID_ACCOUNT_ADJUSTMENT")
+        elif kind in ("HOLD_ACTIVATE",):
+            continue
         elif kind == "DELETE_ZERO":
             raise SSHFinanceHold("ACCOUNT_ALREADY_CLOSED")
         else:
             raise SSHFinanceHold("UNKNOWN_PAID_EVENT")
+    for kind, amount, start, stop in lots:
+        length = (stop - start).days
+        if length <= 0:
+            raise SSHFinanceHold("INVALID_PAID_INTERVAL")
+        if hold:
+            days = max(0, (min(stop,end)-start).days)
+        else:
+            days = max(0, (min(stop,end)-max(start,now)).days)
+        unearned += amount * Decimal(days) / Decimal(length)
     if paid < credited:
         raise SSHFinanceHold("PAID_CREDITS_EXCEED_CHARGES")
     # Every auto-credit must be at most the still-unrefunded paid principal.
@@ -267,22 +318,21 @@ def quote_time_reduction(conn, *, username, agent, created, expiry, users,
     )
     if not _exists(conn, "ssh_paid_events"):
         raise SSHFinanceHold("PAID_EVENTS_MISSING")
-    lots = conn.execute(
-        "SELECT amount_toman,period_from,period_to FROM ssh_paid_events "
-        "WHERE username=? AND agent_id=? "
-        "AND kind IN('PURCHASE','EXTEND','SEAT_INCREASE')",
-        (username, agent),
+    entries = conn.execute(
+        "SELECT kind,amount_toman,period_from,period_to,old_expiry,new_expiry "
+        "FROM ssh_paid_events WHERE username=? AND agent_id=? ORDER BY id",
+        (username,agent),
     ).fetchall()
+    lots = _paid_intervals(entries)
     removed = Decimal("0")
-    for money, started, ended in lots:
-        begin, finish = _day(started), _day(ended)
+    for kind, money, begin, finish in lots:
         total = (finish-begin).days
         if total <= 0:
             raise SSHFinanceHold("INVALID_PAID_INTERVAL")
         start = max(begin, now, new_end)
         stop = min(finish, old_end)
         if stop > start:
-            removed += _amount(money) * Decimal((stop-start).days) / Decimal(total)
+            removed += money * Decimal((stop-start).days) / Decimal(total)
     return int(min(
         removed.quantize(Decimal("1"), rounding=ROUND_HALF_UP),
         Decimal(prior.amount),

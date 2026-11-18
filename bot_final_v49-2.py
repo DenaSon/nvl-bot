@@ -5375,6 +5375,7 @@ async def _calc_account_refund(username: str) -> tuple[float, str]:
             monthly_price=ssh_bp_raw, users_limit=users_limit,
             expire_date=expire_date, creation_date=creation_date,
             hold_active=hold_active, hold_duration_days=hold_duration_days,
+            today=datetime.now(IRAN_TZ).date(),
         )
         if quote.reason.startswith("INVALID_"):
             return 0.0, "اطلاعات قیمت یا مدت این حساب برای بازپرداخت معتبر نیست."
@@ -25045,6 +25046,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         expected_expiry=owner[1], expected_created=owner[2],
                         expected_users=owner[3], expected_status=owner[4],
                         repay_emergency=_apply_emergency_repayment,
+                        today=datetime.now(IRAN_TZ).date(),
                     )
             refund, emergency_repaid, refund_reason, refund_days = (
                 await asyncio.to_thread(_settle_deleted_ssh)

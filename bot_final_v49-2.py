@@ -9106,6 +9106,72 @@ async def _ssh_endpoint_info(acc_host: str | None, conn_mode: str | None):
     return host, port, "🔌 مستقیم"
 
 
+def _ssh_invoice_duration_label(days):
+    """Show exact custom-day extensions; only exact 30-day multiples are months."""
+    if not isinstance(days, int) or days <= 0:
+        return "نامشخص"
+    return f"{days // 30} ماه" if days % 30 == 0 else f"{days} روز"
+
+
+def _ssh_invoice_event_time(value):
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _db_ssh_invoice_last_renewal_days(un, created):
+    """Read-only display history, never a substitute for paid settlement proof.
+
+    Legacy/admin renewals are logged in activity_log. New paid renewals also
+    have an immutable SSH paid event. Compare timestamps to avoid using a stale
+    earlier extension, and ignore events from a previous account with the same
+    username. Both historical tables may be absent on older installations.
+    """
+    created_day = str(created or "")[:10]
+    candidates = []
+    with db_conn() as conn:
+        available = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('activity_log','ssh_paid_events')"
+        )}
+        if "activity_log" in available:
+            activity = conn.execute(
+                "SELECT details,created_at FROM activity_log "
+                "WHERE username=? AND service_type='ssh' AND action='extend' "
+                "AND substr(created_at,1,10)>=? ORDER BY id DESC LIMIT 1",
+                (un, created_day),
+            ).fetchone()
+            if activity:
+                match = re.fullmatch(r"\s*([0-9]+)\s*روز\s*", str(activity[0] or ""))
+                if match and int(match.group(1)) > 0:
+                    candidates.append((
+                        _ssh_invoice_event_time(activity[1]), int(match.group(1))
+                    ))
+        if "ssh_paid_events" in available:
+            event = conn.execute(
+                "SELECT period_from,period_to,created_at_utc "
+                "FROM ssh_paid_events WHERE username=? AND kind='EXTEND' "
+                "AND substr(created_at_utc,1,10)>=? ORDER BY id DESC LIMIT 1",
+                (un, created_day),
+            ).fetchone()
+            if event:
+                try:
+                    start = datetime.strptime(event[0][:10], "%Y-%m-%d")
+                    end = datetime.strptime(event[1][:10], "%Y-%m-%d")
+                    added_days = (end - start).days
+                    if added_days > 0:
+                        candidates.append((
+                            _ssh_invoice_event_time(event[2]), added_days
+                        ))
+                except (ValueError, TypeError):
+                    pass
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
 async def _build_invoice_text(un: str):
     """Build a fresh, readable SSH invoice from the current account and routing settings."""
     row = await asyncio.to_thread(_db_get_user, un)
@@ -9115,16 +9181,25 @@ async def _build_invoice_text(un: str):
     host, port, mode_label = await _ssh_endpoint_info(acc_host, acc_conn_mode)
     remaining = get_remaining_days(exp)
     hold_active, _deadline, hold_days = await asyncio.to_thread(_db_get_hold_info, un)
-    months = 1
-    if hold_days:
-        months = max(1, round(int(hold_days) / 30))
+    renewal_days = await asyncio.to_thread(_db_ssh_invoice_last_renewal_days, un, crt)
+    if renewal_days is not None:
+        duration_heading = "مدت آخرین تمدید"
+        duration_days = renewal_days
+    elif hold_days and int(hold_days) > 0:
+        duration_heading = "مدت اشتراک"
+        duration_days = int(hold_days)
     else:
+        # Historical accounts can lack renewal journals. Do not misrepresent
+        # creation-to-expiry lifetime as the purchased/renewed plan duration.
+        duration_heading = "بازه از ساخت تا انقضا"
         try:
-            exp_dt = datetime.strptime(exp[:10], "%Y-%m-%d")
-            crt_dt = datetime.strptime(crt[:10], "%Y-%m-%d")
-            months = max(1, round((exp_dt - crt_dt).days / 30))
-        except Exception:
-            pass
+            duration_days = (
+                datetime.strptime(exp[:10], "%Y-%m-%d")
+                - datetime.strptime(crt[:10], "%Y-%m-%d")
+            ).days
+        except (ValueError, TypeError, AttributeError):
+            duration_days = None
+    duration_text = _ssh_invoice_duration_label(duration_days)
 
     hold_line = (
         f"\n⏸ <b>فعال‌سازی:</b> در انتظار اولین اتصال (مهلت {ACCOUNT_HOLD_DAYS} روز)"
@@ -9135,7 +9210,7 @@ async def _build_invoice_text(un: str):
         f"{credential_fields_text(host, un, pw, port)}\n\n"
         "📋 <b>مشخصات اشتراک</b>\n"
         f"🔀 <b>حالت اتصال:</b> {esc(mode_label)}\n"
-        f"⏳ <b>مدت اشتراک:</b> {months} ماه\n"
+        f"⏳ <b>{duration_heading}:</b> {duration_text}\n"
         f"📅 <b>تاریخ انقضا:</b> {esc(format_db_date_to_jalali(exp))}\n"
         f"⌛ <b>زمان باقی‌مانده:</b> {esc(remaining)}\n"
         f"👥 <b>تعداد اتصال مجاز:</b> {esc(lim)}\n"

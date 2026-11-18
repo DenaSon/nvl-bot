@@ -147,8 +147,10 @@ class ManualEdgeWizard:
                  form_store=None, now=time.time, key_reader=fingerprint_ssh,
                  enabled=None, form_url=None, guard=None, is_core_host=None,
                  os_check=None, awg_preflight=None, awg_provision=None,
-                 awg_check=None):
+                 awg_check=None, shared_superadmin=None):
         self.journal=ManualEdgeJournal(db,now=now,guard=guard)
+        # Verified bot_access gate; legacy admin sessions are insufficient.
+        self.shared_superadmin=shared_superadmin
         # Production wires the authoritative Core-host validator. Without
         # this callback the mutating wizard must fail closed, not guess.
         self.is_core_host=is_core_host
@@ -284,30 +286,46 @@ class ManualEdgeWizard:
             return "🔴 ناسازگاری مسیر؛ بررسی لازم"
         return ManualEdgeWizard._status_label(stage)
 
+    def _shared_viewer(self, actor, chat):
+        try:
+            return bool(self.shared_superadmin and self.shared_superadmin(actor, chat))
+        except Exception:
+            return False
+
     async def _show(self,query,actor,chat,page=0):
-        # All manual Edges belong to their own IP and journal. Never bind the
-        # administrator's new-edge workflow to whichever operation is latest.
+        # Listing every operator's Edge does not grant mutation privileges.
         backend_filter=None if self._legacy_wg_ui_enabled() else "amneziawg"
-        latest=await asyncio.to_thread(self.journal.latest,actor,chat,
-                                       backend=backend_filter)
-        if latest is None:
+        if type(page) is not int or not 0<=page<=10000:
+            raise ManualWizardHold("INVALID_PAGE")
+        shared=self._shared_viewer(actor,chat)
+        # Preserve the legacy owner-only empty-list fast path. It is also
+        # relied upon by the native wizard's isolated menu tests.
+        if not shared:
+            latest=await asyncio.to_thread(self.journal.latest,actor,chat,
+                                           backend=backend_filter)
+            if latest is None:
+                return await self._view(query,
+                    "🖥 <b>مدیریت Edge</b>\n\n"
+                    "برای راه‌اندازی یک سرور جدید، گزینه افزودن Edge را انتخاب کنید.",
+                    self._new_edge_buttons()+
+                    [[("↩️ مدیریت سرورها","apps_cz_home")]])
+        listing=(self.journal.list_shared if shared else self.journal.list_by_owner)
+        items=await asyncio.to_thread(
+            listing,actor,chat,limit=8,offset=page*7,backend=backend_filter)
+        if not items and page==0:
             return await self._view(query,
                 "🖥 <b>مدیریت Edge</b>\n\n"
                 "برای راه‌اندازی یک سرور جدید، گزینه افزودن Edge را انتخاب کنید.",
                 self._new_edge_buttons()+
                 [[("↩️ مدیریت سرورها","apps_cz_home")]])
-        if type(page) is not int or not 0<=page<=10000:
-            raise ManualWizardHold("INVALID_PAGE")
-        items=await asyncio.to_thread(
-            self.journal.list_by_owner,actor,chat,limit=8,offset=page*7,
-            backend=backend_filter)
         rows=self._new_edge_buttons()
         for op in items[:7]:
             label=str(op.get("ip") or "در انتظار IP")
             if len(label)>25:
                 label=label[:25]
             role=await asyncio.to_thread(
-                self.journal.display_state,op["id"],actor,chat)
+                self.journal.display_state_shared if shared else self.journal.display_state,
+                op["id"],actor,chat)
             rows.append([(
                 label+" · "+self._visible_status(op["status"],role),
                 "apps_edge_manual_detail_"+op["id"],
@@ -329,7 +347,9 @@ class ManualEdgeWizard:
 
     async def _detail(self,query,actor,chat,opid):
         op=await asyncio.to_thread(self.journal.get,opid)
-        if not op or (op["actor"],op["chat"])!=(actor,chat):
+        owned=bool(op and (op["actor"],op["chat"])==(actor,chat))
+        shared=self._shared_viewer(actor,chat)
+        if not op or (not owned and not shared):
             raise ManualWizardHold("OPERATOR_MISMATCH")
         if (op.get("tunnel_backend","wireguard")=="wireguard"
                 and not self._legacy_wg_ui_enabled()):
@@ -338,7 +358,16 @@ class ManualEdgeWizard:
             raise ManualWizardHold("ALREADY_ARCHIVED")
         stage=op["status"]
         role=await asyncio.to_thread(
-            self.journal.display_state,opid,actor,chat)
+            self.journal.display_state_shared if shared else self.journal.display_state,
+            opid,actor,chat)
+        if not owned:
+            return await self._view(
+                query,self._summary(op)+
+                "وضعیت: <b>"+escape(self._visible_status(op["status"],role))+"</b>\n"
+                "🔐 این پرونده متعلق به مدیر دیگری است؛ فعلاً فقط مشاهده مجاز است.",
+                [[("↩️ همه سرورها","apps_edge_manual_home")],
+                 [("↩️ مدیریت سرورها","apps_cz_home")]],
+            )
         rows=[]
         if stage=="HOSTKEY_PENDING":
             rows.append([("🔐 بررسی هویت SSH","apps_edge_manual_key_"+opid)])

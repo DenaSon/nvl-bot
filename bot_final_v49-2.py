@@ -822,6 +822,10 @@ PERSISTENCE_PATH = os.environ.get("BOT_PERSISTENCE_PATH", os.path.join(_SCRIPT_D
 # 🆘 سقف کل «شارژ اضطراری» هر نماینده (تومان) — یعنی موجودی نماینده حداکثر تا این مقدار
 # می‌تواند منفی شود تا در نبود دسترسی به مدیریت هم بتواند اکانت بسازد. مبلغ مصرف‌شده در اولین
 # شارژ واقعی بعدی (دستی توسط ادمین یا تاییدِ رسید کارت‌به‌کارت) به‌طور خودکار کسر می‌شود.
+# New emergency borrowing is disabled; historical emergency debt and its
+# existing repayment workflow remain intact. Keep this explicit fail-closed
+# kill switch rather than deleting financial history or ledger columns.
+EMERGENCY_CREDIT_ENABLED = False
 EMERGENCY_CREDIT_LIMIT = 1_000_000.0
 # 🆘 حداکثر تعداد درخواست‌های «پیاپی» شارژ اضطراری (بدون هیچ شارژ واقعی بین آن‌ها). با هر شارژ
 # واقعی حساب نماینده (حتی جزئی)، این شمارنده صفر می‌شود و دوباره ۲ درخواست در اختیارش قرار می‌گیرد.
@@ -4636,6 +4640,14 @@ def _db_get_user(un):
     # 🆕 ستون conn_mode هم به همین ترتیب در انتها اضافه شد (index=7) تا هیچ فراخوانی قدیمیِ
     # _db_get_user که فقط از cur[0..6] استفاده می‌کند خراب نشود.
     with db_conn() as conn: return conn.execute("SELECT password, expire_date, creation_date, users_limit, status, agent_id, host, conn_mode FROM ssh_accounts WHERE username=?", (un,)).fetchone()
+def _db_get_user_service_type(un):
+    # Reject expired Telegram callbacks targeting V2Ray volume plans.
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT service_type FROM ssh_accounts WHERE username=?", (un,)
+        ).fetchone()
+        return row[0] if row else None
+
 def _db_set_conn_mode(un, mode):
     """'direct' یا 'tls' — برای تغییر حالت اتصال یک اکانت از قبل‌ساخته‌شده."""
     with db_conn() as conn: conn.execute("UPDATE ssh_accounts SET conn_mode=? WHERE username=?", (mode, un))
@@ -5295,6 +5307,8 @@ def _apply_emergency_repayment(conn, aid, topup_amount):
 def _db_agent_register_emergency_use(aid, amount):
     """مصرف یک بار «شارژ اضطراری» را ثبت می‌کند: مبلغ به emergency_used اضافه (تا سقف
     EMERGENCY_CREDIT_LIMIT) و emergency_request_count یکی افزایش می‌یابد."""
+    if not EMERGENCY_CREDIT_ENABLED:
+        raise RuntimeError("EMERGENCY_CREDIT_DISABLED")
     with db_conn() as conn:
         row = conn.execute("SELECT emergency_used, emergency_request_count FROM agents WHERE id=?", (aid,)).fetchone()
         used, cnt = ((row[0] or 0.0), (row[1] or 0)) if row else (0.0, 0)
@@ -5307,11 +5321,16 @@ def _check_emergency_option(ainf, cost):
     آیا امکان تکمیل این خرید با «شارژ اضطراری» وجود دارد یا نه.
     خروجی: (has_option, remaining_emergency, shortfall, used, req_count)
     """
+    if not EMERGENCY_CREDIT_ENABLED:
+        # Do not advertise historical emergency borrowing when disabled.
+        return False, 0.0, 0.0, 0.0, 0
     used = ainf[12] if len(ainf) > 12 and ainf[12] else 0.0
     req_count = ainf[13] if len(ainf) > 13 and ainf[13] else 0
     remaining_emergency = EMERGENCY_CREDIT_LIMIT - used
     shortfall = cost - ainf[2]
-    has_option = (req_count < EMERGENCY_MAX_CONSECUTIVE_REQUESTS) and (0 < shortfall <= remaining_emergency)
+    has_option = (EMERGENCY_CREDIT_ENABLED and
+                  req_count < EMERGENCY_MAX_CONSECUTIVE_REQUESTS and
+                  0 < shortfall <= remaining_emergency)
     return has_option, remaining_emergency, shortfall, used, req_count
 def _db_update_agent_username(aid, new_username):
     """🆕 تغییر یوزرنیم لاگین یک نماینده توسط ادمین. چون username در جدول agents یکتا (UNIQUE) است،
@@ -5336,6 +5355,8 @@ def _get_active_account_count_by_agent(agent_id: int) -> int:
 
 def _agent_can_use_emergency_credit(agent_id: int) -> tuple[bool, int]:
     """بررسی اینکه آیا نماینده واجد شرایط استفاده از شارژ اضطراری است (حداقل ۵۰ اکانت فعال)."""
+    if not EMERGENCY_CREDIT_ENABLED:
+        return False, 0
     active_count = _get_active_account_count_by_agent(agent_id)
     can_use = active_count >= EMERGENCY_MIN_ACTIVE_ACCOUNTS
     return can_use, active_count
@@ -7632,6 +7653,7 @@ _manual_edge = ManualEdgeWizard(
     # No Cloudzy API, HTTPS WebApp or new opt-in flag for native manual path.
     enabled=lambda: True,
     guard=_cloudzy_04a_guard,
+    shared_superadmin=lambda actor, chat: is_private_superadmin(DB_PATH,actor,chat,"private"),
     is_core_host=_manual_edge_is_core_ip,
     os_check=_manual_edge_verify_ubuntu,
     awg_preflight=_manual_awg_preflight,
@@ -9037,7 +9059,7 @@ async def _show_v2ray_user_detail(update_or_query, username, context, db_res, v2
     
     if not is_vol:
         rn_row = [InlineKeyboardButton("🔄 تمدید اکانت", callback_data=f"v2act_rn_{username}")]
-        if role == 'admin':
+        if role in ('admin', 'agent'):
             rn_row.append(InlineKeyboardButton("🔻 کاهش زمان", callback_data=f"v2act_rd_{username}"))
         kb.append(rn_row)
         
@@ -11978,6 +12000,8 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
 # 📝 هندلر اصلی پیام‌های متنی (و منوها)
 # ==========================================
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not globals().get('EMERGENCY_CREDIT_ENABLED', False):
+        context.user_data.pop('emergency_approved', None)
     text = update.message.text
     if not text: return
     state = context.user_data.get('state')
@@ -17000,6 +17024,18 @@ async def _show_v2_renew_confirm(target, context, un, days):
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_auth(context): return
     query = update.callback_query; await query.answer(); d = query.data
+    if not globals().get('EMERGENCY_CREDIT_ENABLED', False):
+        # Reject stale Telegram buttons AND persisted approval from older sessions.
+        context.user_data.pop('emergency_approved', None)
+        if d in (
+            'uinc_emergency_yes', 'buy_emergency_yes',
+            'v2rn_emergency_yes', 'v2addvol_emergency_yes',
+            'v2_vol_buy_emergency_yes', 'v2_buy_emergency_yes',
+            'rnyes_emergency',
+        ):
+            return await query.message.reply_text(
+                "⛔️ شارژ اضطراری غیرفعال است. لطفاً ابتدا کیف پول را شارژ کنید."
+            )
     role, ag_id = context.user_data.get('role'), context.user_data.get('agent_id', 0)
     # Finance V1 uses one isolated, opt-in read-only callback namespace.
     # Keep this path out of the legacy callback chain and enforce Telegram
@@ -22244,6 +22280,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d.startswith("v2act_rn_"):
         un = d.split("_", 2)[2]
+        cur = await asyncio.to_thread(_db_get_user, un)
+        if not cur:
+            return await query.edit_message_text("❌ اکانت یافت نشد.")
+        if not _can_manage_user(role, ag_id, cur[5]):
+            return await query.message.reply_text("⛔️ شما مجاز به مدیریت این اکانت نیستید.")
+        if await asyncio.to_thread(_db_get_user_service_type, un) != 'v2ray':
+            return await query.edit_message_text("⛔️ تغییر زمان برای این نوع سرویس مجاز نیست.")
         context.user_data['v2_renew_un'] = un
         context.user_data['v2_renew_mode'] = 'extend'
         kb = [[InlineKeyboardButton("۱ ماهه", callback_data="v2rn_30"), InlineKeyboardButton("۲ ماهه", callback_data="v2rn_60")],
@@ -22251,8 +22294,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
               [InlineKeyboardButton("🔙 بازگشت", callback_data=f"udet_{un}")]]
         await query.edit_message_text(f"🔄 تمدید اکانت V2Ray <code>{esc(un)}</code>\nچه مقدار تمدید شود؟", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
-    elif d.startswith("v2act_rd_") and role == 'admin':
+    elif d.startswith("v2act_rd_") and role in ('admin', 'agent'):
         un = d.split("_", 2)[2]
+        cur = await asyncio.to_thread(_db_get_user, un)
+        if not cur: return await query.edit_message_text("❌ اکانت یافت نشد.")
+        if not _can_manage_user(role, ag_id, cur[5]):
+            return await query.message.reply_text("⛔️ شما مجاز به مدیریت این اکانت نیستید.")
+        if await asyncio.to_thread(_db_get_user_service_type, un) != 'v2ray':
+            return await query.edit_message_text("⛔️ کاهش زمان برای این نوع سرویس مجاز نیست.")
         context.user_data['v2_renew_un'] = un
         context.user_data['v2_renew_mode'] = 'reduce'
         kb = [[InlineKeyboardButton("۱ ماهه", callback_data="v2rn_30"), InlineKeyboardButton("۲ ماهه", callback_data="v2rn_60")],
@@ -22289,6 +22338,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         cur = await asyncio.to_thread(_db_get_user, un)
         if not cur: return await query.edit_message_text("❌ اکانت یافت نشد.")
+        if not _can_manage_user(role, ag_id, cur[5]):
+            return await query.message.reply_text("⛔️ شما مجاز به مدیریت این اکانت نیستید.")
+        if await asyncio.to_thread(_db_get_user_service_type, un) != 'v2ray':
+            return await query.edit_message_text("⛔️ تغییر زمان برای این نوع سرویس مجاز نیست.")
 
         try:
             cost = 0.0
@@ -27555,7 +27608,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🔻 کاهش تمدید اکانت — برای مواقعی که اشتباهی اکانت بیش‌ازحد تمدید شده و باید تعداد
     # روز/ماه آن کم شود. دقیقاً همان منوی ۱/۲/۳ ماهه + «تعداد روز دلخواه» را نمایش می‌دهد،
     # اما در انتها به‌جای افزودن، از تاریخ انقضا کم می‌کند.
-    elif d.startswith("uact_rd_") and role == 'admin':
+    elif d.startswith("uact_rd_") and role in ('admin', 'agent'):
         un = d.split("_", 2)[2]
         cur = await asyncio.to_thread(_db_get_user, un)
         if not cur: return await query.edit_message_text("❌ این کاربر دیگر وجود ندارد.")

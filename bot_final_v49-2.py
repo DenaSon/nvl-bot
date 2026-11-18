@@ -11987,7 +11987,7 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
 # 📝 هندلر اصلی پیام‌های متنی (و منوها)
 # ==========================================
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not EMERGENCY_CREDIT_ENABLED:
+    if not globals().get('EMERGENCY_CREDIT_ENABLED', False):
         context.user_data.pop('emergency_approved', None)
     text = update.message.text
     if not text: return
@@ -17011,7 +17011,7 @@ async def _show_v2_renew_confirm(target, context, un, days):
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_auth(context): return
     query = update.callback_query; await query.answer(); d = query.data
-    if not EMERGENCY_CREDIT_ENABLED:
+    if not globals().get('EMERGENCY_CREDIT_ENABLED', False):
         # Reject stale Telegram buttons AND persisted approval from older sessions.
         context.user_data.pop('emergency_approved', None)
         if d in (

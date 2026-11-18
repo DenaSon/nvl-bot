@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 import nvl_daily_business
-from ssh_refund_policy import calculate_ssh_refund
+from ssh_refund_policy import SSHRefund, calculate_ssh_refund
 
 
 class SSHDeleteSettlementHold(RuntimeError):
@@ -66,10 +66,7 @@ def finalize_ssh_delete(
         if refund.reason.startswith("INVALID_"):
             raise SSHDeleteSettlementHold(refund.reason)
     else:
-        refund = calculate_ssh_refund(
-            monthly_price=1, users_limit=1, expire_date=expiry,
-            creation_date=created, today=expiry,
-        )  # direct-admin accounts have no wallet refund
+        refund = SSHRefund(0, 0, "DIRECT_ADMIN")
 
     removed = conn.execute(
         "DELETE FROM ssh_accounts WHERE username=? AND service_type='ssh'",

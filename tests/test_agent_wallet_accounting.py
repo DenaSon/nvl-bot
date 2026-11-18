@@ -184,13 +184,17 @@ class AgentWalletAccountingTests(unittest.TestCase):
 
     def test_withdrawal_request_reservation_is_atomic_and_idempotent(self):
         key = "withdrawal-request:2001:801"
+        self.conn.execute(
+            "UPDATE agents SET withdrawable_balance=1000 WHERE id=2"
+        )
+        self.conn.commit()
         req_id = self.create_withdrawal(2, 300, "4111111111111111", "Agent Two", key)
         self.assertIsNotNone(req_id)
         self.assertIsNone(
             self.create_withdrawal(2, 300, "4111111111111111", "Agent Two", key)
         )
         self.assertEqual(
-            self.scalar("SELECT withdrawable_balance FROM agents WHERE id=2"), 200
+            self.scalar("SELECT withdrawable_balance FROM agents WHERE id=2"), 700
         )
         self.assertEqual(
             self.scalar("SELECT COUNT(*) FROM withdrawal_requests"), 1

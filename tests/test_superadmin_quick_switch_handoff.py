@@ -69,6 +69,11 @@ class SuperAdminHandoffTests(unittest.TestCase):
                 0,
             )
 
+    def test_revoked_legacy_owner_as_string_is_denied(self):
+        old_record = dict(self.record, actor="1947045855")
+        self.assertFalse(self.engine.operator_allowed(old_record, 1947045855))
+        self.assertFalse(self.engine.operator_allowed(old_record, "1947045855"))
+
     def test_resume_done_job_by_another_admin_is_idempotent(self):
         self.engine.get = lambda job: self.record if job == "job-1" else None
         result = asyncio.run(self.engine._resume_once("job-1", actor=8))

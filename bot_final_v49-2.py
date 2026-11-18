@@ -118,6 +118,8 @@ import marzban_regional_filtering as marzban_regional
 import marzban_observability
 import marzban_alerting
 import nvl_daily_business
+from ssh_refund_policy import calculate_ssh_refund
+from ssh_delete_settlement import finalize_ssh_delete, SSHDeleteSettlementHold
 from cloudzy_rich_transport import RichBotAPI as NVLDailyRichBotAPI
 import secrets
 from nvl_superadmin_access import (
@@ -5361,12 +5363,25 @@ async def _calc_account_refund(username: str) -> tuple[float, str]:
     def _get_row():
         with db_conn() as conn:
             return conn.execute(
-                "SELECT a.expire_date, a.creation_date, a.hold_active, a.users_limit, ag.base_price, a.service_type, ag.v2ray_base_price, ag.v2ray_vol_price "
+                "SELECT a.expire_date, a.creation_date, a.hold_active, a.users_limit, ag.base_price, a.service_type, ag.v2ray_base_price, ag.v2ray_vol_price, a.hold_duration_days "
                 "FROM ssh_accounts a LEFT JOIN agents ag ON ag.id = a.agent_id WHERE a.username = ?", (username,)
             ).fetchone()
     row = await asyncio.to_thread(_get_row)
     if not row: return 0.0, "اکانت یافت نشد"
-    expire_date, creation_date, hold_active, users_limit, ssh_bp_raw, stype, v2_bp_raw, v2_vol_bp_raw = row
+    expire_date, creation_date, hold_active, users_limit, ssh_bp_raw, stype, v2_bp_raw, v2_vol_bp_raw, hold_duration_days = row
+
+    if stype == 'ssh':
+        quote = calculate_ssh_refund(
+            monthly_price=ssh_bp_raw, users_limit=users_limit,
+            expire_date=expire_date, creation_date=creation_date,
+            hold_active=hold_active, hold_duration_days=hold_duration_days,
+        )
+        if quote.reason.startswith("INVALID_"):
+            return 0.0, "اطلاعات قیمت یا مدت این حساب برای بازپرداخت معتبر نیست."
+        desc = (f"بازگشت مدت خریداری‌شده: {quote.days} روز"
+                if hold_active else f"بازگشت زمان باقی‌مانده: {quote.days} روز")
+        return float(quote.amount), f"{desc}، {quote.amount:,} تومان"
+
     
     if stype == 'v2ray_vol':
         try: base_price = float(str(v2_vol_bp_raw or '4000').replace(",", "").strip())
@@ -25003,43 +25018,58 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d.startswith("udelconf_yes_"):
         un = d.split("_", 2)[2]
         owner = await asyncio.to_thread(_db_get_user, un)
-        if not owner: return await query.edit_message_text("❌ این کاربر دیگر وجود ندارد.")
-        if not _can_manage_user(role, ag_id, owner[5]): return await query.message.reply_text("⛔️ شما مجاز به مدیریت این اکانت نیستید.")
+        if not owner:
+            return await query.edit_message_text("❌ این کاربر دیگر وجود ندارد.")
+        if not _can_manage_user(role, ag_id, owner[5]):
+            return await query.message.reply_text("⛔️ شما مجاز به مدیریت این اکانت نیستید.")
 
-        # 💸 بازپرداخت متناسب: اگر این اکانت متعلق به یک نماینده باشد، بخشِ استفاده‌نشدهٔ هزینه
-        # (روزهای باقی‌مانده تا انقضا × تعداد کاربر مجاز، به نسبت قیمت پایهٔ فعلی همان نماینده)
-        # به کیف‌پولِ قابل‌خرج (balance) او برگردانده می‌شود — نه به استخر قابل‌برداشت
-        # (withdrawable_balance). این تفکیک عمدی است: بازپرداخت فقط سرمایهٔ خودِ نماینده را که
-        # قبلاً بابت همین اکانت پرداخته بود برمی‌گرداند تا صرفِ خریدهای بعدی شود، و هرگز مستقیماً
-        # قابل برداشتِ نقدی نیست؛ به این ترتیب چرخهٔ «ساخت اکانت‌های الکی → واجدشرایط کش‌بک شدن →
-        # برداشت نقدی کش‌بک → حذف اکانت‌ها → بازپرداخت هزینه» نمی‌تواند پول واقعی اضافه تولید کند.
-        owner_agent_id = owner[5]
-        refund = 0.0
-        refund_note = ""
-        if owner_agent_id and owner_agent_id != 0:
-            try:
-                refund, refund_desc = await _calc_account_refund(un)
-                if refund > 0:
-                    with db_conn() as conn:
-                        nvl_daily_business.refund_purchase(conn, owner_agent_id, refund)
-                        used_before_row = conn.execute("SELECT emergency_used FROM agents WHERE id=?", (owner_agent_id,)).fetchone()
-                        used_before = (used_before_row[0] or 0.0) if used_before_row else 0.0
-                        _apply_emergency_repayment(conn, owner_agent_id, refund)
-                        emergency_repaid = min(used_before, refund) if used_before > 0 else 0.0
-                    refund_note = f"\n💸 {refund_desc}"
-                    if emergency_repaid > 0:
-                        refund_note += f"\n🆘 از همین مبلغ، {int(emergency_repaid):,} تومان بدهیِ شارژ اضطراری نماینده نیز پاک شد."
-            except Exception:
-                log.exception("خطا در اعمال بازپرداخت حذف اکانت %s", un)
-
-        # Linux account lives on Core; owner.host is endpoint/routing metadata only.
+        # External Linux delete is the first commit point. Never credit the
+        # wallet or delete the local record when Core userdel reports failure.
         ok, err, kind = await run_cmd("sudo", "userdel", "-f", un)
-        await asyncio.to_thread(_db_delete_user, un)
-        await _remove_user_limit_file(un)  # پاک‌سازی فایل PAM روی Core
-        if ok: await query.edit_message_text(f"✅ اکانت {esc(un)} حذف شد. (آمار فروش کسر گردید){refund_note}")
-        else:
-            extra = _fmt_linux_error("حذف اکانت", err, kind)
-            await query.edit_message_text(f"⚠️ اکانت {esc(un)} از دیتابیس حذف شد اما حذف یوزر لینوکسی ناموفق بود:\n\n{extra}\nپیشنهاد می‌شود دستی بررسی شود.{refund_note}", parse_mode="HTML")
+        if not ok:
+            return await query.edit_message_text(
+                "⛔️ حذف اکانت روی Core ناموفق بود؛ "
+                "اکانت و موجودی نماینده در دیتابیس تغییر نکرد.\n\n"
+                + _fmt_linux_error("حذف اکانت", err, kind),
+                parse_mode="HTML",
+            )
+
+        # One BEGIN IMMEDIATE: delete account + credit balance + finance ledger
+        # + repay any historical emergency debt. The snapshot check and DELETE
+        # CAS prevent two stale Telegram confirmations from refunding twice.
+        try:
+            def _settle_deleted_ssh():
+                with db_conn() as conn:
+                    return finalize_ssh_delete(
+                        conn, username=un, expected_agent_id=owner[5],
+                        expected_expiry=owner[1], expected_created=owner[2],
+                        expected_users=owner[3], expected_status=owner[4],
+                        repay_emergency=_apply_emergency_repayment,
+                    )
+            refund, emergency_repaid, refund_reason, refund_days = (
+                await asyncio.to_thread(_settle_deleted_ssh)
+            )
+        except Exception:
+            log.exception("SSH userdel succeeded but local refund/delete settlement needs reconciliation: %s", un)
+            return await query.edit_message_text(
+                "⚠️ حساب از لینوکس حذف شد اما تکمیل دیتابیس/بازپرداخت "
+                "تأیید نشد. هیچ اعتبار نامطمئنی ثبت نشده است. "
+                "برای بررسی دستی به سوپرادمین اطلاع دهید؛ درخواست را تکرار نکنید."
+            )
+
+        await _remove_user_limit_file(un)
+        refund_note = (
+            f"\n💸 بازپرداخت {refund_days} روز استفاده‌نشده: {refund:,} تومان"
+            if refund > 0 else ""
+        )
+        if emergency_repaid > 0:
+            refund_note += (
+                f"\n🆘 {emergency_repaid:,} تومان بدهی شارژ اضطراری قبلی تسویه شد."
+            )
+        await query.edit_message_text(
+            f"✅ اکانت {esc(un)} حذف شد. (آمار فروش کسر گردید){refund_note}",
+            parse_mode="HTML",
+        )
     elif d.startswith("udelconf_no_"):
         un = d.split("_", 2)[2]
         await _show_user_detail(update, un, context)

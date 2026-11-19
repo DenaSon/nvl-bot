@@ -447,7 +447,7 @@ SOURCE_WG_STOPPED=0
 
     def test_remote_failure_reaches_source_recovery_even_with_errexit(self):
         start = self.core.index('echo "🔹 ۶) اجرای remote')
-        finish = self.core.index('echo "🔹 ۷) تأیید', start)
+        finish = self.core.index('echo "🔹 ۷) هماهنگ', start)
         harness = '''
 set -euo pipefail
 SSH_OPTS=()

@@ -71,6 +71,7 @@ ip -4 -o addr show | grep -Fq "$DEST/"
 [[ $(sqlite3 /root/master_bot.db 'PRAGMA quick_check;') == ok ]]
 [[ -x /root/venv/bin/python3 && -s /root/bot_final_v49-2.py ]]
 [[ -s /root/02_recreate_ssh_users.py && -s /root/requirements.txt ]]
+[[ -s /root/bot_import_preflight.py ]]
 [[ -d /etc/nvlbot ]]
 systemctl is-active --quiet nvlbot && { echo 'HOLD: DEST_BOT_ALREADY_ACTIVE'; exit 1; }
 for unit in wg-quick@wg0 awg-quick@awg0 nvl-customer-sshd gost; do
@@ -78,6 +79,8 @@ for unit in wg-quick@wg0 awg-quick@awg0 nvl-customer-sshd gost; do
 done
 ss -lntH | awk -v p="$CUSTOMER_PORT" '$4 ~ (":" p "$") {yes=1} END {exit !yes}'
 /root/venv/bin/python3 -m py_compile /root/bot_final_v49-2.py /root/02_recreate_ssh_users.py
+cd /root
+PYTHONPATH= /root/venv/bin/python3 /root/bot_import_preflight.py /root/bot_final_v49-2.py >/dev/null
 python3 /root/02_recreate_ssh_users.py --dry-run >/dev/null
 echo 'DEST_PRECHECK=PASS'
 REMOTE_CHECK

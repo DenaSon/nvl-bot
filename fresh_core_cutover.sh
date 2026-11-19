@@ -54,12 +54,19 @@ systemctl stop wg-quick@wg0 awg-quick@awg0
 ! systemctl is-active --quiet awg-quick@awg0
 echo 'DEST_DUPLICATE_CORE_TUNNELS=STOPPED'
 REMOTE_PASSIVE
-# Code-only staging is permitted. The operator explicitly skipped database final sync.
-# Destination bot remains stopped; update only the Python entrypoint before SHA checks.
+# Code-only staging is permitted; NO database, credential or customer file is synchronized.
+# Reuse the legacy deployment's explicit Python/module inventory to prevent stale imports.
 command -v rsync >/dev/null || { echo "HOLD: RSYNC_MISSING"; exit 1; }
-rsync -az -e "ssh -i $SSH_KEY -p 22 -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes" \
-    /root/bot_final_v49-2.py "root@$DEST:/root/bot_final_v49-2.py"
-echo 'BOT_CODE_ONLY_STAGE=PASS'
+[[ -f /root/requirements.txt && -d /root/ops && -d /root/server_migration ]] || {
+    echo "HOLD: SOURCE_RUNTIME_INCOMPLETE"; exit 1;
+}
+rsync -az --prune-empty-dirs \
+    --exclude='__pycache__/' --exclude='.git/' --include='*/' \
+    --include='*.py' --include='*.sh' --include='requirements.txt' --exclude='*' \
+    -e "ssh -i $SSH_KEY -p 22 -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes" \
+    /root/*.py /root/*.sh /root/requirements.txt /root/server_migration /root/ops \
+    "root@$DEST:/root/"
+echo 'BOT_RUNTIME_CODE_ONLY_STAGE=PASS'
 SRC_BOT_SHA=$(sha256sum /root/bot_final_v49-2.py | awk '{print $1}')
 DST_BOT_SHA=$("${SSH[@]}" sha256sum /root/bot_final_v49-2.py | awk '{print $1}')
 [[ "$SRC_BOT_SHA" == "$DST_BOT_SHA" ]] || {

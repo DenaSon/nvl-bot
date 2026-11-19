@@ -193,7 +193,7 @@ rollback_start_nvlbot() {
         fi
     fi
     systemctl start wg-quick@wg0 2>/dev/null || { echo "❌ WireGuard قدیمی شروع نشد."; return 1; }
-    if [ "$AWG_SOURCE_ACTIVE" = 1 ]; then
+    if [ "${AWG_SOURCE_ACTIVE:-0}" = 1 ]; then
         systemctl start awg-quick@awg0 || { echo "❌ AWG قدیمی شروع نشد."; return 1; }
     fi
     systemctl start nvlbot 2>/dev/null && echo "   ✅ nvlbot روی Core قدیمی دوباره فعال شد." \

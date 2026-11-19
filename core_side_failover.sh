@@ -33,6 +33,9 @@ fi
 TARGET_EDGE="$1"
 CUSTOMER_SSH_PORT="$2"
 SOURCE_WG_STOPPED=0
+SOURCE_AWG_STOPPED=0
+AWG_SOURCE_ACTIVE=0
+AWG_SOURCE_PORT=42372
 # Serialize Telegram-triggered migrations, including their source DB freeze.
 command -v flock >/dev/null 2>&1 || { echo "❌ flock نصب نیست."; exit 1; }
 exec 9>/run/nvl-core-migration.lock
@@ -93,14 +96,31 @@ fi
 SSH_OPTS=(-i "$EDGE_SSH_KEY" -p "$EDGE_PORT" -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 echo "   ✅ اتصال مدیریتی روی پورت ${EDGE_PORT} برقرار شد."
 
+# The live source AWG profile is optional for historic WG-only installations.
+# Require an AWG-capable Edge only if the source actually uses AWG.
+if command -v awg >/dev/null 2>&1 && awg show awg0 >/dev/null 2>&1; then
+    AWG_SOURCE_ACTIVE=1
+    AWG_SOURCE_PORT="$(awg show awg0 listen-port)"
+    if [ ! -s /etc/amnezia/amneziawg/awg0.conf ]; then
+        echo "❌ awg0 فعال است ولی کانفیگ Core موجود نیست."
+        exit 1
+    fi
+    if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
+            "command -v awg >/dev/null && command -v awg-quick >/dev/null && modinfo amneziawg >/dev/null"; then
+        echo "❌ ابزار/ماژول AWG روی Edge مقصد نصب نیست. یک Edge سالم دارای AWG انتخاب کنید."
+        exit 1
+    fi
+    if [ ! -s /root/update_all_awg_edges_endpoint.sh ]; then
+        echo "❌ ابزار به‌روزرسانی Endpointهای AWG روی Core اصلی نصب نیست."
+        exit 1
+    fi
+    echo "   ✅ AWG فعال شناسایی شد؛ ابزار مقصد موجود است."
+fi
+
 # All fallible Python preparation happens while the original Core remains live.
 # The chosen bot is pinned to the live service's script, never a random standby file.
 if [ ! -x /root/demote_core_to_edge.sh ] && [ ! -f /root/demote_core_to_edge.sh ]; then
     echo "❌ اسکریپت demote_core_to_edge.sh نصب نیست؛ Core را متوقف نمی‌کنیم."
-    exit 1
-fi
-if ! command -v netfilter-persistent >/dev/null 2>&1; then
-    echo "❌ netfilter-persistent روی Core اصلی نیست؛ رله بعد از انتقال پایدار نمی‌ماند."
     exit 1
 fi
 if [ ! -f /root/02_recreate_ssh_users.py ]; then
@@ -165,16 +185,19 @@ rollback_start_nvlbot() {
         return 1
     fi
     echo "🔹 رول‌بک: بازگرداندن WireGuard و ربات روی Core قبلی..."
-    if [ "$SOURCE_WG_STOPPED" = 1 ]; then
-        # The promoted target may already have the same WG private key even
+    if [ "$SOURCE_WG_STOPPED" = 1 ] || [ "${SOURCE_AWG_STOPPED:-0}" = 1 ]; then
+        # The promoted target may already have the same WG/AWG private keys even
         # though its bot is down. Disable it before restoring the source.
         if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
-                "systemctl disable --now nvlbot >/dev/null 2>&1 || true; systemctl disable --now wg-quick@wg0 >/dev/null 2>&1 || true; ! systemctl is-active --quiet nvlbot && ! systemctl is-active --quiet wg-quick@wg0 && ! wg show wg0 >/dev/null 2>&1"; then
+                "systemctl disable --now nvlbot >/dev/null 2>&1 || true; systemctl disable --now wg-quick@wg0 >/dev/null 2>&1 || true; systemctl disable --now awg-quick@awg0 >/dev/null 2>&1 || true; ! systemctl is-active --quiet nvlbot && ! systemctl is-active --quiet wg-quick@wg0 && ! wg show wg0 >/dev/null 2>&1 && ! awg show awg0 >/dev/null 2>&1"; then
             echo "❌ نتوانستیم خاموش‌بودن WireGuard و ربات مقصد را تأیید کنیم؛ برای جلوگیری از دو Core، رول‌بک خودکار متوقف شد."
             return 1
         fi
     fi
     systemctl start wg-quick@wg0 2>/dev/null || { echo "❌ WireGuard قدیمی شروع نشد."; return 1; }
+    if [ "${AWG_SOURCE_ACTIVE:-0}" = 1 ]; then
+        systemctl start awg-quick@awg0 || { echo "❌ AWG قدیمی شروع نشد."; return 1; }
+    fi
     systemctl start nvlbot 2>/dev/null && echo "   ✅ nvlbot روی Core قدیمی دوباره فعال شد." \
         || echo "   ❌ راه‌اندازی Core قبلی شکست خورد؛ systemctl status nvlbot را بررسی کنید."
 }
@@ -210,6 +233,16 @@ if [ ! -s "${EXPORT_DIR}/core_private.key" ]; then
 fi
 awk '/^\[Peer\]/{f=1} f' "$WG_CONF" > "${EXPORT_DIR}/wg0.conf.peers"
 echo "   ✅ کلید WireGuard + peers استخراج شد."
+if [ "$AWG_SOURCE_ACTIVE" = 1 ]; then
+    install -m 600 /etc/amnezia/amneziawg/awg0.conf "${EXPORT_DIR}/awg0.conf"
+    awg show awg0 public-key > "${EXPORT_DIR}/awg_core_public.key"
+    if [ ! -s "${EXPORT_DIR}/awg_core_public.key" ]; then
+        echo "❌ خواندن هویت AWG Core ناموفق بود."
+        rollback_start_nvlbot
+        exit 1
+    fi
+    echo "   ✅ AWG Core profile + peers جمع‌آوری شد."
+fi
 
 # nvlbot همین الان متوقف است، پس دیگر لازم نیست نگرانِ نوشتنِ هم‌زمان باشیم؛ همچنان از
 # sqlite3 .backup استفاده می‌کنیم چون در برابر یک فایلِ نیمه‌نوشته/WAL هم امن‌تر از cp خام است.
@@ -220,6 +253,22 @@ else
     rollback_start_nvlbot
     exit 1
 fi
+
+# Preserve other root-level SQLite stores (for example accounting.db) too.
+# These are optional, but should not be silently lost in a Core migration.
+mkdir -p "${EXPORT_DIR}/extra_databases"
+for db in "${BOT_DIR}/"*.db; do
+    [ -f "$db" ] || continue
+    name="${db##*/}"
+    [ "$name" = master_bot.db ] && continue
+    if ! sqlite3 "$db" ".backup '${EXPORT_DIR}/extra_databases/${name}'" 2>/dev/null; then
+        echo "⚠️ کپی SQLite ${name} ممکن نبود؛ کپی خام فایل پس از توقف ربات."
+        cp -p "$db" "${EXPORT_DIR}/extra_databases/${name}" || {
+            rollback_start_nvlbot
+            exit 1
+        }
+    fi
+done
 
 if [ -f /etc/gost/config.yaml ]; then
     cp /etc/gost/config.yaml "${EXPORT_DIR}/gost_config.yaml"
@@ -386,6 +435,21 @@ if wg show wg0 >/dev/null 2>&1; then
     rollback_start_nvlbot
     exit 1
 fi
+if [ "$AWG_SOURCE_ACTIVE" = 1 ]; then
+    echo "🔹 ۵.۶) توقف AWG قدیمی پیش از فعال‌سازی هویت یکسان روی Core جدید..."
+    if ! systemctl stop awg-quick@awg0; then
+        echo "❌ توقف AWG قدیمی ناموفق بود."
+        rollback_start_nvlbot
+        exit 1
+    fi
+    SOURCE_AWG_STOPPED=1
+    if awg show awg0 >/dev/null 2>&1; then
+        echo "❌ رابط AWG قدیمی همچنان فعال است."
+        rollback_start_nvlbot
+        exit 1
+    fi
+fi
+
 echo "🔹 ۶) اجرای remote «promote_edge_to_core.sh» روی Edge — با OLD_CORE_IP خودکار=${SELF_IP}..."
 if ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
         "OLD_CORE_IP='${SELF_IP}' bash ${REMOTE_MIGRATION_DIR}/promote_edge_to_core.sh '${CUSTOMER_SSH_PORT}' '${REMOTE_MIGRATION_DIR}'"; then
@@ -401,11 +465,36 @@ if [ "$PROMOTE_EXIT" -ne 0 ]; then
     exit "$PROMOTE_EXIT"
 fi
 
-echo "🔹 ۷) تأییدِ نهایی..."
-echo "   ✅ nvlbot روی این سرور (Core قدیمی) قبلاً (مرحلهٔ ۳) متوقف شده و همچنان متوقف می‌ماند."
-echo ""
+# Keep the retired source Core quiet if it reboots before the operator shuts
+# down the VPS. Do not auto-demote it into another relay.
+systemctl disable nvlbot wg-quick@wg0 >/dev/null 2>&1 || true
+if [ "$AWG_SOURCE_ACTIVE" = 1 ]; then
+    systemctl disable awg-quick@awg0 >/dev/null 2>&1 || true
+fi
+systemctl disable --now nvl-edge-sync.timer >/dev/null 2>&1 || true
+
+echo "🔹 ۷) هماهنگ‌سازی Endpointهای Edgeها از Core جدید..."
+WG_SYNC=0
+AWG_SYNC=0
+if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
+        "bash /root/update_all_edges_endpoint.sh '${TARGET_EDGE}' 51820"; then
+    WG_SYNC=1
+    echo "⚠️ برخی Endpointهای WG نیازمند اصلاح هستند."
+fi
+if [ "$AWG_SOURCE_ACTIVE" = 1 ]; then
+    if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
+            "bash /root/update_all_awg_edges_endpoint.sh '${SELF_IP}' '${TARGET_EDGE}' '${AWG_SOURCE_PORT}'"; then
+        AWG_SYNC=1
+        echo "⚠️ برخی Endpointهای AWG نیازمند اصلاح هستند."
+    fi
+fi
 echo "════════════════════════════════════════════════════════════"
-echo "✅ Promote موفق شد: ${TARGET_EDGE}:${CUSTOMER_SSH_PORT} Core جدید است."
-echo "   هنوز Demote Core قدیمی و هماهنگ‌سازی Endpointهای سایر Edgeها باقی است."
-echo "   DNS و host_pool جداگانه باید با وضعیت نهایی سرویس تطبیق داده شوند."
+echo "PROMOTE_POSTCHECK_OK: Core جدید فعال شد؛ Core قدیمی bot/WG/AWG متوقف است."
+echo "ENDPOINT_SYNC: wg_fail=${WG_SYNC} awg_fail=${AWG_SYNC}"
+echo "   Core قدیمی را پس از تست واقعی سرویس‌ها می‌توان خاموش کرد؛ Demote اجرا نشده است."
+if [ "$WG_SYNC" -ne 0 ] || [ "$AWG_SYNC" -ne 0 ]; then
+    echo "PARTIAL_MIGRATION: برخی Edgeها هنوز Endpoint قدیمی دارند؛ Core جدید فعال بماند."
+    exit 2
+fi
+echo "MIGRATION_COMPLETE: new Core active, WG/AWG endpoint sync complete"
 echo "════════════════════════════════════════════════════════════"

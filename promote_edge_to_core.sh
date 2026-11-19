@@ -19,8 +19,9 @@ rollback_on_failure() {
         echo "⚠️ ارتقا کامل نشد؛ نقش ناقص Core روی مقصد متوقف می‌شود."
         systemctl disable --now nvlbot >/dev/null 2>&1 || true
         systemctl disable --now wg-quick@wg0 >/dev/null 2>&1 || true
+        systemctl disable --now awg-quick@awg0 >/dev/null 2>&1 || true
         if systemctl is-active --quiet nvlbot || systemctl is-active --quiet wg-quick@wg0 \
-                || wg show wg0 >/dev/null 2>&1; then
+                || wg show wg0 >/dev/null 2>&1 || awg show awg0 >/dev/null 2>&1; then
             echo "❌ خاموش‌بودن کامل مقصد تأیید نشد؛ بازگشت Core قبلی نیازمند بررسی است."
             return "$failure_rc"
         fi
@@ -84,6 +85,9 @@ fi
 echo "🔹 ۱) توقف نقش قبلیِ Edge..."
 TARGET_ROLE_CHANGED=1
 systemctl stop wg-quick@wg0 >/dev/null 2>&1 || true
+# The selected destination may itself be an AWG Edge. Retire that identity
+# before installing the source Core AWG profile (the same way wg0 is replaced).
+systemctl stop awg-quick@awg0 >/dev/null 2>&1 || true
 systemctl stop gost >/dev/null 2>&1 || true
 iptables -t nat -F PREROUTING 2>/dev/null || true
 iptables -t nat -F POSTROUTING 2>/dev/null || true
@@ -138,6 +142,42 @@ echo "🔹 ۵) فعال‌سازی تونل..."
 systemctl enable wg-quick@wg0 >/dev/null 2>&1
 systemctl restart wg-quick@wg0
 sleep 1
+
+# AWG is migrated only when it was running on the source Core.
+if [ -s "${MIGRATION_DIR}/awg0.conf" ]; then
+    echo "🔹 ۵.۵) انتقال Core AmneziaWG (پروفایل، کلید و همه Peerها)..."
+    [ -s "${MIGRATION_DIR}/awg_core_public.key" ] || {
+        echo "❌ هویت عمومی AWG در بسته مهاجرت وجود ندارد."
+        exit 1
+    }
+    command -v awg >/dev/null && command -v awg-quick >/dev/null && modinfo amneziawg >/dev/null || {
+        echo "❌ ابزار یا ماژول AmneziaWG روی مقصد موجود نیست."
+        exit 1
+    }
+    mkdir -p /etc/amnezia/amneziawg
+    if [ -f /etc/amnezia/amneziawg/awg0.conf ]; then
+        cp -p /etc/amnezia/amneziawg/awg0.conf "/etc/amnezia/amneziawg/awg0.conf.pre-promote.$(date +%s)"
+    fi
+    install -m 600 "${MIGRATION_DIR}/awg0.conf" /etc/amnezia/amneziawg/awg0.conf
+    systemctl enable awg-quick@awg0 >/dev/null 2>&1
+    systemctl start awg-quick@awg0
+    if [ "$(awg show awg0 public-key)" != "$(cat "${MIGRATION_DIR}/awg_core_public.key")" ]; then
+        echo "❌ هویت AWG Core پس از انتقال متفاوت است."
+        exit 1
+    fi
+    # The selected Edge may have exposed only its own AWG port. Open the
+    # migrated Core listener as well, without changing unrelated rules.
+    AWG_CORE_PORT="$(awg show awg0 listen-port)"
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+        ufw allow "${AWG_CORE_PORT}/udp" >/dev/null
+    else
+        iptables -C INPUT -p udp --dport "$AWG_CORE_PORT" -j ACCEPT 2>/dev/null ||
+            iptables -A INPUT -p udp --dport "$AWG_CORE_PORT" -j ACCEPT
+        (command -v netfilter-persistent >/dev/null 2>&1 &&
+            netfilter-persistent save >/dev/null 2>&1) || true
+    fi
+    echo "   ✅ AWG Core فعال شد و هویت رمزنگاری آن برابر Core قدیمی است."
+fi
 
 echo "🔹 ۶) sshd روی پورت مشتری‌ها (۰.۰.۰.۰) بالا بیاید..."
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
@@ -270,6 +310,12 @@ if [ -f "${BOT_DIR}/master_bot.db" ]; then
     cp "${BOT_DIR}/master_bot.db" "${BOT_DIR}/master_bot.db.bak.$(date +%s)"
 fi
 cp "${MIGRATION_DIR}/master_bot.db" "${BOT_DIR}/master_bot.db"
+if [ -d "${MIGRATION_DIR}/extra_databases" ]; then
+    for db in "${MIGRATION_DIR}/extra_databases/"*.db; do
+        [ -f "$db" ] || continue
+        install -m 600 "$db" "${BOT_DIR}/${db##*/}"
+    done
+fi
 DETECTED_OLD_CORE_IP="$(sqlite3 "${BOT_DIR}/master_bot.db" "SELECT value FROM settings WHERE key='core_wg_public_ip';" 2>/dev/null)"
 if [[ ! "$DETECTED_OLD_CORE_IP" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
     DETECTED_OLD_CORE_IP=""
@@ -771,7 +817,11 @@ if [ "$(wg show wg0 public-key 2>/dev/null)" != "$(wg pubkey < "${MIGRATION_DIR}
     echo "❌ هویت WireGuard Core جدید مطابق کلید مهاجرت نیست."
     exit 1
 fi
-echo "PROMOTE_POSTCHECK_OK: bot, SQLite, Core WG identity and SSH management:22"
+if [ -s "${MIGRATION_DIR}/awg0.conf" ]; then
+    systemctl is-active --quiet awg-quick@awg0 || exit 1
+    [ "$(awg show awg0 public-key)" = "$(cat "${MIGRATION_DIR}/awg_core_public.key")" ] || exit 1
+fi
+echo "PROMOTE_POSTCHECK_OK: bot, SQLite, Core WG/AWG identity and SSH management:22"
 
 PROMOTE_SUCCESS=1
 echo "✅ ترفیع این سرور به Core کامل شد. دیتابیس و سرویس ربات بررسی شدند."

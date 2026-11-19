@@ -14756,7 +14756,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚠️ <b>تأیید مهاجرت Core</b>\nمقصد: <code>{target_ip}</code>\n"
             f"پورت مشتری: <code>{proposed}</code>\n\n"
             "ابتدا پیش‌نیازها روی مقصد بررسی می‌شوند؛ سپس ربات فعلی متوقف می‌شود. "
-            "پس از راه‌اندازی Core جدید، Core قدیمی به Edge تبدیل خواهد شد. "
+            "پس از راه‌اندازی Core جدید، Core قدیمی خاموشِ سرویس باقی می‌ماند و به Edge تبدیل نمی‌شود. "
             "اگر بررسی اولیه شکست بخورد، Core فعلی متوقف نمی‌شود.",
             parse_mode="HTML", reply_markup=kb)
 
@@ -23290,8 +23290,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async def _launch_core_migration():
             try:
                 command = (
-                    f"set -o pipefail; {{ bash /root/core_side_failover.sh {target_ip} {cust_port} "
-                    f"&& bash /root/demote_core_to_edge.sh {target_ip} {cust_port}; }} "
+                    f"set -o pipefail; bash /root/core_side_failover.sh {target_ip} {cust_port} "
                     ">> /root/failover_migration.log 2>&1"
                 )
                 ok, detail, kind = await run_cmd(

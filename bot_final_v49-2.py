@@ -2013,6 +2013,7 @@ def _build_server_settings_kb():
     ساختاری امکان‌پذیر نیست — هر تغییری این‌جا، خودکار در هر دو مسیر ورودی اعمال می‌شود.
     """
     return [[InlineKeyboardButton("🖥 وضعیت و نقش سرورها (Core/Edge)", callback_data="srv_status")],
+            [InlineKeyboardButton("🚀 انتقال بات به Core جدید", callback_data="srv_fresh_core_start")],
             [InlineKeyboardButton("✏️ تغییر نام برند", callback_data="srv_brand")],
             [InlineKeyboardButton("🎯 تنظیمات مستقیم", callback_data="srv_direct_menu"), InlineKeyboardButton("🔐 تنظیمات TLS", callback_data="srv_tls")],
             [InlineKeyboardButton("🔌 تنظیمات UDPGW", callback_data="srv_udpgw")],
@@ -14735,6 +14736,37 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         spawn_bg_task(_provision_task_guarded())
 
+
+    # Fresh VPS migration is separate from the registered-Edge Promote wizard.
+    elif state == 'SRV_FRESH_CORE_IP':
+        import ipaddress
+        try:
+            candidate = ipaddress.IPv4Address(text.strip())
+            if not candidate.is_global:
+                raise ValueError("public IPv4 required")
+        except ValueError:
+            await update.message.reply_text("❌ IP عمومی IPv4 مقصد معتبر نیست. دوباره وارد کنید:")
+            return
+        target_ip = str(candidate)
+        if target_ip == '91.107.170.239':
+            await update.message.reply_text("❌ مقصد نمی‌تواند همان Core فعلی باشد.")
+            return
+        context.user_data['fresh_core_ip'] = target_ip
+        context.user_data['state'] = 'SRV_FRESH_CORE_REVIEW'
+        await update.message.reply_text(
+            f"🚀 <b>انتقال به Core آماده‌شده</b>\n"
+            f"مقصد: <code>{target_ip}</code>\n"
+            "مبدأ: <code>91.107.170.239</code>\n\n"
+            "ابتدا پیش‌بررسی و همگام‌سازی فقط فایل کد بات انجام می‌شود. "
+            "دیتابیس از Snapshot قبلی استفاده می‌کند و Final Sync انجام نمی‌شود. "
+            "Core قبلی تا تأیید نهایی فعال می‌ماند.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔎 بررسی آمادگی انتقال", callback_data="srv_fresh_core_check")],
+                [InlineKeyboardButton("🔙 انصراف", callback_data="srv_menu_back")],
+            ]),
+        )
+
     # Promote: explicit confirmation, without unused password prompts.
     elif state == 'SRV_PROMOTE_PORT_INPUT':
         proposed = text.strip()
@@ -23201,6 +23233,130 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "برای تغییر مسیر از «مدیریت Edge» و بخش انتقال کاربران و DNS استفاده کنید. "
             "هیچ Default، DNS، NAT یا حسابی تغییر نکرد."
         )
+        return
+
+
+    # Fresh Core: pre-staged destination, NO legacy Edge demotion.
+    elif d == "srv_fresh_core_start" and role == 'admin':
+        context.user_data['state'] = 'SRV_FRESH_CORE_IP'
+        await query.edit_message_text(
+            "🚀 <b>انتقال بات به VPS جدید</b>\n"
+            "این مسیر فقط برای Core ازقبل آماده‌شده است و Edge موجود را Promote نمی‌کند.\n\n"
+            "لطفاً IP عمومی IPv4 سرور مقصد را بفرستید:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 انصراف", callback_data="srv_menu_back")]
+            ]),
+        )
+
+    elif d == "srv_fresh_core_check" and role == 'admin':
+        import ipaddress
+        ip = context.user_data.get('fresh_core_ip', '')
+        if context.user_data.get('state') != 'SRV_FRESH_CORE_REVIEW':
+            await query.edit_message_text("⛔ درخواست منقضی شده است؛ مجدداً شروع کنید.")
+            return
+        try:
+            ip = str(ipaddress.IPv4Address(ip))
+            if not ipaddress.IPv4Address(ip).is_global:
+                raise ValueError("public IP required")
+        except ValueError:
+            safe_clear_context(context)
+            await query.edit_message_text("⛔ IP مقصد معتبر نیست.")
+            return
+        if not os.path.isfile("/root/fresh_core_cutover.sh"):
+            await query.edit_message_text(
+                "⛔ اسکریپت Fresh Core روی Core فعلی منتشر نشده است؛ ابتدا Release را Deploy کنید."
+            )
+            return
+        await query.edit_message_text(
+            f"🔎 در حال بررسی Core جدید <code>{ip}</code>... "
+            "بات قدیمی در این مرحله متوقف نمی‌شود.",
+            parse_mode="HTML",
+        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                'sudo', 'bash', '/root/fresh_core_cutover.sh', 'check', ip, '2252',
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            )
+            try:
+                out, _ = await asyncio.wait_for(proc.communicate(), timeout=90)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                raise RuntimeError("PREFLIGHT_TIMEOUT")
+            summary = out.decode(errors='replace')[-2500:]
+            if proc.returncode != 0 or "FRESH_CORE_PRECHECK=PASS" not in summary:
+                raise RuntimeError(summary or f"PREFLIGHT_EXIT={proc.returncode}")
+        except Exception as exc:
+            context.user_data['state'] = 'SRV_FRESH_CORE_REVIEW'
+            await query.message.reply_text(
+                "⛔ <b>پیش‌بررسی ناموفق بود؛ Core قدیمی فعال است.</b>\n"
+                f"<code>{esc(str(exc))[:2500]}</code>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 بررسی مجدد", callback_data="srv_fresh_core_check")],
+                    [InlineKeyboardButton("🔙 انصراف", callback_data="srv_menu_back")],
+                ]),
+            )
+            return
+        context.user_data['state'] = 'SRV_FRESH_CORE_READY'
+        await query.message.reply_text(
+            f"✅ <b>پیش‌بررسی Core جدید موفق بود.</b>\n"
+            f"مقصد: <code>{ip}</code> · پورت مشتری: <code>2252</code>\n\n"
+            "⚠️ با تأیید، بات و WG/AWG روی Core قدیمی متوقف و روی Core جدید راه‌اندازی می‌شوند. "
+            "Core قدیمی خاموش یا Demote نمی‌شود. DNS و Endpointهای Edge در این مرحله منتقل نمی‌شوند. "
+            "اگر بات جدید بالا نیاید، تلاش برای Rollback انجام می‌شود.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⚠️ تأیید نهایی انتقال بات", callback_data="srv_fresh_core_commit")],
+                [InlineKeyboardButton("🔙 انصراف", callback_data="srv_menu_back")],
+            ]),
+        )
+
+    elif d == "srv_fresh_core_commit" and role == 'admin':
+        import ipaddress
+        ip = context.user_data.get('fresh_core_ip', '')
+        if context.user_data.get('state') != 'SRV_FRESH_CORE_READY':
+            await query.edit_message_text("⛔ تأییدیه معتبر نیست؛ پیش‌بررسی را دوباره انجام دهید.")
+            return
+        try:
+            ip_obj = ipaddress.IPv4Address(ip)
+            if not ip_obj.is_global or str(ip_obj) == '91.107.170.239':
+                raise ValueError("invalid destination")
+            ip = str(ip_obj)
+        except ValueError:
+            safe_clear_context(context)
+            await query.edit_message_text("⛔ IP مقصد معتبر نیست.")
+            return
+        safe_clear_context(context)
+        chat_id = query.message.chat_id
+        await query.edit_message_text(
+            f"🚀 عملیات انتقال بات به <code>{ip}</code> ثبت می‌شود. "
+            "نتیجه قطعی را باید از لاگ Systemd بررسی کرد.",
+            parse_mode="HTML",
+        )
+        command = (
+            f"set -o pipefail; NVL_FRESH_CUTOVER_APPROVED=YES "
+            f"bash /root/fresh_core_cutover.sh cutover {ip} 2252 "
+            ">> /root/fresh_core_migration.log 2>&1"
+        )
+        ok, detail, kind = await run_cmd(
+            'sudo', 'systemd-run', f'--unit=fresh-core-job-{int(time.time() * 1000)}',
+            '/bin/bash', '-c', command,
+        )
+        if not ok:
+            await context.bot.send_message(
+                chat_id, f"⛔ Job آغاز نشد: <code>{esc(kind or detail)}</code>",
+                parse_mode="HTML",
+            )
+        else:
+            await context.bot.send_message(
+                chat_id, "✅ Job انتقال ثبت شد؛ این پیام به معنی موفقیت نهایی نیست.\n"
+                "گزارش: <code>/root/fresh_core_migration.log</code>\n"
+                "موفقیت بات با <code>FRESH_CORE_BOT_MIGRATION=PASS</code> مشخص می‌شود؛ "
+                "انتقال Endpointهای Edge جداگانه است.",
+                parse_mode="HTML",
+            )
         return
 
     elif d == "srv_wiz_promote_start" and role == 'admin':

@@ -71,7 +71,7 @@ DST_IDENTITIES=$("${SSH[@]}" bash -s <<'REMOTE_KEYS'
 set -Eeuo pipefail
 pub_from_config() {
     local config="$1" tool="$2" secret
-    secret=$(awk -F= '/^[[:space:]]*PrivateKey[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' "$config")
+    secret=$(awk '/^[[:space:]]*PrivateKey[[:space:]]*=/{sub(/^[^=]*=/, ""); gsub(/[[:space:]]/, ""); print; exit}' "$config")
     [[ -n "$secret" ]] || { echo 'HOLD: CONFIG_PRIVATE_KEY_MISSING' >&2; return 1; }
     printf '%s\n' "$secret" | "$tool" pubkey
 }

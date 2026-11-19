@@ -464,5 +464,61 @@ rollback_start_nvlbot() { printf 'SOURCE_RECOVERY_CALLED\n'; }
         self.assertIn("SOURCE_RECOVERY_CALLED", result.stdout)
 
 
+class CoreAWGPromoteRegressionTests(unittest.TestCase):
+    """Source-level guards for the live legacy Promote Edge -> Core path."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.core = (ROOT / "core_side_failover.sh").read_text()
+        cls.promote = (ROOT / "promote_edge_to_core.sh").read_text()
+        cls.bot = (ROOT / "bot_final_v49-2.py").read_text()
+        cls.awg_sync = (ROOT / "update_all_awg_edges_endpoint.sh").read_text()
+
+    def test_source_exports_awg_and_stops_old_identity_before_promote(self):
+        self.assertIn('install -m 600 /etc/amnezia/amneziawg/awg0.conf', self.core)
+        self.assertIn('awg show awg0 public-key', self.core)
+        self.assertIn('systemctl stop awg-quick@awg0', self.core)
+        self.assertLess(
+            self.core.index('install -m 600 /etc/amnezia/amneziawg/awg0.conf'),
+            self.core.index('systemctl stop awg-quick@awg0'),
+        )
+        self.assertLess(
+            self.core.index('systemctl stop awg-quick@awg0'),
+            self.core.index('PROMOTE_EXIT=$?'),
+        )
+
+    def test_both_rollback_paths_disable_new_awg_before_old_core_is_started(self):
+        self.assertIn('systemctl disable --now awg-quick@awg0', self.core)
+        self.assertIn('systemctl disable --now awg-quick@awg0', self.promote)
+        self.assertIn('systemctl start awg-quick@awg0', self.core)
+
+    def test_promote_restores_awg_identity_and_additional_databases(self):
+        self.assertIn('install -m 600 "${MIGRATION_DIR}/awg0.conf"', self.promote)
+        self.assertIn('systemctl start awg-quick@awg0', self.promote)
+        self.assertIn('awg show awg0 public-key', self.promote)
+        self.assertIn('extra_databases', self.core)
+        self.assertIn('extra_databases', self.promote)
+        self.assertLess(
+            self.promote.index('systemctl start awg-quick@awg0'),
+            self.promote.index('systemctl enable --now nvlbot'),
+        )
+
+    def test_awg_endpoint_sync_not_limited_to_host_pool(self):
+        self.assertIn('mapfile -t EDGES', self.awg_sync)
+        self.assertIn('Endpoint', self.awg_sync)
+        self.assertIn('awg set awg0 peer', self.awg_sync)
+        self.assertIn('EDGE_AWG_ENDPOINT_UPDATED', self.awg_sync)
+        self.assertIn('AWG_EDGE_UPDATE_FAILED', self.awg_sync)
+        self.assertIn('update_all_awg_edges_endpoint.sh', self.core)
+        subprocess.run(["bash", "-n", str(ROOT / "update_all_awg_edges_endpoint.sh")], check=True)
+
+    def test_telegram_launches_promote_without_demoting_old_core(self):
+        handler = self.bot.split('elif d == "srv_promote_confirm"')[1].split(
+            'elif d == "srv_direct_menu"'
+        )[0]
+        self.assertIn('bash /root/core_side_failover.sh', handler)
+        self.assertNotIn('&& bash /root/demote_core_to_edge.sh', handler)
+        self.assertIn('Core قدیمی خاموشِ سرویس', self.bot)
+
 if __name__ == "__main__":
     unittest.main()

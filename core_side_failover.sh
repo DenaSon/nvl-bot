@@ -121,10 +121,6 @@ if [ ! -x /root/demote_core_to_edge.sh ] && [ ! -f /root/demote_core_to_edge.sh 
     echo "❌ اسکریپت demote_core_to_edge.sh نصب نیست؛ Core را متوقف نمی‌کنیم."
     exit 1
 fi
-if ! command -v netfilter-persistent >/dev/null 2>&1; then
-    echo "❌ netfilter-persistent روی Core اصلی نیست؛ رله بعد از انتقال پایدار نمی‌ماند."
-    exit 1
-fi
 if [ ! -f /root/02_recreate_ssh_users.py ]; then
     echo "❌ ابزار بازسازی کاربران روی Core موجود نیست؛ انتقال مسدود است."
     exit 1
@@ -255,6 +251,22 @@ else
     rollback_start_nvlbot
     exit 1
 fi
+
+# Preserve other root-level SQLite stores (for example accounting.db) too.
+# These are optional, but should not be silently lost in a Core migration.
+mkdir -p "${EXPORT_DIR}/extra_databases"
+for db in "${BOT_DIR}/"*.db; do
+    [ -f "$db" ] || continue
+    name="${db##*/}"
+    [ "$name" = master_bot.db ] && continue
+    if ! sqlite3 "$db" ".backup '${EXPORT_DIR}/extra_databases/${name}'" 2>/dev/null; then
+        echo "⚠️ کپی SQLite ${name} ممکن نبود؛ کپی خام فایل پس از توقف ربات."
+        cp -p "$db" "${EXPORT_DIR}/extra_databases/${name}" || {
+            rollback_start_nvlbot
+            exit 1
+        }
+    fi
+done
 
 if [ -f /etc/gost/config.yaml ]; then
     cp /etc/gost/config.yaml "${EXPORT_DIR}/gost_config.yaml"

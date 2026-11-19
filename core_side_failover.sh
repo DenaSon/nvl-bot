@@ -35,6 +35,7 @@ CUSTOMER_SSH_PORT="$2"
 SOURCE_WG_STOPPED=0
 SOURCE_AWG_STOPPED=0
 AWG_SOURCE_ACTIVE=0
+AWG_SOURCE_PORT=42372
 # Serialize Telegram-triggered migrations, including their source DB freeze.
 command -v flock >/dev/null 2>&1 || { echo "❌ flock نصب نیست."; exit 1; }
 exec 9>/run/nvl-core-migration.lock
@@ -99,6 +100,7 @@ echo "   ✅ اتصال مدیریتی روی پورت ${EDGE_PORT} برقرار
 # Require an AWG-capable Edge only if the source actually uses AWG.
 if command -v awg >/dev/null 2>&1 && awg show awg0 >/dev/null 2>&1; then
     AWG_SOURCE_ACTIVE=1
+    AWG_SOURCE_PORT="$(awg show awg0 listen-port)"
     if [ ! -s /etc/amnezia/amneziawg/awg0.conf ]; then
         echo "❌ awg0 فعال است ولی کانفیگ Core موجود نیست."
         exit 1
@@ -473,7 +475,7 @@ if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
 fi
 if [ "$AWG_SOURCE_ACTIVE" = 1 ]; then
     if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
-            "bash /root/update_all_awg_edges_endpoint.sh '${SELF_IP}' '${TARGET_EDGE}' 42372"; then
+            "bash /root/update_all_awg_edges_endpoint.sh '${SELF_IP}' '${TARGET_EDGE}' '${AWG_SOURCE_PORT}'"; then
         AWG_SYNC=1
         echo "⚠️ برخی Endpointهای AWG نیازمند اصلاح هستند."
     fi

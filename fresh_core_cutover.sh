@@ -42,6 +42,18 @@ for service in nvlbot wg-quick@wg0 awg-quick@awg0; do
     systemctl is-active --quiet "$service" || { echo "HOLD: SOURCE_SERVICE_INACTIVE=$service"; exit 1; }
 done
 [[ -r /root/bot_final_v49-2.py ]] || { echo "HOLD: SOURCE_BOT_MISSING"; exit 1; }
+# The destination tunnels were started during previous manual migration attempts.
+# Check mode makes them passive while the original Core is still live.
+"${SSH[@]}" bash -s <<'REMOTE_PASSIVE'
+set -Eeuo pipefail
+if systemctl is-active --quiet nvlbot; then
+    echo 'HOLD: DEST_BOT_ALREADY_ACTIVE'; exit 1
+fi
+systemctl stop wg-quick@wg0 awg-quick@awg0
+! systemctl is-active --quiet wg-quick@wg0
+! systemctl is-active --quiet awg-quick@awg0
+echo 'DEST_DUPLICATE_CORE_TUNNELS=STOPPED'
+REMOTE_PASSIVE
 # Code-only staging is permitted. The operator explicitly skipped database final sync.
 # Destination bot remains stopped; update only the Python entrypoint before SHA checks.
 command -v rsync >/dev/null || { echo "HOLD: RSYNC_MISSING"; exit 1; }
@@ -55,8 +67,20 @@ DST_BOT_SHA=$("${SSH[@]}" sha256sum /root/bot_final_v49-2.py | awk '{print $1}')
 }
 SRC_WG=$(wg show wg0 public-key)
 SRC_AWG=$(awg show awg0 public-key)
-DST_WG=$("${SSH[@]}" wg show wg0 public-key)
-DST_AWG=$("${SSH[@]}" awg show awg0 public-key)
+DST_IDENTITIES=$("${SSH[@]}" bash -s <<'REMOTE_KEYS'
+set -Eeuo pipefail
+pub_from_config() {
+    local config="$1" tool="$2" secret
+    secret=$(awk -F= '/^[[:space:]]*PrivateKey[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' "$config")
+    [[ -n "$secret" ]] || { echo 'HOLD: CONFIG_PRIVATE_KEY_MISSING' >&2; return 1; }
+    printf '%s\n' "$secret" | "$tool" pubkey
+}
+pub_from_config /etc/wireguard/wg0.conf wg
+pub_from_config /etc/amnezia/amneziawg/awg0.conf awg
+REMOTE_KEYS
+)
+DST_WG=${DST_IDENTITIES%%$'\n'*}
+DST_AWG=${DST_IDENTITIES##*$'\n'}
 [[ -n "$SRC_WG" && "$SRC_WG" == "$DST_WG" ]] || {
     echo "HOLD: WG_IDENTITY_MISMATCH"; exit 1;
 }
@@ -74,7 +98,13 @@ ip -4 -o addr show | grep -Fq "$DEST/"
 [[ -s /root/bot_import_preflight.py ]]
 [[ -d /etc/nvlbot ]]
 systemctl is-active --quiet nvlbot && { echo 'HOLD: DEST_BOT_ALREADY_ACTIVE'; exit 1; }
-for unit in wg-quick@wg0 awg-quick@awg0 nvl-customer-sshd gost; do
+for unit in wg-quick@wg0 awg-quick@awg0; do
+    if systemctl is-active --quiet "$unit"; then
+        echo "HOLD: DUPLICATE_DEST_TUNNEL_ACTIVE=$unit"
+        exit 1
+    fi
+done
+for unit in nvl-customer-sshd gost; do
     systemctl is-active --quiet "$unit" || { echo "HOLD: DEST_SERVICE_INACTIVE=$unit"; exit 1; }
 done
 ss -lntH | awk -v p="$CUSTOMER_PORT" '$4 ~ (":" p "$") {yes=1} END {exit !yes}'

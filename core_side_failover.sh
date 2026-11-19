@@ -185,7 +185,7 @@ rollback_start_nvlbot() {
         return 1
     fi
     echo "🔹 رول‌بک: بازگرداندن WireGuard و ربات روی Core قبلی..."
-    if [ "$SOURCE_WG_STOPPED" = 1 ] || [ "$SOURCE_AWG_STOPPED" = 1 ]; then
+    if [ "$SOURCE_WG_STOPPED" = 1 ] || [ "${SOURCE_AWG_STOPPED:-0}" = 1 ]; then
         # The promoted target may already have the same WG/AWG private keys even
         # though its bot is down. Disable it before restoring the source.
         if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \

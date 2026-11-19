@@ -6,6 +6,8 @@ This is distinct from the registered-Edge Promote/Demote wizard. The old promoti
 
 Source Core: 91.107.170.239. Destination: 185.202.113.79 (already pre-staged with bot, snapshot SQLite DB, Linux identities, WG/AWG keys and peers, GOST, BadVPN, and separate customer SSH 2252). The operator explicitly skips the final live DB sync; changes since the snapshot WILL NOT be transferred. Preflight copies only the Python bot entrypoint, not the database.
 
+During the preflight, duplicate wg0/awg0 listeners on the DESTINATION are stopped and remain passive until the source is frozen at cutover. The source Core remains fully operational during this preparation. Source-key equality is checked against target config private keys offline without printing private keys. Preflight therefore modifies target tunnel runtime (not live source).
+
 The old Core must have passwordless administrative SSH on port 22 to the destination using /root/.ssh/edge_provision_ed25519; its SSH host key must be pinned in /root/.ssh/known_hosts. Missing or changed trust results in HOLD; do not disable SSH host key checking.
 
 ## Bot operation

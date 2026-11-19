@@ -299,6 +299,12 @@ if [ -f "${BOT_DIR}/master_bot.db" ]; then
     cp "${BOT_DIR}/master_bot.db" "${BOT_DIR}/master_bot.db.bak.$(date +%s)"
 fi
 cp "${MIGRATION_DIR}/master_bot.db" "${BOT_DIR}/master_bot.db"
+if [ -d "${MIGRATION_DIR}/extra_databases" ]; then
+    for db in "${MIGRATION_DIR}/extra_databases/"*.db; do
+        [ -f "$db" ] || continue
+        install -m 600 "$db" "${BOT_DIR}/${db##*/}"
+    done
+fi
 DETECTED_OLD_CORE_IP="$(sqlite3 "${BOT_DIR}/master_bot.db" "SELECT value FROM settings WHERE key='core_wg_public_ip';" 2>/dev/null)"
 if [[ ! "$DETECTED_OLD_CORE_IP" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
     DETECTED_OLD_CORE_IP=""

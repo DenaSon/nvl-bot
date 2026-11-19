@@ -165,6 +165,17 @@ if [ -s "${MIGRATION_DIR}/awg0.conf" ]; then
         echo "❌ هویت AWG Core پس از انتقال متفاوت است."
         exit 1
     fi
+    # The selected Edge may have exposed only its own AWG port. Open the
+    # migrated Core listener as well, without changing unrelated rules.
+    AWG_CORE_PORT="$(awg show awg0 listen-port)"
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+        ufw allow "${AWG_CORE_PORT}/udp" >/dev/null
+    else
+        iptables -C INPUT -p udp --dport "$AWG_CORE_PORT" -j ACCEPT 2>/dev/null ||
+            iptables -A INPUT -p udp --dport "$AWG_CORE_PORT" -j ACCEPT
+        (command -v netfilter-persistent >/dev/null 2>&1 &&
+            netfilter-persistent save >/dev/null 2>&1) || true
+    fi
     echo "   ✅ AWG Core فعال شد و هویت رمزنگاری آن برابر Core قدیمی است."
 fi
 

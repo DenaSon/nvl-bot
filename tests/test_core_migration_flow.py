@@ -53,6 +53,30 @@ class TelegramCoreMigrationTests(unittest.TestCase):
             with self.subTest(script=name):
                 subprocess.run(["bash", "-n", str(ROOT / name)], check=True)
 
+    def test_fresh_core_cutover_stays_separate_from_edge_promotion(self):
+        fresh = (ROOT / "fresh_core_cutover.sh").read_text(encoding="utf-8")
+        subprocess.run(["bash", "-n", str(ROOT / "fresh_core_cutover.sh")], check=True)
+        self.assertIn("FRESH_CORE_PRECHECK=PASS", fresh)
+        self.assertIn("FRESH_CORE_BOT_MIGRATION=PASS", fresh)
+        self.assertIn("FINAL_SYNC=SKIPPED_BY_OPERATOR", fresh)
+        self.assertIn("EDGE_ENDPOINTS=NOT_MIGRATED", fresh)
+        self.assertIn("DEST_BOT_ALREADY_ACTIVE", fresh)
+        self.assertIn("DEST_HOST_KEY_NOT_PINNED", fresh)
+        self.assertIn("CUTOVER_CONFIRMATION_REQUIRED", fresh)
+        self.assertIn("CORE_MIGRATION_ALREADY_RUNNING", fresh)
+        self.assertIn("OLD_CORE_BOT_LEFT_INACTIVE_TO_PREVENT_SPLIT_BRAIN", fresh)
+        self.assertIn("systemctl stop nvlbot", fresh)
+        self.assertIn("systemctl stop wg-quick@wg0 awg-quick@awg0", fresh)
+        self.assertNotIn("demote_core_to_edge.sh", fresh)
+        self.assertNotIn("update_all_edges_endpoint.sh", fresh)
+        self.assertIn("srv_fresh_core_start", self.bot)
+        self.assertIn("srv_fresh_core_check", self.bot)
+        self.assertIn("srv_fresh_core_commit", self.bot)
+        self.assertIn("SRV_FRESH_CORE_READY", self.bot)
+        fresh_callback = self.bot.split('elif d == "srv_fresh_core_commit"')[1].split('elif d == "srv_wiz_promote_start"')[0]
+        self.assertIn("fresh_core_cutover.sh cutover", fresh_callback)
+        self.assertNotIn("demote_core_to_edge.sh", fresh_callback)
+
     def test_telegram_confirms_before_launch(self):
         self.assertIn("srv_promote_confirm", self.bot)
         self.assertIn("SRV_PROMOTE_AWAIT_CONFIRM", self.bot)

@@ -4,7 +4,7 @@ This is distinct from the registered-Edge Promote/Demote wizard. The old promoti
 
 ## Scope and source of truth
 
-Source Core: 91.107.170.239. Destination: 185.202.113.79 (already pre-staged with bot, snapshot SQLite DB, Linux identities, WG/AWG keys and peers, GOST, BadVPN, and separate customer SSH 2252). The operator explicitly skips the final live DB sync; changes since the snapshot WILL NOT be transferred. Preflight copies only the Python bot entrypoint, not the database.
+Source Core: 91.107.170.239. Destination: 185.202.113.79 (already pre-staged with bot, snapshot SQLite DB, Linux identities, WG/AWG keys and peers, GOST, BadVPN, and separate customer SSH 2252). The operator explicitly skips the final live DB sync; changes since the snapshot WILL NOT be transferred. Preflight copies the current bot's code-only Python/shell runtime and requirements (including ops/server_migration), but not the database or live credentials.
 
 During the preflight, duplicate wg0/awg0 listeners on the DESTINATION are stopped and remain passive until the source is frozen at cutover. The source Core remains fully operational during this preparation. Source-key equality is checked against target config private keys offline without printing private keys. Preflight therefore modifies target tunnel runtime (not live source).
 

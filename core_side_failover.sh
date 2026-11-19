@@ -465,6 +465,14 @@ if [ "$PROMOTE_EXIT" -ne 0 ]; then
     exit "$PROMOTE_EXIT"
 fi
 
+# Keep the retired source Core quiet if it reboots before the operator shuts
+# down the VPS. Do not auto-demote it into another relay.
+systemctl disable nvlbot wg-quick@wg0 >/dev/null 2>&1 || true
+if [ "$AWG_SOURCE_ACTIVE" = 1 ]; then
+    systemctl disable awg-quick@awg0 >/dev/null 2>&1 || true
+fi
+systemctl disable --now nvl-edge-sync.timer >/dev/null 2>&1 || true
+
 echo "🔹 ۷) هماهنگ‌سازی Endpointهای Edgeها از Core جدید..."
 WG_SYNC=0
 AWG_SYNC=0

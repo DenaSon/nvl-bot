@@ -77,7 +77,7 @@ CURRENT=$(awk -F= '/^[[:space:]]*Endpoint[[:space:]]*=/ {
   gsub(/[[:space:]]/, "", $2); print $2
 }' "$CONF")
 [[ "$(printf '%s\n' "$CURRENT" | wc -l)" -eq 1 ]] || exit 1
-if [[ "$CURRENT" != "$OLD:42372" && "$CURRENT" != "$NEW:$PORT" ]]; then
+if [[ "$CURRENT" != "$OLD:$PORT" && "$CURRENT" != "$NEW:$PORT" ]]; then
   echo "EDGE_AWG_CONFIG_ENDPOINT_UNEXPECTED"
   exit 1
 fi

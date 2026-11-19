@@ -201,10 +201,16 @@ echo 'NEW_CORE_BOT=ACTIVE'
 REMOTE_ACTIVATE
 
 # Keep the old VPS powered on with its admin SSH, but retire the duplicate bot/tunnels.
-"${SSH[@]}" systemctl enable nvlbot wg-quick@wg0 awg-quick@awg0 nvl-customer-sshd >/dev/null
+"${SSH[@]}" systemctl enable nvlbot wg-quick@wg0 awg-quick@awg0 nvl-customer-sshd \
+    ssh-limiter gost badvpn-7300 badvpn-8510 badvpn-8515 badvpn-8516 \
+    badvpn-8517 badvpn-udpgw-legacy >/dev/null
+# New bot is serving; never automatically roll back it solely for failed old boot-unit disable.
 COMMITTED=1
-systemctl disable nvlbot wg-quick@wg0 awg-quick@awg0 >/dev/null || \
-    echo 'WARNING: OLD_CORE_BOOT_UNITS_MAY_NEED_MANUAL_DISABLE'
+if ! systemctl disable nvlbot wg-quick@wg0 awg-quick@awg0 >/dev/null; then
+    echo 'CUTOVER=PARTIAL; OLD_CORE_BOOT_UNITS_NOT_DISABLED'
+    echo 'NEW_CORE_BOT=ACTIVE; DO_NOT_RESTART_OLD_CORE_UNTIL_RECONCILED'
+    exit 1
+fi
 echo 'FRESH_CORE_BOT_MIGRATION=PASS'
 echo 'OLD_CORE=ONLINE_STANDBY; BOT_WG_AWG_STOPPED'
 echo 'NEW_CORE_BOT=ACTIVE'

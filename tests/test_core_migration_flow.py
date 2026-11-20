@@ -197,7 +197,7 @@ TARGET_EDGE=192.0.2.2
 
     def test_old_stage_is_preserved_but_cannot_supply_missing_modules(self):
         start = self.core.index("# Preserve the previous stage")
-        finish = self.core.index("if ! rsync", start)
+        finish = self.core.index("# DenaProbe is imported by the live bot", start)
         with tempfile.TemporaryDirectory() as tmp:
             stage = Path(tmp) / "stage"
             (stage / "ops").mkdir(parents=True)

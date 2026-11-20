@@ -419,7 +419,7 @@ STAGED_MAIN_NAME="$(cat "$MAIN_MARKER")"
     { echo "❌ Missing pip in destination venv; preflight failed."; exit 1; }
 "$BOT_DIR/venv/bin/python3" -m py_compile "$STANDBY_DIR/$STAGED_MAIN_NAME"
 systemctl stop nvlbot 2>/dev/null || true
-for package in ops server_migration; do
+for package in ops server_migration denaprobe_ingest; do
     # A zero-byte __init__.py is a valid Python package initializer.
     [ -f "$STANDBY_DIR/$package/__init__.py" ] ||
         { echo "Missing staged Python package: $package"; exit 1; }
@@ -427,9 +427,11 @@ done
 [ -s "$STANDBY_DIR/bot_import_preflight.py" ] ||
     { echo "Missing staged bot import checker"; exit 1; }
 cp "$STANDBY_DIR/"*.py "$STANDBY_DIR/"*.sh "$STANDBY_DIR/requirements.txt" "$BOT_DIR/"
-cp -a "$STANDBY_DIR/ops" "$STANDBY_DIR/server_migration" "$BOT_DIR/"
+cp -a "$STANDBY_DIR/ops" "$STANDBY_DIR/server_migration" "$STANDBY_DIR/denaprobe_ingest" "$BOT_DIR/"
 (cd "$BOT_DIR" && PYTHONPATH= "$BOT_DIR/venv/bin/python3" "$BOT_DIR/bot_import_preflight.py" "$BOT_DIR/$STAGED_MAIN_NAME") ||
     { echo "Bot runtime imports failed on destination"; exit 1; }
+(cd "$BOT_DIR" && PYTHONPATH= "$BOT_DIR/venv/bin/python3" -B -c 'from denaprobe_ingest.detector import evaluate') ||
+    { echo "DenaProbe runtime import failed on destination"; exit 1; }
 
 # Always prefer the service unit collected from the live Core during THIS run.
 if [ -s "${MIGRATION_DIR}/nvlbot.service" ]; then

@@ -78,7 +78,8 @@ class TelegramCoreMigrationTests(unittest.TestCase):
         self.assertLess(marker, stop)
         self.assertIn("python3 -m venv --clear /root/venv", self.core)
         self.assertIn("python3 -m pip --version", self.core)
-        self.assertIn("demote_core_to_edge.sh --prepare", self.core)
+        self.assertNotIn("demote_core_to_edge.sh --prepare", self.core)
+        self.assertIn("awg show awg0 public-key", self.core)
         self.assertIn("systemctl is-active --quiet nvlbot", self.core)
         self.assertNotIn("با cp خام کپی شد", self.core)
 
@@ -301,6 +302,45 @@ rollback_start_nvlbot() { printf 'SOURCE_RECOVERY\n' >> "$TRACE"; }
 
     def test_endpoint_propagation_fails_on_unreachable_edges(self):
         self.assertIn('[ "$FAIL" -eq 0 ]', self.sync)
+
+    def test_awg_only_promotion_preflight_does_not_require_target_wg(self):
+        start = self.core.index('echo "🔹 ۲.۵) بررسی AWG')
+        end = self.core.index('echo "🔹 ۲.۶) انتقال نسخه دقیق', start)
+        fragment = self.core[start:end]
+        self.assertNotIn('wg show wg0', fragment)
+        self.assertNotIn('wg-quick@wg0', fragment)
+        self.assertNotIn('demote_core_to_edge', fragment)
+        harness = """
+set -uo pipefail
+AWG_SOURCE_ACTIVE=1
+TARGET_EDGE=192.0.2.8
+SSH_OPTS=()
+ssh() {
+  case "${*: -1}" in
+    'awg show awg0 public-key') echo TEST_EDGE_PUBLIC_KEY ;;
+    *) return 0 ;;
+  esac
+}
+awg() {
+  if [ "$*" = "show awg0 peers" ]; then
+    echo TEST_EDGE_PUBLIC_KEY
+  fi
+}
+"""
+        result = subprocess.run(
+            ["bash", "-c", harness + fragment + "\necho AWG_ONLY_PREFLIGHT_PASS\n"],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("AWG_ONLY_PREFLIGHT_PASS", result.stdout)
+
+    def test_wg_sync_skips_awg_only_edges_and_retired_core(self):
+        sync = self.sync
+        self.assertIn('OLD_CORE_PUBLIC_IP="${3:-}"', sync)
+        self.assertIn('WG_ROLE=', sync)
+        self.assertIn('NO_WG', sync)
+        self.assertIn('CORE', sync)
+        self.assertIn('"$EDGE" = "$OLD_CORE_PUBLIC_IP"', sync)
+        self.assertLess(sync.index('WG_ROLE='), sync.index('if ! rsync -az -e'))
 
     @staticmethod
     def _function(source, name):

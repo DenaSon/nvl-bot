@@ -288,17 +288,53 @@ rollback_start_nvlbot() { printf 'SOURCE_RECOVERY\n' >> "$TRACE"; }
         self.assertIn("MIGRATION_COMPLETE", self.demote)
         self.assertIn('systemctl disable --now nvlbot', self.demote)
 
-    def test_private_runtime_and_systemd_dropins_restored_before_bot_start(self):
+    def test_private_runtime_archives_both_etc_trees_and_restores_before_bot_start(self):
         self.assertIn('nvlbot_etc.tar.gz', self.core)
         self.assertIn('nvlbot_dropins.tar.gz', self.core)
+        self.assertIn('for env_dir in /etc/nvlbot /etc/nvl', self.core)
+        self.assertIn('environment_files.list', self.core)
+        self.assertIn('readlink -f -- "$env_file"', self.core)
         self.assertIn('nvlbot_etc.tar.gz', self.promote)
         self.assertIn('nvlbot_dropins.tar.gz', self.promote)
-        self.assertIn('chmod 600 /etc/nvlbot/nvlbot.env', self.promote)
-        self.assertLess(
-            self.promote.index('tar -xzf "${MIGRATION_DIR}/nvlbot_etc.tar.gz"'),
-            self.promote.index('systemctl enable --now nvlbot'),
-        )
-        self.assertIn('REQUIRED_ENV_FILE=', self.promote)
+        self.assertIn('environment_files.list', self.promote)
+        self.assertIn('tar --same-owner --same-permissions', self.promote)
+        self.assertIn('validate_required_environment_files()', self.promote)
+        restore_index = self.promote.index('tar --same-owner --same-permissions')
+        daemon_reload_index = self.promote.index('systemctl daemon-reload', restore_index)
+        bot_start_index = self.promote.index('systemctl enable --now nvlbot', restore_index)
+        self.assertLess(restore_index, daemon_reload_index)
+        self.assertLess(restore_index, bot_start_index)
+
+    def test_promote_validates_every_effective_environment_file(self):
+        start = self.promote.index('validate_required_environment_files() {')
+        finish = self.promote.index('\n}', start) + 2
+        function = self.promote[start:finish]
+        for missing_index in (None, 1, 4):
+            with self.subTest(missing_index=missing_index), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                paths = [
+                    root / 'etc/nvlbot/nvlbot.env',
+                    root / 'etc/nvlbot/cloudzy.env',
+                    root / 'etc/nvlbot/awg-flags.env',
+                    root / 'etc/nvl/marzban-alert.env',
+                    root / 'etc/nvl/daily-business.env',
+                ]
+                for index, path in enumerate(paths):
+                    if index == missing_index:
+                        continue
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text('fixture=1\n')
+                env_files = '\n'.join(f'{path} (ignore_errors=no)' for path in paths)
+                harness = 'systemctl() { printf \'%s\\n\' "$TEST_ENV_FILES"; }\n'
+                result = subprocess.run(
+                    ['bash', '-c', harness + function + '\nvalidate_required_environment_files\n'],
+                    env=dict(os.environ, TEST_ENV_FILES=env_files),
+                    capture_output=True, text=True,
+                )
+                expected = 0 if missing_index is None else 1
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                if missing_index is not None:
+                    self.assertIn(str(paths[missing_index]), result.stdout)
 
     def test_endpoint_propagation_fails_on_unreachable_edges(self):
         self.assertIn('[ "$FAIL" -eq 0 ]', self.sync)

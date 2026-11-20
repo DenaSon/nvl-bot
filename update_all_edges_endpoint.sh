@@ -127,7 +127,7 @@ for EDGE in "${EDGE_HOSTS[@]}"; do
     # A stale host_pool record may also refer to the retired Core; never
     # accidentally rewrite its peers or restart its stopped wg0 identity.
     WG_ROLE=$(ssh "${SSH_OPTS[@]}" "root@${EDGE}" \
-        'if [ ! -s /etc/wireguard/wg0.conf ]; then echo NO_WG; elif grep -Eq "^[[:space:]]*Address[[:space:]]*=[[:space:]]*10\\.77\\.0\\.1(/|[[:space:]]|$)" /etc/wireguard/wg0.conf; then echo CORE; else echo EDGE; fi' 2>/dev/null) || WG_ROLE="UNKNOWN"
+        'if [ ! -s /etc/wireguard/wg0.conf ] || ! wg show wg0 >/dev/null 2>&1; then echo NO_WG; elif grep -Eq "^[[:space:]]*Address[[:space:]]*=[[:space:]]*10\\.77\\.0\\.1(/|[[:space:]]|$)" /etc/wireguard/wg0.conf; then echo CORE; else echo EDGE; fi' 2>/dev/null) || WG_ROLE="UNKNOWN"
     if [ "$WG_ROLE" = NO_WG ] || [ "$WG_ROLE" = CORE ]; then
         echo "   ↪️ ${EDGE} — فاقد WG Edge (AWG-only یا Core)؛ بدون تغییر."
         SKIP=$((SKIP+1))

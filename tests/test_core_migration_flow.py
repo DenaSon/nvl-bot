@@ -310,7 +310,7 @@ rollback_start_nvlbot() { printf 'SOURCE_RECOVERY\n' >> "$TRACE"; }
 
     def test_promote_validates_every_effective_environment_file(self):
         start = self.promote.index('validate_required_environment_files() {')
-        finish = self.promote.index('\\n}', start) + 2
+        finish = self.promote.index('\n}', start) + 2
         function = self.promote[start:finish]
         for missing_index in (None, 1, 4):
             with self.subTest(missing_index=missing_index), tempfile.TemporaryDirectory() as tmp:
@@ -326,11 +326,11 @@ rollback_start_nvlbot() { printf 'SOURCE_RECOVERY\n' >> "$TRACE"; }
                     if index == missing_index:
                         continue
                     path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text('fixture=1\\n')
-                env_files = '\\n'.join(f'{path} (ignore_errors=no)' for path in paths)
-                harness = 'systemctl() { printf \'%s\\n\' "$TEST_ENV_FILES"; }\\n'
+                    path.write_text('fixture=1\n')
+                env_files = '\n'.join(f'{path} (ignore_errors=no)' for path in paths)
+                harness = 'systemctl() { printf \'%s\\n\' "$TEST_ENV_FILES"; }\n'
                 result = subprocess.run(
-                    ['bash', '-c', harness + function + '\\nvalidate_required_environment_files\\n'],
+                    ['bash', '-c', harness + function + '\nvalidate_required_environment_files\n'],
                     env=dict(os.environ, TEST_ENV_FILES=env_files),
                     capture_output=True, text=True,
                 )
@@ -338,7 +338,6 @@ rollback_start_nvlbot() { printf 'SOURCE_RECOVERY\n' >> "$TRACE"; }
                 self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
                 if missing_index is not None:
                     self.assertIn(str(paths[missing_index]), result.stdout)
-
 
     def test_endpoint_propagation_fails_on_unreachable_edges(self):
         self.assertIn('[ "$FAIL" -eq 0 ]', self.sync)

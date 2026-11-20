@@ -22,6 +22,11 @@ from urllib.parse import urlsplit
 from manual_edge_secure_form import IntakeHold, ManualFormStore
 from manual_edge_journal import ManualEdgeHold, ManualEdgeJournal
 from nvl_awg_install_diagnostics import receipt as awg_receipt, describe as awg_describe, validated as awg_validated, classify as awg_classify
+from nvl_awg_limiter_recovery import (
+    limiter_status as awg_limiter_status, repair_stale_limiter,
+    LimiterRecoveryHold, TEXT as AWG_LIMITER_TEXT,
+    RESTARTABLE as AWG_LIMITER_RESTARTABLE,
+)
 from manual_edge_identity import assert_ref as assert_edge_ref
 from cloudzy_cz04b import _digest
 
@@ -139,6 +144,12 @@ FA = {
     "CLOUDFLARE_CONFIG_MISSING":"اتصال Cloudflare تنظیم نشده است؛ سرور در Standby می‌ماند.",
     "DNS_CHANGED_CONCURRENTLY":"DNS در زمان بررسی تغییر کرد؛ انتقال متوقف شد.",
     "DNS_OR_DEFAULT_UNCERTAIN_LOCK_HELD":"نتیجه تغییر DNS مشخص نیست؛ مسیر باید بررسی شود.",
+    "LIMITER_RECOVERY_NOT_ALLOWED":"فقط مدیر کل در پرونده معتبر STANDBY می‌تواند بازیابی Limiter انجام دهد.",
+    "LIMITER_RECOVERY_EXPIRED":"تأیید بازیابی منقضی شده یا قبلاً مصرف شده است؛ دوباره عیب‌یابی را باز کنید.",
+    "RECOVERY_ROOT_REQUIRED":"این عملیات نیازمند اجرای امن با دسترسی Root است.",
+    "RECOVERY_STATE_CHANGED":"وضعیت Limiter تغییر کرده است؛ عیب‌یابی را دوباره انجام دهید.",
+    "LIMITER_RESTART_FAILED":"راه‌اندازی مجدد Limiter موفق نبود؛ وضعیت سرویس را در Core بررسی کنید.",
+    "LIMITER_RESTART_NOT_VERIFIED":"سرویس راه‌اندازی شد، اما هویت پردازش آن تأیید نشد؛ بررسی دستی لازم است.",
 }
 
 
@@ -389,10 +400,15 @@ class ManualEdgeWizard:
                 if os.environ.get("NVL_AWG_CUTOVER_ENABLED")!="1":
                     standby_notice="\n\n⚠️ انتقال AWG در تنظیمات غیرفعال است."
                 else:
+                    diagnosis=await asyncio.to_thread(awg_limiter_status,op["ip"])
                     standby_notice=(
-                        "\n\n⏳ تأیید Limiter این Edge آماده نیست. "
-                        "بررسی مستقل Core خودکار انجام می‌شود؛ "
-                        "در صورت تداوم، لاگ nvl-awg-witness-refresh را بررسی کنید.")
+                        "\n\n⏳ <b>انتقال فعلاً مجاز نیست.</b>\n"
+                        +escape(AWG_LIMITER_TEXT.get(diagnosis,
+                                                     AWG_LIMITER_TEXT["RECOVERY_CHECK_FAILED"]))
+                        +"\nکد: <code>"+escape(diagnosis)+"</code>")
+                    rows.append([("🧰 عیب‌یابی و بازیابی Limiter",
+                                 "apps_edge_manual_limiter_"+opid)])
+                    rows.append([("📋 وضعیت انتقال و بازیابی", "apps_edge_quick_status")])
                 rows.append([("🔄 تازه‌سازی تأییدیه انتقال",
                              "apps_edge_manual_detail_"+opid)])
         if (stage=="ACTIVE" and role=="FORMER" and
@@ -1027,10 +1043,10 @@ class ManualEdgeWizard:
                                         [[("↩️ همه سرورها","apps_edge_manual_home")]])
             return await self._show(query,actor,chat)
         except Exception as exc:
-            code=(str(exc) if isinstance(exc,(ManualWizardHold,ManualEdgeHold,IntakeHold))
+            code=(str(exc) if isinstance(exc,(ManualWizardHold,ManualEdgeHold,IntakeHold,LimiterRecoveryHold))
                   or (type(exc) is RuntimeError and str(exc) in FA)
                   else type(exc).__name__)
-            if isinstance(exc,(ManualWizardHold,ManualEdgeHold,IntakeHold)):
+            if isinstance(exc,(ManualWizardHold,ManualEdgeHold,IntakeHold,LimiterRecoveryHold)):
                 log.warning("Manual Edge callback rejected action=%s actor=%s "
                             "code=%s trace=%s",data,actor,code,
                             _safe_trace_location(exc))

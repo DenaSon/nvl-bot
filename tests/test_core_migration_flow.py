@@ -13,19 +13,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def runtime_fixture(stage, missing=None):
-    """A bot import chain covering both lost packages; its body must never run."""
+    """A bot import chain covering local runtime packages; its body must never run."""
     stage.mkdir(parents=True, exist_ok=True)
-    for package in ("ops", "server_migration"):
+    for package in ("ops", "server_migration", "denaprobe_ingest"):
         folder = stage / package
         folder.mkdir()
         # Empty package initializers are valid, as in the real ops package.
         (folder / "__init__.py").write_text("")
         (folder / "runtime_fixture.py").write_text("VALUE = 1\n")
+        if package == "denaprobe_ingest":
+            (folder / "detector.py").write_text("def evaluate(): return True\n")
     (stage / "runtime_helper.py").write_text(
         "from server_migration.runtime_fixture import VALUE\n"
-        "from ops.runtime_fixture import VALUE as OTHER\n")
+        "from ops.runtime_fixture import VALUE as OTHER\n"
+        "from denaprobe_ingest.runtime_fixture import VALUE as DENA\n")
     (stage / "bot_final_v49-2.py").write_text(
-        "from runtime_helper import VALUE, OTHER\n"
+        "from runtime_helper import VALUE, OTHER, DENA\n"
         "raise RuntimeError('BOT_BODY_MUST_NOT_RUN')\n")
     shutil.copy2(ROOT / "bot_import_preflight.py", stage / "bot_import_preflight.py")
     (stage / "02_recreate_ssh_users.py").write_text("# fixture\n")
@@ -77,6 +80,9 @@ class TelegramCoreMigrationTests(unittest.TestCase):
         stop = self.core.index("if ! systemctl stop nvlbot || systemctl is-active --quiet nvlbot; then")
         self.assertLess(marker, stop)
         self.assertIn("python3 -m venv --clear /root/venv", self.core)
+        self.assertIn("/root/denaprobe_ingest", self.core)
+        self.assertIn("from denaprobe_ingest.detector import evaluate", self.core)
+        self.assertIn("from denaprobe_ingest.detector import evaluate", self.promote)
         self.assertIn("python3 -m pip --version", self.core)
         self.assertNotIn("demote_core_to_edge.sh --prepare", self.core)
         self.assertIn("awg show awg0 public-key", self.core)
@@ -90,11 +96,11 @@ class TelegramCoreMigrationTests(unittest.TestCase):
             "/root/venv/bin/python3", "venv_python").replace(
             "/root/nvlbot_standby/.nvl_promotion_main", '"$TEST_MAIN"').replace(
             "/root/nvlbot_standby", '"$TEST_STATE"')
-        for failure in ("none", "apt", "pip", "compile", "ops", "server_migration"):
+        for failure in ("none", "apt", "pip", "compile", "ops", "server_migration", "denaprobe_ingest"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
                 trace = Path(tmp) / "trace"
                 marker = Path(tmp) / "main"
-                runtime_fixture(Path(tmp), failure if failure in ("ops", "server_migration") else None)
+                runtime_fixture(Path(tmp), failure if failure in ("ops", "server_migration", "denaprobe_ingest") else None)
                 env = dict(os.environ, TRACE=str(trace), TEST_STATE=tmp,
                            TEST_MAIN=str(marker), FAIL_STAGE=failure,
                            TEST_PYTHON=sys.executable, PYTHONPATH="")
@@ -160,7 +166,7 @@ TARGET_EDGE=192.0.2.2
     def test_destination_installs_importable_staged_package_and_rejects_missing_package(self):
         start = self.promote.index('STANDBY_DIR="/root/nvlbot_standby"')
         finish = self.promote.index("# Always prefer the service unit", start)
-        for missing in ("ops", "server_migration", None):
+        for missing in ("ops", "server_migration", "denaprobe_ingest", None):
             with self.subTest(missing_package=missing), tempfile.TemporaryDirectory() as tmp:
                 stage, dest = Path(tmp) / "stage", Path(tmp) / "destination"
                 runtime_fixture(stage, missing)
@@ -174,7 +180,7 @@ TARGET_EDGE=192.0.2.2
                 self.assertEqual(result.returncode, 0 if missing is None else 1,
                                  result.stdout + result.stderr)
                 if missing is None:
-                    for name in ("runtime_helper.py", "ops/runtime_fixture.py", "server_migration/runtime_fixture.py", "fixture.sh"):
+                    for name in ("runtime_helper.py", "ops/runtime_fixture.py", "server_migration/runtime_fixture.py", "denaprobe_ingest/runtime_fixture.py", "fixture.sh"):
                         self.assertTrue((dest / name).is_file(), name)
                     self.assertIn("BOT_IMPORTS_OK=", result.stdout)
 
@@ -191,7 +197,7 @@ TARGET_EDGE=192.0.2.2
 
     def test_old_stage_is_preserved_but_cannot_supply_missing_modules(self):
         start = self.core.index("# Preserve the previous stage")
-        finish = self.core.index("if ! rsync", start)
+        finish = self.core.index("# DenaProbe is imported by the live bot", start)
         with tempfile.TemporaryDirectory() as tmp:
             stage = Path(tmp) / "stage"
             (stage / "ops").mkdir(parents=True)
@@ -218,7 +224,7 @@ TARGET_EDGE=192.0.2.2
             harness = 'EDGE_SSH_KEY=unused; EDGE_PORT=22; TARGET_EDGE=fixture;\n'
             subprocess.run(["bash", "-ec", harness + body],
                            env=dict(os.environ, TEST_STAGE=str(stage)), check=True)
-            for name in ("runtime_helper.py", "ops/runtime_fixture.py", "server_migration/runtime_fixture.py"):
+            for name in ("runtime_helper.py", "ops/runtime_fixture.py", "server_migration/runtime_fixture.py", "denaprobe_ingest/runtime_fixture.py"):
                 self.assertTrue((stage / name).is_file(), name)
             for name in (".env", "master_bot.db", "ops/private.json", "ops/key.pem"):
                 self.assertFalse((stage / name).exists(), name)
@@ -257,7 +263,8 @@ rollback_start_nvlbot() { printf 'SOURCE_RECOVERY\n' >> "$TRACE"; }
                 if not failure:
                     with tarfile.open(export / "root_full_snapshot.tar.gz") as archive:
                         for name in ("./ops/runtime_fixture.py", "./server_migration/runtime_fixture.py",
-                                     "./runtime_helper.py", "./bot_import_preflight.py"):
+                                     "./runtime_helper.py", "./bot_import_preflight.py",
+                                     "./denaprobe_ingest/runtime_fixture.py"):
                             self.assertIn(name, archive.getnames())
 
     def test_source_frozen_before_copy_and_wg_exclusive_before_promote(self):

@@ -299,14 +299,11 @@ rollback_start_nvlbot() { printf 'SOURCE_RECOVERY\n' >> "$TRACE"; }
         self.assertIn('environment_files.list', self.promote)
         self.assertIn('tar --same-owner --same-permissions', self.promote)
         self.assertIn('validate_required_environment_files()', self.promote)
-        self.assertLess(
-            self.promote.index('tar --same-owner --same-permissions'),
-            self.promote.index('systemctl daemon-reload'),
-        )
-        self.assertLess(
-            self.promote.index('tar --same-owner --same-permissions'),
-            self.promote.index('systemctl enable --now nvlbot'),
-        )
+        restore_index = self.promote.index('tar --same-owner --same-permissions')
+        daemon_reload_index = self.promote.index('systemctl daemon-reload', restore_index)
+        bot_start_index = self.promote.index('systemctl enable --now nvlbot', restore_index)
+        self.assertLess(restore_index, daemon_reload_index)
+        self.assertLess(restore_index, bot_start_index)
 
     def test_promote_validates_every_effective_environment_file(self):
         start = self.promote.index('validate_required_environment_files() {')

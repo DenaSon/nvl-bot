@@ -364,7 +364,7 @@ fi
 # Runtime environment and systemd drop-ins are host-local and not in Git.
 # Archive both runtime trees plus any EnvironmentFile (and symlink target) elsewhere.
 # Keep the archive and path manifest owner-only: the archive contains live credentials.
-printf '%s\\n' "${ENV_FILE_PATHS[@]}" > "${EXPORT_DIR}/environment_files.list"
+printf '%s\n' "${ENV_FILE_PATHS[@]}" > "${EXPORT_DIR}/environment_files.list"
 chmod 600 "${EXPORT_DIR}/environment_files.list"
 
 RUNTIME_ARCHIVE_PATHS=()

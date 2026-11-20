@@ -34,6 +34,7 @@ db.execute("PRAGMA query_only=ON")
 checks={
     "manual_edge_operations":("id","status",("INSTALLING","ROUTING")),
     "cloudzy_cz07_jobs":("id","status",("QUEUED","ROUTING","MIGRATING")),
+    "cloudzy_cz04b_operations":("id","status",("PREPARING","DNS_WRITE_INTENT","DNS_TARGET_CONFIRMED","USERS_COMMITTING")),
 }
 busy=False
 for table,(id_column,status_column,states) in checks.items():

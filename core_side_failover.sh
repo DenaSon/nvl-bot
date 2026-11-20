@@ -490,7 +490,7 @@ echo "🔹 ۷) هماهنگ‌سازی Endpointهای Edgeها از Core جدی�
 WG_SYNC=0
 AWG_SYNC=0
 if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
-        "bash /root/update_all_edges_endpoint.sh '${TARGET_EDGE}' 51820"; then
+        "bash /root/update_all_edges_endpoint.sh '${TARGET_EDGE}' 51820 '${SELF_IP}'"; then
     WG_SYNC=1
     echo "⚠️ برخی Endpointهای WG نیازمند اصلاح هستند."
 fi

@@ -441,24 +441,53 @@ else
     exit 1
 fi
 
-# Restore source Core's private runtime BEFORE starting the destination bot.
-# Archives are prepared on the trusted source Core; never print env contents.
-if [ -f "${MIGRATION_DIR}/nvlbot_etc.tar.gz" ]; then
-    tar -xzf "${MIGRATION_DIR}/nvlbot_etc.tar.gz" -C /etc ||
-        { echo "❌ بازگردانی /etc/nvlbot شکست خورد."; exit 1; }
-    if [ -f /etc/nvlbot/nvlbot.env ]; then chmod 600 /etc/nvlbot/nvlbot.env; fi
-fi
+# Restore source Core's complete private runtime BEFORE starting the destination bot.
+# The archive is rooted at / and includes /etc/nvlbot, /etc/nvl, plus external
+# EnvironmentFiles and resolved symlink targets. Never print secret contents.
+[ -f "${MIGRATION_DIR}/environment_files.list" ] || {
+    echo "❌ فهرست EnvironmentFileهای Core مبدأ منتقل نشده است."
+    exit 1
+}
+[ -f "${MIGRATION_DIR}/nvlbot_etc.tar.gz" ] || {
+    echo "❌ آرشیو تنظیمات Runtime Core مبدأ منتقل نشده است."
+    exit 1
+}
+tar --same-owner --same-permissions -xzf "${MIGRATION_DIR}/nvlbot_etc.tar.gz" -C / ||
+    { echo "❌ بازگردانی تنظیمات Runtime در / شکست خورد."; exit 1; }
+
+# Verify every source-declared EnvironmentFile was restored.
+while IFS= read -r env_file; do
+    [ -n "$env_file" ] || continue
+    if [[ "$env_file" != /* || ! -f "$env_file" ]]; then
+        echo "❌ فایل EnvironmentFile منتقل‌شده روی Core جدید موجود نیست: ${env_file:-<invalid>}"
+        exit 1
+    fi
+done < "${MIGRATION_DIR}/environment_files.list"
+
 if [ -f "${MIGRATION_DIR}/nvlbot_dropins.tar.gz" ]; then
     tar -xzf "${MIGRATION_DIR}/nvlbot_dropins.tar.gz" -C /etc/systemd/system ||
         { echo "❌ بازگردانی drop-in سرویس ربات شکست خورد."; exit 1; }
 fi
 systemctl daemon-reload
-# Fail before account migration if a required systemd EnvironmentFile is absent.
-REQUIRED_ENV_FILE="$(systemctl show nvlbot -p EnvironmentFiles --value 2>/dev/null | awk '{print $1}')"
-if [ -n "$REQUIRED_ENV_FILE" ] && [ ! -f "$REQUIRED_ENV_FILE" ]; then
-    echo "❌ فایل EnvironmentFile الزامی روی Core جدید موجود نیست: ${REQUIRED_ENV_FILE}"
-    exit 1
-fi
+
+# Validate every effective EnvironmentFile, not only the first line returned by systemd.
+validate_required_environment_files() {
+    local environment_files line env_file missing=0
+    environment_files="$(systemctl show nvlbot -p EnvironmentFiles --value 2>/dev/null)" || {
+        echo "❌ خواندن EnvironmentFileهای سرویس روی Core جدید ناموفق بود."
+        return 1
+    }
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        env_file="${line%% *}"
+        if [[ "$env_file" != /* || ! -f "$env_file" ]]; then
+            echo "❌ فایل EnvironmentFile الزامی روی Core جدید موجود نیست: ${env_file:-<invalid>}"
+            missing=1
+        fi
+    done <<< "$environment_files"
+    return "$missing"
+}
+validate_required_environment_files || exit 1
 
 echo "🔹 ۱۲) بازسازیِ کاربرهای لینوکسی..."
 RECREATE_SCRIPT="${BOT_DIR}/02_recreate_ssh_users.py"

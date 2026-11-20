@@ -424,20 +424,22 @@ SSH=(remote)
     def test_target_exit_cleanup_and_source_restart_order(self):
         rollback = self._function(self.promote, "rollback_on_failure")
         cases = (
-            # changed, success, stopped_old, bot_active, wg_active, wg_interface
-            (1, 0, 0, 0, 0, 0),  # wrapper stopped old Core; only clean target
-            (1, 0, 1, 0, 0, 0),  # standalone flow may resume source after cleanup
-            (1, 0, 1, 1, 0, 0),  # incomplete bot shutdown: do not revive source
-            (1, 0, 1, 0, 1, 0),  # incomplete WG service shutdown
-            (1, 0, 1, 0, 0, 1),  # raw WG identity survives inactive service
-            (0, 0, 0, 0, 0, 0),  # validation failed before target mutations
-            (1, 1, 0, 1, 1, 1),  # successful promotion must keep target alive
+            # changed, success, stopped_old, bot_active, wg_active, wg_interface, awg_interface
+            (1, 0, 0, 0, 0, 0, 0),  # wrapper stopped old Core; only clean target
+            (1, 0, 1, 0, 0, 0, 0),  # standalone flow may resume source after cleanup
+            (1, 0, 1, 1, 0, 0, 0),  # incomplete bot shutdown: do not revive source
+            (1, 0, 1, 0, 1, 0, 0),  # incomplete WG service shutdown
+            (1, 0, 1, 0, 0, 1, 0),  # raw WG identity survives inactive service
+            (1, 0, 1, 0, 0, 0, 1),  # raw AWG identity survives inactive service
+            (0, 0, 0, 0, 0, 0, 0),  # validation failed before target mutations
+            (1, 1, 0, 1, 1, 1, 1),  # successful promotion must keep target alive
         )
-        for changed, success, stopped_old, bot, service, interface in cases:
-            with self.subTest(case=(changed, success, stopped_old, bot, service, interface)), tempfile.TemporaryDirectory() as tmp:
+        for changed, success, stopped_old, bot, service, interface, awg_interface in cases:
+            with self.subTest(case=(changed, success, stopped_old, bot, service, interface, awg_interface)), tempfile.TemporaryDirectory() as tmp:
                 trace = Path(tmp) / "trace"
                 env = dict(os.environ, TRACE=str(trace), BOT_ACTIVE=str(bot),
-                           WG_ACTIVE=str(service), WG_INTERFACE=str(interface))
+                           WG_ACTIVE=str(service), WG_INTERFACE=str(interface),
+                           AWG_INTERFACE=str(awg_interface))
                 harness = '''
 set -u
 systemctl() {
@@ -447,6 +449,7 @@ systemctl() {
     else return 0; fi
 }
 wg() { printf 'wg %s\n' "$*" >> "$TRACE"; [ "$WG_INTERFACE" = 1 ]; }
+awg() { printf 'awg %s\n' "$*" >> "$TRACE"; [ "$AWG_INTERFACE" = 1 ]; }
 ssh() { printf 'ssh %s\n' "$*" >> "$TRACE"; return 0; }
 OLD_CORE_IP=192.0.2.1
 CUSTOMER_SSH_PORT=8443
@@ -461,17 +464,18 @@ CUSTOMER_SSH_PORT=8443
                 else:
                     self.assertIn("systemctl disable --now nvlbot", calls)
                     self.assertIn("systemctl disable --now wg-quick@wg0", calls)
-                    should_restart = stopped_old and not (bot or service or interface)
+                    should_restart = stopped_old and not (bot or service or interface or awg_interface)
                     self.assertEqual("ssh " in calls, bool(should_restart))
                     if should_restart:
                         self.assertLess(calls.index("wg show wg0"), calls.index("ssh "))
 
     def test_source_rollback_requires_target_bot_and_wg_to_be_down(self):
         rollback = self._function(self.core, "rollback_start_nvlbot")
-        for bot, interface in ((0, 0), (1, 0), (0, 1)):
-            with self.subTest(bot=bot, interface=interface), tempfile.TemporaryDirectory() as tmp:
+        for bot, interface, awg_interface in ((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)):
+            with self.subTest(bot=bot, interface=interface, awg_interface=awg_interface), tempfile.TemporaryDirectory() as tmp:
                 trace = Path(tmp) / "trace"
-                env = dict(os.environ, TRACE=str(trace), BOT_ACTIVE=str(bot), WG_INTERFACE=str(interface))
+                env = dict(os.environ, TRACE=str(trace), BOT_ACTIVE=str(bot),
+                           WG_INTERFACE=str(interface), AWG_INTERFACE=str(awg_interface))
                 harness = '''
 set -u
 systemctl() {
@@ -479,8 +483,9 @@ systemctl() {
     if [ "$1" = is-active ]; then [ "$3" = nvlbot ] && [ "$BOT_ACTIVE" = 1 ]; else return 0; fi
 }
 wg() { [ "$WG_INTERFACE" = 1 ]; }
+awg() { [ "$AWG_INTERFACE" = 1 ]; }
 ssh() { SIDE=target bash -c "${!#}"; }
-export -f systemctl wg
+export -f systemctl wg awg
 SSH_OPTS=()
 TARGET_EDGE=192.0.2.2
 SOURCE_WG_STOPPED=1
@@ -488,7 +493,7 @@ SOURCE_WG_STOPPED=1
                 result = subprocess.run(["bash", "-c", harness + rollback + "rollback_start_nvlbot\n"],
                                         env=env, capture_output=True, text=True)
                 calls = trace.read_text()
-                should_restart = not (bot or interface)
+                should_restart = not (bot or interface or awg_interface)
                 self.assertEqual(result.returncode, 0 if should_restart else 1, result.stdout + result.stderr)
                 self.assertEqual("source systemctl start nvlbot" in calls, should_restart)
 

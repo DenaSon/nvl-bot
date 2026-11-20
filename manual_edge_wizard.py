@@ -585,6 +585,66 @@ class ManualEdgeWizard:
                 if not raw.isascii() or not raw.isdigit() or len(raw)>5:
                     raise ManualWizardHold("INVALID_PAGE")
                 return await self._show(query,actor,chat,int(raw))
+            if data.startswith("apps_edge_manual_limiter_yes_"):
+                nonce=data[len("apps_edge_manual_limiter_yes_"):]
+                pending=context.user_data.pop("manual_edge_limiter_recovery",None)
+                if (not isinstance(pending,dict)
+                        or pending.get("nonce")!=nonce
+                        or (pending.get("actor"),pending.get("chat"))!=(actor,chat)
+                        or self.now()>=pending.get("expires",0)):
+                    raise ManualWizardHold("LIMITER_RECOVERY_EXPIRED")
+                opid=pending["op"]
+                op=await asyncio.to_thread(self.journal.get,opid)
+                if (not op or (op["actor"],op["chat"])!=(actor,chat)
+                        or op["status"]!="STANDBY"
+                        or op.get("archived_at") is not None
+                        or op.get("tunnel_backend")!="amneziawg"
+                        or not self._shared_viewer(actor,chat)):
+                    raise ManualWizardHold("LIMITER_RECOVERY_NOT_ALLOWED")
+                # Recheck trusted source + process drift just before the
+                # only permitted change: a controlled ssh-limiter restart.
+                # Independent witness attestation remains outside the bot.
+                outcome=await asyncio.to_thread(repair_stale_limiter,op["ip"])
+                log.warning("AWG Limiter operator recovery actor=%s op=%s "
+                            "result=%s",actor,opid,outcome)
+                return await self._view(query,
+                    "✅ <b>بازیابی کنترل‌شده Limiter انجام شد.</b>\n"
+                    "فقط سرویس ssh-limiter راه‌اندازی مجدد شد؛ "
+                    "هیچ انتقال، تغییر DNS یا بازنویسی Marker انجام نشد.\n"
+                    "اکنون تأیید مستقل Witness را دوباره بررسی کنید.",
+                    [[("🔄 بررسی تأییدیه Edge",
+                       "apps_edge_manual_detail_"+opid)],
+                     [("📋 وضعیت انتقال و بازیابی","apps_edge_quick_status")]])
+            if data.startswith("apps_edge_manual_limiter_"):
+                opid=data[len("apps_edge_manual_limiter_"):]
+                op=await asyncio.to_thread(self.journal.get,opid)
+                if (not op or (op["actor"],op["chat"])!=(actor,chat)
+                        or op["status"]!="STANDBY"
+                        or op.get("archived_at") is not None
+                        or op.get("tunnel_backend")!="amneziawg"):
+                    raise ManualWizardHold("LIMITER_RECOVERY_NOT_ALLOWED")
+                diagnosis=await asyncio.to_thread(awg_limiter_status,op["ip"])
+                rows=[[("🔄 بررسی مجدد","apps_edge_manual_limiter_"+opid)],
+                      [("↩️ بازگشت به Edge","apps_edge_manual_detail_"+opid)]]
+                notice=AWG_LIMITER_TEXT.get(
+                    diagnosis,AWG_LIMITER_TEXT["RECOVERY_CHECK_FAILED"])
+                if (diagnosis==AWG_LIMITER_RESTARTABLE and
+                        self._shared_viewer(actor,chat)):
+                    nonce=secrets.token_hex(8)
+                    context.user_data["manual_edge_limiter_recovery"]={
+                        "nonce":nonce,"op":opid,"actor":actor,"chat":chat,
+                        "expires":self.now()+120,
+                    }
+                    rows.insert(0,[("⚠️ تأیید Restart فقط ssh-limiter",
+                                   "apps_edge_manual_limiter_yes_"+nonce)])
+                    notice+=("\n\nاین اقدام سرویس Limiter را کوتاه‌مدت "
+                             "Restart می‌کند و ممکن است بر نشست‌های فعال "
+                             "اثر بگذارد؛ بات، SSHD، تونل و DNS تغییر نمی‌کنند.")
+                return await self._view(query,
+                    "🧰 <b>عیب‌یابی قفل Limiter</b>\n"
+                    "Edge: <code>"+escape(op["ip"])+"</code>\n"
+                    "کد: <code>"+escape(diagnosis)+"</code>\n\n"
+                    +escape(notice),rows)
             if data.startswith("apps_edge_manual_detail_"):
                 opid=data[len("apps_edge_manual_detail_"):]
                 return await self._detail(query,actor,chat,opid)

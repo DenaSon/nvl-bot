@@ -179,6 +179,23 @@ if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
 fi
 echo "   ✅ Python و وابستگی‌ها قبل از توقف Core روی مقصد آماده شدند."
 
+# Read the effective EnvironmentFile list while the source Core is still live.
+# Only paths are handled here; secret contents are never printed or logged.
+SOURCE_ENV_FILES_RAW="$(systemctl show nvlbot -p EnvironmentFiles --value 2>/dev/null)" || {
+    echo "❌ خواندن EnvironmentFileهای سرویس nvlbot ناموفق بود."
+    exit 1
+}
+ENV_FILE_PATHS=()
+while IFS= read -r env_line; do
+    [ -n "$env_line" ] || continue
+    env_path="${env_line%% *}"
+    if [[ "$env_path" != /* || ! -f "$env_path" ]]; then
+        echo "❌ فایل EnvironmentFile روی Core فعلی پیدا نشد: ${env_path:-<invalid>}"
+        exit 1
+    fi
+    ENV_FILE_PATHS+=("$env_path")
+done <<< "$SOURCE_ENV_FILES_RAW"
+echo "   ✅ EnvironmentFileهای منبع بررسی شدند: ${#ENV_FILE_PATHS[@]}"
 
 echo "🔹 ۳) توقفِ nvlbot روی همین Core (قبل از بکاپِ نهاییِ دیتابیس، تا نوشته‌ای گم نشود)..."
 # 🐛🔧 رفع باگِ ریشه‌ایِ واقعی (دو مشکل با هم): ۱) promote_edge_to_core.sh (مرحلهٔ ۱۰، محافظِ
@@ -345,16 +362,78 @@ if [ -f /etc/systemd/system/nvlbot.service ]; then
     echo "   ✅ فایل nvlbot.service کپی شد."
 fi
 # Runtime environment and systemd drop-ins are host-local and not in Git.
-# Keep these archives owner-only: they can contain live bot credentials.
-if [ -d /etc/nvlbot ]; then
-    if ! tar -czf "${EXPORT_DIR}/nvlbot_etc.tar.gz" -C /etc nvlbot; then
-        echo "❌ گرفتن بکاپ تنظیمات /etc/nvlbot شکست خورد."
+# Archive both runtime trees plus any EnvironmentFile (and symlink target) elsewhere.
+# Keep the archive and path manifest owner-only: the archive contains live credentials.
+printf '%s\\n' "${ENV_FILE_PATHS[@]}" > "${EXPORT_DIR}/environment_files.list"
+chmod 600 "${EXPORT_DIR}/environment_files.list"
+
+RUNTIME_ARCHIVE_PATHS=()
+add_runtime_archive_path() {
+    local source_path="$1"
+    local relative_path existing_path
+    [[ "$source_path" == /* && -e "$source_path" ]] || return 0
+    relative_path="${source_path#/}"
+    for existing_path in "${RUNTIME_ARCHIVE_PATHS[@]}"; do
+        [[ "$existing_path" == "$relative_path" ]] && return 0
+    done
+    RUNTIME_ARCHIVE_PATHS+=("$relative_path")
+}
+
+for env_dir in /etc/nvlbot /etc/nvl; do
+    if [[ -d "$env_dir" || -L "$env_dir" ]]; then
+        add_runtime_archive_path "$env_dir"
+        env_dir_realpath="$(readlink -f -- "$env_dir" 2>/dev/null || true)"
+        if [ -n "$env_dir_realpath" ] && [ "$env_dir_realpath" != "$env_dir" ]; then
+            add_runtime_archive_path "$env_dir_realpath"
+        fi
+    fi
+done
+
+for env_file in "${ENV_FILE_PATHS[@]}"; do
+    case "$env_file" in
+        /etc/nvlbot/*|/etc/nvl/*) ;;
+        *) add_runtime_archive_path "$env_file" ;;
+    esac
+    env_file_realpath="$(readlink -f -- "$env_file" 2>/dev/null || true)"
+    if [ -n "$env_file_realpath" ]; then
+        case "$env_file_realpath" in
+            /etc/nvlbot/*|/etc/nvl/*) ;;
+            *) add_runtime_archive_path "$env_file_realpath" ;;
+        esac
+    fi
+done
+
+if [ "${#RUNTIME_ARCHIVE_PATHS[@]}" -gt 0 ]; then
+    if ! tar -czf "${EXPORT_DIR}/nvlbot_etc.tar.gz" -C / "${RUNTIME_ARCHIVE_PATHS[@]}"; then
+        echo "❌ گرفتن بکاپ تنظیمات Runtime سرویس ربات شکست خورد."
         rollback_start_nvlbot
         exit 1
     fi
-    chmod 600 "${EXPORT_DIR}/nvlbot_etc.tar.gz"
-    echo "   ✅ تنظیمات خصوصی سرویس ربات جمع‌آوری شد."
+else
+    if ! tar -czf "${EXPORT_DIR}/nvlbot_etc.tar.gz" --files-from /dev/null; then
+        echo "❌ ساخت آرشیو خالی تنظیمات Runtime شکست خورد."
+        rollback_start_nvlbot
+        exit 1
+    fi
 fi
+chmod 600 "${EXPORT_DIR}/nvlbot_etc.tar.gz"
+
+# Confirm that each source EnvironmentFile (or its resolved symlink target) is in the archive.
+if ! tar -tzf "${EXPORT_DIR}/nvlbot_etc.tar.gz" > "${EXPORT_DIR}/runtime_archive.list"; then
+    echo "❌ بررسی آرشیو تنظیمات Runtime شکست خورد."
+    rollback_start_nvlbot
+    exit 1
+fi
+for env_file in "${ENV_FILE_PATHS[@]}"; do
+    env_file_realpath="$(readlink -f -- "$env_file" 2>/dev/null || true)"
+    relative_path="${env_file_realpath#/}"
+    if [ -z "$env_file_realpath" ] || ! grep -Fxq -- "$relative_path" "${EXPORT_DIR}/runtime_archive.list"; then
+        echo "❌ فایل EnvironmentFile در آرشیو قرار نگرفت: $env_file"
+        rollback_start_nvlbot
+        exit 1
+    fi
+done
+echo "   ✅ تنظیمات Runtime منتقل‌پذیر شدند؛ EnvironmentFileها: ${#ENV_FILE_PATHS[@]}"
 if [ -d /etc/systemd/system/nvlbot.service.d ]; then
     if ! tar -czf "${EXPORT_DIR}/nvlbot_dropins.tar.gz" -C /etc/systemd/system nvlbot.service.d; then
         echo "❌ گرفتن بکاپ تنظیمات تکمیلی systemd شکست خورد."

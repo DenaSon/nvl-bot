@@ -119,10 +119,6 @@ fi
 
 # All fallible Python preparation happens while the original Core remains live.
 # The chosen bot is pinned to the live service's script, never a random standby file.
-if [ ! -x /root/demote_core_to_edge.sh ] && [ ! -f /root/demote_core_to_edge.sh ]; then
-    echo "❌ اسکریپت demote_core_to_edge.sh نصب نیست؛ Core را متوقف نمی‌کنیم."
-    exit 1
-fi
 if [ ! -f /root/02_recreate_ssh_users.py ]; then
     echo "❌ ابزار بازسازی کاربران روی Core موجود نیست؛ انتقال مسدود است."
     exit 1
@@ -135,10 +131,27 @@ if [ ! -f /root/update_all_edges_endpoint.sh ] || [ ! -f /root/update_edge_endpo
     echo "❌ اسکریپت‌های انتقال Endpoint به سایر Edgeها ناقص هستند."
     exit 1
 fi
-echo "🔹 ۲.۵) بررسی نقش واقعی مقصد و نگه‌داری موقت هویت Edge قبلی..."
-if ! bash /root/demote_core_to_edge.sh --prepare "$TARGET_EDGE" "$CUSTOMER_SSH_PORT" "$EDGE_PORT"; then
-    echo "❌ مقصد Edge معتبر نیست. Core فعلی بدون تغییر فعال می‌ماند."
-    exit 1
+echo "🔹 ۲.۵) بررسی AWG Edge مقصد (بدون نیاز به wg0 روی Edge)..."
+# This flow RETIRES the old Core; no old-Core demotion is performed.
+# Therefore we do not need the destination's legacy WG identity or wg0.
+# A running AWG Core must promote an AWG Edge registered in the Core peer set.
+if [ "$AWG_SOURCE_ACTIVE" = 1 ]; then
+    TARGET_AWG_KEY="$(ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
+        'awg show awg0 public-key' 2>/dev/null)" || TARGET_AWG_KEY=""
+    if [ -z "$TARGET_AWG_KEY" ] || [ "$TARGET_AWG_KEY" = "(none)" ]; then
+        echo "❌ AWG Edge مقصد فعال نیست؛ Core فعلی بدون تغییر باقی می‌ماند."
+        exit 1
+    fi
+    if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
+        'systemctl is-active --quiet awg-quick@awg0 && awg show awg0 >/dev/null'; then
+        echo "❌ awg0 روی Edge مقصد فعال نیست؛ ابتدا Edge را سالم راه‌اندازی کنید."
+        exit 1
+    fi
+    if ! awg show awg0 peers | grep -Fxq -- "$TARGET_AWG_KEY"; then
+        echo "❌ AWG Edge مقصد هنوز به‌عنوان Peer روی Core ثبت نشده است."
+        exit 1
+    fi
+    echo "   ✅ هویت AWG Edge روی Core ثبت‌شده و رابط AWG مقصد فعال است."
 fi
 echo "🔹 ۲.۶) انتقال نسخه دقیق ربات و آماده‌سازی Python روی مقصد قبل از قطع سرویس..."
 if [ ! -s /root/bot_import_preflight.py ] || [ ! -d /root/ops ] || [ ! -d /root/server_migration ]; then

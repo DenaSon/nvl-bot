@@ -319,7 +319,8 @@ class ManualEdgeWizard:
                     "🖥 <b>مدیریت Edge</b>\n\n"
                     "برای راه‌اندازی یک سرور جدید، گزینه افزودن Edge را انتخاب کنید.",
                     self._new_edge_buttons()+
-                    [[("↩️ مدیریت سرورها","apps_cz_home")]])
+                    [[("🧰 وضعیت قفل‌های انتقال و بازیابی","apps_cz7_status")],
+                     [("↩️ مدیریت سرورها","apps_cz_home")]])
         listing=(self.journal.list_shared if shared else self.journal.list_by_owner)
         items=await asyncio.to_thread(
             listing,actor,chat,limit=8,offset=page*7,backend=backend_filter)
@@ -350,6 +351,7 @@ class ManualEdgeWizard:
             rows.append(pager)
         rows.extend([
             [("🔄 تازه‌سازی","apps_edge_manual_list_"+str(page))],
+            [("🧰 وضعیت قفل‌های انتقال و بازیابی","apps_cz7_status")],
             [("↩️ مدیریت سرورها","apps_cz_home")],
         ])
         return await self._view(query,
@@ -430,6 +432,7 @@ class ManualEdgeWizard:
             rows.append([("🗂 حذف از فهرست (بایگانی)",
                          "apps_edge_manual_archive_"+opid)])
         rows.extend(self._new_edge_buttons() + [
+            [("📋 وضعیت انتقال و بازیابی","apps_cz7_status")],
             [("↩️ همه سرورها","apps_edge_manual_home")],
             [("↩️ مدیریت سرورها","apps_cz_home")],
         ])

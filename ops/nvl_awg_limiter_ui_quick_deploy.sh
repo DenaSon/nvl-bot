@@ -69,6 +69,17 @@ for file in "${FILES[@]}"; do
     "$BASE/$file" --output "$STAGE/$file"
   [[ -s "$STAGE/$file" ]]
 done
+# Do not overwrite a customized or newer production wizard.
+BASELINE="https://raw.githubusercontent.com/DenaSon/nvl-bot/3f489043e28116da50934daf674927471c84e3db"
+curl --fail --location --silent --show-error --retry 2 \
+  --connect-timeout 10 --max-time 60 \
+  "$BASELINE/manual_edge_wizard.py" \
+  --output "$STAGE/manual_edge_wizard.baseline.py"
+if ! cmp -s /root/manual_edge_wizard.py "$STAGE/manual_edge_wizard.baseline.py"; then
+  echo "DEPLOY=HOLD reason=PRODUCTION_WIZARD_DRIFT"
+  echo "Installed wizard differs from the audited PR base; do not overwrite it."
+  exit 3
+fi
 mkdir -p "$STAGE/tests"
 curl --fail --location --silent --show-error --retry 2 \
   --connect-timeout 10 --max-time 60 \

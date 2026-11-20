@@ -7,11 +7,16 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 cd /root
-PIN="4e3c5e4d4a55fe423eaf678b3c12bc7852afa9ba"
+# Pass the merged commit from the operator command; never fetch a moving branch.
+PIN="${NVL_PROMOTE_REV:-}"
+if [[ ! "$PIN" =~ ^[a-f0-9]{40}$ ]]; then
+  echo "STOP: supply NVL_PROMOTE_REV=<merged commit SHA>."
+  exit 1
+fi
 BASE="https://raw.githubusercontent.com/DenaSon/nvl-bot/${PIN}"
 STAGE="$(mktemp -d /root/nvl-promote-stage-XXXXXX)"
 BACKUP="$(mktemp -d /root/nvl-promote-backup-XXXXXX)"
-FILES=(core_side_failover.sh promote_edge_to_core.sh update_all_awg_edges_endpoint.sh)
+FILES=(core_side_failover.sh promote_edge_to_core.sh update_all_awg_edges_endpoint.sh update_all_edges_endpoint.sh)
 
 echo "BACKUP=$BACKUP"
 test -f /root/bot_final_v49-2.py

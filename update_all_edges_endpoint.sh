@@ -36,6 +36,7 @@ DB_PATH="${BOT_DIR}/master_bot.db"
 EDGE_SSH_KEY="/root/.ssh/edge_provision_ed25519"
 LOCAL_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/update_edge_endpoint.sh"
 CORE_WG_PORT="${2:-51820}"
+OLD_CORE_PUBLIC_IP="${3:-}"  # Omit the retired Core from Edge endpoint updates.
 
 if [ ! -f "$DB_PATH" ]; then
     echo "❌ دیتابیس پیدا نشد: ${DB_PATH}"
@@ -107,8 +108,8 @@ OK=0; FAIL=0; SKIP=0
 
 for EDGE in "${EDGE_HOSTS[@]}"; do
     [ -z "$EDGE" ] && continue
-    if [ "$EDGE" = "$NEW_CORE_PUBLIC_IP" ]; then
-        echo "🔹 ${EDGE} — رد شد (خودِ Core جدید است، Endpoint لازم ندارد)."
+    if [ "$EDGE" = "$NEW_CORE_PUBLIC_IP" ] || [ "$EDGE" = "$OLD_CORE_PUBLIC_IP" ]; then
+        echo "🔹 ${EDGE} — رد شد (Core جدید یا Core قدیمی است)."
         SKIP=$((SKIP+1))
         continue
     fi
@@ -121,6 +122,21 @@ for EDGE in "${EDGE_HOSTS[@]}"; do
         continue
     fi
     SSH_OPTS=(-i "$EDGE_SSH_KEY" -p "$EDGE_PORT" -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+
+    # A registered Edge may be AWG-only. Never install/start legacy wg0 there.
+    # A stale host_pool record may also refer to the retired Core; never
+    # accidentally rewrite its peers or restart its stopped wg0 identity.
+    WG_ROLE=$(ssh "${SSH_OPTS[@]}" "root@${EDGE}" \
+        'if [ ! -s /etc/wireguard/wg0.conf ] || ! wg show wg0 >/dev/null 2>&1; then echo NO_WG; elif grep -Eq "^[[:space:]]*Address[[:space:]]*=[[:space:]]*10\\.77\\.0\\.1(/|[[:space:]]|$)" /etc/wireguard/wg0.conf; then echo CORE; else echo EDGE; fi' 2>/dev/null) || WG_ROLE="UNKNOWN"
+    if [ "$WG_ROLE" = NO_WG ] || [ "$WG_ROLE" = CORE ]; then
+        echo "   ↪️ ${EDGE} — فاقد WG Edge (AWG-only یا Core)؛ بدون تغییر."
+        SKIP=$((SKIP+1))
+        continue
+    elif [ "$WG_ROLE" != EDGE ]; then
+        echo "   ❌ نوع WireGuard مقصد مشخص نشد."
+        FAIL=$((FAIL+1))
+        continue
+    fi
 
     if ! rsync -az -e "ssh -i ${EDGE_SSH_KEY} -p ${EDGE_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
             "$LOCAL_SCRIPT" "root@${EDGE}:/root/update_edge_endpoint.sh" 2>&1; then

@@ -150,7 +150,7 @@ def render_health(health: dict, extra: dict, *,
         lines.append("💾 دیسک  <b>نامشخص</b>")
     else:
         lines += [
-            f"💾 دیسک  <b>{_fa(f'{disk['pct']:.1f}')}٪</b>  {_percent_bar(disk['pct'])}",
+            f"💾 دیسک  <b>{_fa(format(disk['pct'], '.1f'))}٪</b>  {_percent_bar(disk['pct'])}",
             f"   {_gb(disk['used_gb'])} از {_gb(disk['total_gb'])} گیگابایت · {_gb(disk['available_gb'])} آزاد",
         ]
     if swap is None:

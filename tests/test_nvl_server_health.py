@@ -104,9 +104,9 @@ class ServerHealthLargeFileScanTests(unittest.TestCase):
     def test_strictly_over_threshold_and_sorted(self):
         with tempfile.TemporaryDirectory() as tempdir:
             folder = Path(tempdir)
-            os.truncate(folder / "equal.bin", 4096)
-            os.truncate(folder / "larger.bin", 4097)
-            os.truncate(folder / "biggest.bin", 8192)
+            (folder / "equal.bin").write_bytes(b"\0" * 4096)
+            (folder / "larger.bin").write_bytes(b"\0" * 4097)
+            (folder / "biggest.bin").write_bytes(b"\0" * 8192)
             (folder / "link.bin").symlink_to(folder / "biggest.bin")
             result = asyncio.run(scan_large_files(
                 root=tempdir, threshold_bytes=4096, timeout_seconds=5,
@@ -120,7 +120,7 @@ class ServerHealthLargeFileScanTests(unittest.TestCase):
     def test_limit_results_but_keep_total(self):
         with tempfile.TemporaryDirectory() as tempdir:
             for number in range(12):
-                os.truncate(Path(tempdir) / f"large{number}.bin", 101 + number)
+                (Path(tempdir) / f"large{number}.bin").write_bytes(b"\0" * (101 + number))
             result = asyncio.run(scan_large_files(
                 root=tempdir, threshold_bytes=100, max_results=3,
             ))

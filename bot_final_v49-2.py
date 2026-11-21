@@ -23595,44 +23595,59 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                                  [InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")]]))
 
 
-    elif d == "srv_health" and role == 'admin':
-        await query.edit_message_text("⏳ در حال بررسی وضعیت سرور...")
-        health, herr = await _get_server_health()
-        conn_counts, conn_err = await _get_live_connection_counts()
-        prt_for_conn = await asyncio.to_thread(_db_get_setting, 'port', '22')
-        sock_count, sock_err = await _get_established_socket_count(prt_for_conn)
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 بروزرسانی", callback_data="srv_health")], [InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")]])
+    elif d in ("srv_health", "srv_health_details") and role == 'admin':
+        # Read-only dashboard; an ordinary refresh NEVER walks the filesystem.
+        from nvl_server_health import collect_extra_metrics, render_health
+        detailed = (d == "srv_health_details")
+        await query.edit_message_text("⏳ در حال دریافت وضعیت سرور...")
+        (health, herr), (conn_counts, conn_err), extra = await asyncio.gather(
+            _get_server_health(),
+            _get_live_connection_counts(),
+            asyncio.to_thread(collect_extra_metrics),
+        )
+        kb_rows = [
+            [InlineKeyboardButton("🔄 بروزرسانی", callback_data="srv_health"),
+             InlineKeyboardButton("📊 جزئیات فنی" if not detailed else "📊 نمای خلاصه",
+                                  callback_data="srv_health_details" if not detailed else "srv_health")],
+            [InlineKeyboardButton("📂 فایل‌های حجیم (بیش از ۳ گیگ)", callback_data="srv_health_files")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")],
+        ]
+        kb = InlineKeyboardMarkup(kb_rows)
         if not health:
-            await query.edit_message_text(f"❌ خطا در بررسی وضعیت سرور:\n({esc(herr)})", reply_markup=kb); return
-        proc_total = sum(conn_counts.values()) if conn_counts else 0
-        # 🆕 عدد اصلیِ «اتصالات SSH زنده» فقط از روی شمارش پردازه (همان روش تأییدشده و دقیقی که در
-        # «مشاهده کاربران آنلاین» استفاده می‌شود) محاسبه می‌شود، نه بیشترین مقدار بین آن و شمارش سوکت.
-        # چون شمارش خام سوکت‌های TCP در وضعیت ESTABLISHED می‌تواند شامل اتصالات نیمه‌باز/راکد باشد —
-        # مثلاً وقتی کلاینت موبایل بدون بستن تمیز اتصال (FIN/RST) از شبکه خارج می‌شود، سوکت تا رسیدن
-        # زمان keepalive (که می‌تواند ساعت‌ها طول بکشد) هنوز ESTABLISHED نشان داده می‌شود، در حالی که
-        # آن کاربر واقعاً دیگر متصل/آنلاین نیست. این باعث می‌شد عدد «زنده» خیلی بیشتر از تعداد واقعیِ
-        # کاربران آنلاینِ همان لحظه نمایش داده شود.
-        total_conns = proc_total
-        mismatch_note = ""
-        if sock_count is not None and sock_count != proc_total:
-            mismatch_note = (f"\nℹ️ شمارش بر اساس پردازه (زنده): {proc_total} | بر اساس سوکت TCP کل (شامل احتمالاً اتصالات راکد/نیمه‌باز): {sock_count}")
-        elif sock_count is None and not conn_err:
-            mismatch_note = (f"\n⚠️ شمارش جایگزین (سوکت TCP) ناموفق بود: {esc(sock_err)}"
-                              f"\n🔧 برای فعال‌شدنش این خط را هم به sudoers کاربر ربات اضافه کنید: NOPASSWD: /sbin/ss, /usr/sbin/ss")
-        warns = []
-        if health['cpu_pct'] >= 85: warns.append("⚠️ مصرف CPU بسیار بالاست.")
-        if health['ram_pct'] >= 85: warns.append("⚠️ مصرف RAM بسیار بالاست.")
-        if health['load1'] >= health['cpu_count'] * 1.5: warns.append("⚠️ Load Average نسبت به تعداد هسته‌ها بالاست؛ سرور زیر فشار است.")
-        warn_txt = ("\n\n" + "\n".join(warns) + "\n💡 در صورت افت سرعت، می‌توانید از بخش «تنظیمات سرور ← 🌐 سرویس IP» بخشی از کاربران (یا حتی همه) را به هاست دیگری منتقل کنید؛ یا از همان‌جا دکمهٔ «انجام خودکار» را بزنید.") if warns else "\n\n✅ وضعیت سرور طبیعی است."
-        disk_txt = esc(health['disk_line']) if health['disk_line'] else "در دسترس نیست"
-        txt = (f"🖥 <b>وضعیت لحظه‌ای سرور</b>\n\n"
-               f"⚙️ CPU: {health['cpu_pct']}٪ مصرف (از {health['cpu_count']} هسته)\n"
-               f"🧠 RAM: {health['ram_used_mb']:,} / {health['ram_total_mb']:,} مگابایت ({health['ram_pct']}٪)\n"
-               f"📈 Load Average: {health['load1']} / {health['load5']} / {health['load15']} (۱ / ۵ / ۱۵ دقیقه)\n"
-               f"💾 دیسک (/): <code>{disk_txt}</code>\n"
-               f"🔌 اتصالات SSH زنده: {total_conns}" + (f" ({esc(conn_err)})" if conn_err else "") + mismatch_note +
-               warn_txt)
+            await query.edit_message_text(
+                f"❌ خطا در دریافت وضعیت سرور:\n<code>{esc(herr or 'نامشخص')}</code>",
+                parse_mode="HTML", reply_markup=kb)
+            return
+        socket_count, socket_error = None, None
+        if detailed:
+            port = await asyncio.to_thread(_db_get_setting, 'port', '22')
+            socket_count, socket_error = await _get_established_socket_count(port)
+        txt = render_health(
+            health, extra,
+            sessions=sum(conn_counts.values()) if not conn_err else None,
+            unique_accounts=len(conn_counts) if not conn_err else None,
+            connection_error=conn_err,
+            details=detailed,
+            socket_count=socket_count,
+            socket_error=socket_error,
+        )
         await query.edit_message_text(txt, reply_markup=kb, parse_mode="HTML")
+
+    elif d == "srv_health_files" and role == 'admin':
+        from nvl_server_health import render_large_files, scan_large_files
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 اسکن دوباره", callback_data="srv_health_files")],
+            [InlineKeyboardButton("🖥 بازگشت به سلامت سرور", callback_data="srv_health")],
+        ])
+        await query.edit_message_text(
+            "⏳ در حال بررسی فایل‌های بزرگ‌تر از ۳ گیگابایت روی دیسک اصلی...\n"
+            "اسکن فقط خواندنی است و ممکن است چند ثانیه طول بکشد.",
+            reply_markup=kb,
+        )
+        result = await scan_large_files()
+        await query.edit_message_text(
+            render_large_files(result), parse_mode="HTML", reply_markup=kb,
+        )
     elif d == "srv_brand" and role == 'admin':
         context.user_data['state'] = 'BRAND_INPUT'
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")]])

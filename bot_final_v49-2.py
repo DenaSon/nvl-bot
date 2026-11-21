@@ -2016,7 +2016,7 @@ def _build_server_settings_kb():
             [InlineKeyboardButton("✏️ تغییر نام برند", callback_data="srv_brand")],
             [InlineKeyboardButton("🎯 تنظیمات مستقیم", callback_data="srv_direct_menu"), InlineKeyboardButton("🔐 تنظیمات TLS", callback_data="srv_tls")],
             [InlineKeyboardButton("🔌 تنظیمات UDPGW", callback_data="srv_udpgw")],
-            [InlineKeyboardButton("🖥 وضعیت سرور (CPU/RAM)", callback_data="srv_health")],
+            [InlineKeyboardButton("🩺 سلامت سرور", callback_data="srv_health")],
             [InlineKeyboardButton("🩺 عیب‌یابی خام اتصالات SSH", callback_data="srv_ssh_debug")],
             [InlineKeyboardButton("🩹 خودتشخیصی و رفع خودکار اتصال SSH", callback_data="srv_ssh_diag")],
             [InlineKeyboardButton("🧹 کاربران یتیم (بدون رکورد در ربات)", callback_data="orphan_menu")],

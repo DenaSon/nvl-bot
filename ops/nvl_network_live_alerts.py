@@ -361,7 +361,7 @@ def incident_begin(incident):
     """Extract only the first DETECTION time from our generated incident ID."""
     if not incident:
         return None
-    match = re.fullmatch(r"NVL-(\\d{8}T\\d{6}Z)-\\d{3,}", incident)
+    match = re.fullmatch(r"NVL-(\d{8}T\d{6}Z)-\d{3,}", incident)
     if not match:
         return None
     try:
@@ -456,7 +456,7 @@ def render(phase, incident, stamp, metrics, baseline):
     if phase in ("SUSPECTED", "DEGRADED", "RECOVERED"):
         lines.extend(["", "ℹ️ <i>این ارزیابی بر پایه متریک‌های Core است؛"
                       " علت قطعی اختلال یا وضعیت تک‌تک کاربران را مشخص نمی‌کند.</i>"])
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 def make_incident(stamp, state):

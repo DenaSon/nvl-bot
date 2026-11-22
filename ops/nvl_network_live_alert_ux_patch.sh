@@ -100,6 +100,7 @@ systemctl start nvl-network-alerts.timer
 systemctl is-active --quiet nvl-network-alerts.timer
 replaced=0
 trap - EXIT
+cleanup
 echo "PATCH_APPLY_PASS SHA=$SHA"
 echo "LIVE_TIMER=ACTIVE"
 echo "UNMODIFIED=nvlbot,sshd,gost,udpgw,awg,netdata,sampler,baseline,state,telegram"

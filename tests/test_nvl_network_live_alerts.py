@@ -102,6 +102,84 @@ class LiveAlertsTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 3)
         self.assertEqual(outcome["state"], "NORMAL")
 
+    def test_fast_two_consecutive_issues_alert_one_sample_earlier(self):
+        # Reproduces 22 Nov 20:56:32/20:57:34 evidence with a stable
+        # healthy lead-in. The old 3-of-5 rule would fire on sample 3.
+        for i in range(8):
+            t = T0 + timedelta(minutes=i)
+            r = row(t, ssh=215, cw=44) if i == 6 else (
+                row(t, ssh=244, cw=67) if i == 7 else row(t))
+            self.events.append(r)
+            self._tick(t + timedelta(seconds=20))
+            if i < 7:
+                self.assertEqual(len(self.calls), 0)
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn("اختلال احتمالی", self.calls[0])
+        with live.db_connect(self.store) as db:
+            sent = db.execute("SELECT event_key FROM outbox WHERE status='SENT'").fetchall()
+            self.assertEqual(len(sent), 1)
+            self.assertTrue(sent[0][0].endswith(":SUSPECTED"))
+
+        # Subsequent suspicious samples must not reannounce same incident.
+        for i in range(8, 15):
+            t = T0 + timedelta(minutes=i)
+            self.events.append(row(t, ssh=250, cw=80))
+            self._tick(t + timedelta(seconds=20))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_fast_path_single_transient_does_not_alert(self):
+        for i in range(18):
+            t = T0 + timedelta(minutes=i)
+            is_spike = i in (3, 8, 13)
+            self.events.append(row(t, ssh=210, cw=56) if is_spike else row(t))
+            self._tick(t + timedelta(seconds=20))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self._tick(T0 + timedelta(minutes=17, seconds=40))["state"],
+                         "NORMAL")
+
+    def test_fast_path_requires_contiguous_valid_samples(self):
+        # Missing sampling period (>150s) is a monitor UNKNOWN, not
+        # confirmation of a consecutive two-minute fast alarm.
+        self.events = [
+            row(T0, ssh=205, cw=55),
+            row(T0 + timedelta(minutes=4), ssh=205, cw=55),
+        ]
+        self._tick(T0 + timedelta(minutes=4, seconds=20))
+        self.assertFalse(any("اختلال احتمالی" in m for m in self.calls))
+        self.events.append(row(T0 + timedelta(minutes=5), ssh=205, cw=55))
+        self._tick(T0 + timedelta(minutes=5, seconds=20))
+        self.assertEqual(
+            sum("اختلال احتمالی" in m for m in self.calls), 1)
+
+    def test_fast_path_invalid_sample_breaks_confirmation(self):
+        data = [
+            row(T0, ssh=205, cw=55),
+            row(T0 + timedelta(minutes=1), missing=True),
+            row(T0 + timedelta(minutes=2), ssh=205, cw=55),
+            row(T0 + timedelta(minutes=3), ssh=205, cw=55),
+        ]
+        for i, entry in enumerate(data):
+            self.events.append(entry)
+            self._tick(T0 + timedelta(minutes=i, seconds=20))
+            if i <= 2:
+                self.assertFalse(any("اختلال احتمالی" in m for m in self.calls))
+        self.assertEqual(
+            sum("اختلال احتمالی" in m for m in self.calls), 1)
+
+    def test_fast_and_original_3_of_5_share_single_incident(self):
+        # 2/3 alternating suspicious samples are not consecutive:
+        # preserve 3-of-5 fallback even if fast path never fires.
+        for i in range(5):
+            t = T0 + timedelta(minutes=i)
+            self.events.append(
+                row(t, ssh=200, cw=55) if i in (0, 2, 4) else row(t))
+            self._tick(t + timedelta(seconds=20))
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn("اختلال احتمالی", self.calls[0])
+        with live.db_connect(self.store) as db:
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 1)
+
     def test_four_of_five_is_not_an_unbounded_stream_of_alerts(self):
         for i in range(25):
             t = T0 + timedelta(minutes=i)

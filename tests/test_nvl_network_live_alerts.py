@@ -344,7 +344,7 @@ class LiveAlertsTests(unittest.TestCase):
         with self.assertRaisesRegex(live.EvidenceError, "does not match"):
             live.baseline_load(self.store)
 
-    def test_pretty_html_alarm_and_recovery_without_shadow_string(self):
+    def test_compact_alerts_have_persian_title_english_body(self):
         self.events = [row(T0 + timedelta(minutes=i)) for i in range(60)]
         self._write()
         live.enrich_eth_baseline(self.src, self.store)
@@ -355,28 +355,75 @@ class LiveAlertsTests(unittest.TestCase):
         m["eth_tx_mbps"] = 25.0
         incident = "NVL-20261122T110000Z-001"
         moment = (T0 + timedelta(minutes=9)).isoformat()
-        for stage in ("SUSPECTED", "DEGRADED", "RECOVERED"):
-            msg = live.render(stage, incident, moment, m, base)
-            self.assertIn("\n📊 <b>اتصالات</b>\n", msg)
-            self.assertIn("\n📶 <b>نرخ ترافیک</b>\n", msg)
-            self.assertIn("ETH RX:", msg)
-            self.assertIn("ETH TX:", msg)
-            self.assertIn("نسبت به مبنا", msg)
-            self.assertIn("از اولین تشخیص: <b>9 دقیقه</b>", msg)
+        for phase in ("SUSPECTED", "DEGRADED", "RECOVERED"):
+            msg = live.render(phase, incident, moment, m, base)
+            title, *body = msg.splitlines()
+            self.assertIn("NVL |", title)
+            self.assertRegex(title, r"[\u0600-\u06FF]")
+            self.assertNotRegex("\n".join(body), r"[\u0600-\u06FF]")
+            self.assertEqual(body[0], "Core · 2026-11-22 14:39:00 Tehran")
+            self.assertIn("Age 9m", body[1])
+            self.assertIn("<b>Connections</b> <i>· vs baseline</i>", msg)
+            self.assertIn("<b>Traffic</b> <i>· Mbps · vs baseline</i>", msg)
+            self.assertIn("SSH <b>230</b>", msg)
+            self.assertIn("CLOSE-WAIT <b>90</b>", msg)
+            self.assertIn("AWG  RX <b>3.20</b>", msg)
+            self.assertIn("ETH  RX <b>42.00</b>", msg)
+            self.assertIn("TX <b>25.00</b>", msg)
+            self.assertIn("+26%", msg)
+            self.assertIn("vs baseline", msg)
             self.assertNotIn("Shadow", msg)
             self.assertNotIn("بدون", msg)
-            self.assertLess(len(msg), 4096)
-        self.assertIn("اولیه", live.render("SUSPECTED", incident, moment, m, base))
-        self.assertIn("بازگشت شاخص", live.render("RECOVERED", incident, moment, m, base))
+            self.assertNotIn("📊", msg)
+            self.assertNotIn("📶", msg)
+            self.assertLessEqual(len(msg.splitlines()), 14)
+            self.assertLess(len(msg), 1300)
+            self.assertEqual(msg.count("<b>"), msg.count("</b>"))
+            self.assertEqual(msg.count("<i>"), msg.count("</i>"))
+        self.assertIn("Signal: SSH + CLOSE-WAIT elevated.",
+                      live.render("SUSPECTED", incident, moment, m, base))
+        self.assertIn("Connection surge",
+                      live.render("DEGRADED", incident, moment, m, base))
+        self.assertIn("Client access not verified.",
+                      live.render("RECOVERED", incident, moment, m, base))
 
-    def test_message_missing_eth_reference_is_explicit_not_zero(self):
+    def test_monitor_notices_short_and_english_after_title(self):
+        for phase, marker in (
+            ("UNKNOWN", "Telemetry unavailable"),
+            ("RESUMED", "Telemetry resumed"),
+            ("TEST", "Delivery test OK")
+        ):
+            msg = live.render(phase, None, T0.isoformat(), None, None)
+            title, *body = msg.splitlines()
+            self.assertRegex(title, r"[\u0600-\u06FF]")
+            self.assertNotRegex("\n".join(body), r"[\u0600-\u06FF]")
+            self.assertIn(marker, msg)
+            self.assertEqual(len(msg.splitlines()), 3)
+            self.assertNotIn("Connections", msg)
+            self.assertNotIn("Traffic", msg)
+            self.assertNotIn("Shadow", msg)
+
+    def test_missing_eth_reference_explicit_NA_no_persian_body(self):
         base = live.baseline_load(self.store)
         m = live.observation(row(T0))
         m["eth_rx_mbps"] = 20
-        m["eth_tx_mbps"] = 30
+        m["eth_tx_mbps"] = None
         text = live.render("SUSPECTED", None, T0.isoformat(), m, base)
-        self.assertIn("مبنای معتبر ندارد", text)
-        self.assertNotIn("N/A", text)
+        self.assertIn("RX <b>20.00</b> <i>N/A</i>", text)
+        self.assertIn("TX <b>N/A</b> <i>N/A</i>", text)
+        self.assertNotRegex("\n".join(text.splitlines()[1:]), r"[\u0600-\u06FF]")
+
+    def test_format_no_negative_zero_and_safe_incident_id(self):
+        self.assertEqual(live.pct(100, 100.2), "0%")
+        self.assertEqual(live.pct(None, 100), "N/A")
+        self.assertEqual(live.pct(20, 0), "N/A")
+        msg = live.render("UNKNOWN", "id-<script>&", T0.isoformat(), None, None)
+        self.assertNotIn("<script>", msg)
+        self.assertIn("id-&lt;script&gt;&amp;", msg)
+        first = live.render("SUSPECTED", "NVL-20261122T110000Z-001",
+                            T0.isoformat(), None, None)
+        self.assertNotIn("Age 0m", first)
+
 
     def test_reject_degraded_auto_baseline(self):
         self.events = [row(T0 + timedelta(minutes=i),

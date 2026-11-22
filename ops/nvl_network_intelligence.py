@@ -169,6 +169,7 @@ def replay(records, baseline, start, end):
     unknown_count = 0
     last = None
     recovery_streak = 0
+    incident_open = False
 
     for stamp, row in records:
         if not start <= stamp < end:
@@ -205,12 +206,12 @@ def replay(records, baseline, start, end):
         elif len(window) == 5 and sum(v in ("SUSPECTED", "DEGRADED") for v in window) >= 3:
             if state not in ("DEGRADED", "RECOVERING"):
                 proposed = "SUSPECTED"
-        elif state in ("SUSPECTED", "DEGRADED", "RECOVERING") and (
+        elif incident_open and state in ("SUSPECTED", "DEGRADED", "RECOVERING", "UNKNOWN") and (
                 len(recovery) == 7 and sum(recovery) >= 5):
             proposed = "RECOVERING"
             if state == "RECOVERING" and recovery_streak >= 10:
                 proposed = "NORMAL"
-        elif state == "UNKNOWN" and len(window) == 5:
+        elif state == "UNKNOWN" and not incident_open and len(window) == 5:
             # Resume observation without claiming a recovered incident.
             proposed = "NORMAL"
 
@@ -218,6 +219,10 @@ def replay(records, baseline, start, end):
             transitions.append({"at": stamp.isoformat(), "from": state,
                                 "to": proposed, "reason": "MULTI_SIGNAL"})
             state = proposed
+            if proposed in ("SUSPECTED", "DEGRADED"):
+                incident_open = True
+            elif proposed == "NORMAL":
+                incident_open = False
 
     return {"state": state, "transitions": transitions,
             "samples_valid": valid_count, "samples_unknown": unknown_count,
@@ -276,7 +281,7 @@ def archive(source: Path, dest: Path, event_id: str, start: datetime, end: datet
             files.append({"file": name, "kind": "jsonl_slice", "records": len(lines),
                           "sha256": digest(target), "bytes": target.stat().st_size})
 
-        if not files or not rows_by_day:
+        if not any(f["kind"] == "snapshot" for f in files) or not rows_by_day:
             raise EvidenceError("No matching raw JSONL and snapshots; archive aborted")
         manifest = {
             "schema": "nvl-network-evidence-1",

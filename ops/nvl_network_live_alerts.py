@@ -39,7 +39,10 @@ STATE_DIR = Path("/var/lib/nvl-network-alerts")
 CONFIG = Path("/etc/nvl-network-alerts/telegram.json")
 BOT_ENV = Path("/etc/nvlbot/nvlbot.env")
 TOKEN_RE = re.compile(r"^[0-9]{5,20}:[A-Za-z0-9_-]{20,}$")
+EXTRA_FIELDS = ("eth_rx_mbps", "eth_tx_mbps")
 METRIC_LABELS = {
+    "eth_rx_mbps": "ETH RX",
+    "eth_tx_mbps": "ETH TX",
     "ssh": "SSH :2252",
     "udpgw": "UDPGW :7300",
     "close_wait": "UDPGW CLOSE-WAIT",
@@ -144,6 +147,18 @@ def baseline_build(source, store, start, end, confirmed):
             or b["udpgw"] < b["ssh"] * .45
             or b["awg_tx_mbps"] < .5):
         raise EvidenceError("Baseline seems degraded; select verified healthy window")
+    # ETH is corroborating evidence, never required for the primary classifier.
+    # Missing ETH leaves it absent instead of inventing a zero or blocking alerting.
+    for field, direction in (("eth_rx_mbps", "received"), ("eth_tx_mbps", "sent")):
+        vals = []
+        for _, row in records:
+            v = (row.get("interface_rates_kbps") or {}).get("eth0") or {}
+            num = v.get(direction)
+            if isinstance(num, (int, float)) and not isinstance(num, bool) and math.isfinite(num) and num >= 0:
+                vals.append(num / 1000)
+        if len(vals) >= .8 * base["valid_count"]:
+            from statistics import median
+            base["values"][field] = median(vals)
     # Keep existing live incident history; a baseline update only when no active
     # detector is running is enforced by preflight/runbook, not by relabeling.
     obj = {"schema": "nvl-network-live-baseline-1",
@@ -251,12 +266,13 @@ def render(phase, incident, stamp, metrics, baseline):
              f"زمان: {html.escape(fmt_time(stamp))} تهران",
              "وضعیت: پایش آزمایشیِ فعال (بدون Shadow)"]
     if metrics and baseline:
-        for field in FIELDS:
+        for field in (*FIELDS, *EXTRA_FIELDS):
             val = metrics.get(field)
             label = METRIC_LABELS[field]
+            ref = baseline["values"].get(field)
             if val is not None:
                 lines.append(f"{label}: <b>{fmt_metric(val, label)}</b> "
-                             f"({pct(val, baseline['values'][field])})")
+                             f"({pct(val, ref)})")
             else:
                 lines.append(f"{label}: نامشخص")
     if phase == "UNKNOWN":
@@ -468,8 +484,19 @@ def tick(source, store, config_path, *, now=None, send=telegram_send):
     samples, malformed = recent_samples(
         source, lookback, now + timedelta(seconds=5))
     # Avoid sending historical, already-ended incidents after a long outage.
-    fresh = [(t, observation(v)) for t, v in samples
-             if (now - t).total_seconds() <= 360]
+    fresh = []
+    for t, raw in samples:
+        if (now - t).total_seconds() > 360:
+            continue
+        obs = observation(raw)
+        iface = (raw.get("interface_rates_kbps") or {}).get("eth0") or {}
+        for key, direction in (("eth_rx_mbps", "received"),
+                               ("eth_tx_mbps", "sent")):
+            value = iface.get(direction)
+            obs[key] = (value / 1000 if isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        and math.isfinite(value) and value >= 0 else None)
+        fresh.append((t, obs))
     with db_connect(store) as db:
         state = state_read(db)
         for stamp, obs in fresh:

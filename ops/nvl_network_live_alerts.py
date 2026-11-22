@@ -534,8 +534,15 @@ def process_sample(state, stamp, obs, base, db):
     nxt = None
     if len(win) == 5 and sum(k == "DEGRADED" for k in win) >= 3:
         nxt = "DEGRADED"
-    elif len(win) == 5 and sum(
-            k in ("SUSPECTED", "DEGRADED") for k in win) >= 3:
+    elif (
+        # Fast, conservative 2-sample gate: still requires the ORIGINAL
+        # two-signal SUSPECTED thresholds; no single-sample alarms.
+        # Gaps >150s or incomplete samples already clear state["window"].
+        (len(win) >= 2 and all(
+            k in ("SUSPECTED", "DEGRADED") for k in win[-2:]))
+        or (len(win) == 5 and sum(
+            k in ("SUSPECTED", "DEGRADED") for k in win) >= 3)
+    ):
         if phase not in ("DEGRADED", "RECOVERING"):
             nxt = "SUSPECTED"
     elif (state["incident_open"]

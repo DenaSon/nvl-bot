@@ -418,13 +418,55 @@ def drain_outbox(db, config, now, send=telegram_send):
     return "SENT"
 
 
+def recent_samples(source: Path, start: datetime, end: datetime):
+    """Live tail-only reader: a stale malformed historical record cannot
+    block today's notifications. P0 evidence validation remains strict.
+    A recent corrupt row means a missing minute, never a zero metric.
+    """
+    if not source.is_dir():
+        raise EvidenceError("Sampler source directory missing")
+    records = []
+    malformed = 0
+    days = {start.date(), (end - timedelta(microseconds=1)).date()}
+    for day in sorted(days):
+        path = source / ("nvl-samples-" + day.strftime("%Y%m%d") + ".jsonl")
+        if not path.exists():
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise EvidenceError("Unsafe sampler input path")
+        with path.open(encoding="utf-8", errors="replace") as f:
+            tail = deque(f, maxlen=90)
+        for raw in tail:
+            if not raw.strip():
+                continue
+            try:
+                row = json.loads(raw)
+                if not isinstance(row, dict):
+                    raise ValueError("Not a JSON object")
+                stamp = utc(row["timestamp_utc"])
+            except (ValueError, KeyError, TypeError, EvidenceError):
+                malformed += 1
+                continue
+            if start <= stamp < end:
+                records.append((stamp, row))
+    records.sort(key=lambda r: r[0])
+    unique = {}
+    for stamp, row in records:
+        if stamp in unique:
+            malformed += 1
+        else:
+            unique[stamp] = row
+    return list(unique.items()), malformed
+
+
 def tick(source, store, config_path, *, now=None, send=telegram_send):
     now = now or datetime.now(timezone.utc)
     base = baseline_load(store)
     conf = config_load(config_path)
     # Kernel counter observations; Netdata charts are optional.
     lookback = now - timedelta(minutes=12)
-    samples = load_samples(source, lookback, now + timedelta(seconds=5))
+    samples, malformed = recent_samples(
+        source, lookback, now + timedelta(seconds=5))
     # Avoid sending historical, already-ended incidents after a long outage.
     fresh = [(t, observation(v)) for t, v in samples
              if (now - t).total_seconds() <= 360]
@@ -459,7 +501,8 @@ def tick(source, store, config_path, *, now=None, send=telegram_send):
         delivery = drain_outbox(db, conf, now, send=send)
         return {"state": state["phase"], "incident": state["incident"],
                 "new_samples": len(fresh), "last_sample": state["last_sample"],
-                "delivery": delivery, "outbox_pending": db.execute(
+                "delivery": delivery, "bad_recent_lines": malformed,
+                "outbox_pending": db.execute(
                     "SELECT COUNT(*) FROM outbox WHERE status='PENDING'").fetchone()[0]}
 
 

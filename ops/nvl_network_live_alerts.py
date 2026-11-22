@@ -250,7 +250,7 @@ def pct(value, reference):
 def fmt_metric(value, label):
     if value is None:
         return "نامشخص"
-    return f"{value:.2f} Mbps" if "AWG " in label else f"{value:.0f}"
+    return f"{value:.2f} Mbps" if label.startswith(("AWG ", "ETH ")) else f"{value:.0f}"
 
 
 def render(phase, incident, stamp, metrics, baseline):

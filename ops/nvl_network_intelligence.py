@@ -15,7 +15,7 @@ import shutil
 import statistics
 import tempfile
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 FIELDS = ("ssh", "udpgw", "close_wait", "awg_rx_mbps", "awg_tx_mbps")
@@ -85,12 +85,37 @@ def observation(row: dict) -> dict:
     return result
 
 
+def _window_days(start: datetime, end: datetime):
+    """UTC day interval, with exclusive end; filenames are UTC dates."""
+    if end <= start:
+        raise EvidenceError("End must follow start")
+    return start.date(), (end - timedelta(microseconds=1)).date()
+
+
+def _day_in_window(name: str, pattern: str, start: datetime, end: datetime):
+    match = re.fullmatch(pattern, name)
+    if match is None:
+        raise EvidenceError("Unexpected evidence filename: " + name)
+    try:
+        day = datetime.strptime(match.group(1), "%Y%m%d").date()
+    except ValueError as exc:
+        raise EvidenceError("Invalid evidence filename date: " + name) from exc
+    first, last = _window_days(start, end)
+    return first <= day <= last
+
+
 def iter_samples(source: Path, start: datetime, end: datetime):
     if not source.is_dir():
         raise EvidenceError("Source directory not found")
     for path in sorted(source.glob(SAMPLE_PATTERN)):
         if path.is_symlink() or not path.is_file():
             raise EvidenceError("Invalid sample path: " + path.name)
+        if not _day_in_window(
+            path.name, r"nvl-samples-(\d{8})\.jsonl", start, end
+        ):
+            # Never parse an unrelated daily log. Old corrupted records
+            # must not block an incident on a different UTC day.
+            continue
         with path.open(encoding="utf-8") as stream:
             for lineno, raw in enumerate(stream, 1):
                 if not raw.strip():
@@ -264,6 +289,12 @@ def archive(source: Path, dest: Path, event_id: str, start: datetime, end: datet
                            set(source.glob(SNAP_DISRUPTION_PATTERN))):
             if path.is_symlink() or not path.is_file():
                 raise EvidenceError("Invalid snapshot path")
+            if not _day_in_window(
+                path.name,
+                r"(\d{8})T\d{6}\.\d+Z_(?:normal|disruption)\.json",
+                start, end
+            ):
+                continue
             try:
                 row = json.loads(path.read_text(encoding="utf-8"))
                 stamp = utc(row["timestamp_utc"])

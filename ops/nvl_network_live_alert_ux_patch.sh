@@ -66,6 +66,7 @@ restore() {
   systemctl start nvl-network-alerts.timer || {
     echo "TIMER_RESTART_NEEDS_OPERATOR_ATTENTION" >&2;
   }
+  cleanup
 }
 # Preserve the existing timer's enabled status; briefly pause ticks during the
 # atomic file swap. No runtime state, baseline.json or Telegram credentials change.

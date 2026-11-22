@@ -33,6 +33,15 @@ except ImportError:  # direct file installation beside nvl_network_intelligence.
     from nvl_network_intelligence import (EvidenceError, FIELDS, build_baseline,
                                           classify, load_samples, observation, utc)
 
+def instant(value):
+    """Normalize P1 ISO strings and runtime aware datetime objects to UTC."""
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            raise EvidenceError("Naive runtime timestamp")
+        return value.astimezone(timezone.utc)
+    return utc(value)
+
+
 IRAN = ZoneInfo("Asia/Tehran")
 SOURCE = Path("/root/nvl-network-observations")
 STATE_DIR = Path("/var/lib/nvl-network-alerts")
@@ -131,7 +140,7 @@ def config_load(path: Path):
 
 
 def fmt_time(stamp):
-    return utc(stamp).astimezone(IRAN).strftime("%Y-%m-%d %H:%M:%S")
+    return instant(stamp).astimezone(IRAN).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def baseline_build(source, store, start, end, confirmed):
@@ -139,7 +148,7 @@ def baseline_build(source, store, start, end, confirmed):
         raise EvidenceError("Operator must confirm a clean 60+ minute window")
     if (store / "state.sqlite3").exists():
         raise EvidenceError("Detector state exists: no live baseline replacement")
-    begin, finish = utc(start), utc(end)
+    begin, finish = instant(start), instant(end)
     if finish > datetime.now(timezone.utc) + timedelta(minutes=2):
         raise EvidenceError("Baseline cannot be in the future")
     if (datetime.now(timezone.utc) - finish) > timedelta(days=7):
@@ -293,7 +302,7 @@ def render(phase, incident, stamp, metrics, baseline):
 
 def make_incident(stamp, state):
     state["seq"] += 1
-    return "NVL-" + utc(stamp).strftime("%Y%m%dT%H%M%SZ") + f"-{state['seq']:03d}"
+    return "NVL-" + instant(stamp).strftime("%Y%m%dT%H%M%SZ") + f"-{state['seq']:03d}"
 
 
 def transition(state, next_phase, stamp, metrics, base, db):
@@ -310,20 +319,20 @@ def transition(state, next_phase, stamp, metrics, base, db):
             # Suppress rapid fresh SUSPECTED alerts after a completed incident;
             # DEGRADED always sends, as material escalation.
             just_closed = (state["last_closed"] is not None
-                           and (utc(stamp) - utc(state["last_closed"])).total_seconds() < 1200)
+                           and (instant(stamp) - instant(state["last_closed"])).total_seconds() < 1200)
             if not (next_phase == "SUSPECTED" and just_closed):
                 key = f"{state['incident']}:{next_phase}"
                 queue(db, key, render(next_phase, state["incident"], stamp, metrics, base),
-                      utc(stamp).isoformat())
+                      instant(stamp).isoformat())
                 state["alerted_phases"].append(next_phase)
     elif next_phase == "RECOVERING":
-        state["recovering_since"] = utc(stamp).isoformat()
+        state["recovering_since"] = instant(stamp).isoformat()
     elif next_phase == "NORMAL" and state["incident_open"]:
         if state["alerted_phases"]:
             key = f"{state['incident']}:RECOVERED"
             queue(db, key, render("RECOVERED", state["incident"], stamp, metrics, base),
-                  utc(stamp).isoformat())
-        state["last_closed"] = utc(stamp).isoformat()
+                  instant(stamp).isoformat())
+        state["last_closed"] = instant(stamp).isoformat()
         state["incident_open"] = False
         state["incident"] = None
         state["alerted_phases"] = []
@@ -332,11 +341,11 @@ def transition(state, next_phase, stamp, metrics, base, db):
 
 
 def process_sample(state, stamp, obs, base, db):
-    stamp_iso = utc(stamp).isoformat()
-    previous = utc(state["last_sample"]) if state["last_sample"] else None
-    if previous and utc(stamp) <= previous:
+    stamp_iso = instant(stamp).isoformat()
+    previous = instant(state["last_sample"]) if state["last_sample"] else None
+    if previous and instant(stamp) <= previous:
         return
-    if previous and (utc(stamp) - previous).total_seconds() > 150:
+    if previous and (instant(stamp) - previous).total_seconds() > 150:
         state["window"] = []
         state["recovery"] = []
         state["recovery_streak"] = 0
@@ -350,7 +359,7 @@ def process_sample(state, stamp, obs, base, db):
         state["recovery_streak"] = 0
         transition(state, "UNKNOWN", stamp_iso, obs, base, db)
         if state["incomplete_streak"] >= 5 and not state["unknown_alerted"]:
-            queue(db, f"MONITOR:{utc(stamp).strftime('%Y%m%dT%H%M%SZ')}:UNKNOWN",
+            queue(db, f"MONITOR:{instant(stamp).strftime('%Y%m%dT%H%M%SZ')}:UNKNOWN",
                   render("UNKNOWN", state["incident"], stamp_iso, None, None),
                   stamp_iso)
             state["unknown_alerted"] = True
@@ -378,7 +387,7 @@ def process_sample(state, stamp, obs, base, db):
         since = state["recovering_since"]
         if (phase == "RECOVERING" and since is not None
                 and state["recovery_streak"] >= 10
-                and (utc(stamp) - utc(since)).total_seconds() >= 600):
+                and (instant(stamp) - instant(since)).total_seconds() >= 600):
             nxt = "NORMAL"
     elif phase == "UNKNOWN" and not state["incident_open"] and len(win) == 5:
         nxt = "NORMAL"
@@ -386,7 +395,7 @@ def process_sample(state, stamp, obs, base, db):
     if nxt is not None:
         transition(state, nxt, stamp_iso, obs, base, db)
     if state["phase"] not in ("UNKNOWN",) and state["unknown_alerted"]:
-        key = f"MONITOR:{utc(stamp).strftime('%Y%m%dT%H%M%SZ')}:RESUMED"
+        key = f"MONITOR:{instant(stamp).strftime('%Y%m%dT%H%M%SZ')}:RESUMED"
         queue(db, key, render("RESUMED", state["incident"], stamp_iso,
                               obs, base), stamp_iso)
         state["unknown_alerted"] = False
@@ -464,7 +473,7 @@ def recent_samples(source: Path, start: datetime, end: datetime):
                 row = json.loads(raw)
                 if not isinstance(row, dict):
                     raise ValueError("Not a JSON object")
-                stamp = utc(row["timestamp_utc"])
+                stamp = instant(row["timestamp_utc"])
             except (ValueError, KeyError, TypeError, EvidenceError):
                 malformed += 1
                 continue
@@ -512,11 +521,11 @@ def tick(source, store, config_path, *, now=None, send=telegram_send):
                     (sample_utc, recorded_utc, candidate, phase,
                      metrics_json, baseline_start)
                     VALUES (?,?,?,?,?,?)""",
-                    (utc(stamp).isoformat(), now.isoformat(),
+                    (instant(stamp).isoformat(), now.isoformat(),
                      classify(obs, base), state["phase"],
                      json.dumps(obs, ensure_ascii=False, allow_nan=False),
                      base["window_start"]))
-        last = utc(state["last_sample"]) if state["last_sample"] else None
+        last = instant(state["last_sample"]) if state["last_sample"] else None
         stale = last is None or (now - last).total_seconds() > 300
         if stale and not state["unknown_alerted"]:
             # A genuine monitor fault gets one notice; never classify as filtering.

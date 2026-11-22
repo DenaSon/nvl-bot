@@ -186,7 +186,7 @@ class P0P1Tests(unittest.TestCase):
         # to the 20261122 incident and must not block the latter.
         yesterday = self.samples / "nvl-samples-20261121.jsonl"
         self.samples.mkdir(exist_ok=True, parents=True)
-        yesterday.write_text(("{}\\n" * 106) + "{not-json}\\n")
+        yesterday.write_text(("{}\n" * 106) + "{not-json}\n")
         (self.samples / "20261121T212715.000000Z_disruption.json").write_text(
             "{corrupted old snapshot")
         row = sample(T0)
@@ -194,7 +194,7 @@ class P0P1Tests(unittest.TestCase):
         name = "20261122T110000.000000Z_disruption.json"
         (self.samples / name).write_text(json.dumps({
             **row, "condition": "disruption"
-        }) + "\\n")
+        }) + "\n")
         result = archive(self.samples, self.root / "archive", "CURRENT-EVENT",
                          T0, T0 + timedelta(minutes=1))
         output = Path(result["path"])
@@ -205,7 +205,7 @@ class P0P1Tests(unittest.TestCase):
     def test_replay_input_skips_unrelated_corrupt_previous_day(self):
         self.samples.mkdir(exist_ok=True, parents=True)
         (self.samples / "nvl-samples-20261121.jsonl").write_text(
-            "not-json\\n" * 107)
+            "not-json\n" * 107)
         write_data(self.samples, [sample(T0 + timedelta(minutes=i))
                                   for i in range(61)])
         records = load_samples(self.samples, T0, T0 + timedelta(minutes=61))
@@ -216,8 +216,8 @@ class P0P1Tests(unittest.TestCase):
     def test_corrupt_current_day_is_fail_closed(self):
         self.samples.mkdir(exist_ok=True, parents=True)
         with (self.samples / "nvl-samples-20261122.jsonl").open("w") as f:
-            f.write(json.dumps(sample(T0)) + "\\n")
-            f.write("not-json\\n")
+            f.write(json.dumps(sample(T0)) + "\n")
+            f.write("not-json\n")
         with self.assertRaisesRegex(EvidenceError,
                                     "nvl-samples-20261122.jsonl:2"):
             load_samples(self.samples, T0, T0 + timedelta(minutes=10))
@@ -226,8 +226,8 @@ class P0P1Tests(unittest.TestCase):
         yesterday = datetime(2026, 11, 21, 23, 59, tzinfo=timezone.utc)
         self.samples.mkdir(exist_ok=True, parents=True)
         (self.samples / "nvl-samples-20261121.jsonl").write_text(
-            json.dumps(sample(yesterday)) + "\\n")
-        (self.samples / "nvl-samples-20261122.jsonl").write_text("not-json\\n")
+            json.dumps(sample(yesterday)) + "\n")
+        (self.samples / "nvl-samples-20261122.jsonl").write_text("not-json\n")
         records = load_samples(
             self.samples, yesterday,
             datetime(2026, 11, 22, 0, 0, tzinfo=timezone.utc))

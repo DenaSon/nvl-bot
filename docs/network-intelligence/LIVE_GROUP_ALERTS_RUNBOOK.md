@@ -108,7 +108,7 @@ Emergency disable (does not touch sampler/SSH/Bot): `systemctl disable --now nvl
 
 | Transition | Core evidence gate | Group message |
 |---|---|---|
-| `NORMAL → SUSPECTED` | SSH >=1.25× and CLOSE-WAIT >=max(3×, baseline+20) in >=3 of last 5 current minute samples | **🟠 اختلال احتمالی**: ID, time, 5 live metrics and relative changes |
+| `NORMAL → SUSPECTED` | SSH >=1.25× and CLOSE-WAIT >=max(3×, baseline+20) in >=3 of last 5 current minute samples | **🟠 اختلال احتمالی**: ID, time, 5 detector metrics plus 2 optional ETH metrics and relative changes |
 | `SUSPECTED → DEGRADED` | SSH >=1.40× and CLOSE-WAIT >=max(5×, baseline+40), plus either AWG TX <=0.75× or UDPGW <=0.80× in >=3 of 5 | **🔴 تشدید اختلال** (once per incident) |
 | `DEGRADED/SUSPECTED → RECOVERING` | >=5 of last 7 recovery candidates | State logged; no extra group message |
 | `RECOVERING → NORMAL` | >=10 consecutive recovery samples, >=10 min elapsed since entering RECOVERING | **🟢 بازیابی** (once if incident was announced) |
@@ -128,7 +128,7 @@ Emergency disable (does not touch sampler/SSH/Bot): `systemctl disable --now nvl
 - File source: `/root/nvl-network-observations/nvl-samples-YYYYMMDD.jsonl` (collector still writes it).
 - Alert state, outbox, and de-identified per-sample decision rows: `/var/lib/nvl-network-alerts/state.sqlite3`, root-only.
 - Immutable baseline: `/var/lib/nvl-network-alerts/baseline.json`.
-- Group messages include Incident ID, timing, SSH, UDPGW established/CLOSE-WAIT, AWG RX/TX, and percentage change vs baseline.
+- Group messages include Incident ID, timing, SSH, UDPGW established/CLOSE-WAIT, AWG RX/TX, optional corroborating ETH RX/TX, and percentage change vs baseline. ETH and AWG traffic are never summed.
 - Periodically audit `decisions` and `outbox` from the DB **without exposing Telegram token**.
 - Evaluate sensitivity, first-warning lag, escalation lag, closure lag, duplicate count, misses and false positives against operator-labeled incidents.
 - Baseline refresh and new threshold tuning require an explicit separate reviewed patch or planned stopped release. Never auto-learn from disruption/unknown/recovery periods.

@@ -147,6 +147,26 @@ class LiveAlertsTests(unittest.TestCase):
         self.assertEqual(third["outbox_pending"], 0)
         self.assertEqual(len(self.calls), 1)
 
+    def test_malformed_historical_log_does_not_block_live_alert(self):
+        self.events = [row(T0 + timedelta(minutes=i), ssh=205, cw=55)
+                       for i in range(7)]
+        self._write()
+        old = self.src / "nvl-samples-20261121.jsonl"
+        old.write_text("{broken-json}\\n" * 120)
+        report = self._tick(T0 + timedelta(minutes=6, seconds=20))
+        self.assertEqual(report["bad_recent_lines"], 0)
+        self.assertEqual(report["delivery"], "SENT")
+        self.assertEqual(len(self.calls), 1)
+
+    def test_repeated_incomplete_samples_warn_once_without_fake_recovery(self):
+        for i in range(12):
+            t = T0 + timedelta(minutes=i)
+            self.events.append(row(t, missing=True))
+            self._tick(t + timedelta(seconds=20))
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn("وقفه در پایش", self.calls[0])
+        self.assertNotIn("بازگشت شاخص", self.calls[0])
+
     def test_research_baseline_rejected(self):
         p = self.store / "baseline.json"
         data = json.loads(p.read_text())

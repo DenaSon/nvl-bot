@@ -346,19 +346,21 @@ def queue(db, key, text, stamp):
 
 
 def pct(value, reference):
-    if reference is None or reference <= 0:
+    if value is None or reference is None or reference <= 0:
         return "N/A"
-    return f"{(value/reference-1)*100:+.0f}%"
+    # Avoid misleading negative zero for small changes.
+    change = (value / reference - 1) * 100
+    return "0%" if abs(change) < .5 else f"{change:+.0f}%"
 
 
 def fmt_metric(value, label):
     if value is None:
-        return "نامشخص"
-    return f"{value:.2f} Mbps" if label.startswith(("AWG ", "ETH ")) else f"{value:.0f}"
+        return "N/A"
+    return f"{value:.2f}" if label.startswith(("AWG ", "ETH ")) else f"{value:.0f}"
 
 
 def incident_begin(incident):
-    """Extract only the first DETECTION time from our generated incident ID."""
+    """Extract first DETECTION time, not the physical start of filtering."""
     if not incident:
         return None
     match = re.fullmatch(r"NVL-(\d{8}T\d{6}Z)-\d{3,}", incident)
@@ -371,27 +373,18 @@ def incident_begin(incident):
         return None
 
 
-def delta_text(value, reference):
-    if value is None:
-        return "اندازه‌گیری نشد"
-    if reference is None or reference <= 0:
-        return "مبنای معتبر ندارد"
-    change = (value / reference - 1) * 100
-    direction = "↑" if change > 0 else "↓" if change < 0 else "↔"
-    return f"{direction} {change:+.0f}٪ نسبت به مبنا"
-
-
-def render_metric(field, metrics, base):
+def render_metric(field, metrics, base, *, compact_label=None):
+    """One tight, escaped Telegram HTML metric: current value and % vs baseline."""
     label = METRIC_LABELS[field]
-    value = metrics.get(field)
-    ref = base["values"].get(field)
-    display = html.escape(fmt_metric(value, label))
-    delta = html.escape(delta_text(value, ref))
-    return f"• {html.escape(label)}: <b>{display}</b>  <i>({delta})</i>"
+    current = metrics.get(field)
+    reference = base["values"].get(field)
+    name = compact_label if compact_label is not None else label
+    return (f"{html.escape(name)} <b>{html.escape(fmt_metric(current, label))}</b>"
+            f" <i>{html.escape(pct(current, reference))}</i>")
 
 
 def render(phase, incident, stamp, metrics, baseline):
-    """Compact Telegram HTML, consistent across suspicion/escalation/recovery."""
+    """Only the Persian alert title is localized; body is concise English."""
     captions = {
         "SUSPECTED": "🟠 <b>NVL | اختلال احتمالی ارتباط</b>",
         "DEGRADED": "🔴 <b>NVL | تشدید اختلال ارتباط</b>",
@@ -400,62 +393,60 @@ def render(phase, incident, stamp, metrics, baseline):
         "RESUMED": "🔵 <b>NVL | دریافت داده از سر گرفته شد</b>",
         "TEST": "🧪 <b>NVL | آزمایش ارسال هشدار گروه</b>",
     }
-    stage = {
-        "SUSPECTED": "هشدار اولیه",
-        "DEGRADED": "اختلال تشدیدشده",
-        "RECOVERED": "بازیابی تأییدشده",
-        "UNKNOWN": "نامشخص",
-        "RESUMED": "پایش برقرار",
-        "TEST": "تست ارتباط",
-    }
     stamp_dt = instant(stamp)
     lines = [
         captions[phase],
-        f"📍 <b>Core</b>  |  {stage[phase]}",
-        f"🕒 {html.escape(fmt_time(stamp_dt))} (تهران)",
+        f"Core · {html.escape(fmt_time(stamp_dt))} Tehran",
     ]
     if incident:
-        lines.append(f"🆔 رویداد: <code>{html.escape(incident)}</code>")
+        identifier = f"ID <code>{html.escape(incident)}</code>"
         first = incident_begin(incident)
         if first is not None:
-            elapsed_minutes = max(0, int((stamp_dt - first).total_seconds() // 60))
-            lines.append(f"⏱ از اولین تشخیص: <b>{elapsed_minutes} دقیقه</b>")
+            age_minutes = max(0, int((stamp_dt - first).total_seconds() // 60))
+            if age_minutes > 0:
+                identifier += f" · Age {age_minutes}m"
+        lines.append(identifier)
 
-    if metrics is not None and baseline is not None:
-        lines.extend([
-            "",
-            "📊 <b>اتصالات</b>",
-            *(render_metric(f, metrics, baseline)
-              for f in ("ssh", "udpgw", "close_wait")),
-            "",
-            "📶 <b>نرخ ترافیک</b>",
-            *(render_metric(f, metrics, baseline)
-              for f in ("awg_rx_mbps", "awg_tx_mbps", *EXTRA_FIELDS)),
-        ])
-
-    if phase in ("SUSPECTED", "DEGRADED"):
-        lines.extend([
-            "",
-            "🔎 <b>مبنای تشخیص</b>",
-            ("• افزایش هم‌زمان SSH و CLOSE-WAIT در چند نمونه متوالی"
-             if phase == "SUSPECTED" else
-             "• افزایش SSH و CLOSE-WAIT همراه با افت AWG TX یا UDPGW"),
-        ])
-    elif phase == "RECOVERED":
-        lines.extend(["", "✅ شاخص‌های ارتباط پس از تأیید متوالی به محدوده عادی بازگشتند.",
-                      "اتصال کاربران به‌صورت مستقل آزمایش نشده است."])
-    elif phase == "UNKNOWN":
-        lines.extend(["", "⚠️ داده تازه یا معتبر دریافت نشده است.",
-                      "این وضعیت نشان‌دهنده رفع اختلال نیست."])
+    # Monitor-only messages should be short and never imply a customer outage.
+    if phase == "UNKNOWN":
+        lines.append("Telemetry unavailable · Recovery not confirmed.")
     elif phase == "RESUMED":
-        lines.extend(["", "✅ دریافت داده معتبر مانیتورینگ از سر گرفته شد."])
+        lines.append("Telemetry resumed · Connectivity not independently verified.")
     elif phase == "TEST":
-        lines.extend(["", "✅ مسیر ارسال پیام به همین گروه برقرار است.",
-                      "این پیام آزمایشی است و هیچ اختلالی اعلام نشده است."])
-
-    if phase in ("SUSPECTED", "DEGRADED", "RECOVERED"):
-        lines.extend(["", "ℹ️ <i>این ارزیابی بر پایه متریک‌های Core است؛"
-                      " علت قطعی اختلال یا وضعیت تک‌تک کاربران را مشخص نمی‌کند.</i>"])
+        lines.append("Delivery test OK · No incident reported.")
+    elif phase in ("SUSPECTED", "DEGRADED", "RECOVERED"):
+        if metrics is not None and baseline is not None:
+            lines.extend([
+                "",
+                "<b>Connections</b> <i>· vs baseline</i>",
+                (render_metric("ssh", metrics, baseline, compact_label="SSH")
+                 + " · " +
+                 render_metric("udpgw", metrics, baseline, compact_label="UDPGW")),
+                render_metric("close_wait", metrics, baseline,
+                              compact_label="CLOSE-WAIT"),
+                "",
+                "<b>Traffic</b> <i>· Mbps · vs baseline</i>",
+                ("AWG  " +
+                 render_metric("awg_rx_mbps", metrics, baseline,
+                               compact_label="RX") + " · " +
+                 render_metric("awg_tx_mbps", metrics, baseline,
+                               compact_label="TX")),
+                ("ETH  " +
+                 render_metric("eth_rx_mbps", metrics, baseline,
+                               compact_label="RX") + " · " +
+                 render_metric("eth_tx_mbps", metrics, baseline,
+                               compact_label="TX")),
+            ])
+        summary = {
+            "SUSPECTED": "Signal: SSH + CLOSE-WAIT elevated.",
+            "DEGRADED": "Signal: Connection surge + AWG TX / UDPGW decline.",
+            "RECOVERED": "Core metrics stabilized · Client access not verified.",
+        }
+        lines.extend([
+            "",
+            summary[phase],
+            "<i>Core telemetry only · ISP filtering not confirmed.</i>",
+        ])
     return "\n".join(lines)
 
 

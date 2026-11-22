@@ -53,10 +53,13 @@ STATE_VERSION = 1
 
 
 def secure_parent(path: Path):
+    # Never chmod an existing parent such as /etc, /root or /var/lib.
+    existed = path.exists()
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     if path.is_symlink() or not path.is_dir():
         raise EvidenceError("Unsafe storage directory")
-    path.chmod(0o700)
+    if not existed:
+        path.chmod(0o700)
 
 
 def atomic_json(path: Path, data: dict):
@@ -117,6 +120,8 @@ def configure(bot_env: Path, chat_id: str | None, topic: int | None,
 
 
 def config_load(path: Path):
+    if path.stat().st_mode & 0o077:
+        raise EvidenceError("Telegram config must be owner-only (0600)")
     data = read_json(path)
     if (data.get("schema") != "nvl-group-telegram-1"
             or not re.fullmatch(r"-[1-9][0-9]{5,20}", str(data.get("chat_id", "")))

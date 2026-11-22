@@ -129,6 +129,8 @@ def fmt_time(stamp):
 def baseline_build(source, store, start, end, confirmed):
     if not confirmed:
         raise EvidenceError("Operator must confirm a clean 60+ minute window")
+    if (store / "state.sqlite3").exists():
+        raise EvidenceError("Detector state exists: no live baseline replacement")
     begin, finish = utc(start), utc(end)
     if finish > datetime.now(timezone.utc) + timedelta(minutes=2):
         raise EvidenceError("Baseline cannot be in the future")
@@ -275,16 +277,22 @@ def transition(state, next_phase, stamp, metrics, base, db):
             state["incident_open"] = True
             state["alerted_phases"] = []
         if next_phase not in state["alerted_phases"]:
-            key = f"{state['incident']}:{next_phase}"
-            queue(db, key, render(next_phase, state["incident"], stamp, metrics, base),
-                  utc(stamp).isoformat())
-            state["alerted_phases"].append(next_phase)
+            # Suppress rapid fresh SUSPECTED alerts after a completed incident;
+            # DEGRADED always sends, as material escalation.
+            just_closed = (state["last_closed"] is not None
+                           and (utc(stamp) - utc(state["last_closed"])).total_seconds() < 1200)
+            if not (next_phase == "SUSPECTED" and just_closed):
+                key = f"{state['incident']}:{next_phase}"
+                queue(db, key, render(next_phase, state["incident"], stamp, metrics, base),
+                      utc(stamp).isoformat())
+                state["alerted_phases"].append(next_phase)
     elif next_phase == "RECOVERING":
         state["recovering_since"] = utc(stamp).isoformat()
     elif next_phase == "NORMAL" and state["incident_open"]:
-        key = f"{state['incident']}:RECOVERED"
-        queue(db, key, render("RECOVERED", state["incident"], stamp, metrics, base),
-              utc(stamp).isoformat())
+        if state["alerted_phases"]:
+            key = f"{state['incident']}:RECOVERED"
+            queue(db, key, render("RECOVERED", state["incident"], stamp, metrics, base),
+                  utc(stamp).isoformat())
         state["last_closed"] = utc(stamp).isoformat()
         state["incident_open"] = False
         state["incident"] = None

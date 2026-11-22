@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import getpass
 import html
 import json
@@ -15,6 +16,7 @@ import math
 import os
 import re
 import sqlite3
+import statistics
 import sys
 import tempfile
 import time
@@ -28,10 +30,10 @@ from zoneinfo import ZoneInfo
 
 try:
     from .nvl_network_intelligence import (EvidenceError, FIELDS, build_baseline,
-                                            classify, load_samples, observation, utc)
+                                            classify, iter_samples, load_samples, observation, utc)
 except ImportError:  # direct file installation beside nvl_network_intelligence.py
     from nvl_network_intelligence import (EvidenceError, FIELDS, build_baseline,
-                                          classify, load_samples, observation, utc)
+                                          classify, iter_samples, load_samples, observation, utc)
 
 def instant(value):
     """Normalize P1 ISO strings and runtime aware datetime objects to UTC."""
@@ -48,6 +50,7 @@ STATE_DIR = Path("/var/lib/nvl-network-alerts")
 CONFIG = Path("/etc/nvl-network-alerts/telegram.json")
 BOT_ENV = Path("/etc/nvlbot/nvlbot.env")
 TOKEN_RE = re.compile(r"^[0-9]{5,20}:[A-Za-z0-9_-]{20,}$")
+ETH_REFERENCE_SCHEMA = "nvl-network-eth-reference-1"
 EXTRA_FIELDS = ("eth_rx_mbps", "eth_tx_mbps")
 METRIC_LABELS = {
     "eth_rx_mbps": "ETH RX",
@@ -143,6 +146,79 @@ def fmt_time(stamp):
     return instant(stamp).astimezone(IRAN).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def baseline_fingerprint(base):
+    """Bind supplementary ETH medians to the original, immutable live baseline."""
+    identity = {
+        "window_start": base["window_start"],
+        "window_end": base["window_end"],
+        "created_utc": base.get("created_utc"),
+        "values": {field: base["values"][field] for field in FIELDS},
+    }
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"),
+                           allow_nan=False).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def derive_eth_reference(source: Path, base: dict):
+    """Median ETH0 rates from the SAME verified baseline window.
+
+    Uses raw JSONL rather than the normalized P1 observation, because
+    observation() intentionally excludes eth0. Neither metric is required
+    by the Core detector; no AWG/ETH traffic sums are computed.
+    """
+    start, end = instant(base["window_start"]), instant(base["window_end"])
+    expected = math.ceil((end - start).total_seconds() / 60)
+    if expected < 60 or base.get("status") != "NORMAL_VERIFIED":
+        raise EvidenceError("ETH reference requires verified 60+ minute baseline")
+    slots = {field: {} for field in EXTRA_FIELDS}
+    for stamp, raw, _, _ in iter_samples(source, start, end):
+        if not observation(raw)["valid"]:
+            continue
+        iface = (raw.get("interface_rates_kbps") or {}).get("eth0") or {}
+        slot = stamp.replace(second=0, microsecond=0)
+        for field, direction in (("eth_rx_mbps", "received"),
+                                 ("eth_tx_mbps", "sent")):
+            number = iface.get(direction)
+            if (isinstance(number, (int, float))
+                    and not isinstance(number, bool)
+                    and math.isfinite(number) and number >= 0):
+                slots[field].setdefault(slot, number / 1000)
+    coverage = {f: round(len(slots[f]) / expected, 4) for f in EXTRA_FIELDS}
+    if any(coverage[f] < 0.80 for f in EXTRA_FIELDS):
+        raise EvidenceError("Insufficient ETH0 coverage in verified baseline")
+    values = {f: statistics.median(slots[f].values()) for f in EXTRA_FIELDS}
+    return values, coverage
+
+
+def enrich_eth_baseline(source: Path, store: Path):
+    """One-time sidecar migration; never modify baseline.json or SQLite."""
+    path = store / "eth-reference.json"
+    if path.exists() or path.is_symlink():
+        raise EvidenceError("ETH reference already exists; refusing overwrite")
+    base = baseline_load(store)
+    if all(field in base["values"] for field in EXTRA_FIELDS):
+        raise EvidenceError("Baseline already contains ETH references")
+    values, coverage = derive_eth_reference(source, base)
+    reference = {
+        "schema": ETH_REFERENCE_SCHEMA,
+        "base_fingerprint": baseline_fingerprint(base),
+        "window_start": base["window_start"],
+        "window_end": base["window_end"],
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "values": values,
+        "coverage": coverage,
+        "source": "original_verified_baseline_window",
+    }
+    atomic_json(path, reference)
+    print(json.dumps({"status": "ETH_REFERENCE_READY",
+                      "baseline_unchanged": True,
+                      "state_unchanged": True,
+                      "window": [base["window_start"], base["window_end"]],
+                      "coverage": coverage, "median_mbps": values},
+                     ensure_ascii=False))
+    return reference
+
+
 def baseline_build(source, store, start, end, confirmed):
     if not confirmed:
         raise EvidenceError("Operator must confirm a clean 60+ minute window")
@@ -161,18 +237,13 @@ def baseline_build(source, store, start, end, confirmed):
             or b["udpgw"] < b["ssh"] * .45
             or b["awg_tx_mbps"] < .5):
         raise EvidenceError("Baseline seems degraded; select verified healthy window")
-    # ETH is corroborating evidence, never required for the primary classifier.
-    # Missing ETH leaves it absent instead of inventing a zero or blocking alerting.
-    for field, direction in (("eth_rx_mbps", "received"), ("eth_tx_mbps", "sent")):
-        vals = []
-        for _, row in records:
-            v = (row.get("interface_rates_kbps") or {}).get("eth0") or {}
-            num = v.get(direction)
-            if isinstance(num, (int, float)) and not isinstance(num, bool) and math.isfinite(num) and num >= 0:
-                vals.append(num / 1000)
-        if len(vals) >= .8 * base["valid_count"]:
-            from statistics import median
-            base["values"][field] = median(vals)
+    # Optional corroboration: use raw ETH0 samples (not P1-normalized rows).
+    # A missing ETH interface must never invalidate the Core detector.
+    try:
+        extras, _coverage = derive_eth_reference(source, base)
+        base["values"].update(extras)
+    except EvidenceError:
+        pass
     # Keep existing live incident history; a baseline update only when no active
     # detector is running is enforced by preflight/runbook, not by relabeling.
     obj = {"schema": "nvl-network-live-baseline-1",
@@ -194,6 +265,25 @@ def baseline_load(folder):
             or value.get("mode") != "LIVE_PILOT_EVALUATION"
             or value.get("normal_verified") is not True):
         raise EvidenceError("Verified live baseline missing or research-only")
+    path = folder / "eth-reference.json"
+    if path.exists() or path.is_symlink():
+        ref = read_json(path)
+        if (ref.get("schema") != ETH_REFERENCE_SCHEMA
+                or ref.get("base_fingerprint") != baseline_fingerprint(value)
+                or ref.get("window_start") != value["window_start"]
+                or ref.get("window_end") != value["window_end"]):
+            raise EvidenceError("ETH reference does not match live baseline")
+        fields = ref.get("values")
+        if not isinstance(fields, dict) or set(fields) != set(EXTRA_FIELDS):
+            raise EvidenceError("ETH reference has unexpected fields")
+        for field in EXTRA_FIELDS:
+            number = fields[field]
+            if (not isinstance(number, (float, int))
+                    or isinstance(number, bool)
+                    or not math.isfinite(number) or number < 0):
+                raise EvidenceError("ETH reference contains invalid metric")
+        value["values"] = dict(value["values"])
+        value["values"].update(fields)
     return value
 
 
@@ -267,7 +357,41 @@ def fmt_metric(value, label):
     return f"{value:.2f} Mbps" if label.startswith(("AWG ", "ETH ")) else f"{value:.0f}"
 
 
+def incident_begin(incident):
+    """Extract only the first DETECTION time from our generated incident ID."""
+    if not incident:
+        return None
+    match = re.fullmatch(r"NVL-(\d{8}T\d{6}Z)-\d{3,}", incident)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ").replace(
+            tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def delta_text(value, reference):
+    if value is None:
+        return "اندازه‌گیری نشد"
+    if reference is None or reference <= 0:
+        return "مبنای معتبر ندارد"
+    change = (value / reference - 1) * 100
+    direction = "↑" if change > 0 else "↓" if change < 0 else "↔"
+    return f"{direction} {change:+.0f}٪ نسبت به مبنا"
+
+
+def render_metric(field, metrics, base):
+    label = METRIC_LABELS[field]
+    value = metrics.get(field)
+    ref = base["values"].get(field)
+    display = html.escape(fmt_metric(value, label))
+    delta = html.escape(delta_text(value, ref))
+    return f"• {html.escape(label)}: <b>{display}</b>  <i>({delta})</i>"
+
+
 def render(phase, incident, stamp, metrics, baseline):
+    """Compact Telegram HTML, consistent across suspicion/escalation/recovery."""
     captions = {
         "SUSPECTED": "🟠 <b>NVL | اختلال احتمالی ارتباط</b>",
         "DEGRADED": "🔴 <b>NVL | تشدید اختلال ارتباط</b>",
@@ -276,27 +400,62 @@ def render(phase, incident, stamp, metrics, baseline):
         "RESUMED": "🔵 <b>NVL | دریافت داده از سر گرفته شد</b>",
         "TEST": "🧪 <b>NVL | آزمایش ارسال هشدار گروه</b>",
     }
-    lines = [captions[phase], f"شناسه: <code>{html.escape(incident or 'MONITOR')}</code>",
-             f"زمان: {html.escape(fmt_time(stamp))} تهران",
-             "وضعیت: پایش آزمایشیِ فعال (بدون Shadow)"]
-    if metrics and baseline:
-        for field in (*FIELDS, *EXTRA_FIELDS):
-            val = metrics.get(field)
-            label = METRIC_LABELS[field]
-            ref = baseline["values"].get(field)
-            if val is not None:
-                lines.append(f"{label}: <b>{fmt_metric(val, label)}</b> "
-                             f"({pct(val, ref)})")
-            else:
-                lines.append(f"{label}: نامشخص")
-    if phase == "UNKNOWN":
-        lines.append("داده تازه در دسترس نیست؛ این به معنی رفع اختلال نیست.")
-    if phase == "RECOVERED":
-        lines.append("بازیابی شاخص‌ها تأیید شده؛ اتصال تک‌تک کاربران آزمایش نشده است.")
-    if phase == "TEST":
-        lines.append("تست ارسال به همین گروه؛ هیچ اختلالی اعلام نشده است.")
-    else:
-        lines.append("شواهد فقط از Core هستند؛ اثبات قطعی فیلترینگ اپراتور نیستند.")
+    stage = {
+        "SUSPECTED": "هشدار اولیه",
+        "DEGRADED": "اختلال تشدیدشده",
+        "RECOVERED": "بازیابی تأییدشده",
+        "UNKNOWN": "نامشخص",
+        "RESUMED": "پایش برقرار",
+        "TEST": "تست ارتباط",
+    }
+    stamp_dt = instant(stamp)
+    lines = [
+        captions[phase],
+        f"📍 <b>Core</b>  |  {stage[phase]}",
+        f"🕒 {html.escape(fmt_time(stamp_dt))} (تهران)",
+    ]
+    if incident:
+        lines.append(f"🆔 رویداد: <code>{html.escape(incident)}</code>")
+        first = incident_begin(incident)
+        if first is not None:
+            elapsed_minutes = max(0, int((stamp_dt - first).total_seconds() // 60))
+            lines.append(f"⏱ از اولین تشخیص: <b>{elapsed_minutes} دقیقه</b>")
+
+    if metrics is not None and baseline is not None:
+        lines.extend([
+            "",
+            "📊 <b>اتصالات</b>",
+            *(render_metric(f, metrics, baseline)
+              for f in ("ssh", "udpgw", "close_wait")),
+            "",
+            "📶 <b>نرخ ترافیک</b>",
+            *(render_metric(f, metrics, baseline)
+              for f in ("awg_rx_mbps", "awg_tx_mbps", *EXTRA_FIELDS)),
+        ])
+
+    if phase in ("SUSPECTED", "DEGRADED"):
+        lines.extend([
+            "",
+            "🔎 <b>مبنای تشخیص</b>",
+            ("• افزایش هم‌زمان SSH و CLOSE-WAIT در چند نمونه متوالی"
+             if phase == "SUSPECTED" else
+             "• افزایش SSH و CLOSE-WAIT همراه با افت AWG TX یا UDPGW"),
+        ])
+    elif phase == "RECOVERED":
+        lines.extend(["", "✅ شاخص‌های ارتباط پس از تأیید متوالی به محدوده عادی بازگشتند.",
+                      "اتصال کاربران به‌صورت مستقل آزمایش نشده است."])
+    elif phase == "UNKNOWN":
+        lines.extend(["", "⚠️ داده تازه یا معتبر دریافت نشده است.",
+                      "این وضعیت نشان‌دهنده رفع اختلال نیست."])
+    elif phase == "RESUMED":
+        lines.extend(["", "✅ دریافت داده معتبر مانیتورینگ از سر گرفته شد."])
+    elif phase == "TEST":
+        lines.extend(["", "✅ مسیر ارسال پیام به همین گروه برقرار است.",
+                      "این پیام آزمایشی است و هیچ اختلالی اعلام نشده است."])
+
+    if phase in ("SUSPECTED", "DEGRADED", "RECOVERED"):
+        lines.extend(["", "ℹ️ <i>این ارزیابی بر پایه متریک‌های Core است؛"
+                      " علت قطعی اختلال یا وضعیت تک‌تک کاربران را مشخص نمی‌کند.</i>"])
     return "\n".join(lines)
 
 
@@ -565,6 +724,7 @@ def command_line(argv=None):
     x.add_argument("--source", type=Path, default=SOURCE)
     x.add_argument("--store", type=Path, default=STATE_DIR)
     x.add_argument("--config", type=Path, default=CONFIG)
+    commands.add_parser("enrich-eth-baseline", help="Add ETH0 reference from existing verified baseline without rewriting it")
     x = commands.add_parser("send-test")
     x.add_argument("--config", type=Path, default=CONFIG)
     x = commands.add_parser("status")
@@ -577,6 +737,8 @@ def command_line(argv=None):
         elif args.cmd == "baseline":
             baseline_build(args.source, args.store, args.start,
                            args.end, args.confirmed_normal)
+        elif args.cmd == "enrich-eth-baseline":
+            enrich_eth_baseline(SOURCE, STATE_DIR)
         elif args.cmd == "tick":
             secure_parent(args.store)
             lock_file = args.store / ".tick.lock"
@@ -604,6 +766,7 @@ def command_line(argv=None):
             print(json.dumps({"phase": state["phase"], "incident": state["incident"],
                               "last_sample": state["last_sample"],
                               "baseline_quality": base["status"],
+                              "eth_reference_active": all(f in base["values"] for f in EXTRA_FIELDS),
                               "baseline_window": [base["window_start"], base["window_end"]],
                               "pending": pending, "sent": sent,
                               "recent_decisions": [

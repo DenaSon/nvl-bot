@@ -215,6 +215,90 @@ class LiveAlertsTests(unittest.TestCase):
                             confirmed=True)
         self.assertEqual(live.baseline_load(self.store)["status"],
                          "NORMAL_VERIFIED")
+        self.assertIn("eth_rx_mbps", live.baseline_load(self.store)["values"])
+        self.assertIn("eth_tx_mbps", live.baseline_load(self.store)["values"])
+
+    def test_existing_live_baseline_eth_enrichment_does_not_touch_state(self):
+        # Existing Core already has a running pilot and verified immutable baseline.
+        self.events = [row(T0 + timedelta(minutes=i),
+                           tx=30000 + i * 10)
+                       for i in range(60)]
+        self._write()
+        baseline_file = self.store / "baseline.json"
+        original = baseline_file.read_bytes()
+        with live.db_connect(self.store) as db:
+            db.execute("INSERT INTO kv(k,v) VALUES('marker','existing')")
+            db.commit()
+        prior_db = (self.store / "state.sqlite3").read_bytes()
+        result = live.enrich_eth_baseline(self.src, self.store)
+        self.assertEqual(result["schema"], live.ETH_REFERENCE_SCHEMA)
+        self.assertEqual(baseline_file.read_bytes(), original)
+        self.assertEqual((self.store / "state.sqlite3").read_bytes(), prior_db)
+        self.assertEqual(result["coverage"]["eth_rx_mbps"], 1.0)
+        self.assertAlmostEqual(result["values"]["eth_rx_mbps"], 30.295)
+        self.assertAlmostEqual(result["values"]["eth_tx_mbps"], 30.295)
+        live_base = live.baseline_load(self.store)
+        self.assertAlmostEqual(live_base["values"]["eth_rx_mbps"], 30.295)
+        self.assertEqual(live_base["values"]["ssh"], 154)
+        self.assertEqual(result["window_start"], T0.isoformat())
+        with self.assertRaisesRegex(live.EvidenceError, "already exists"):
+            live.enrich_eth_baseline(self.src, self.store)
+
+    def test_eth_reference_low_coverage_fails_without_changes(self):
+        self.events = [row(T0 + timedelta(minutes=i)) for i in range(60)]
+        for sample in self.events[40:]:
+            sample["interface_rates_kbps"].pop("eth0")
+        self._write()
+        original = (self.store / "baseline.json").read_bytes()
+        with self.assertRaisesRegex(live.EvidenceError, "ETH0 coverage"):
+            live.enrich_eth_baseline(self.src, self.store)
+        self.assertFalse((self.store / "eth-reference.json").exists())
+        self.assertEqual((self.store / "baseline.json").read_bytes(), original)
+        self.assertEqual(live.baseline_load(self.store)["values"]["ssh"], 154)
+
+    def test_eth_reference_cannot_bind_to_another_baseline(self):
+        self.events = [row(T0 + timedelta(minutes=i)) for i in range(60)]
+        self._write()
+        live.enrich_eth_baseline(self.src, self.store)
+        base = json.loads((self.store / "baseline.json").read_text())
+        base["values"]["ssh"] += 1
+        live.atomic_json(self.store / "baseline.json", base)
+        with self.assertRaisesRegex(live.EvidenceError, "does not match"):
+            live.baseline_load(self.store)
+
+    def test_pretty_html_alarm_and_recovery_without_shadow_string(self):
+        self.events = [row(T0 + timedelta(minutes=i)) for i in range(60)]
+        self._write()
+        live.enrich_eth_baseline(self.src, self.store)
+        base = live.baseline_load(self.store)
+        m = live.observation(row(T0, ssh=230, udp=100, cw=90,
+                                 rx=3200, tx=22000))
+        m["eth_rx_mbps"] = 42.0
+        m["eth_tx_mbps"] = 25.0
+        incident = "NVL-20261122T110000Z-001"
+        moment = (T0 + timedelta(minutes=9)).isoformat()
+        for stage in ("SUSPECTED", "DEGRADED", "RECOVERED"):
+            msg = live.render(stage, incident, moment, m, base)
+            self.assertIn("\n📊 <b>اتصالات</b>\n", msg)
+            self.assertIn("\n📶 <b>نرخ ترافیک</b>\n", msg)
+            self.assertIn("ETH RX:", msg)
+            self.assertIn("ETH TX:", msg)
+            self.assertIn("نسبت به مبنا", msg)
+            self.assertIn("از اولین تشخیص: <b>9 دقیقه</b>", msg)
+            self.assertNotIn("Shadow", msg)
+            self.assertNotIn("بدون", msg)
+            self.assertLess(len(msg), 4096)
+        self.assertIn("اولیه", live.render("SUSPECTED", incident, moment, m, base))
+        self.assertIn("بازگشت شاخص", live.render("RECOVERED", incident, moment, m, base))
+
+    def test_message_missing_eth_reference_is_explicit_not_zero(self):
+        base = live.baseline_load(self.store)
+        m = live.observation(row(T0))
+        m["eth_rx_mbps"] = 20
+        m["eth_tx_mbps"] = 30
+        text = live.render("SUSPECTED", None, T0.isoformat(), m, base)
+        self.assertIn("مبنای معتبر ندارد", text)
+        self.assertNotIn("N/A", text)
 
     def test_reject_degraded_auto_baseline(self):
         self.events = [row(T0 + timedelta(minutes=i),

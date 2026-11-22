@@ -1,5 +1,7 @@
 # NVL Network Intelligence — live group alerts (P2/P3 combined pilot)
 
+> **2026-11-22 operator field update:** Core live timer, a 60-minute verified baseline and a successful Telegram group send-test were reported. For the follow-up ETH baseline/UI update **do not reinstall or reset** the active service; use the [pinned code-only ETH reference and alert UX hotpatch](LIVE_ALERT_UX_ETH_REFERENCE_PATCH_2026-11-22.md). The original deployment procedure below is for first-time installations.
+
 **Status:** source and deployment tooling delivered; production activation is a separate operator-controlled action.  
 **Decision:** owner explicitly waived Shadow Mode on 2026-11-22. Group alerts will therefore be sent directly with a visible **LIVE PILOT / evaluation** disclaimer. The goal is to assess alert usefulness and refine thresholds, **not** to certify filtering cause.
 

@@ -279,8 +279,8 @@ class LiveAlertsTests(unittest.TestCase):
         moment = (T0 + timedelta(minutes=9)).isoformat()
         for stage in ("SUSPECTED", "DEGRADED", "RECOVERED"):
             msg = live.render(stage, incident, moment, m, base)
-            self.assertIn("\\n📊 <b>اتصالات</b>\\n", msg)
-            self.assertIn("\\n📶 <b>نرخ ترافیک</b>\\n", msg)
+            self.assertIn("\n📊 <b>اتصالات</b>\n", msg)
+            self.assertIn("\n📶 <b>نرخ ترافیک</b>\n", msg)
             self.assertIn("ETH RX:", msg)
             self.assertIn("ETH TX:", msg)
             self.assertIn("نسبت به مبنا", msg)

@@ -173,6 +173,7 @@ def default_state():
             "seq": 0, "last_sample": None, "window": [], "recovery": [],
             "recovering_since": None, "recovery_streak": 0,
             "incident_open": False, "unknown_alerted": False,
+            "incomplete_streak": 0,
             "latest_metrics": None, "last_closed": None,
             "alerted_phases": []}
 
@@ -192,6 +193,14 @@ def db_connect(folder):
         next_attempt INTEGER NOT NULL DEFAULT 0,
         message_id INTEGER,
         created_at TEXT NOT NULL
+    )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS decisions (
+        sample_utc TEXT PRIMARY KEY,
+        recorded_utc TEXT NOT NULL,
+        candidate TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        metrics_json TEXT NOT NULL,
+        baseline_start TEXT NOT NULL
     )""")
     db.commit()
     return db
@@ -314,11 +323,18 @@ def process_sample(state, stamp, obs, base, db):
     state["last_sample"] = stamp_iso
     state["latest_metrics"] = obs
     if not obs["valid"]:
+        state["incomplete_streak"] = state.get("incomplete_streak", 0) + 1
         state["window"] = []
         state["recovery"] = []
         state["recovery_streak"] = 0
         transition(state, "UNKNOWN", stamp_iso, obs, base, db)
+        if state["incomplete_streak"] >= 5 and not state["unknown_alerted"]:
+            queue(db, f"MONITOR:{utc(stamp).strftime('%Y%m%dT%H%M%SZ')}:UNKNOWN",
+                  render("UNKNOWN", state["incident"], stamp_iso, None, None),
+                  stamp_iso)
+            state["unknown_alerted"] = True
         return
+    state["incomplete_streak"] = 0
     kind = classify(obs, base)
     state["window"] = (state["window"] + [kind])[-5:]
     state["recovery"] = (state["recovery"] + [kind == "RECOVERY_CANDIDATE"])[-7:]
@@ -415,7 +431,17 @@ def tick(source, store, config_path, *, now=None, send=telegram_send):
     with db_connect(store) as db:
         state = state_read(db)
         for stamp, obs in fresh:
+            previous = state["last_sample"]
             process_sample(state, stamp, obs, base, db)
+            if state["last_sample"] != previous:
+                db.execute("""INSERT OR IGNORE INTO decisions
+                    (sample_utc, recorded_utc, candidate, phase,
+                     metrics_json, baseline_start)
+                    VALUES (?,?,?,?,?,?)""",
+                    (utc(stamp).isoformat(), now.isoformat(),
+                     classify(obs, base), state["phase"],
+                     json.dumps(obs, ensure_ascii=False, allow_nan=False),
+                     base["window_start"]))
         last = utc(state["last_sample"]) if state["last_sample"] else None
         stale = last is None or (now - last).total_seconds() > 300
         if stale and not state["unknown_alerted"]:
@@ -488,11 +514,17 @@ def command_line(argv=None):
             with db_connect(args.store) as db:
                 state = state_read(db)
                 pending = db.execute("SELECT COUNT(*) FROM outbox WHERE status='PENDING'").fetchone()[0]
+                sent = db.execute("SELECT COUNT(*) FROM outbox WHERE status='SENT'").fetchone()[0]
+                recent = db.execute("""SELECT sample_utc, candidate, phase
+                    FROM decisions ORDER BY sample_utc DESC LIMIT 5""").fetchall()
             print(json.dumps({"phase": state["phase"], "incident": state["incident"],
                               "last_sample": state["last_sample"],
                               "baseline_quality": base["status"],
                               "baseline_window": [base["window_start"], base["window_end"]],
-                              "pending": pending}, ensure_ascii=False))
+                              "pending": pending, "sent": sent,
+                              "recent_decisions": [
+                                  {"utc": t, "candidate": c, "phase": p}
+                                  for t, c, p in recent]}, ensure_ascii=False))
         return 0
     except (EvidenceError, OSError, ValueError, json.JSONDecodeError,
             sqlite3.Error) as exc:

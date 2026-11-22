@@ -1,0 +1,12 @@
+[Unit]
+Description=NVL Network Intelligence — one-minute group alert evaluation
+
+[Timer]
+OnActiveSec=10s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+Persistent=false
+Unit=nvl-network-alerts.service
+
+[Install]
+WantedBy=timers.target

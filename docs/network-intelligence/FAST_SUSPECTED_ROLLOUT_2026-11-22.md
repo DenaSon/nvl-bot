@@ -20,6 +20,38 @@ User's read-only audit of 207 decision rows (17:50–21:25 Tehran) reported:
 
 **Limitations:** The proposed 62s gain is an offline replay over one field-labeled incident. No false positives in a ~3h observation window does not quantify a long-term FPR. Detection still depends on the sampler cadence and may not trigger if real filtering does not produce the two-signal pattern.
 
+## Telegram alert UX — English body, Persian title only
+
+This release also includes the final compact Telegram copy requested before the Fast Detection rollout. It is **the same pinned deployment**; do not deploy PR #331 separately first.
+
+- Keep only the event title in Persian for all six message types: SUSPECTED, DEGRADED, RECOVERED, UNKNOWN, RESUMED, TEST.
+- All content after the title is English, with no Persian stage labels, verbose notes or repeating 'relative to baseline' on every metric.
+- Two compact groups: **Connections** (SSH, UDPGW, CLOSE-WAIT) and **Traffic** (AWG/ETH RX/TX, Mbps). Signed delta percentages always compare against the verified baseline. Missing values show `N/A`; never invent zero.
+- One Core + Tehran timestamp line, one optional incident ID line with detection **Age** after minute 0, and one succinct evidence statement/disclaimer.
+- Monitor-only messages omit traffic and connections entirely. A test message explicitly says no incident was reported.
+- No changes to Telegram send method, API credentials, chat ID, thresholds, recovery, retry, dedup or persisted outbox. Already-queued messages keep the body generated at queue time.
+
+Sample rendered DEGRADED body (illustrative metric values):
+
+```text
+🔴 NVL | تشدید اختلال ارتباط
+Core · 2026-11-22 21:10:01 Tehran
+ID NVL-20261122T172734Z-001 · Age 12m
+
+Connections · vs baseline
+SSH 359 +135% · UDPGW 125 -7%
+CLOSE-WAIT 202 +1583%
+
+Traffic · Mbps · vs baseline
+AWG  RX 3.2 -35% · TX 23.2 -34%
+ETH  RX 28.0 -29% · TX 25.9 -37%
+
+Signal: Connection surge + AWG TX / UDPGW decline.
+Core telemetry only · ISP filtering not confirmed.
+```
+
+The actual Bot API uses HTML bold/italics and the original baseline values. No additional live Telegram message is sent by deployment.
+
 ## Safe live deployment (pinned merge SHA)
 
 Install only when checks are green and the GitHub PR has been squash-merged. Replace the placeholder with the precise 40-hex merge commit.

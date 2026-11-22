@@ -93,6 +93,8 @@ class LiveAlertsTests(unittest.TestCase):
         self.assertIn("تشدید", alltext)
         self.assertIn("بازگشت", alltext)
         self.assertIn("AWG RX", alltext)
+        self.assertIn("ETH RX", alltext)
+        self.assertIn("ETH TX", alltext)
         self.assertIn("SSH :2252", alltext)
         self.assertNotIn("123456789:", alltext)
         outcome = self._tick(T0 + timedelta(minutes=84, seconds=40))

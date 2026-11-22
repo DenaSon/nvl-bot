@@ -169,6 +169,7 @@ def replay(records, baseline, start, end):
     unknown_count = 0
     last = None
     recovery_streak = 0
+    recovering_since = None
     incident_open = False
 
     for stamp, row in records:
@@ -209,7 +210,9 @@ def replay(records, baseline, start, end):
         elif incident_open and state in ("SUSPECTED", "DEGRADED", "RECOVERING", "UNKNOWN") and (
                 len(recovery) == 7 and sum(recovery) >= 5):
             proposed = "RECOVERING"
-            if state == "RECOVERING" and recovery_streak >= 10:
+            if (state == "RECOVERING" and recovering_since is not None
+                    and recovery_streak >= 10
+                    and (stamp - recovering_since).total_seconds() >= 600):
                 proposed = "NORMAL"
         elif state == "UNKNOWN" and not incident_open and len(window) == 5:
             # Resume observation without claiming a recovered incident.
@@ -219,6 +222,10 @@ def replay(records, baseline, start, end):
             transitions.append({"at": stamp.isoformat(), "from": state,
                                 "to": proposed, "reason": "MULTI_SIGNAL"})
             state = proposed
+            if proposed == "RECOVERING":
+                recovering_since = stamp
+            elif proposed != "UNKNOWN":
+                recovering_since = None
             if proposed in ("SUSPECTED", "DEGRADED"):
                 incident_open = True
             elif proposed == "NORMAL":

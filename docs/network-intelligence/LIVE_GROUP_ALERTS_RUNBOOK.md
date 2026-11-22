@@ -1,6 +1,6 @@
 # NVL Network Intelligence — live group alerts (P2/P3 combined pilot)
 
-> **2026-11-22 operator field update:** Core live timer, a 60-minute verified baseline and a successful Telegram group send-test were reported. For the follow-up ETH baseline/UI update **do not reinstall or reset** the active service; use the [pinned code-only ETH reference and alert UX hotpatch](LIVE_ALERT_UX_ETH_REFERENCE_PATCH_2026-11-22.md). The original deployment procedure below is for first-time installations.
+> **2026-11-22 real-event tuning:** A field-confirmed filtering incident showed first suspicious sample at 20:56:32 Tehran, second at 20:57:34 and original 3-of-5 alarm at 20:58:36. Offline audit of 207 decision records (17:50–21:25 Tehran) showed zero Fast-2-consecutive matches before 20:55; proposed time saving 62 seconds. This sample is too short to claim a general false-positive rate. Live fast alert rollout is a separate pinned hotpatch: [Fast SUSPECTED release guide](FAST_SUSPECTED_ROLLOUT_2026-11-22.md). Keep original DEGRADED and recovery gates unchanged.\n\n> **2026-11-22 operator field update:** Core live timer, a 60-minute verified baseline and a successful Telegram group send-test were reported. For the follow-up ETH baseline/UI update **do not reinstall or reset** the active service; use the [pinned code-only ETH reference and alert UX hotpatch](LIVE_ALERT_UX_ETH_REFERENCE_PATCH_2026-11-22.md). The original deployment procedure below is for first-time installations.
 
 **Status:** source and deployment tooling delivered; production activation is a separate operator-controlled action.  
 **Decision:** owner explicitly waived Shadow Mode on 2026-11-22. Group alerts will therefore be sent directly with a visible **LIVE PILOT / evaluation** disclaimer. The goal is to assess alert usefulness and refine thresholds, **not** to certify filtering cause.
@@ -110,7 +110,7 @@ Emergency disable (does not touch sampler/SSH/Bot): `systemctl disable --now nvl
 
 | Transition | Core evidence gate | Group message |
 |---|---|---|
-| `NORMAL → SUSPECTED` | SSH >=1.25× and CLOSE-WAIT >=max(3×, baseline+20) in >=3 of last 5 current minute samples | **🟠 اختلال احتمالی**: ID, time, 5 detector metrics plus 2 optional ETH metrics and relative changes |
+| `NORMAL → SUSPECTED` | **Fast:** SSH >=1.25× and CLOSE-WAIT >=max(3×, baseline+20) in **2 consecutive valid** samples; **fallback:** same conditions in >=3 of last 5 samples | **🟠 اختلال احتمالی**: ID, time, 5 detector metrics plus 2 optional ETH metrics and relative changes |
 | `SUSPECTED → DEGRADED` | SSH >=1.40× and CLOSE-WAIT >=max(5×, baseline+40), plus either AWG TX <=0.75× or UDPGW <=0.80× in >=3 of 5 | **🔴 تشدید اختلال** (once per incident) |
 | `DEGRADED/SUSPECTED → RECOVERING` | >=5 of last 7 recovery candidates | State logged; no extra group message |
 | `RECOVERING → NORMAL` | >=10 consecutive recovery samples, >=10 min elapsed since entering RECOVERING | **🟢 بازیابی** (once if incident was announced) |

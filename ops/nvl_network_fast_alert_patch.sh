@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# NVL Core fast-SUSPECTED sensitivity patch; stage-only by default.
+# NVL Core fast warning + compact English alert copy patch; stage-only by default.
 # The original bot, network services and sampler are NEVER restarted.
 set -Eeuo pipefail
 umask 077
@@ -32,7 +32,10 @@ curl --fail --location --silent --show-error --retry 2 --connect-timeout 10 \
 python3 -B -m py_compile "$stage/nvl_network_live_alerts.py"
 PYTHONPATH="$ROOT:$stage" python3 -B "$stage/nvl_network_live_alerts.py" --help >/dev/null
 grep -q 'Fast, conservative 2-sample gate' "$stage/nvl_network_live_alerts.py" || {
-  echo "REQUIRED_PATCH_COMMAND_MISSING" >&2; exit 78;
+  echo "FAST_GATE_MISSING" >&2; exit 78;
+}
+grep -q 'Only the Persian alert title is localized' "$stage/nvl_network_live_alerts.py" || {
+  echo "COMPACT_ENGLISH_ALERT_FORMAT_MISSING" >&2; exit 78;
 }
 echo "STAGE_PASS SHA=$SHA"
 

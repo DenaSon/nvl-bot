@@ -169,6 +169,17 @@ class LiveAlertsTests(unittest.TestCase):
         self.assertIn("وقفه در پایش", self.calls[0])
         self.assertNotIn("بازگشت شاخص", self.calls[0])
 
+    def test_private_credential_file_required_and_shared_parent_unchanged(self):
+        parent = self.src / "shared"
+        parent.mkdir(mode=0o755)
+        parent.chmod(0o755)
+        live.atomic_json(parent / "private.json", {"ok": True})
+        self.assertEqual(parent.stat().st_mode & 0o777, 0o755)
+        self.assertEqual((parent / "private.json").stat().st_mode & 0o777, 0o600)
+        self.config.chmod(0o644)
+        with self.assertRaises(live.EvidenceError):
+            live.config_load(self.config)
+
     def test_research_baseline_rejected(self):
         p = self.store / "baseline.json"
         data = json.loads(p.read_text())

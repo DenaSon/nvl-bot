@@ -119,6 +119,29 @@ class P0P1Tests(unittest.TestCase):
         self.assertEqual(report["state"], "NORMAL")
         self.assertEqual(report["telegram_messages_sent"], 0)
 
+    def test_gap_does_not_silently_close_open_incident(self):
+        rows = []
+        for i in range(70):
+            t = T0 + timedelta(minutes=i)
+            degraded = i >= 60
+            rows.append((t, observation(sample(
+                t, ssh=290 if degraded else 150,
+                udpgw=105 if degraded else 140,
+                cw=140 if degraded else 10,
+                tx=22000 if degraded else 36000
+            ))))
+        # Following a telemetry gap, only five recovery points exist.
+        # An unresolved incident must remain UNKNOWN, never NORMAL.
+        for i in range(75, 80):
+            t = T0 + timedelta(minutes=i)
+            rows.append((t, observation(sample(t))))
+        b = build_baseline(rows, T0, T0 + timedelta(minutes=60))
+        result = replay(rows, b, T0 + timedelta(minutes=60),
+                        T0 + timedelta(minutes=80))
+        self.assertEqual(result["state"], "UNKNOWN")
+        self.assertTrue(any(t["reason"] == "SAMPLE_GAP"
+                            for t in result["transitions"]))
+
     def test_unlabeled_normal_not_accepted_as_training(self):
         rows = [sample(T0 + timedelta(minutes=i), ssh=150)
                 for i in range(30)]

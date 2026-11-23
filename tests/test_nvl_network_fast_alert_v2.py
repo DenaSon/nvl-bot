@@ -150,7 +150,6 @@ class AdaptiveFastAlertTests(unittest.TestCase):
             self.tick(i)
         self.assertEqual(len(self.sent), 3)
         self.assertIn("بازگشت", self.sent[2])
-        self.assertEqual(live.status if False else 3, 3)
         with live.db_connect(self.store) as db:
             self.assertEqual(db.execute(
                 "SELECT COUNT(*) FROM outbox WHERE status='SENT'"

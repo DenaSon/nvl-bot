@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ops import nvl_network_live_alerts as live
+from ops import nvl_network_fast_alert_v2_replay as offline
 
 T0 = datetime(2026, 11, 22, 20, 0, tzinfo=timezone.utc)
 
@@ -154,6 +155,24 @@ class AdaptiveFastAlertTests(unittest.TestCase):
             self.assertEqual(db.execute(
                 "SELECT COUNT(*) FROM outbox WHERE status='SENT'"
             ).fetchone()[0], 3)
+
+    def test_offline_replay_queues_same_alert_without_live_side_effects(self):
+        self.stable()
+        self.tick(20, ssh=140, udp=88, cw=43, tx=15000)
+        self.tick(21, ssh=140, udp=88, cw=43, tx=15000)
+        original_state = (self.store / "state.sqlite3").read_bytes()
+        original_base = (self.store / "baseline.json").read_bytes()
+        original_telegram = self.config.read_bytes()
+        sent_before = len(self.sent)
+        report = offline.replay(
+            self.source, self.store, T0, T0 + timedelta(minutes=22))
+        self.assertEqual(report["telegram_messages_sent"], 0)
+        self.assertEqual(len(report["would_queue"]), 1)
+        self.assertEqual(report["samples"], 22)
+        self.assertEqual(sent_before, len(self.sent))
+        self.assertEqual((self.store / "state.sqlite3").read_bytes(), original_state)
+        self.assertEqual((self.store / "baseline.json").read_bytes(), original_base)
+        self.assertEqual(self.config.read_bytes(), original_telegram)
 
     def test_new_reference_only_keeps_healthy_45min_window(self):
         self.stable()

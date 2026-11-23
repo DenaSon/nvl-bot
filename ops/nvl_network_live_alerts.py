@@ -294,7 +294,7 @@ def default_state():
             "incident_open": False, "unknown_alerted": False,
             "incomplete_streak": 0,
             "latest_metrics": None, "last_closed": None,
-            "alerted_phases": []}
+            "alerted_phases": [], "recent_good": [], "latest_reason": None}
 
 
 def db_connect(folder):
@@ -383,7 +383,7 @@ def render_metric(field, metrics, base, *, compact_label=None):
             f" <i>{html.escape(pct(current, reference))}</i>")
 
 
-def render(phase, incident, stamp, metrics, baseline):
+def render(phase, incident, stamp, metrics, baseline, *, reason=None):
     """Only the Persian alert title is localized; body is concise English."""
     captions = {
         "SUSPECTED": "🟠 <b>NVL | اختلال احتمالی ارتباط</b>",
@@ -442,9 +442,12 @@ def render(phase, incident, stamp, metrics, baseline):
             "DEGRADED": "Signal: Connection surge + AWG TX / UDPGW decline.",
             "RECOVERED": "Core metrics stabilized · Client access not verified.",
         }
+        signal = summary[phase]
+        if reason and phase in ("SUSPECTED", "DEGRADED") and not reason.startswith("LEGACY_"):
+            signal = "Signal: " + html.escape(reason.replace("_", " ")) + "."
         lines.extend([
             "",
-            summary[phase],
+            signal,
             "<i>Core telemetry only · ISP filtering not confirmed.</i>",
         ])
     return "\n".join(lines)
@@ -455,7 +458,7 @@ def make_incident(stamp, state):
     return "NVL-" + instant(stamp).strftime("%Y%m%dT%H%M%SZ") + f"-{state['seq']:03d}"
 
 
-def transition(state, next_phase, stamp, metrics, base, db):
+def transition(state, next_phase, stamp, metrics, base, db, *, reason=None):
     prev = state["phase"]
     if prev == next_phase:
         return
@@ -472,7 +475,8 @@ def transition(state, next_phase, stamp, metrics, base, db):
                            and (instant(stamp) - instant(state["last_closed"])).total_seconds() < 1200)
             if not (next_phase == "SUSPECTED" and just_closed):
                 key = f"{state['incident']}:{next_phase}"
-                queue(db, key, render(next_phase, state["incident"], stamp, metrics, base),
+                queue(db, key, render(next_phase, state["incident"], stamp, metrics, base,
+                                      reason=reason),
                       instant(stamp).isoformat())
                 state["alerted_phases"].append(next_phase)
     elif next_phase == "RECOVERING":
@@ -490,6 +494,112 @@ def transition(state, next_phase, stamp, metrics, base, db):
     # UNKNOWN doesn't close an existing incident. Missing data cannot recover it.
 
 
+
+# Adaptive Fast Alert V2: additive high-sensitivity paths, no baseline rewrite.
+ADAPTIVE_FIELDS = ("ssh", "udpgw", "close_wait", "awg_tx_mbps")
+
+
+def adaptive_reference(state, stamp):
+    """Medians of healthy 45m/last 5 samples; frozen during an incident."""
+    history = state.get("recent_good", [])
+    if not isinstance(history, list):
+        return None
+    if not state.get("incident_open"):
+        cutoff = instant(stamp) - timedelta(minutes=45)
+        history = [h for h in history if instant(h["utc"]) >= cutoff]
+    if len(history) < 12:
+        return None
+    recent = history[-45:]
+    if any(not all(isinstance(h.get(f), (int, float))
+                   and not isinstance(h.get(f), bool) for f in ADAPTIVE_FIELDS)
+           for h in recent):
+        return None
+    return (
+        {f: statistics.median(h[f] for h in recent) for f in ADAPTIVE_FIELDS},
+        {f: statistics.median(h[f] for h in recent[-5:]) for f in ADAPTIVE_FIELDS},
+    )
+
+
+def high_sensitivity_candidate(metrics, baseline, state, stamp):
+    """Add multi-signal surge, sudden connection loss and traffic collapse."""
+    legacy = classify(metrics, baseline)
+    if legacy in ("UNKNOWN", "SUSPECTED", "DEGRADED"):
+        return legacy, "LEGACY_" + legacy
+    reference = adaptive_reference(state, stamp)
+    if reference is None:
+        # Safe warm-up: preserve legacy rules and flag only strong corroboration.
+        b = baseline["values"]
+        if (metrics["close_wait"] >= max(25, b["close_wait"] * 2,
+                                         b["close_wait"] + 15)
+                and metrics["awg_tx_mbps"] <= b["awg_tx_mbps"] * .60
+                and metrics["udpgw"] <= b["udpgw"] * .80):
+            return "SUSPECTED", "CW_SPIKE+TRAFFIC_DROP_WARMUP"
+        return legacy, "LEGACY_" + legacy
+
+    ref, short = reference
+    ssh, udp, cw, tx = (
+        metrics["ssh"], metrics["udpgw"], metrics["close_wait"],
+        metrics["awg_tx_mbps"]
+    )
+    cw_spike = cw >= max(15, ref["close_wait"] * 2,
+                        ref["close_wait"] + 15)
+    udp_drop = udp <= ref["udpgw"] * .85 and ref["udpgw"] - udp >= 10
+    ssh_drop = ssh <= ref["ssh"] * .85 and ref["ssh"] - ssh >= 10
+    tx_drop = (ref["awg_tx_mbps"] >= 8
+               and tx <= ref["awg_tx_mbps"] * .60
+               and ref["awg_tx_mbps"] - tx >= 8)
+    quick_connection_drop = (
+        ssh <= short["ssh"] * .85 or udp <= short["udpgw"] * .85)
+    connection_collapse = (
+        ssh <= ref["ssh"] * .75
+        and udp <= ref["udpgw"] * .75
+        and ref["ssh"] - ssh >= 12
+        and ref["udpgw"] - udp >= 10
+        and quick_connection_drop)
+    traffic_collapse = (
+        tx_drop and tx <= short["awg_tx_mbps"] * .70
+        and (ssh_drop or udp_drop or cw_spike))
+    abnormal_surge = (
+        cw_spike and ssh >= ref["ssh"] * 1.15
+        and ssh - ref["ssh"] >= 8)
+    degraded = (
+        (cw >= max(40, ref["close_wait"] + 35,
+                   ref["close_wait"] * 4)
+         and (tx <= ref["awg_tx_mbps"] * .55
+              or udp <= ref["udpgw"] * .75))
+        or (connection_collapse and tx_drop))
+
+    if cw_spike and (udp_drop or tx_drop or abnormal_surge):
+        reason = "CW_SPIKE+" + (
+            "AWG_TX_DROP" if tx_drop else
+            "UDPGW_DROP" if udp_drop else "SSH_SURGE")
+        return ("DEGRADED" if degraded else "SUSPECTED"), reason
+    if connection_collapse:
+        return ("DEGRADED" if degraded else "SUSPECTED"), "CONNECTION_COLLAPSE"
+    if traffic_collapse:
+        return "SUSPECTED", "TRAFFIC_COLLAPSE"
+
+    # An unresolved connection loss must not be labelled as recovery.
+    if (state.get("incident_open") and legacy == "RECOVERY_CANDIDATE"
+            and ssh <= ref["ssh"] * .80
+            and udp <= ref["udpgw"] * .80):
+        return "NEUTRAL", "ONGOING_CONNECTION_DROP"
+    return legacy, "LEGACY_" + legacy
+
+
+def record_healthy_reference(state, stamp, metrics):
+    if state.get("incident_open") or state["phase"] != "NORMAL":
+        return
+    if metrics.get("alert_candidate") in ("SUSPECTED", "DEGRADED", "UNKNOWN"):
+        return
+    history = state.get("recent_good", [])
+    cutoff = instant(stamp) - timedelta(minutes=45)
+    history = [h for h in history if instant(h["utc"]) >= cutoff]
+    history.append({"utc": instant(stamp).isoformat(),
+                    **{f: metrics[f] for f in ADAPTIVE_FIELDS}})
+    state["recent_good"] = history[-45:]
+
+
 def process_sample(state, stamp, obs, base, db):
     stamp_iso = instant(stamp).isoformat()
     previous = instant(state["last_sample"]) if state["last_sample"] else None
@@ -497,6 +607,7 @@ def process_sample(state, stamp, obs, base, db):
         return
     if previous and (instant(stamp) - previous).total_seconds() > 150:
         state["window"] = []
+        state["recent_good"] = []
         state["recovery"] = []
         state["recovery_streak"] = 0
         transition(state, "UNKNOWN", stamp_iso, obs, base, db)
@@ -504,6 +615,9 @@ def process_sample(state, stamp, obs, base, db):
     state["latest_metrics"] = obs
     if not obs["valid"]:
         state["incomplete_streak"] = state.get("incomplete_streak", 0) + 1
+        state["recent_good"] = []
+        obs["alert_candidate"] = "UNKNOWN"
+        obs["decision_reason"] = "INCOMPLETE_TELEMETRY"
         state["window"] = []
         state["recovery"] = []
         state["recovery_streak"] = 0
@@ -515,7 +629,10 @@ def process_sample(state, stamp, obs, base, db):
             state["unknown_alerted"] = True
         return
     state["incomplete_streak"] = 0
-    kind = classify(obs, base)
+    kind, reason = high_sensitivity_candidate(obs, base, state, stamp_iso)
+    obs["alert_candidate"] = kind
+    obs["decision_reason"] = reason
+    state["latest_reason"] = reason
     state["window"] = (state["window"] + [kind])[-5:]
     state["recovery"] = (state["recovery"] + [kind == "RECOVERY_CANDIDATE"])[-7:]
     state["recovery_streak"] = (
@@ -534,7 +651,7 @@ def process_sample(state, stamp, obs, base, db):
         or (len(win) == 5 and sum(
             k in ("SUSPECTED", "DEGRADED") for k in win) >= 3)
     ):
-        if phase not in ("DEGRADED", "RECOVERING"):
+        if phase != "DEGRADED":
             nxt = "SUSPECTED"
     elif (state["incident_open"]
           and phase in ("SUSPECTED", "DEGRADED", "RECOVERING", "UNKNOWN")
@@ -550,7 +667,8 @@ def process_sample(state, stamp, obs, base, db):
         nxt = "NORMAL"
 
     if nxt is not None:
-        transition(state, nxt, stamp_iso, obs, base, db)
+        transition(state, nxt, stamp_iso, obs, base, db, reason=reason)
+    record_healthy_reference(state, stamp_iso, obs)
     if state["phase"] not in ("UNKNOWN",) and state["unknown_alerted"]:
         key = f"MONITOR:{instant(stamp).strftime('%Y%m%dT%H%M%SZ')}:RESUMED"
         queue(db, key, render("RESUMED", state["incident"], stamp_iso,
@@ -679,7 +797,7 @@ def tick(source, store, config_path, *, now=None, send=telegram_send):
                      metrics_json, baseline_start)
                     VALUES (?,?,?,?,?,?)""",
                     (instant(stamp).isoformat(), now.isoformat(),
-                     classify(obs, base), state["phase"],
+                     obs.get("alert_candidate") or classify(obs, base), state["phase"],
                      json.dumps(obs, ensure_ascii=False, allow_nan=False),
                      base["window_start"]))
         last = instant(state["last_sample"]) if state["last_sample"] else None

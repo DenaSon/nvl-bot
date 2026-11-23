@@ -40,6 +40,8 @@ def replay(source: Path, store: Path, start: datetime, end: datetime):
             created_at TEXT NOT NULL
         )""")
         for stamp, raw, _, _ in iter_samples(source, start, end):
+            if state["last_sample"] and stamp <= live.instant(state["last_sample"]):
+                continue  # Replayed duplicate samples must not create events.
             obs = observation(raw)
             iface = (raw.get("interface_rates_kbps") or {}).get("eth0") or {}
             for field, direction in (("eth_rx_mbps", "received"),

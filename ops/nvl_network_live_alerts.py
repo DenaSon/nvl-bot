@@ -643,8 +643,8 @@ def process_sample(state, stamp, obs, base, db):
     if len(win) == 5 and sum(k == "DEGRADED" for k in win) >= 3:
         nxt = "DEGRADED"
     elif (
-        # Fast 2-sample gate: legacy OR adaptive multi-signal candidates.
-        # Never alert on a single anomaly.
+        # Fast, conservative 2-sample gate for legacy and V2 multi-signal
+        # candidates: never alert on a single anomaly.
         # Gaps >150s or incomplete samples already clear state["window"].
         (len(win) >= 2 and all(
             k in ("SUSPECTED", "DEGRADED") for k in win[-2:]))

@@ -8573,7 +8573,7 @@ def _nav_settings_rows(role, *, superadmin=False, card_allowed=False):
     elif role == 'agent':
         rows = [[("✏️ نام برند", "nav:agent_brand")]]
         if card_allowed:
-            rows.append([("💳 کارت اختصاصی", "nav:agent_card")])
+            rows[0].append(("💳 کارت اختصاصی", "nav:agent_card"))
     else:
         return []
     return rows + [[("❌ خروج", "nav:logout")],
@@ -8746,8 +8746,7 @@ async def _show_nav_agents(target):
 
 async def _show_nav_cards(target):
     await _nav_render(target, "💳 <b>مدیریت کارت‌ها</b>", [
-        [("💳 شماره کارت مدیر", "fin_admin_card")],
-        [("💳 شماره کارت نمایندگان", "fin_agents_1")],
+        [("💳 کارت مدیر", "fin_admin_card"), ("💳 کارت نمایندگان", "fin_agents_1")],
         [("🔙 بازگشت", "nav:finance")],
     ])
 
@@ -27759,8 +27758,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🌍 مدیریت دامنه‌ها (فقط ادمین)
     # ==========================================
     elif d == "dom_menu" and role == 'admin':
-        kb = [[InlineKeyboardButton("➕ افزودن دامنه", callback_data="dom_add")],
-              [InlineKeyboardButton("📋 لیست دامنه‌ها", callback_data="dom_list")],
+        kb = [[InlineKeyboardButton("➕ افزودن دامنه", callback_data="dom_add"),
+               InlineKeyboardButton("📋 لیست دامنه‌ها", callback_data="dom_list")],
               [InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")]]
         await query.edit_message_text("🌍 <b>مدیریت دامنه‌ها</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
     elif d == "dom_add" and role == 'admin':
@@ -28489,8 +28488,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d == "super_admin_users_menu" and _is_superadmin_update(update, context):
         kb = [
-            [InlineKeyboardButton("👮‍♂️ ادمین‌های ربات", callback_data="super_admin_list_admins")],
-            [InlineKeyboardButton("💼 فروشنده‌های ربات", callback_data="super_admin_list_agents")],
+            [InlineKeyboardButton("👮‍♂️ مدیران", callback_data="super_admin_list_admins"),
+             InlineKeyboardButton("💼 نمایندگان", callback_data="super_admin_list_agents")],
             [InlineKeyboardButton("🔙 بازگشت", callback_data="nav:settings")]
         ]
         await query.edit_message_text("👥 <b>مدیران و دسترسی‌ها</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")

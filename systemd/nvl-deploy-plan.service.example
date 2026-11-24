@@ -1,0 +1,16 @@
+[Unit]
+Description=NVL CD release planner (dry-run only)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 -B /opt/nvl-deploy/nvl_cd_planner.py
+TimeoutStartSec=240
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/nvl-deploy
+PrivateTmp=true

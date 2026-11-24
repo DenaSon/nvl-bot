@@ -360,8 +360,33 @@ def invalidate_bytecode(runtime, names):
     sync_dir(directory)
 
 
+def resume_unchanged(host, state, checkpoint):
+    """Restore availability after a failed pre-publication stop, not code."""
+    _, record = verified_manifest(host, checkpoint)
+    if host.schema() != record["schema"] or not host.idle():
+        raise p.Hold("OPERATION_OR_SCHEMA_CHANGED")
+    if any(host.live(name) != item["old"] for name, item in record["files"].items()):
+        raise p.Hold("BASELINE_NOT_UNCHANGED")
+    status = host.status()
+    if (status.get("ActiveState"), status.get("SubState")) == ("active", "running"):
+        # Stop may have failed without stopping the service.
+        pass
+    elif (status.get("ActiveState"), status.get("SubState"), status.get("MainPID")) == (
+            "inactive", "dead", "0"):
+        # Never send a second stop or publish code; start the verified
+        # unchanged baseline only after systemd confirms it is fully stopped.
+        host.start()
+    else:
+        raise p.Hold("STOP_STATE_UNCERTAIN")
+    host.healthy()
+    return set_phase(state, checkpoint, "ROLLED_BACK",
+                     reason="STOP_UNPROVEN_BASELINE_RESUMED")
+
+
 def restore(host, state, checkpoint):
     """Recover old code only, never rewind live SQLite or external effects."""
+    if checkpoint.get("reason") == "STOP_UNPROVEN" or checkpoint.get("phase") == "STOPPING":
+        return resume_unchanged(host, state, checkpoint)
     directory, record = verified_manifest(host, checkpoint)
     if host.schema() != record["schema"]:
         raise p.Hold("SCHEMA_CHANGED_NO_AUTO_ROLLBACK")
@@ -419,9 +444,13 @@ def publish(host, state, repo, baseline, candidate, updates, old, new, revalidat
     try:
         host.stop()
     except Exception:
-        # A forced/uncertain stop must never authorize publication or a
-        # second automatic stop via restore(). Code has not been changed.
-        return set_phase(state, checkpoint, "HOLD", reason="STOP_UNPROVEN")
+        # Never publish or send a second stop after uncertain shutdown.
+        # If the exact old code is intact, resume its service instead of
+        # leaving a confirmed inactive bot offline.
+        try:
+            return resume_unchanged(host, state, checkpoint)
+        except Exception:
+            return set_phase(state, checkpoint, "HOLD", reason="STOP_UNPROVEN")
     try:
         if not host.idle() or host.schema() != record["schema"]:
             host.start()

@@ -73,6 +73,11 @@ class FakeHost:
     def active(self):
         return self.running
 
+    def status(self):
+        return ({"ActiveState": "active", "SubState": "running", "MainPID": "753"}
+                if self.running else
+                {"ActiveState": "inactive", "SubState": "dead", "MainPID": "0"})
+
     def idle(self):
         return True
 
@@ -207,13 +212,64 @@ class PublisherTests(unittest.TestCase):
                 pub.restore(self.host, self.state, checkpoint)
         self.assertEqual(self.host.starts, 0)
 
-    def test_uncertain_stop_never_publishes_or_attempts_second_stop(self):
+    def test_uncertain_stop_while_running_leaves_baseline_running(self):
         with patch.object(self.host, "stop", side_effect=p.Hold("BOT_STOP_UNCLEAN")) as stop:
+            result = self.publish()
+        self.assertEqual(result["phase"], "ROLLED_BACK")
+        self.assertEqual(result["reason"], "STOP_UNPROVEN_BASELINE_RESUMED")
+        self.assertEqual((self.host.runtime / "bot.py").read_bytes(), self.old_raw)
+        stop.assert_called_once()
+        self.assertEqual(self.host.starts, 0)
+
+    def test_missing_clean_marker_after_stop_restarts_unchanged_baseline(self):
+        def stop():
+            self.host.running = False
+            raise p.Hold("BOT_DRAIN_UNPROVEN")
+        with patch.object(self.host, "stop", side_effect=stop) as mocked:
+            result = self.publish()
+        self.assertEqual(result["phase"], "ROLLED_BACK")
+        self.assertEqual(result["deployed"], A)
+        self.assertEqual(self.host.starts, 1)
+        self.assertTrue(self.host.running)
+        self.assertEqual((self.host.runtime / "bot.py").read_bytes(), self.old_raw)
+        self.assertEqual(self.host.db.read_bytes(), b"database")
+        mocked.assert_called_once()
+
+    def test_unknown_stop_state_never_restarts_or_publishes(self):
+        with patch.object(self.host, "stop", side_effect=p.Hold("BOT_STOP_UNCLEAN")), \
+                patch.object(self.host, "status", return_value={"ActiveState": "deactivating"}):
+            result = self.publish()
+        self.assertEqual(result["phase"], "HOLD")
+        self.assertEqual(self.host.starts, 0)
+        self.assertEqual((self.host.runtime / "bot.py").read_bytes(), self.old_raw)
+
+    def test_failed_baseline_health_keeps_hold(self):
+        self.host.fail_health = 1
+        with patch.object(self.host, "stop", side_effect=p.Hold("BOT_STOP_UNCLEAN")):
             result = self.publish()
         self.assertEqual(result["phase"], "HOLD")
         self.assertEqual(result["reason"], "STOP_UNPROVEN")
+
+    def test_recovery_of_stop_unproven_never_rewrites_code(self):
+        directory, _ = pub.stage(self.host, self.root, A, B, ["bot.py"], self.old, self.new)
+        checkpoint = dict(deployed=A, candidate=B, phase="HOLD", reason="STOP_UNPROVEN",
+                          backup=str(directory), manifest_sha256=pub.file_digest(directory / "manifest.json"))
+        self.host.running = False
+        with patch.object(self.host, "stop") as stop:
+            result = pub.restore(self.host, self.state, checkpoint)
+        self.assertEqual(result["phase"], "ROLLED_BACK")
+        stop.assert_not_called()
+        self.assertEqual(self.host.starts, 1)
         self.assertEqual((self.host.runtime / "bot.py").read_bytes(), self.old_raw)
-        stop.assert_called_once()
+
+    def test_recovery_rejects_changed_baseline(self):
+        directory, _ = pub.stage(self.host, self.root, A, B, ["bot.py"], self.old, self.new)
+        checkpoint = dict(deployed=A, candidate=B, phase="HOLD", reason="STOP_UNPROVEN",
+                          backup=str(directory), manifest_sha256=pub.file_digest(directory / "manifest.json"))
+        self.host.running = False
+        (self.host.runtime / "bot.py").write_bytes(self.new_raw)
+        with self.assertRaisesRegex(p.Hold, "BASELINE_NOT_UNCHANGED"):
+            pub.restore(self.host, self.state, checkpoint)
         self.assertEqual(self.host.starts, 0)
 
 

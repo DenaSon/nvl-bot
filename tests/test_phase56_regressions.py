@@ -12,9 +12,9 @@ class NavigationTests(unittest.TestCase):
         source = BOT.read_text(encoding="utf-8")
         tree = ast.parse(source)
         wanted = {"_nav_home_rows", "_nav_settings_rows", "_nav_finance_rows",
-                  "_nav_callback_allowed"}
+                  "_nav_callback_allowed", "_build_server_settings_kb"}
         nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
-        cls.ns = {}
+        cls.ns = {"InlineKeyboardButton": lambda label, callback_data: callback_data}
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(BOT), "exec"), cls.ns)
 
     def test_role_home_and_required_brand_onboarding(self):
@@ -46,6 +46,17 @@ class NavigationTests(unittest.TestCase):
         self.assertIn("nvl_fin:menu", callbacks(finance("admin", superadmin=True, accounting_enabled=True)))
         self.assertNotIn("fin_menu", callbacks(finance("agent", superadmin=True)))
         self.assertEqual(finance("accountant"), [])
+
+    def test_monitoring_has_one_infrastructure_entry_and_parent(self):
+        home = self.ns["_nav_home_rows"]("admin")
+        self.assertNotIn("🛡 بررسی فیلترینگ", sum(home, []))
+        callbacks = sum(self.ns["_build_server_settings_kb"](), [])
+        self.assertEqual(callbacks.count("hp_filtering"), 1)
+        self.assertEqual(callbacks.count("apps_home"), 1)
+        source = BOT.read_text(encoding="utf-8")
+        start = source.index("async def _render_filtering_monitor_panel")
+        end = source.index("async def _render_filtering_edge_detail", start)
+        self.assertIn('callback_data="srv_menu_back"', source[start:end])
 
     def test_new_callback_role_boundary(self):
         allowed = self.ns["_nav_callback_allowed"]

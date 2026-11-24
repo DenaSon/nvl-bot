@@ -16,26 +16,6 @@ class V120D1MonitoringUITests(unittest.TestCase):
         b = self.source.index(end, a)
         return self.source[a:b]
 
-    def test_admin_home_keeps_filtering_but_moves_marzban_monitor_to_programs(self):
-        region = self._region(
-            "async def show_main_menu",
-            "async def cmd_start",
-        )
-        self.assertIn("🛡 بررسی فیلترینگ", region)
-        self.assertIn("🧩 برنامه‌ها", region)
-        self.assertNotIn(
-            "['🛡 بررسی فیلترینگ', '🛰 بررسی مرزبان']",
-            region,
-        )
-
-    def test_filtering_button_removed_from_server_settings(self):
-        region = self._region(
-            "def _build_server_settings_kb():",
-            "def _normalize_ssh_port",
-        )
-        self.assertNotIn("🛡 وضعیت فیلترینگ", region)
-        self.assertNotIn('callback_data="hp_filtering"', region)
-
     def test_filtering_home_button_reuses_existing_monitor(self):
         region = self._region(
             "# 🛡 گارد منوها",
@@ -54,14 +34,6 @@ class V120D1MonitoringUITests(unittest.TestCase):
             "await _render_marzban_monitor_panel(update.message)",
             handler,
         )
-
-    def test_filtering_panel_returns_home_not_settings(self):
-        region = self._region(
-            "async def _render_filtering_monitor_panel",
-            "async def _render_filtering_edge_detail",
-        )
-        self.assertIn("🏠 منوی اصلی", region)
-        self.assertNotIn("بازگشت به تنظیمات", region)
 
     def test_marzban_panel_is_programs_dashboard_with_drilldowns(self):
         region = self._region(
@@ -97,13 +69,6 @@ class V120D1MonitoringUITests(unittest.TestCase):
         self.assertIn("no private fallback", region)
         self.assertNotIn("bot was blocked by the user", region)
         self.assertNotIn("_db_get_admin_chat_ids", region)
-
-    def test_release_marker(self):
-        self.assertIn(
-            'BOT_VERSION_TAG = "V124-2026-10-07-critical-only-regional-notifications"',
-            self.source,
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

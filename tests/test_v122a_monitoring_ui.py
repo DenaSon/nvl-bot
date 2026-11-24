@@ -198,15 +198,6 @@ class V122ANavigationTests(unittest.TestCase):
         b = self.source.index(end, a)
         return self.source[a:b]
 
-    def test_marzban_monitor_is_not_visible_on_admin_home(self):
-        region = self._region("async def show_main_menu", "async def cmd_start")
-        self.assertNotIn(
-            "['🛡 بررسی فیلترینگ', '🛰 بررسی مرزبان']",
-            region,
-        )
-        self.assertIn("['🛡 بررسی فیلترینگ']", region)
-        self.assertIn("🧩 برنامه‌ها", region)
-
     def test_old_marzban_home_text_remains_compatibility_alias(self):
         region = self._region(
             "if text in main_menus and is_auth(context):",

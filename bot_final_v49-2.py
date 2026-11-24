@@ -8549,7 +8549,7 @@ def _nav_markup(rows):
 async def _nav_render(target, title, rows):
     markup = _nav_markup(rows)
     if hasattr(target, 'edit_message_text'):
-        await target.edit_message_text(title, reply_markup=markup, parse_mode="HTML")
+        await _safe_edit_or_send(target, title, reply_markup=markup, parse_mode="HTML")
     else:
         await target.reply_text(title, reply_markup=markup, parse_mode="HTML")
 
@@ -8580,7 +8580,6 @@ def _nav_finance_rows(role, *, superadmin=False, accounting_enabled=False, chart
         if chart_enabled:
             rows.append([("📈 نمودار فروش", "info_chart")])
         rows.append([("💳 مدیریت کارت‌ها", "fin_menu")])
-        rows.append([("📊 گزارش مالی نمایندگان", "agm_finlist")])
         if superadmin:
             rows.extend([
                 [("💼 سوابق مالی نمایندگان", "super_agent_list")],
@@ -8624,7 +8623,7 @@ async def _show_nav_finance(target, update, context):
 async def _show_nav_infrastructure(target):
     markup = InlineKeyboardMarkup(_build_server_settings_kb())
     if hasattr(target, 'edit_message_text'):
-        await target.edit_message_text("🌐 <b>زیرساخت</b>", reply_markup=markup, parse_mode="HTML")
+        await _safe_edit_or_send(target, "🌐 <b>زیرساخت</b>", reply_markup=markup, parse_mode="HTML")
     else:
         await target.reply_text("🌐 <b>زیرساخت</b>", reply_markup=markup, parse_mode="HTML")
 
@@ -17461,7 +17460,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("📚 از ابتدا", callback_data="nvl_fin:all")],
                 [InlineKeyboardButton("📅 ۷ روز اخیر", callback_data="nvl_fin:7d"),
                  InlineKeyboardButton("🗓 ۳۰ روز اخیر", callback_data="nvl_fin:30d")],
-                [InlineKeyboardButton("🔙 پنل سوپر ادمین", callback_data="super_admin_back")],
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="nav:finance")],
             ]
             await query.edit_message_text(
                 "💰 <b>گزارش حسابداری NVL</b>\n\n"
@@ -17502,7 +17501,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             report_text, parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 انتخاب بازه", callback_data="nvl_fin:menu")],
-                [InlineKeyboardButton("👑 پنل سوپر ادمین", callback_data="super_admin_back")],
+                [InlineKeyboardButton("💰 مالی", callback_data="nav:finance")],
             ]),
         )
         return
@@ -22519,7 +22518,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                         reply_markup=ReplyKeyboardMarkup([['/start']], resize_keyboard=True))
         return
     elif d == "confirm_logout_no":
-        await query.edit_message_text("✅ انصراف داده شد؛ همچنان وارد سیستم هستید.")
+        safe_clear_context(context)
+        await query.edit_message_text("✅ خروج لغو شد.", reply_markup=_nav_markup([[("🏠 منوی اصلی", "uact_back_to_menu")]]))
         return
 
     # 💳 بخش تایید رسیدها — منحصراً ادمین
@@ -28399,7 +28399,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🟢 ساخت عمده SSH (فعال)" if bulk_en else "🔴 ساخت عمده SSH (غیرفعال)", callback_data="tsell_bulk")],
             [InlineKeyboardButton("🟢 فروش V2Ray نامحدود (فعال)" if v2_unlimit_en else "🔴 فروش V2Ray نامحدود (غیرفعال)", callback_data="tsell_v2ray_unlimit")],
             [InlineKeyboardButton("🟢 فروش V2Ray حجمی (فعال)" if v2_vol_en else "🔴 فروش V2Ray حجمی (غیرفعال)", callback_data="tsell_v2ray_vol")],
-            [InlineKeyboardButton("🔙 بازگشت", callback_data="super_admin_back")]
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="nav:settings")]
         ]
         await query.edit_message_text("⚙️ <b>مدیریت فروش و ساخت سرویس‌ها</b>\n\nبا خاموش کردن هر بخش، دکمهٔ آن از منوی «🛒 خرید اشتراک» برای تمامی کاربران (ادمین و نماینده) پنهان می‌شود.", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
@@ -28419,7 +28419,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🟢 ساخت عمده SSH (فعال)" if bulk_en else "🔴 ساخت عمده SSH (غیرفعال)", callback_data="tsell_bulk")],
             [InlineKeyboardButton("🟢 فروش V2Ray نامحدود (فعال)" if v2_unlimit_en else "🔴 فروش V2Ray نامحدود (غیرفعال)", callback_data="tsell_v2ray_unlimit")],
             [InlineKeyboardButton("🟢 فروش V2Ray حجمی (فعال)" if v2_vol_en else "🔴 فروش V2Ray حجمی (غیرفعال)", callback_data="tsell_v2ray_vol")],
-            [InlineKeyboardButton("🔙 بازگشت", callback_data="super_admin_back")]
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="nav:settings")]
         ]
         await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(kb))
 
@@ -28430,14 +28430,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                f"امروز: {cr_tdy} | دیروز: {cr_yest}\nاین هفته: {cr_wk} | این ماه (شمسی): {cr_mo}\n\n"
                f"🔄 <b>تمدید اکانت:</b>\n"
                f"امروز: {rn_tdy} | دیروز: {rn_yest}\nاین هفته: {rn_wk}\nاین ماه (شمسی): {rn_mo} | ماه گذشته: {rn_lmo}")
-        kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="super_admin_back")]]
+        kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="nav:finance")]]
         await query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
         
     elif d == "super_agent_list" and _is_superadmin_update(update, context):
         agents = await asyncio.to_thread(_db_get_all_agents)
-        if not agents: return await query.edit_message_text("نماینده‌ای یافت نشد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="super_admin_back")]]))
+        if not agents: return await query.edit_message_text("نماینده‌ای یافت نشد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="nav:finance")]]))
         kb = [[InlineKeyboardButton(f"💼 {a[1]}", callback_data=f"super_agent_det_{a[0]}")] for a in agents]
-        kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="super_admin_back")])
+        kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="nav:finance")])
         await query.edit_message_text("👑 <b>سوابق مالی نمایندگان</b>\nنماینده مورد نظر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
         
     elif d.startswith("super_agent_det_") and _is_superadmin_update(update, context):

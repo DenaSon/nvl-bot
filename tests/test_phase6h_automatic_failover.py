@@ -190,26 +190,6 @@ class Phase6HIntegrationShapeTests(unittest.TestCase):
         b = self.source.index(end, a)
         return self.source[a:b]
 
-    def test_monitoring_is_promoted_out_of_server_settings(self):
-        settings = self._region(
-            "def _build_server_settings_kb():",
-            "def _normalize_ssh_port",
-        )
-        self.assertNotIn(
-            'InlineKeyboardButton("🛡 وضعیت فیلترینگ", callback_data="hp_filtering")',
-            settings,
-        )
-        home = self._region(
-            "async def show_main_menu",
-            "async def cmd_start",
-        )
-        self.assertIn("🛡 بررسی فیلترینگ", home)
-        self.assertNotIn(
-            "['🛡 بررسی فیلترینگ', '🛰 بررسی مرزبان']",
-            home,
-        )
-        self.assertIn("🧩 برنامه‌ها", home)
-
     def test_monitor_exposes_explicit_auto_opt_in(self):
         region = self._region(
             "async def _render_filtering_monitor_panel",

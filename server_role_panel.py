@@ -58,7 +58,7 @@ def overview(core_ip: str, pool, dns_ip: str, page: int = 0):
     active = sum(bool(r[1]) for r in edges)
     inactive = len(edges) - active
     lines = [
-        "🖥 <b>مدیریت سرورهای Core / Edge</b>", "",
+        "🖥 <b>سرورها</b>", "",
         f"🏠 Core: <code>{escape(core_ip)}</code>",
         f"🎯 رله منتخب: <code>{escape(selected)}</code>" if selected else "🎯 رله منتخب: <b>نامشخص</b>",
         f"🌐 IP دامنه (ثبت‌شده): <code>{escape(dns_ip or '—')}</code>",
@@ -66,7 +66,6 @@ def overview(core_ip: str, pool, dns_ip: str, page: int = 0):
     ]
     if warning:
         lines.extend(("", warning))
-    lines.extend(("", "برای مشاهده عملیات، IP سرور را انتخاب کنید."))
     buttons = [[("👑 Core · " + core_ip, "srv_view_" + core_ip)]]
     for row in edges[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]:
         ip, is_active = row[0], bool(row[1])
@@ -83,8 +82,8 @@ def overview(core_ip: str, pool, dns_ip: str, page: int = 0):
     if page_count > 1:
         lines.append(f"صفحه {page + 1} از {page_count}")
     buttons.extend([
-        [("🔄 بروزرسانی", "srv_status")],
-        [("🔙 تنظیمات سرور", "srv_menu_back")],
+        [("🔄 به‌روزرسانی", "srv_status")],
+        [("🔙 زیرساخت", "srv_menu_back")],
     ])
     return "\n".join(lines), buttons
 
@@ -128,7 +127,7 @@ def detail(core_ip: str, host: str, pool, dns_ip: str,
         if not active:
             buttons.append([("🗑 حذف از فهرست", "srv_del_" + host)])
     buttons.extend([
-        [("🔄 بروزرسانی جزئیات", "srv_view_" + host)],
+        [("🔄 به‌روزرسانی", "srv_view_" + host)],
         [("🔙 فهرست سرورها", "srv_status")],
     ])
     return "\n".join(lines), buttons

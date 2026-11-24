@@ -22,6 +22,8 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(sum(map(len, home("admin"))), 6)
         self.assertIn("🌐 زیرساخت", sum(home("admin"), []))
         self.assertIn("⚙️ تنظیمات", sum(home("agent"), []))
+        self.assertIn("📊 گزارش‌ها", sum(home("agent"), []))
+        self.assertIn("💰 کیف پول", sum(home("agent"), []))
         self.assertEqual(home("agent", brand_ready=False), [["✏️ نام برند"], ["❌ خروج"]])
         self.assertNotIn("🌐 زیرساخت", sum(home("accountant"), []))
 
@@ -65,6 +67,8 @@ class NavigationTests(unittest.TestCase):
         self.assertTrue(allowed("nav:backup", "admin"))
         self.assertFalse(allowed("nav:agent_card", "admin"))
         self.assertTrue(allowed("nav:agent_card", "agent"))
+        self.assertTrue(allowed("nav:agent_reports", "agent"))
+        self.assertFalse(allowed("nav:agent_reports", "admin"))
         self.assertFalse(allowed("nav:settings", "accountant"))
         self.assertFalse(allowed("nav:unknown", "admin"))
 

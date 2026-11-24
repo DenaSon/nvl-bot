@@ -3,7 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 from ops import nvl_cd_publisher as pub
 from ops import nvl_cd_planner as p
 
@@ -206,3 +206,55 @@ class PublisherTests(unittest.TestCase):
             with self.assertRaises(p.Hold):
                 pub.restore(self.host, self.state, checkpoint)
         self.assertEqual(self.host.starts, 0)
+
+    def test_uncertain_stop_never_publishes_or_attempts_second_stop(self):
+        with patch.object(self.host, "stop", side_effect=p.Hold("BOT_STOP_UNCLEAN")) as stop:
+            result = self.publish()
+        self.assertEqual(result["phase"], "HOLD")
+        self.assertEqual(result["reason"], "STOP_UNPROVEN")
+        self.assertEqual((self.host.runtime / "bot.py").read_bytes(), self.old_raw)
+        stop.assert_called_once()
+        self.assertEqual(self.host.starts, 0)
+
+
+class HostEvidenceTests(unittest.TestCase):
+    def test_stop_requires_same_invocation_clean_journal(self):
+        host = pub.Host()
+        active = {"ActiveState": "active", "SubState": "running", "MainPID": "753",
+                  "InvocationID": "a" * 32}
+        stopped = {"ActiveState": "inactive", "MainPID": "0", "Result": "success",
+                   "ExecMainCode": "1", "ExecMainStatus": "0"}
+        with patch.object(host, "status", side_effect=[active, stopped]), \
+                patch.object(host, "command"), \
+                patch.object(host, "evidence", return_value=False) as proof:
+            with self.assertRaisesRegex(p.Hold, "BOT_DRAIN_UNPROVEN"):
+                host.stop()
+            self.assertEqual(proof.call_args.args[:2], (active, "NVL_CD_SHUTDOWN_CLEAN"))
+
+    def test_stop_rejects_sigkill_even_with_marker(self):
+        host = pub.Host()
+        active = {"ActiveState": "active", "SubState": "running", "MainPID": "753"}
+        stopped = {"ActiveState": "inactive", "MainPID": "0", "Result": "timeout",
+                   "ExecMainCode": "2", "ExecMainStatus": "9"}
+        with patch.object(host, "status", side_effect=[active, stopped]), \
+                patch.object(host, "command"), \
+                patch.object(host, "evidence", return_value=True) as proof:
+            with self.assertRaisesRegex(p.Hold, "BOT_STOP_UNCLEAN"):
+                host.stop()
+            proof.assert_not_called()
+
+    def test_evidence_rejects_wrong_invocation_and_old_timestamp(self):
+        import json
+        import time
+        host = pub.Host()
+        identity = {"MainPID": "753", "InvocationID": "a" * 32}
+        entry = {"MESSAGE": "NVL_CD_POLL_OK", "_SYSTEMD_UNIT": pub.SERVICE,
+                 "_PID": "753", "_SYSTEMD_INVOCATION_ID": "a" * 32,
+                 "__REALTIME_TIMESTAMP": str(int(time.time() * 1_000_000))}
+        since = time.time() - 45
+        with patch.object(host, "command", return_value=json.dumps(entry)):
+            self.assertTrue(host.evidence(identity, "NVL_CD_POLL_OK", since))
+        for changes in ({"_SYSTEMD_INVOCATION_ID": "b" * 32},
+                        {"_PID": "754"}, {"__REALTIME_TIMESTAMP": "1000000"}):
+            with patch.object(host, "command", return_value=json.dumps(entry | changes)):
+                self.assertFalse(host.evidence(identity, "NVL_CD_POLL_OK", since))

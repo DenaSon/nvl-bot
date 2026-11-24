@@ -28461,7 +28461,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         "Unhandled Telegram update id=%s update_type=%s error_type=%s frames=%s",
         getattr(update, "update_id", None),
         type(update).__name__,
-        type(error).__name__ if error else "Unknown",
+        type(context.error).__name__ if context.error else "Unknown",
         locations,
     )
 

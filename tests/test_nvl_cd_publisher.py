@@ -258,3 +258,14 @@ class HostEvidenceTests(unittest.TestCase):
                         {"_PID": "754"}, {"__REALTIME_TIMESTAMP": "1000000"}):
             with patch.object(host, "command", return_value=json.dumps(entry | changes)):
                 self.assertFalse(host.evidence(identity, "NVL_CD_POLL_OK", since))
+
+
+    def test_terminal_checkpoint_archived_before_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(p, "trusted", side_effect=lambda path, **kw: path):
+            state = Path(tmp)
+            pub.set_phase(state, {"candidate": A, "deployed": A}, "COMMITTED")
+            pub.set_phase(state, {"candidate": B, "deployed": A}, "STOPPING")
+            archived = state / "outcomes" / (A + "-COMMITTED.json")
+            self.assertEqual(p.load_json(archived)["deployed"], A)
+            self.assertEqual(p.load_json(state / "release-state.json")["phase"], "STOPPING")

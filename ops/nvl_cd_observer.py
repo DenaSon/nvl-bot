@@ -113,6 +113,8 @@ def event(state):
         labels = {"COMMITTED": "✅ استقرار موفق",
                   "ROLLED_BACK": "↩️ بازگشت به نسخه قبلی",
                   "HOLD": "⚠️ استقرار نیازمند بررسی"}
+        if phase == "COMMITTED" and state.get("restart_required") is False:
+            labels[phase] = "✅ ثبت نسخه بدون نیاز به Restart"
         msg = "NVL CI/CD\n" + labels[phase] + "\nSHA: " + sha[:12]
         deployed = state.get("deployed")
         if isinstance(deployed, str) and p.SHA.fullmatch(deployed):
@@ -195,6 +197,21 @@ def observe(state, env=None, now=None, sender=None):
             release_path = state / "release-state.json"
             checkpoint = p.load_json(release_path) if release_path.exists() else None
             checkpoint_mtime = release_path.stat().st_mtime_ns if checkpoint is not None else 0
+            # Import archived terminal outcomes even if a newer release
+            # completed before this observer tick. Remove only after DB commit.
+            archive = state / "outcomes"
+            consumed = []
+            if archive.exists():
+                p.trusted(archive, directory=True)
+                for path in sorted(archive.glob("*.json")):
+                    snapshot = p.load_json(path)
+                    item = event(snapshot)
+                    expected = snapshot.get("candidate", "") + "-" + snapshot.get("phase", "") + ".json"
+                    if not item or path.name != expected or snapshot.get("phase") not in pub.FINAL | {"HOLD"}:
+                        raise p.Hold("OUTCOME_INVALID")
+                    if seen.get("release-state.json") != item[0]:
+                        record(con, snapshot, snapshot.get("finished_at", now))
+                    consumed.append(path)
             for filename in ("release-state.json", "latest-plan.json"):
                 path = state / filename
                 if not path.exists():
@@ -208,6 +225,10 @@ def observe(state, env=None, now=None, sender=None):
                     record(con, snapshot, now)
                     seen[filename] = item[0]
         pub.durable_json(seenfile, seen)
+        for path in consumed:
+            path.unlink()
+        if consumed:
+            pub.sync_dir(archive)
         with con:
             result = drain(con, now, sender)
             prune_history(con, now)

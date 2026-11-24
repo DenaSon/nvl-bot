@@ -5,6 +5,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import sqlite3
@@ -122,18 +123,55 @@ class Host:
     def status(self):
         raw = self.command("/usr/bin/systemctl", "show", SERVICE,
                            "-p", "ActiveState", "-p", "SubState", "-p", "MainPID",
-                           "-p", "NRestarts")
+                           "-p", "NRestarts", "-p", "InvocationID",
+                           "-p", "Result", "-p", "ExecMainCode", "-p", "ExecMainStatus")
         return dict(line.split("=", 1) for line in raw.splitlines())
 
     def active(self):
         s = self.status()
         return s.get("ActiveState") == "active" and s.get("SubState") == "running"
 
+    def evidence(self, identity, message, since):
+        invocation, pid = identity.get("InvocationID", ""), identity.get("MainPID", "")
+        if (not re.fullmatch(r"[0-9a-f]{32}", invocation)
+                or invocation == "0" * 32 or not pid.isdigit() or int(pid) <= 1):
+            return False
+        raw = self.command("/usr/bin/journalctl", "--no-pager", "--output=json",
+                           "--lines=1", "--since=@" + str(int(since)),
+                           "_SYSTEMD_UNIT=" + SERVICE,
+                           "_SYSTEMD_INVOCATION_ID=" + invocation,
+                           "_PID=" + pid, "MESSAGE=" + message)
+        try:
+            entry = json.loads(raw)
+            observed = int(entry["__REALTIME_TIMESTAMP"]) / 1_000_000
+            return (entry.get("MESSAGE") == message
+                    and entry.get("_SYSTEMD_UNIT") == SERVICE
+                    and entry.get("_SYSTEMD_INVOCATION_ID") == invocation
+                    and entry.get("_PID") == pid
+                    and since <= observed <= time.time() + 2)
+        except (ValueError, TypeError, KeyError):
+            return False
+
     def stop(self):
+        before = self.status()
+        if before.get("ActiveState") == "inactive" and before.get("MainPID") == "0":
+            # Recovery may start with an already stopped process. Never infer
+            # a clean stop from a failed/killed unit.
+            if (before.get("Result"), before.get("ExecMainCode"),
+                    before.get("ExecMainStatus")) != ("success", "1", "0"):
+                raise p.Hold("BOT_STOP_UNPROVEN")
+            return
+        if before.get("ActiveState") != "active" or before.get("SubState") != "running":
+            raise p.Hold("BOT_STOP_UNPROVEN")
+        started = time.time()
         self.command("/usr/bin/systemctl", "stop", SERVICE)
         s = self.status()
-        if s.get("ActiveState") != "inactive" or s.get("MainPID") != "0":
-            raise p.Hold("BOT_NOT_STOPPED")
+        if (s.get("ActiveState"), s.get("MainPID"), s.get("Result"),
+                s.get("ExecMainCode"), s.get("ExecMainStatus")) != (
+                    "inactive", "0", "success", "1", "0"):
+            raise p.Hold("BOT_STOP_UNCLEAN")
+        if not self.evidence(before, "NVL_CD_SHUTDOWN_CLEAN", started):
+            raise p.Hold("BOT_DRAIN_UNPROVEN")
 
     def start(self):
         self.command("/usr/bin/systemctl", "start", SERVICE)
@@ -147,20 +185,29 @@ class Host:
             return schema(con)
 
     def healthy(self):
-        # Process-level health only; application readiness still required
-        # for unattended activation in CICD-06.
         first = self.status()
         pid = first.get("MainPID", "0")
-        if not self.active() or pid == "0":
+        if (first.get("ActiveState") != "active" or first.get("SubState") != "running"
+                or pid == "0"):
             raise p.Hold("BOT_HEALTH_FAILED")
-        for _ in range(6):
-            time.sleep(2)
+        # Require real polling evidence from the same invocation, plus
+        # at least 12 seconds of process stability. No extra getUpdates calls.
+        started = time.monotonic()
+        deadline = started + 60
+        while True:
             state = self.status()
             if (state.get("ActiveState") != "active"
                     or state.get("SubState") != "running"
                     or state.get("MainPID") != pid
+                    or state.get("InvocationID") != first.get("InvocationID")
                     or state.get("NRestarts") != first.get("NRestarts")):
                 raise p.Hold("BOT_HEALTH_FAILED")
+            if (time.monotonic() - started >= 12
+                    and self.evidence(state, "NVL_CD_POLL_OK", time.time() - 45)):
+                break
+            if time.monotonic() >= deadline:
+                raise p.Hold("BOT_POLL_UNPROVEN")
+            time.sleep(2)
         with read_db(self.db) as con:
             if con.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
                 raise p.Hold("DB_HEALTH_FAILED")
@@ -343,6 +390,11 @@ def publish(host, state, repo, baseline, candidate, updates, old, new, revalidat
     checkpoint = set_phase(state, checkpoint, "STOPPING")
     try:
         host.stop()
+    except Exception:
+        # A forced/uncertain stop must never authorize publication or a
+        # second automatic stop via restore(). Code has not been changed.
+        return set_phase(state, checkpoint, "HOLD", reason="STOP_UNPROVEN")
+    try:
         if not host.idle() or host.schema() != record["schema"]:
             host.start()
             return set_phase(state, checkpoint, "ROLLED_BACK", reason="OPERATION_OR_SCHEMA_CHANGED")
@@ -416,6 +468,8 @@ def release(state, config, expected):
     if not plan["updates"]:
         revalidate()
         return set_phase(state, {"candidate": candidate}, "COMMITTED", deployed=candidate)
+    # The rollback baseline must already implement the polling contract.
+    host.healthy()
     return publish(host, state, repo, baseline, candidate, plan["updates"], old, new, revalidate)
 
 

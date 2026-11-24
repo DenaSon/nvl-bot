@@ -263,6 +263,7 @@ def _bilingual_label(en: str, fa: str) -> str:
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputMediaPhoto
 from telegram.error import BadRequest
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, TypeHandler, ApplicationHandlerStop, filters, ContextTypes, PicklePersistence, PersistenceInput
+from nvl_cd_bot_lifecycle import PollingHealthRequest, drain_detached, mark_clean_shutdown
 
 from edge_observability import (
     DIAG_CORE_LOCAL,
@@ -32303,6 +32304,12 @@ async def _post_init(app):
     app.bot_data['filter_detect_task'] = asyncio.create_task(_filter_detect_loop(app))  # 🆕 V89
     app.bot_data['weekly_accounting_task'] = asyncio.create_task(_weekly_accounting_report_loop(app))
 
+async def _cd_post_stop(app):
+    # PTB has stopped update admission and drained its own handlers. Keep
+    # the bot API initialized while registered detached work finishes.
+    app.bot_data['_cd_detached_drained'] = await drain_detached(_BACKGROUND_TASKS)
+
+
 async def _post_shutdown(app):
     # 🔧 رفع باگ «Task was destroyed but it is pending!» که هنگام systemctl stop در لاگ سرور
     # دیده می‌شد: قبلاً هیچ post_shutdown ثبت نشده بود، پس وقتی ربات متوقف می‌شد، تسک پس‌زمینهٔ
@@ -32335,6 +32342,10 @@ async def _post_shutdown(app):
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
 
+    mark_clean_shutdown(app.bot_data.get('_cd_detached_drained', False),
+                        _BACKGROUND_TASKS)
+
+
 if __name__ == '__main__':
     init_db()
     # 🆕 Persistence: فقط user_data (وضعیت لاگین هر چت) روی دیسک ذخیره می‌شود تا بعد از هر
@@ -32345,7 +32356,10 @@ if __name__ == '__main__':
     persistence = PicklePersistence(
         filepath=PERSISTENCE_PATH,
         store_data=PersistenceInput(bot_data=False, chat_data=False, user_data=True, callback_data=False))
-    app = ApplicationBuilder().token(TOKEN).persistence(persistence).post_init(_post_init).post_shutdown(_post_shutdown).build()
+    app = (ApplicationBuilder().token(TOKEN).persistence(persistence)
+           .get_updates_request(PollingHealthRequest())
+           .post_init(_post_init).post_stop(_cd_post_stop)
+           .post_shutdown(_post_shutdown).build())
     # Globally deny previously revoked principal before commands, text,
     # photographs and callbacks (including old persisted admin sessions).
     app.add_handler(TypeHandler(Update, _nvl_revoked_admin_guard), group=-2)

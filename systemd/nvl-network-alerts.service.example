@@ -1,0 +1,30 @@
+[Unit]
+Description=NVL Network Intelligence — Core-only Telegram group alerts
+Documentation=https://github.com/DenaSon/nvl-bot/blob/master/docs/network-intelligence/LIVE_GROUP_ALERTS_RUNBOOK.md
+After=network-online.target nvl-network-sampler.service
+Wants=network-online.target
+ConditionPathExists=/etc/nvl-network-alerts/telegram.json
+ConditionPathExists=/var/lib/nvl-network-alerts/baseline.json
+ConditionPathIsDirectory=/root/nvl-network-observations
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/nvl-network-alerts
+ExecStart=/usr/bin/python3 -B /opt/nvl-network-alerts/nvl_network_live_alerts.py tick
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/nvl-network-alerts
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+MemoryMax=192M
+CPUQuota=20%
+TimeoutStartSec=40s
+StandardOutput=journal
+StandardError=journal

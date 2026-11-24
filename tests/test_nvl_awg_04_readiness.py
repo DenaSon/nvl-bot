@@ -54,7 +54,7 @@ class LimiterWitnessTests(unittest.TestCase):
             db.executescript(SCHEMA)
             db.execute(
                 "CREATE TABLE manual_edge_operations(ip TEXT, status TEXT, "
-                "tunnel_backend TEXT)"
+                "tunnel_backend TEXT, archived_at INTEGER)"
             )
             db.execute(
                 "CREATE TABLE host_pool(host TEXT, active INTEGER, "
@@ -66,8 +66,8 @@ class LimiterWitnessTests(unittest.TestCase):
                  SOURCE, KEY, "VERIFIED", int(time.time())),
             )
             db.execute(
-                "INSERT INTO manual_edge_operations VALUES (?,?,?)",
-                (EDGE, "STANDBY", "amneziawg"),
+                "INSERT INTO manual_edge_operations VALUES (?,?,?,?)",
+                (EDGE, "STANDBY", "amneziawg", None),
             )
             db.execute(
                 "INSERT INTO host_pool VALUES (?,?,?,?)",
@@ -79,6 +79,93 @@ class LimiterWitnessTests(unittest.TestCase):
             db.execute("UPDATE edge_tunnel_bindings SET state='HOLD'")
         with self.assertRaises(Exception):
             _registered_binding(EDGE, dbfile)
+
+    def test_registered_binding_ignores_cancelled_history_for_same_ip(self):
+        dbfile = self.root / "nvl-history.db"
+        with sqlite3.connect(dbfile) as db:
+            db.executescript(SCHEMA)
+            db.execute(
+                "CREATE TABLE manual_edge_operations(ip TEXT, status TEXT, "
+                "tunnel_backend TEXT, archived_at INTEGER)"
+            )
+            db.execute(
+                "CREATE TABLE host_pool(host TEXT, active INTEGER, "
+                "is_default INTEGER, is_standby INTEGER)"
+            )
+            db.execute(
+                "INSERT INTO edge_tunnel_bindings VALUES (?,?,?,?,?,?,?,?)",
+                (EDGE, "amneziawg", "awg0", "10.203.77.1",
+                 SOURCE, KEY, "VERIFIED", int(time.time())),
+            )
+            # A force-cancelled earlier install is audit history, not a
+            # second live identity for the replacement Edge at the same IP.
+            db.executemany(
+                "INSERT INTO manual_edge_operations VALUES (?,?,?,?)",
+                [
+                    (EDGE, "CANCELLED", "amneziawg", None),
+                    (EDGE, "STANDBY", "amneziawg", None),
+                ],
+            )
+            db.execute(
+                "INSERT INTO host_pool VALUES (?,?,?,?)",
+                (EDGE, 1, 0, 1),
+            )
+
+        self.assertEqual(_registered_binding(EDGE, dbfile).edge_tunnel_ip,
+                         SOURCE)
+
+        # Two records that both claim the current live role remain ambiguous.
+        with sqlite3.connect(dbfile) as db:
+            db.execute(
+                "INSERT INTO manual_edge_operations VALUES (?,?,?,?)",
+                (EDGE, "STANDBY", "amneziawg", None),
+            )
+        with self.assertRaisesRegex(
+                LimiterWitnessHold, "AWG_TARGET_NOT_IN_MANAGED_LIFECYCLE"):
+            _registered_binding(EDGE, dbfile)
+
+    def test_registered_binding_rejects_conflicting_live_history(self):
+        dbfile = self.root / "nvl-conflicting-history.db"
+        with sqlite3.connect(dbfile) as db:
+            db.executescript(SCHEMA)
+            db.execute(
+                "CREATE TABLE manual_edge_operations(ip TEXT, status TEXT, "
+                "tunnel_backend TEXT, archived_at INTEGER)"
+            )
+            db.execute(
+                "CREATE TABLE host_pool(host TEXT, active INTEGER, "
+                "is_default INTEGER, is_standby INTEGER)"
+            )
+            db.execute(
+                "INSERT INTO edge_tunnel_bindings VALUES (?,?,?,?,?,?,?,?)",
+                (EDGE, "amneziawg", "awg0", "10.203.77.1",
+                 SOURCE, KEY, "VERIFIED", int(time.time())),
+            )
+            db.execute(
+                "INSERT INTO host_pool VALUES (?,?,?,?)",
+                (EDGE, 1, 0, 1),
+            )
+            db.executemany(
+                "INSERT INTO manual_edge_operations VALUES (?,?,?,?)",
+                [
+                    (EDGE, "STANDBY", "amneziawg", None),
+                    (EDGE, "ACTIVE", "amneziawg", None),
+                ],
+            )
+
+        # Do not silently select the role-matching row when another
+        # unarchived live operation still claims this host.
+        with self.assertRaisesRegex(
+                LimiterWitnessHold, "AWG_TARGET_NOT_IN_MANAGED_LIFECYCLE"):
+            _registered_binding(EDGE, dbfile)
+
+        with sqlite3.connect(dbfile) as db:
+            db.execute(
+                "UPDATE manual_edge_operations SET archived_at=? "
+                "WHERE status='ACTIVE'", (int(time.time()),)
+            )
+        self.assertEqual(_registered_binding(EDGE, dbfile).edge_tunnel_ip,
+                         SOURCE)
 
     def test_witness_success_creates_only_private_exact_source_marker(self):
         marker = self.root / "witness"

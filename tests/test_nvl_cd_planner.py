@@ -94,6 +94,39 @@ class PlanTests(unittest.TestCase):
                   a | {"ops/install.sh": item(B)}, a | {".github/workflows/x.yml": item(B)}):
             self.assertEqual(self.plan(a, b)["status"], "HOLD")
 
+    def test_control_plane_update_requires_exact_installed_candidate(self):
+        old = {"bot.py": item(A), "ops/nvl_cd_publisher.py": item(A)}
+        new = {"bot.py": item(B), "ops/nvl_cd_publisher.py": item(B)}
+
+        plan = build_plan(
+            old, new, {"bot.py"}, lambda _: A,
+            lambda name: B if name == "ops/nvl_cd_publisher.py" else None,
+        )
+        self.assertEqual(plan["status"], "PLAN_READY")
+        self.assertEqual(plan["updates"], ["bot.py"])
+        self.assertEqual(plan["manual"], [])
+
+    def test_control_plane_mismatch_or_missing_stays_hold(self):
+        old = {"bot.py": item(A), "ops/nvl_cd_publisher.py": item(A)}
+        new = {"bot.py": item(B), "ops/nvl_cd_publisher.py": item(B)}
+
+        for installed in (A, None):
+            with self.subTest(installed=installed):
+                plan = build_plan(
+                    old, new, {"bot.py"}, lambda _: A,
+                    lambda _: installed,
+                )
+                self.assertEqual(plan["status"], "HOLD")
+                self.assertEqual(plan["manual"], ["ops/nvl_cd_publisher.py"])
+
+    def test_control_plane_deletion_and_mode_change_stay_hold(self):
+        old = {"ops/nvl_cd_publisher.py": item(A)}
+        for new in ({}, {"ops/nvl_cd_publisher.py": ("100755", "blob", B)}):
+            with self.subTest(new=new):
+                plan = build_plan(old, new, set(), lambda _: "ABSENT", lambda _: B)
+                self.assertEqual(plan["status"], "HOLD")
+                self.assertEqual(plan["manual"], ["ops/nvl_cd_publisher.py"])
+
     def test_inventory_only_explicit_root_python(self):
         self.assertEqual(inventory_paths(["bot.py"]), {"bot.py"})
         for paths in ([], ["../bot.py"], ["ops/x.py"], ["a.sh"],

@@ -12,8 +12,13 @@ Static imports are not a complete dependency or safety proof: dynamic
 dispatch, subprocesses, shell scripts, optional features, cron and external
 services may share files. Review every candidate and the actual Core
 service inventory before explicitly enrolling files. Changes to dependency
-versions, ops, systemd, packages and unapproved paths still HOLD. This
-policy is Core-only; Edge Sync is not modified.
+versions, systemd, packages and unapproved paths still HOLD. Changes under
+ops/ also HOLD except the narrowly allowlisted ops/nvl_cd_*.py control-plane
+modules: those are not runtime-deployed and are accepted only when the
+corresponding /opt/nvl-deploy/<module>.py already matches the exact candidate
+Git blob. A missing or mismatched installed copy remains HOLD. This is a
+parity check, not automatic self-update of the deployer. This policy is
+Core-only; Edge Sync is not modified.
 
 The CD-06B lifecycle module and entrypoint need a controlled bootstrap
 before the newer publisher can verify readiness of the rollback baseline.

@@ -19,10 +19,12 @@ completed production safety.
   to dependencies, shell, ops, services, or unreviewed files.
 - Private local backup under /var/backups/nvl: original changed code, staged
   bytes, verified manifest and SQLite online backup with integrity check.
+  The snapshot schema must match the live schema before publication.
   Backup stays on Core; encrypted off-host snapshot/retention are separate.
 - Durable release-state.json and atomic per-file publication while only
   nvlbot is stopped. No write to SQLite, environment, networking or other
-  service units by publisher. Existing shared lease and job checks are
+  service units by publisher. Invalidate only affected Python bytecode
+  caches before starting the bot, including rollback. Existing shared lease and job checks are
   read-only; no new application locks or auto-clearing old HOLD.
 - Start bot, verify stable PID/restart counter, DB quick_check, schema
   fingerprint. Only then record the deployed SHA. A docs-only plan needs

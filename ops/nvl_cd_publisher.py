@@ -174,11 +174,12 @@ class Host:
             dst.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
             if dst.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
                 raise p.Hold("BACKUP_INTEGRITY_FAILED")
+            backup_schema = schema(dst)
             dst.commit()
         os.chmod(path, 0o600)
         with path.open("rb") as stream:
             os.fsync(stream.fileno())
-        return file_digest(path)
+        return file_digest(path), backup_schema
 
     def live(self, name):
         return p.live_blob(self.runtime, name)
@@ -224,9 +225,11 @@ def stage(host, repo, baseline, candidate, updates, old, new):
         manifest[name] = {"old": expected, "new": new[name][2],
                           "old_sha256": previous, "new_sha256": digest(raw),
                           "mode": mode}
-    db_sha = host.snapshot_db(directory / "database.sqlite3")
+    db_sha, backup_schema = host.snapshot_db(directory / "database.sqlite3")
+    if host.schema() != backup_schema:
+        raise p.Hold("SCHEMA_CHANGED_DURING_BACKUP")
     record = {"baseline": baseline, "candidate": candidate,
-              "files": manifest, "db_sha256": db_sha, "schema": host.schema()}
+              "files": manifest, "db_sha256": db_sha, "schema": backup_schema}
     durable_json(directory / "manifest.json", record)
     sync_dir(host.backups)
     return directory, record
@@ -267,20 +270,43 @@ def set_phase(state, checkpoint, phase, **fields):
     return checkpoint
 
 
+
+def invalidate_bytecode(runtime, names):
+    # CPython can otherwise reuse a timestamp/size-matched .pyc after an
+    # atomic replacement, including rollback within the same second.
+    directory = runtime / "__pycache__"
+    if os.path.lexists(directory):
+        p.trusted(directory, directory=True)
+    else:
+        return
+    stems = {Path(name).stem for name in names}
+    for path in directory.iterdir():
+        if path.suffix == ".pyc" and any(
+                path.name.startswith(stem + ".") for stem in stems):
+            p.trusted(path)
+            path.unlink()
+    sync_dir(directory)
+
+
 def restore(host, state, checkpoint):
     """Recover old code only, never rewind live SQLite or external effects."""
     directory, record = verified_manifest(host, checkpoint)
     if host.schema() != record["schema"]:
         raise p.Hold("SCHEMA_CHANGED_NO_AUTO_ROLLBACK")
     # Do not stop an already-running bot if it has begun a new sensitive job.
-    if host.active() and not host.idle():
+    if not host.idle():
         raise p.Hold("ACTIVE_OPERATION_NO_AUTO_ROLLBACK")
     for name, item in record["files"].items():
         if host.live(name) not in (item["old"], item["new"]):
             raise p.Hold("UNKNOWN_RUNTIME_NO_AUTO_ROLLBACK")
+    was_active = host.active()
+    uniform = (all(host.live(n) == i["old"] for n, i in record["files"].items())
+               or all(host.live(n) == i["new"] for n, i in record["files"].items()))
     host.stop()
     if not host.idle() or host.schema() != record["schema"]:
-        host.start()
+        # Never start a half-published generation during recovery.
+        if was_active and uniform:
+            host.start()
         raise p.Hold("OPERATION_OR_SCHEMA_CHANGED")
     for name, item in record["files"].items():
         target = host.runtime / name
@@ -292,6 +318,7 @@ def restore(host, state, checkpoint):
             atomic_bytes(target, (directory / "before" / name).read_bytes(), item["mode"])
         if host.live(name) != item["old"]:
             raise p.Hold("ROLLBACK_HASH_FAILED")
+    invalidate_bytecode(host.runtime, record["files"])
     host.start()
     host.healthy()
     return set_phase(state, checkpoint, "ROLLED_BACK")
@@ -325,6 +352,7 @@ def publish(host, state, repo, baseline, candidate, updates, old, new, revalidat
             atomic_bytes(host.runtime / name, (directory / "after" / name).read_bytes(), item["mode"])
             if host.live(name) != item["new"]:
                 raise p.Hold("PUBLISH_HASH_FAILED")
+        invalidate_bytecode(host.runtime, record["files"])
         checkpoint = set_phase(state, checkpoint, "STARTING")
         host.start()
         host.healthy()

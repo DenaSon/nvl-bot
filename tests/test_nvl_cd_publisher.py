@@ -86,7 +86,7 @@ class FakeHost:
 
     def snapshot_db(self, path):
         path.write_bytes(b"backup")
-        return pub.digest(b"backup")
+        return pub.digest(b"backup"), self.schema()
 
     def live(self, name):
         path = self.runtime / name
@@ -166,3 +166,33 @@ class PublisherTests(unittest.TestCase):
         with self.assertRaises(p.Hold):
             pub.restore(self.host, self.state, checkpoint)
         self.assertEqual(self.host.stops, 0)
+
+    def test_invalidate_only_changed_module_cache(self):
+        cache = self.host.runtime / "__pycache__"
+        cache.mkdir()
+        changed = cache / "bot.cpython-312.pyc"
+        unrelated = cache / "other.cpython-312.pyc"
+        changed.write_bytes(b"stale")
+        unrelated.write_bytes(b"keep")
+        self.publish()
+        self.assertFalse(changed.exists())
+        self.assertTrue(unrelated.exists())
+
+    def test_schema_change_during_backup_does_not_stop_bot(self):
+        def snapshot(path):
+            path.write_bytes(b"backup")
+            return pub.digest(b"backup"), "different-schema"
+        with patch.object(self.host, "snapshot_db", side_effect=snapshot):
+            with self.assertRaises(p.Hold):
+                self.publish()
+        self.assertEqual(self.host.stops, 0)
+
+    def test_recovery_never_starts_mixed_generation_on_busy_state(self):
+        directory, _ = pub.stage(self.host, self.root, A, B, ["bot.py"], self.old, self.new)
+        checkpoint = dict(deployed=A, candidate=B, phase="PUBLISHING",
+                          backup=str(directory), manifest_sha256=pub.file_digest(directory / "manifest.json"))
+        self.host.running = False
+        with patch.object(self.host, "idle", return_value=False):
+            with self.assertRaises(p.Hold):
+                pub.restore(self.host, self.state, checkpoint)
+        self.assertEqual(self.host.starts, 0)

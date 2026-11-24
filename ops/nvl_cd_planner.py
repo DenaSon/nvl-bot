@@ -23,6 +23,9 @@ REQUIRED = {"syntax-and-unit-tests", "Release manifest and root safety",
 SHA = re.compile(r"[0-9a-f]{40}")
 API_INTERVAL = 300
 MAX_BYTES = 32 * 1024 * 1024
+# Only these reviewed deployer modules may be reconciled against their
+# already-installed /opt/nvl-deploy copies. They are never runtime updates.
+CONTROL_PLANE_PATH = re.compile(r"ops/nvl_cd_[a-z0-9_]+\.py\Z")
 
 
 class Hold(RuntimeError):
@@ -193,7 +196,7 @@ def nonruntime(name):
             or name.startswith(("docs/", "tests/")))
 
 
-def build_plan(old, new, inventory, live_hash):
+def build_plan(old, new, inventory, live_hash, control_plane_hash=None):
     drift, updates, manual = [], [], []
     for name in sorted(inventory):
         a, b = old.get(name), new.get(name)
@@ -211,9 +214,20 @@ def build_plan(old, new, inventory, live_hash):
         if a != b:
             updates.append(name)
     for name in sorted(old.keys() | new.keys()):
-        if old.get(name) != new.get(name) and name not in inventory:
-            if not nonruntime(name):
-                manual.append(name)
+        if old.get(name) == new.get(name) or name in inventory:
+            continue
+        if nonruntime(name):
+            continue
+        if CONTROL_PLANE_PATH.fullmatch(name):
+            candidate = new.get(name)
+            # Control-plane code is not self-deployed. A changed module is
+            # accepted only when its installed counterpart already matches
+            # the exact candidate Git blob; otherwise it remains a manual HOLD.
+            if (candidate is not None and candidate[:2] == ("100644", "blob")
+                    and control_plane_hash is not None
+                    and control_plane_hash(name) == candidate[2]):
+                continue
+        manual.append(name)
     return {"drift": drift, "updates": updates, "manual": sorted(set(manual)),
             "restart_required": bool(updates),
             "status": "HOLD" if drift or manual else "PLAN_READY"}
@@ -243,6 +257,13 @@ def live_blob(runtime, name):
         return None
 
 
+def control_plane_blob(name):
+    """Hash an installed deployer module only for the explicit ops allowlist."""
+    if not isinstance(name, str) or not CONTROL_PLANE_PATH.fullmatch(name):
+        return None
+    return live_blob(Path("/opt/nvl-deploy"), PurePosixPath(name).name)
+
+
 def poll(config, state, now=time.time):
     baseline = exact_sha(config["baseline"])
     checkpoint = state / "release-state.json"
@@ -257,7 +278,7 @@ def poll(config, state, now=time.time):
     candidate = remote_head()
     if candidate == baseline:
         old = tree(repo, baseline)
-        plan = build_plan(old, old, inventory, lambda n: live_blob(runtime, n))
+        plan = build_plan(old, old, inventory, lambda n: live_blob(runtime, n), control_plane_blob)
         if plan["status"] == "PLAN_READY":
             plan["status"] = "NO_NEW_COMMIT"
         return dict(plan, baseline=baseline, candidate=candidate)
@@ -276,7 +297,7 @@ def poll(config, state, now=time.time):
         raise Hold("MASTER_MOVED")
     git(repo, "merge-base", "--is-ancestor", baseline, candidate)
     old, new = tree(repo, baseline), tree(repo, candidate)
-    plan = build_plan(old, new, inventory, lambda n: live_blob(runtime, n))
+    plan = build_plan(old, new, inventory, lambda n: live_blob(runtime, n), control_plane_blob)
     return dict(plan, baseline=baseline, candidate=candidate, ci=proof)
 
 

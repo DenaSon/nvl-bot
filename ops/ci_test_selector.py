@@ -3,7 +3,7 @@
 Changed files -> curated domain suites + matching test files. Unknown or
 cross-cutting changes always select the full suite. No external dependencies.
 The runner writes a plan once, then both unprivileged and root jobs consume
-exactly that plan. Nightly/manual runs use complete suites.
+exactly that plan. Master pushes and nightly/manual runs use complete suites.
 """
 from __future__ import annotations
 
@@ -135,9 +135,9 @@ def make_plan(event, base, head, root=Path(".")):
     available = sorted(p.name for p in (root / "tests").glob("test_*.py"))
     if not available:
         raise ValueError("no test files found; cannot skip CI")
-    if event in ("schedule", "workflow_dispatch"):
+    if event in ("schedule", "workflow_dispatch", "master_push"):
         return {"mode": "full", "tests": available, "root": available,
-                "reason": event + " complete nightly/manual regression"}
+                "reason": event + " complete release/nightly/manual regression"}
     try:
         files = changed_files(base, head)
     except (OSError, subprocess.CalledProcessError, ValueError):

@@ -121,12 +121,12 @@ class TestImpactSelector(TestCase):
             self.assertEqual(plan["mode"], "full")
             self.assertEqual(plan["tests"], ["test_x.py"])
 
-    def test_daily_and_manual_always_full(self):
+    def test_master_push_daily_and_manual_always_full(self):
         with tempfile.TemporaryDirectory() as td:
             d=Path(td)/"tests"
             d.mkdir()
             (d/"test_x.py").write_text("pass",encoding="utf-8")
-            for event in ("schedule","workflow_dispatch"):
+            for event in ("schedule","workflow_dispatch","master_push"):
                 with self.subTest(event=event):
                     plan=make_plan(event,"","",Path(td))
                     self.assertEqual(plan["mode"],"full")

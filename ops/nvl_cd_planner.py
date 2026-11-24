@@ -26,6 +26,8 @@ MAX_BYTES = 32 * 1024 * 1024
 # Only these reviewed deployer modules may be reconciled against their
 # already-installed /opt/nvl-deploy copies. They are never runtime updates.
 CONTROL_PLANE_PATH = re.compile(r"ops/nvl_cd_[a-z0-9_]+\.py\Z")
+APPLY_UNIT_TEMPLATE = "systemd/nvl-deploy-apply.service.example"
+APPLY_UNIT = Path("/etc/systemd/system/nvl-deploy-apply.service")
 
 
 class Hold(RuntimeError):
@@ -218,7 +220,7 @@ def build_plan(old, new, inventory, live_hash, control_plane_hash=None):
             continue
         if nonruntime(name):
             continue
-        if CONTROL_PLANE_PATH.fullmatch(name):
+        if CONTROL_PLANE_PATH.fullmatch(name) or name == APPLY_UNIT_TEMPLATE:
             candidate = new.get(name)
             # Control-plane code is not self-deployed. A changed module is
             # accepted only when its installed counterpart already matches
@@ -257,8 +259,36 @@ def live_blob(runtime, name):
         return None
 
 
+def apply_unit_blob():
+    """Accept only the exact manually installed, reloaded apply unit."""
+    oid = live_blob(APPLY_UNIT.parent, APPLY_UNIT.name)
+    if oid in (None, "ABSENT"):
+        return None
+    expected = {"FragmentPath": str(APPLY_UNIT), "DropInPaths": "",
+                "NeedDaemonReload": "no", "ProtectHome": "no",
+                "ProtectSystem": "strict", "PrivateTmp": "yes",
+                "NoNewPrivileges": "yes"}
+    try:
+        raw = subprocess.check_output(
+            ["/usr/bin/systemctl", "show", APPLY_UNIT.name,
+             *["-p" + key for key in expected], "-pReadWritePaths"],
+            text=True, stderr=subprocess.DEVNULL, timeout=10)
+        status = dict(line.split("=", 1) for line in raw.splitlines())
+        if any(status.get(key) != value for key, value in expected.items()):
+            return None
+        if set(status.get("ReadWritePaths", "").split()) != {
+                "/root", "/var/lib/nvl-deploy", "/var/backups/nvl"}:
+            return None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    # Re-read the fragment to reject a change during inspection.
+    return oid if live_blob(APPLY_UNIT.parent, APPLY_UNIT.name) == oid else None
+
+
 def control_plane_blob(name):
-    """Hash an installed deployer module only for the explicit ops allowlist."""
+    """Reconcile installed deployer modules and one explicit apply unit."""
+    if name == APPLY_UNIT_TEMPLATE:
+        return apply_unit_blob()
     if not isinstance(name, str) or not CONTROL_PLANE_PATH.fullmatch(name):
         return None
     return live_blob(Path("/opt/nvl-deploy"), PurePosixPath(name).name)

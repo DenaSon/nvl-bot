@@ -1,5 +1,9 @@
 """Hermetic publisher safety tests; never control real systemd or production DB."""
+import errno
+import io
+import json
 import sqlite3
+from contextlib import redirect_stderr
 import tempfile
 import unittest
 from pathlib import Path
@@ -155,6 +159,82 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual((self.host.runtime / "bot.py").read_bytes(), self.new_raw)
         self.assertEqual(self.host.stops, 1)
         self.assertEqual(self.host.db.read_bytes(), b"database")
+
+
+    def test_readonly_runtime_preflight_never_stops_bot(self):
+        real_atomic = pub.atomic_bytes
+
+        def write(path, raw, mode):
+            if self.host.runtime in path.parents:
+                raise OSError(errno.EROFS, "secret-runtime-path")
+            return real_atomic(path, raw, mode)
+
+        output = io.StringIO()
+        with patch.object(pub, "atomic_bytes", side_effect=write), redirect_stderr(output):
+            with self.assertRaisesRegex(p.Hold, "RUNTIME_WRITE_PREFLIGHT_FAILED"):
+                self.publish()
+        event = json.loads(output.getvalue())
+        self.assertEqual((event["stage"], event["errno"]),
+                         ("RUNTIME_WRITE_PREFLIGHT", errno.EROFS))
+        self.assertNotIn("secret-runtime-path", output.getvalue())
+        self.assertEqual(self.host.stops, 0)
+        self.assertTrue(self.host.running)
+        self.assertFalse((self.state / "release-state.json").exists())
+        self.assertEqual(list(self.host.runtime.iterdir()), [self.host.runtime / "bot.py"])
+
+    def test_publish_ero_fs_resumes_old_without_second_stop_or_write(self):
+        real_atomic = pub.atomic_bytes
+
+        def write(path, raw, mode):
+            if path == self.host.runtime / "bot.py":
+                raise OSError(errno.EROFS, "secret-publish-path")
+            return real_atomic(path, raw, mode)
+
+        with patch.object(pub, "atomic_bytes", side_effect=write), redirect_stderr(io.StringIO()) as log:
+            result = self.publish()
+        self.assertEqual(result["phase"], "ROLLED_BACK")
+        self.assertEqual(result["reason"], "PUBLISH_FAILED_BASELINE_RESUMED")
+        self.assertEqual((self.host.stops, self.host.starts), (1, 1))
+        self.assertTrue(self.host.running)
+        self.assertEqual((self.host.runtime / "bot.py").read_bytes(), self.old_raw)
+        self.assertEqual(self.host.db.read_bytes(), b"database")
+        self.assertEqual(json.loads(log.getvalue())["errno"], errno.EROFS)
+        self.assertNotIn("secret-publish-path", log.getvalue())
+
+    def test_failed_recovery_preserves_original_phase_and_both_diagnostics(self):
+        real_atomic = pub.atomic_bytes
+
+        def write(path, raw, mode):
+            if path == self.host.runtime / "bot.py":
+                raise OSError(errno.EROFS, "secret-publish-path")
+            return real_atomic(path, raw, mode)
+
+        self.host.fail_health = 1
+        with patch.object(pub, "atomic_bytes", side_effect=write), redirect_stderr(io.StringIO()) as log:
+            result = self.publish()
+        events = [json.loads(line) for line in log.getvalue().splitlines()]
+        self.assertEqual([e["stage"] for e in events], ["PUBLISHING", "RECOVERY"])
+        self.assertEqual(result["phase"], "HOLD")
+        self.assertEqual(result["failure_phase"], "PUBLISHING")
+        self.assertEqual(result["reason"], "RECOVERY_REQUIRED")
+
+    def test_recovery_does_not_stop_running_bot_if_runtime_not_writable(self):
+        directory, _ = pub.stage(self.host, self.root, A, B, ["bot.py"], self.old, self.new)
+        checkpoint = dict(deployed=A, candidate=B, phase="HOLD",
+                          backup=str(directory), manifest_sha256=pub.file_digest(directory / "manifest.json"))
+        with patch.object(pub, "runtime_write_preflight", side_effect=p.Hold("RUNTIME_WRITE_PREFLIGHT_FAILED")):
+            with self.assertRaisesRegex(p.Hold, "RUNTIME_WRITE_PREFLIGHT_FAILED"):
+                pub.restore(self.host, self.state, checkpoint)
+        self.assertEqual(self.host.stops, 0)
+        self.assertTrue(self.host.running)
+
+    def test_historical_hold_is_not_assumed_to_be_prepublication(self):
+        directory, _ = pub.stage(self.host, self.root, A, B, ["bot.py"], self.old, self.new)
+        checkpoint = dict(deployed=A, candidate=B, phase="HOLD", reason="RECOVERY_REQUIRED",
+                          backup=str(directory), manifest_sha256=pub.file_digest(directory / "manifest.json"))
+        result = pub.restore(self.host, self.state, checkpoint)
+        self.assertEqual(result["phase"], "ROLLED_BACK")
+        self.assertEqual((self.host.stops, self.host.starts), (1, 1))
 
     def test_gate_failure_never_stops_bot(self):
         def reject():

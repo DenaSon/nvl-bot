@@ -7,7 +7,6 @@ Wants=network-online.target
 Type=oneshot
 User=root
 UMask=0077
-EnvironmentFile=/etc/nvlbot/nvlbot.env
 ExecStart=/usr/bin/python3 -B /opt/nvl-deploy/nvl_cd_observer.py
 TimeoutStartSec=30
 NoNewPrivileges=true

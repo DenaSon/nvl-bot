@@ -1,10 +1,13 @@
 # CICD-05 — group notifications and history
 
 Source-only. The observer service and timer are examples, not installed.
-Use the existing /etc/nvlbot/nvlbot.env, BOT_TOKEN and MARZBAN_ALERT_CHAT_ID
-(the documented infrastructure group). No new group, token, config secret
-copy, private-chat fallback or real Telegram send in CI. Verify presence and
-same destination on Core without printing values in CICD-06.
+Production audit 2026-11-24: BOT_TOKEN is set inline in nvlbot.service;
+MARZBAN_ALERT_CHAT_ID comes from /etc/nvl/marzban-alert.env. Both exist in the
+running bot environment. Resolve only those two keys from the live MainPID,
+checking the same active systemd invocation before and after the read. Never
+copy the token into another file, pass it on a command line or print values.
+If nvlbot is unavailable or restarts during lookup, keep notifications queued.
+The --check-target command is read-only and sends no Telegram message.
 The finance report group is not used. No changes to existing alert services.
 
 Persist independent /var/lib/nvl-deploy/history.sqlite3; no changes to

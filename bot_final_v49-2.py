@@ -2015,15 +2015,10 @@ def _build_server_settings_kb():
     """
     return [[InlineKeyboardButton("🖥 وضعیت و نقش سرورها (Core/Edge)", callback_data="srv_status")],
             [InlineKeyboardButton("✏️ تغییر نام برند", callback_data="srv_brand")],
-            [InlineKeyboardButton("🎯 تنظیمات مستقیم", callback_data="srv_direct_menu"), InlineKeyboardButton("🔐 تنظیمات TLS", callback_data="srv_tls")],
             [InlineKeyboardButton("🔌 تنظیمات UDPGW", callback_data="srv_udpgw")],
             [InlineKeyboardButton("🩺 سلامت سرور", callback_data="srv_health")],
-            [InlineKeyboardButton("🩺 عیب‌یابی خام اتصالات SSH", callback_data="srv_ssh_debug")],
-            [InlineKeyboardButton("🩹 خودتشخیصی و رفع خودکار اتصال SSH", callback_data="srv_ssh_diag")],
-            [InlineKeyboardButton("🧹 کاربران یتیم (بدون رکورد در ربات)", callback_data="orphan_menu")],
             [InlineKeyboardButton("🌐 سرویس IP / خرید سرور جدید(دستی)", callback_data="ipsvc_menu")],
             [InlineKeyboardButton("🌍 مدیریت دامنه‌ها", callback_data="dom_menu")],
-            [InlineKeyboardButton("🔴🔵 RED & BLUE", callback_data="srv_rb")],
             [InlineKeyboardButton("🔙 بازگشت", callback_data="uact_back_to_menu")]]
 
 # 🆕 توابع دیتابیس مربوط به استخر IP و پایش سلامت خودکار (تشخیص فیلترشدن/از کار افتادن)
@@ -25729,8 +25724,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         filter_threshold = await asyncio.to_thread(_db_get_filter_detect_threshold)
         kb = [[InlineKeyboardButton("🔍 انتخاب و انتقال کاربر(ها)", callback_data="ipsvc_search")],
               [InlineKeyboardButton("👥 انتقال همهٔ کاربران", callback_data="ipsvc_allusers")],
-              [InlineKeyboardButton("⚖️ تقسیم متوازن (غیرفعال — مسیر قدیمی)", callback_data="ipsvc_distribute")],
-              [InlineKeyboardButton("🩺 بررسی فشار سرور (بدون انتقال)", callback_data="ipsvc_auto")],
               [InlineKeyboardButton("🛡 وضعیت و مسدودسازی IPها / 📡خرید سرور جدید(دستی)", callback_data="hp_menu")],
               [InlineKeyboardButton(f"{filter_icon} شناسایی خودکار فیلتر ({'\u0641\u0639\u0627\u0644' if filter_enabled else '\u063a\u06cc\u0631\u0641\u0639\u0627\u0644'}) — آستانه: {filter_threshold:.0f}\u066a", callback_data="ipsvc_filter_settings")],
               [InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")]]

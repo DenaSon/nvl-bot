@@ -10,6 +10,8 @@ The finance report group is not used. No changes to existing alert services.
 Persist independent /var/lib/nvl-deploy/history.sqlite3; no changes to
 master_bot.db. Terminal committed/rolled-back/HOLD release states and
 actionable drift/manual-plan HOLD are deduplicated by candidate and status.
+Obsolete plans older than the latest release checkpoint or tied to a different
+baseline are ignored; new post-release drift is preserved.
 No notices for each CI pending poll, unchanged master or API backoff.
 One delivery attempt per tick with exponential backoff up to one hour.
 Telegram delivery is at-least-once (an ambiguous accepted request or crash

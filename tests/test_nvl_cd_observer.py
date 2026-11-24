@@ -53,3 +53,21 @@ class ObserverTests(unittest.TestCase):
         obs.record(self.con, {"phase": "HOLD", "candidate": SHA}, 1)
         obs.prune_history(self.con, 10**9)
         self.assertEqual(self.con.execute("SELECT COUNT(*) FROM events").fetchone()[0], 1)
+
+    def test_stale_plan_after_success_is_suppressed(self):
+        checkpoint = {"phase": "COMMITTED", "deployed": SHA}
+        old = {"baseline": "b" * 40, "candidate": SHA, "status": "HOLD"}
+        self.assertFalse(obs.current_plan(old, checkpoint, 10, 20))
+        self.assertFalse(obs.current_plan(old, checkpoint, 30, 20))
+
+    def test_new_post_release_drift_is_preserved(self):
+        checkpoint = {"phase": "COMMITTED", "deployed": SHA}
+        plan = {"baseline": SHA, "candidate": SHA, "status": "HOLD", "drift": ["bot.py"]}
+        self.assertFalse(obs.current_plan(plan, checkpoint, 10, 20))
+        self.assertTrue(obs.current_plan(plan, checkpoint, 30, 20))
+        self.assertTrue(obs.current_plan(plan, None, 10, 0))
+
+    def test_incomplete_release_suppresses_plan_alerts(self):
+        for phase in ("PUBLISHING", "STARTING", "HOLD"):
+            self.assertFalse(obs.current_plan({"baseline": SHA},
+                                             {"phase": phase, "deployed": SHA}, 30, 20))

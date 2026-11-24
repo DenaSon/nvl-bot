@@ -127,6 +127,16 @@ def drain(con, now, sender=send):
     return "RETRY"
 
 
+def current_plan(plan, checkpoint, plan_mtime, checkpoint_mtime):
+    """A plan predating a release checkpoint cannot describe current drift."""
+    if checkpoint is None:
+        return True
+    if checkpoint.get("phase") not in pub.FINAL:
+        return False
+    return (plan.get("baseline") == checkpoint.get("deployed")
+            and plan_mtime > checkpoint_mtime)
+
+
 def observe(state, env=os.environ, now=None, sender=None):
     now = int(time.time()) if now is None else now
     if sender is None:
@@ -135,11 +145,17 @@ def observe(state, env=os.environ, now=None, sender=None):
     seen = p.load_json(seenfile) if seenfile.exists() else {}
     with contextlib.closing(db_open(state / "history.sqlite3")) as con:
         with con:
+            release_path = state / "release-state.json"
+            checkpoint = p.load_json(release_path) if release_path.exists() else None
+            checkpoint_mtime = release_path.stat().st_mtime_ns if checkpoint is not None else 0
             for filename in ("release-state.json", "latest-plan.json"):
                 path = state / filename
                 if not path.exists():
                     continue
-                snapshot = p.load_json(path)
+                snapshot = checkpoint if filename == "release-state.json" else p.load_json(path)
+                if filename == "latest-plan.json" and not current_plan(
+                        snapshot, checkpoint, path.stat().st_mtime_ns, checkpoint_mtime):
+                    continue
                 item = event(snapshot)
                 if item and seen.get(filename) != item[0]:
                     record(con, snapshot, now)

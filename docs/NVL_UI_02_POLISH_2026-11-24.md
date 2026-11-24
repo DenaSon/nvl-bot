@@ -1,6 +1,6 @@
 # UI-02 — Design system and polish
 
-Draft, dependent on UI-01. No deployment or approval implied.
+Draft, dependent on UI-01. The PR targets master to run the full release gate and contains the UI-01 commits until that PR is merged. No deployment or approval implied.
 
 ## Changes
 

@@ -1,5 +1,7 @@
 """UI-01 contracts: verify real menu routing instead of decorative labels."""
 import ast
+import asyncio
+from types import SimpleNamespace
 from pathlib import Path
 import unittest
 
@@ -122,3 +124,29 @@ class LegacyNavigationCompatibilityTests(unittest.TestCase):
             self.source,
         )
         self.assertIn("🛠 <b>V2Ray / Marzban › کاربران</b>", self.source)
+
+
+class ResellerReportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reports_use_only_authenticated_reseller_scope(self):
+        tree = ast.parse(BOT.read_text(encoding="utf-8"))
+        func = next(n for n in tree.body
+                    if isinstance(n, ast.AsyncFunctionDef)
+                    and n.name == "_show_nav_agent_reports")
+        calls = []
+        views = []
+        def stats(aid, service=None):
+            calls.append((aid, service))
+            return (1, 2, 3, 4, 5)
+        async def render(target, title, rows):
+            views.append((title, rows))
+        ns = {"asyncio": asyncio, "_db_get_sales_stats": stats, "_nav_render": render}
+        exec(compile(ast.Module(body=[func], type_ignores=[]), str(BOT), "exec"), ns)
+        handler = ns["_show_nav_agent_reports"]
+        await handler(object(), SimpleNamespace(user_data={"role": "admin", "agent_id": 7}))
+        await handler(object(), SimpleNamespace(user_data={"role": "agent", "agent_id": 0}))
+        self.assertEqual(calls, [])
+        await handler(object(), SimpleNamespace(user_data={"role": "agent", "agent_id": 7}))
+        self.assertEqual(calls, [(7, None), (7, "ssh"), (7, "v2ray")])
+        self.assertEqual(len(views), 1)
+        self.assertIn("V2Ray", views[0][0])
+        self.assertIn("info_online", {cb for row in views[0][1] for _, cb in row})

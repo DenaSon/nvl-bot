@@ -8539,7 +8539,6 @@ def _nav_button(label, callback):
         "bcast_menu": "primary",
         "agself_card_set": "primary",
         "agself_card_clear": "danger",
-        "buy_yes": "success",
         "nav:agent_brand": "primary",
     }
     style = styles.get(callback)
@@ -11953,7 +11952,7 @@ async def _show_buy_summary(update_or_message, context, edit=False):
 
     # 📦 در حالت عمده، دکمهٔ افزودن/حذف از «کانفیگ‌های مورد علاقه» نمایش داده نمی‌شود
     kb = [
-        [InlineKeyboardButton("✅ تأیید و ساخت", callback_data="buy_yes"), InlineKeyboardButton("بازگشت", callback_data="buy_back_start")]
+        [InlineKeyboardButton("✅ تأیید و ساخت", callback_data="buy_yes", style="success"), InlineKeyboardButton("بازگشت", callback_data="buy_back_start")]
     ]
     if not bulk_mode:
         is_fav = await asyncio.to_thread(_db_check_fav, m, u)

@@ -27,11 +27,14 @@ if [[ ! -x /usr/bin/python3 ]]; then
 fi
 
 # Refuse to restart the bot during an in-flight install, route or account batch.
-if ! /usr/bin/python3 -B - <<'PY'
+check_deploy_idle() {
+/usr/bin/python3 -B - <<'PY'
 import sqlite3, sys
 db=sqlite3.connect("file:/root/master_bot.db?mode=ro",uri=True,timeout=5)
 db.execute("PRAGMA query_only=ON")
 checks={
+    "failover_operations":("id","status",("RUNNING",)),
+    "manual_quick_switch_jobs":("id","status",("DNS_INTENT","DB_COMMITTED")),
     "manual_edge_operations":("id","status",("INSTALLING","ROUTING")),
     "cloudzy_cz07_jobs":("id","status",("QUEUED","ROUTING","MIGRATING")),
     "cloudzy_cz04b_operations":("id","status",("PREPARING","DNS_WRITE_INTENT","DNS_TARGET_CONFIRMED","USERS_COMMITTING")),
@@ -53,9 +56,8 @@ for table,(id_column,status_column,states) in checks.items():
 db.close()
 sys.exit(2 if busy else 0)
 PY
-then
-  exit 2
-fi
+}
+check_deploy_idle || exit 2
 
 BASE="https://raw.githubusercontent.com/DenaSon/nvl-bot/${REV}"
 STAGE="$(mktemp -d /root/nvl-awg-limiter-ui-stage-XXXXXX)"
@@ -91,6 +93,9 @@ PYTHONPYCACHEPREFIX="$STAGE/pycache" /usr/bin/python3 -m py_compile \
   "$STAGE/nvl_awg_limiter_recovery.py" "$STAGE/manual_edge_wizard.py"
 (cd "$STAGE" && PYTHONPATH="$STAGE:/root" /usr/bin/python3 -B \
   -m unittest discover -s tests -p test_nvl_awg_limiter_recovery.py -v)
+
+# Recheck after staging/tests, before touching live code or restarting.
+check_deploy_idle || exit 2
 
 for file in "${FILES[@]}"; do
   if [[ -f "/root/$file" ]]; then cp -a "/root/$file" "$BACKUP/$file"; fi

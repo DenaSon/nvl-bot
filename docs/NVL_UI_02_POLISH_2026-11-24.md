@@ -9,6 +9,8 @@ Draft, dependent on UI-01. The PR targets master to run the full release gate an
 - Separate agent wallet from sales reports. Keep existing ownership checks, wallet actions, sales-stat queries, old reply-keyboard aliases and callback guards.
 - Preserve sensitive operation warnings, prices, confirmation callbacks and existing infrastructure safety gates.
 - Avoid duplicate automatic-login welcome messages.
+- Move SSH favorites into a dedicated selector; preserve existing sale feature flags and purchase callbacks.
+- Improve SSH/V2Ray user detail readability without changing credentials, ownership or account actions.
 - Correct remaining superadmin access-menu parent and mandatory-brand logout return.
 
 ## Acceptance

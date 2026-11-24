@@ -8647,6 +8647,21 @@ async def _show_nav_agent_reports(target, context):
          [("🏠 منوی اصلی", "uact_back_to_menu")]])
 
 
+async def _show_nav_sale_favorites(target, context):
+    if context.user_data.get('role') not in ('admin', 'agent'):
+        return
+    enabled = await asyncio.to_thread(_db_get_setting, 'sell_ssh', '1') == '1'
+    favs = await asyncio.to_thread(_db_get_favs) if enabled else []
+    rows = [[(f"{m} ماه · {u} کاربر", f"buyfav_{m}_{u}")] for m, u in favs]
+    rows.append([("🔙 فروش اشتراک", "buy_back_start")])
+    title = "⭐ <b>فروش سریع SSH</b>"
+    if not enabled:
+        title += "\n\n⚠️ فروش SSH غیرفعال است."
+    elif not favs:
+        title += "\n\nهنوز پلن محبوبی ثبت نشده است."
+    await _nav_render(target, title, rows)
+
+
 async def _show_nav_infrastructure(target):
     markup = InlineKeyboardMarkup(_build_server_settings_kb())
     if hasattr(target, 'edit_message_text'):
@@ -8723,7 +8738,7 @@ async def _nav_send_backup(message):
 
 
 def _nav_callback_allowed(action, role):
-    if action in ('nav:settings', 'nav:finance', 'nav:logout'):
+    if action in ('nav:settings', 'nav:finance', 'nav:logout', 'nav:sale_favorites'):
         return role in ('admin', 'agent')
     if action in ('nav:agent_brand', 'nav:agent_card', 'nav:agent_reports'):
         return role == 'agent'
@@ -8837,17 +8852,8 @@ async def _show_buy_start(update, context):
     if v2_any:
         kb.append([InlineKeyboardButton("🚀 فروش V2Ray", callback_data="v2ray_buy_menu")])
 
-    # Favorites remain shortcuts, but no longer compete with the service
-    # selection as the first interaction.
-    if ssh_en:
-        favs = await asyncio.to_thread(_db_get_favs)
-        for m, u in favs:
-            kb.append([
-                InlineKeyboardButton(
-                    f"⭐ SSH سریع · {m} ماه · {u} کاربر",
-                    callback_data=f"buyfav_{m}_{u}",
-                )
-            ])
+    if ssh_en and await asyncio.to_thread(_db_get_favs):
+        kb.append([InlineKeyboardButton("⭐ فروش سریع SSH", callback_data="nav:sale_favorites")])
 
     if bulk_en and ssh_en:
         kb.append([InlineKeyboardButton("📦 فروش عمده SSH", callback_data="buy_bulk_start")])
@@ -9433,16 +9439,16 @@ async def _show_v2ray_user_detail(update_or_query, username, context, db_res, v2
     exp_txt = "بدون محدودیت زمانی" if is_vol else format_db_date_to_jalali(exp)
     lim_txt = "نامحدود" if is_vol else lim
 
-    txt = (f"username: <code>{esc(username)}</code>{c_name_txt}\n\n"
+    txt = (f"🚀 <b>حساب V2Ray</b>\n<code>{esc(username)}</code>{c_name_txt}\n\n"
            f"👤 مالک: {esc(owner_label)}\n"
-           f"تعداد کاربر: {lim_txt}\n"
+           f"اتصالات مجاز: {lim_txt}\n"
            f"🔀 حالت اتصال: {'V2Ray حجمی' if is_vol else 'V2Ray نامحدود'}\n"
-           f"انقضا: {exp_txt} | ({rem_txt})\n"
+           f"انقضا: {exp_txt}\nزمان باقی‌مانده: {rem_txt}\n"
            f"تاریخ ساخت: {format_db_date_to_jalali(crt)}\n"
-           f"وضعیت: {status_v2}{usage_extra_txt}")
+           f"<b>وضعیت:</b> {status_v2}{usage_extra_txt}")
 
     kb = [
-        [InlineKeyboardButton("🔗 دریافت لینک اتصال", callback_data=f"v2act_sub_{username}")]
+        [InlineKeyboardButton("🔗 لینک اتصال", callback_data=f"v2act_sub_{username}")]
     ]
     
     if not is_vol:
@@ -11820,7 +11826,7 @@ async def _show_user_detail(update_or_query, username, context):
         host_display_text = f"\n🖥 هاست زیرساخت: <code>{esc(display_host)}</code>"
         conn_counts, conn_err = await _get_live_connection_counts()
         if conn_err:
-            conn_line = "\nتعداد دستگاه های متصل شده: نامشخص (خطای مانیتورینگ سرور)"
+            conn_line = "\nدستگاه‌های متصل: نامشخص (خطای مانیتورینگ سرور)"
         else:
             live_n = conn_counts.get(username.lower(), 0)
             u_det = getattr(conn_counts, 'users_detail', {}).get(username.lower(), {'ssh': 0, 'tls': 0})
@@ -11848,12 +11854,12 @@ async def _show_user_detail(update_or_query, username, context):
     ]
     if role == 'agent' and _agent_lifecycle_access(ag_id, r2=True):
         kb.insert(-1, [InlineKeyboardButton("📝 متن یادآوری تمدید", callback_data=f"aglx_note_{username}")])
-    mode_label = {"tls": "🔐 TLS (اتصال مستقیم با گواهی معتبر)"}.get(acc_conn_mode, "🔌 مستقیم")
+    mode_label = {"tls": "TLS (گواهی معتبر)"}.get(acc_conn_mode, "🔌 مستقیم")
     hold_active, _hd, hold_days = await asyncio.to_thread(_db_get_hold_info, username)
     hold_line = ""
     if hold_active:
         real_days_txt = f"{int(hold_days)} روزه" if hold_days else "خریداری‌شده"
-        hold_line = f"\n⏳ در حال آنهولد (اشتراک {real_days_txt} — منتظر اولین اتصال یا پایان مهلت {ACCOUNT_HOLD_DAYS} روزه)"
+        hold_line = f"\n⏳ در انتظار اتصال (اشتراک {real_days_txt}، مهلت {ACCOUNT_HOLD_DAYS} روز)"
     
     txt = (
         "🔐 <b>حساب SSH</b>\n\n"
@@ -17584,6 +17590,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _show_nav_agent_card(query, context)
         elif d == 'nav:agent_reports':
             await _show_nav_agent_reports(query, context)
+        elif d == 'nav:sale_favorites':
+            await _show_nav_sale_favorites(query, context)
         elif d == 'nav:backup':
             await _nav_send_backup(query.message)
         return

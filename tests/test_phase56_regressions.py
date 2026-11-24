@@ -71,6 +71,9 @@ class NavigationTests(unittest.TestCase):
         self.assertTrue(allowed("nav:agent_card", "agent"))
         self.assertTrue(allowed("nav:agent_reports", "agent"))
         self.assertFalse(allowed("nav:agent_reports", "admin"))
+        self.assertTrue(allowed("nav:sale_favorites", "admin"))
+        self.assertTrue(allowed("nav:sale_favorites", "agent"))
+        self.assertFalse(allowed("nav:sale_favorites", "accountant"))
         self.assertFalse(allowed("nav:settings", "accountant"))
         self.assertFalse(allowed("nav:unknown", "admin"))
 
@@ -150,3 +153,27 @@ class ResellerReportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(views), 1)
         self.assertIn("V2Ray", views[0][0])
         self.assertIn("info_online", {cb for row in views[0][1] for _, cb in row})
+
+
+class SaleFavoritesNavigationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_favorites_obey_sales_flag_and_keep_existing_callbacks(self):
+        tree = ast.parse(BOT.read_text(encoding="utf-8"))
+        func = next(n for n in tree.body
+                    if isinstance(n, ast.AsyncFunctionDef)
+                    and n.name == "_show_nav_sale_favorites")
+        views = []
+        state = {"enabled": "0"}
+        async def render(target, title, rows):
+            views.append(rows)
+        ns = {"asyncio": asyncio,
+              "_db_get_setting": lambda *args: state["enabled"],
+              "_db_get_favs": lambda: [(1, 2)],
+              "_nav_render": render}
+        exec(compile(ast.Module(body=[func], type_ignores=[]), str(BOT), "exec"), ns)
+        handler = ns["_show_nav_sale_favorites"]
+        ctx = SimpleNamespace(user_data={"role": "agent", "agent_id": 7})
+        await handler(object(), ctx)
+        self.assertEqual({cb for row in views[-1] for _, cb in row}, {"buy_back_start"})
+        state["enabled"] = "1"
+        await handler(object(), ctx)
+        self.assertEqual({cb for row in views[-1] for _, cb in row}, {"buy_back_start", "buyfav_1_2"})

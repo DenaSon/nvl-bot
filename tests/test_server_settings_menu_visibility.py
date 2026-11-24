@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import ast
+import asyncio
+from types import SimpleNamespace
 from pathlib import Path
 import unittest
 
@@ -131,6 +133,56 @@ class ServerMenuVisibilityTests(unittest.TestCase):
         ):
             with self.subTest(callback=callback):
                 self.assertIn(f'd == "{callback}"', self.source)
+
+
+
+class InfrastructureAccessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_direct_edge_buttons_only_for_live_private_admin(self):
+        tree = ast.parse(load_source())
+        names = {"_show_nav_infrastructure", "_build_server_settings_kb"}
+        nodes = [node for node in tree.body
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and node.name in names]
+        active = {77}
+        wizard_rows = [[("AWG", "apps_edge_manual_new_awg")]]
+        namespace = {
+            "asyncio": asyncio,
+            "InlineKeyboardButton": InlineButton,
+            "InlineKeyboardMarkup": lambda rows: rows,
+            "_db_get_admin_chat_ids": lambda: active,
+            "_manual_edge": SimpleNamespace(_new_edge_buttons=lambda: wizard_rows),
+        }
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(BOT), "exec"),
+             namespace)
+        for actor, chat, kind, expected in (
+            (77, 77, "private", True),
+            (78, 78, "private", False),
+            (77, 77, "group", False),
+            (77, 99, "private", False),
+        ):
+            with self.subTest(actor=actor, chat=chat, kind=kind):
+                views = []
+                async def reply_text(text, *, reply_markup, parse_mode):
+                    views.append((text, reply_markup, parse_mode))
+                target = SimpleNamespace(from_user=SimpleNamespace(id=actor),
+                                         chat_id=chat, chat=SimpleNamespace(type=kind),
+                                         reply_text=reply_text)
+                await namespace["_show_nav_infrastructure"](target)
+                title, rows, mode = views[0]
+                callbacks = {button.callback_data for button in flatten(rows)}
+                self.assertIn("<b>زیرساخت</b>", title)
+                self.assertEqual(mode, "HTML")
+                self.assertEqual("apps_edge_quick_home" in callbacks, expected)
+                self.assertEqual("apps_edge_manual_new_awg" in callbacks, expected)
+        wizard_rows.clear()
+        views = []
+        target = SimpleNamespace(from_user=SimpleNamespace(id=77), chat_id=77,
+                                 chat=SimpleNamespace(type="private"),
+                                 reply_text=reply_text)
+        await namespace["_show_nav_infrastructure"](target)
+        callbacks = {button.callback_data for button in flatten(views[0][1])}
+        self.assertIn("apps_edge_quick_home", callbacks)
+        self.assertNotIn("apps_edge_manual_new_awg", callbacks)
 
 
 if __name__ == "__main__":

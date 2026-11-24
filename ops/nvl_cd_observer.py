@@ -16,9 +16,11 @@ import urllib.request
 if __package__:
     from . import nvl_cd_planner as p
     from . import nvl_cd_publisher as pub
+    from . import nvl_cd_release_notes as notes
 else:
     import nvl_cd_planner as p
     import nvl_cd_publisher as pub
+    import nvl_cd_release_notes as notes
 
 TOKEN = re.compile(r"[0-9]{5,20}:[A-Za-z0-9_-]{20,100}")
 GROUP = re.compile(r"-[1-9][0-9]{5,20}")
@@ -119,6 +121,27 @@ def event(state):
         deployed = state.get("deployed")
         if isinstance(deployed, str) and p.SHA.fullmatch(deployed):
             msg += "\nنسخه ثبت‌شده: " + deployed[:12]
+        if phase == "COMMITTED":
+            count = state.get("file_count")
+            if type(count) is int and count >= 0:
+                msg += "\nفایل‌های منتشرشده: " + str(count)
+            start, finish = state.get("started_at"), state.get("finished_at")
+            if type(start) is int and type(finish) is int and 0 <= finish - start <= 86400:
+                msg += "\nمدت استقرار: " + str(finish - start) + " ثانیه"
+            if state.get("restart_required") is True:
+                msg += ("\n\n✅ CI موفق | بکاپ تأیید شد"
+                        "\n✅ Polling تلگرام و سلامت دیتابیس تأیید شد"
+                        "\n🧪 تست عملیاتی مدیران: در انتظار انجام")
+            elif state.get("restart_required") is False:
+                msg += "\n✅ CI موفق | بدون انتشار فایل عملیاتی"
+            msg += "\n" + notes.render(state)
+        elif phase == "ROLLED_BACK":
+            msg += "\nنسخه جدید قابل تست نیست؛ نسخه قبلی بازیابی شده است."
+        else:
+            msg += "\nاز تست نسخه جدید تا بررسی وضعیت خودداری کنید."
+        # Telegram length is bounded conservatively in UTF-16 units.
+        if len(msg.encode("utf-16-le")) // 2 > 3900:
+            msg = msg.encode("utf-16-le")[:7600].decode("utf-16-le", errors="ignore") + "\n…"
         return key, msg
     if state.get("status") == "HOLD" and (state.get("drift") or state.get("manual")):
         # Only counts, never raw runtime paths or secret values.

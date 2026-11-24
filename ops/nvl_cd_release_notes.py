@@ -119,7 +119,7 @@ def collect(repo, baseline, candidate, fetch=None):
             if item:
                 notes["entries"].append(item)
         notes["complete"] = (len(notes["entries"]) == len(commits)
-                             and all(item.get("summary") and item.get("changes") and item.get("tests")
+                             and all(item.get("summary") and item.get("changes")
                                      for item in notes["entries"]))
     except Exception:
         pass
@@ -142,6 +142,7 @@ def render(state):
     if not isinstance(entries, list):
         entries = []
     changes = []
+    structured = False
     for item in entries[:MAX_COMMITS]:
         if not isinstance(item, dict) or type(item.get("number")) is not int or item["number"] <= 0:
             continue
@@ -151,9 +152,11 @@ def render(state):
         for key, limit in (("summary", 1), ("changes", 2)):
             values = item.get(key)
             if isinstance(values, list):
-                changes.extend("• " + value for raw in values[:limit]
-                               if (value := clean(raw, 150)))
-    if not changes:
+                cleaned = [value for raw in values[:limit]
+                           if (value := clean(raw, 150))]
+                structured = structured or bool(cleaned)
+                changes.extend("• " + value for value in cleaned)
+    if not structured:
         fallback = notes.get("commit_changes")
         if isinstance(fallback, list):
             changes.extend("• " + value for raw in fallback[:3]

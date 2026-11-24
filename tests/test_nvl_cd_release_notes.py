@@ -95,6 +95,14 @@ class ReleaseNotesTests(unittest.TestCase):
         for forbidden in ("github.com", notes.p.REPO, "git@", "https://"):
             self.assertNotIn(forbidden, text)
 
+    def test_title_only_pr_uses_commit_body_fallback(self):
+        state = dict(phase="COMMITTED", candidate=B, deployed=B,
+                     release_notes={"complete": False, "entries": [{"number": 1, "title": "PR title"}],
+                                    "commit_message": "Merge release", "commit_changes": ["Actual change"]})
+        _, text = obs.event(state)
+        self.assertIn("Actual change", text)
+        self.assertNotIn("github.com", text)
+
     def test_message_bounded_for_three_large_prs(self):
         item = {"number": 1, "title": "😀" * 100, "summary": ["😀" * 150],
                 "changes": ["😀" * 150] * 2, "tests": ["😀" * 150] * 2}

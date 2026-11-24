@@ -28448,9 +28448,22 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     # Never stringify Telegram Update/Message or raw exception here.
     # A just-deleted root password may still exist in the Update object,
     # and some network exceptions include the request payload.
-    log.error("Unhandled Telegram update id=%s error_type=%s",
-              getattr(update, "update_id", None),
-              type(context.error).__name__ if context.error else "Unknown")
+    error = context.error
+    try:
+        frames = traceback.extract_tb(error.__traceback__)[-8:] if error else []
+        locations = " > ".join(
+            f"{os.path.basename(frame.filename)}:{frame.lineno}:{frame.name}"
+            for frame in frames
+        ) or "NO_TRACEBACK"
+    except Exception:
+        locations = "TRACEBACK_UNAVAILABLE"
+    log.error(
+        "Unhandled Telegram update id=%s update_type=%s error_type=%s frames=%s",
+        getattr(update, "update_id", None),
+        type(update).__name__,
+        type(error).__name__ if error else "Unknown",
+        locations,
+    )
 
 # ==========================================
 # 🛡️ حلقهٔ پس‌زمینهٔ پایش تخطی از ظرفیت مجاز

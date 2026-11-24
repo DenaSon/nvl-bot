@@ -1,0 +1,11 @@
+[Unit]
+Description=NVL accepted Core-only auto deployment
+
+[Timer]
+OnBootSec=120s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+Unit=nvl-deploy-apply.service
+
+[Install]
+WantedBy=timers.target

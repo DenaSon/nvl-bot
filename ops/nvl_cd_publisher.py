@@ -25,6 +25,7 @@ RUNTIME = Path("/root")
 STATE = Path("/var/lib/nvl-deploy")
 BACKUPS = Path("/var/backups/nvl")
 CONFIG = Path("/etc/nvl-deploy/config.json")
+ACCEPTED = Path("/etc/nvl-deploy/operator-accepted")
 DB = RUNTIME / "master_bot.db"
 ACTIVE = {
     "failover_operations": ("RUNNING",),
@@ -118,7 +119,7 @@ class Host:
 
     def command(self, *args):
         return subprocess.check_output(args, stderr=subprocess.DEVNULL,
-                                       timeout=90, text=True)
+                                       timeout=120, text=True)
 
     def status(self):
         raw = self.command("/usr/bin/systemctl", "show", SERVICE,
@@ -312,9 +313,30 @@ def verified_manifest(host, checkpoint):
     return directory, record
 
 
+def archive_outcome(state, checkpoint):
+    """Preserve the outcome before another release can replace its checkpoint."""
+    if checkpoint.get("phase") not in FINAL | {"HOLD"}:
+        return
+    candidate = p.exact_sha(checkpoint["candidate"])
+    directory = state / "outcomes"
+    if not directory.exists():
+        directory.mkdir(mode=0o700)
+        sync_dir(state)
+    p.trusted(directory, directory=True)
+    durable_json(directory / (candidate + "-" + checkpoint["phase"] + ".json"),
+                 checkpoint)
+
+
 def set_phase(state, checkpoint, phase, **fields):
+    previous = state / "release-state.json"
+    if previous.exists():
+        # Recover the archive even if an earlier process died after saving
+        # its terminal checkpoint but before the next write below.
+        archive_outcome(state, p.load_json(previous))
     checkpoint = dict(checkpoint, phase=phase, **fields)
-    durable_json(state / "release-state.json", checkpoint)
+    if phase in FINAL | {"HOLD"}:
+        checkpoint["finished_at"] = int(time.time())
+    durable_json(previous, checkpoint)
     return checkpoint
 
 
@@ -375,10 +397,13 @@ def restore(host, state, checkpoint):
 def publish(host, state, repo, baseline, candidate, updates, old, new, revalidate):
     if not host.active() or not host.idle():
         raise p.Hold("BOT_OR_OPERATION_BUSY")
+    started_at = int(time.time())
     directory, record = stage(host, repo, baseline, candidate, updates, old, new)
     checkpoint = {"deployed": baseline, "candidate": candidate,
                   "backup": str(directory),
-                  "manifest_sha256": file_digest(directory / "manifest.json")}
+                  "manifest_sha256": file_digest(directory / "manifest.json"),
+                  "started_at": started_at, "restart_required": True,
+                  "file_count": len(updates)}
     verified_manifest(host, checkpoint)
     # Last read-only checks; no stale saved plan used as authority.
     revalidate()
@@ -397,6 +422,7 @@ def publish(host, state, repo, baseline, candidate, updates, old, new, revalidat
     try:
         if not host.idle() or host.schema() != record["schema"]:
             host.start()
+            host.healthy()
             return set_phase(state, checkpoint, "ROLLED_BACK", reason="OPERATION_OR_SCHEMA_CHANGED")
         checkpoint = set_phase(state, checkpoint, "PUBLISHING")
         for name, item in record["files"].items():
@@ -413,7 +439,8 @@ def publish(host, state, repo, baseline, candidate, updates, old, new, revalidat
         # recording a reversible release. Do not undo database changes.
         if host.schema() != record["schema"]:
             return set_phase(state, checkpoint, "HOLD", reason="SCHEMA_CHANGED")
-        return set_phase(state, checkpoint, "COMMITTED", deployed=candidate)
+        return set_phase(state, checkpoint, "COMMITTED", deployed=candidate,
+                         previous_deployed=baseline)
     except Exception:
         try:
             return restore(host, state, checkpoint)
@@ -440,6 +467,8 @@ def release(state, config, expected):
         raise p.Hold("RECOVERY_REQUIRED")
     baseline = p.exact_sha(previous["deployed"] if previous else config["baseline"])
     candidate = p.exact_sha(expected)
+    if baseline == candidate:
+        raise p.Hold("ALREADY_DEPLOYED")
     if previous and previous["phase"] == "ROLLED_BACK" and previous["candidate"] == candidate:
         raise p.Hold("FAILED_CANDIDATE_REQUIRES_REVIEW")
     if p.remote_head() != candidate:
@@ -467,10 +496,24 @@ def release(state, config, expected):
             raise p.Hold("PLAN_CHANGED")
     if not plan["updates"]:
         revalidate()
-        return set_phase(state, {"candidate": candidate}, "COMMITTED", deployed=candidate)
+        return set_phase(state, {"candidate": candidate, "restart_required": False,
+                                 "started_at": int(time.time()), "file_count": 0,
+                                 "previous_deployed": baseline}, "COMMITTED", deployed=candidate)
     # The rollback baseline must already implement the polling contract.
     host.healthy()
     return publish(host, state, repo, baseline, candidate, plan["updates"], old, new, revalidate)
+
+
+def accepted_config():
+    marker = p.trusted(ACCEPTED)
+    if marker.read_text().strip() != "CICD-06-ACCEPTED":
+        raise p.Hold("PRODUCTION_NOT_ACCEPTED")
+    config = p.load_json(CONFIG)
+    if set(config) != {"baseline", "inventory"}:
+        raise p.Hold("CONFIG_SCOPE_INVALID")
+    p.exact_sha(config["baseline"])
+    p.inventory_paths(config["inventory"])
+    return config
 
 
 def main():
@@ -487,12 +530,7 @@ def main():
         with exclusive(state):
             # This marker is deliberately NOT shipped or created by a timer.
             # CICD-06 must verify real quiescence, readiness and rollback policy.
-            marker = p.trusted(Path("/etc/nvl-deploy/operator-accepted"))
-            if marker.read_text().strip() != "CICD-06-ACCEPTED":
-                raise p.Hold("PRODUCTION_NOT_ACCEPTED")
-            config = p.load_json(CONFIG)
-            if set(config) != {"baseline", "inventory"}:
-                raise p.Hold("CONFIG_SCOPE_INVALID")
+            config = accepted_config()
             if args.recover:
                 checkpoint = p.load_json(state / "release-state.json")
                 if checkpoint["phase"] in FINAL:

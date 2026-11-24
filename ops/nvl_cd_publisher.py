@@ -17,8 +17,10 @@ import time
 
 if __package__:
     from . import nvl_cd_planner as p
+    from . import nvl_cd_release_notes as notes
 else:
     import nvl_cd_planner as p
+    import nvl_cd_release_notes as notes
 
 SERVICE = "nvlbot.service"
 RUNTIME = Path("/root")
@@ -394,7 +396,8 @@ def restore(host, state, checkpoint):
     return set_phase(state, checkpoint, "ROLLED_BACK")
 
 
-def publish(host, state, repo, baseline, candidate, updates, old, new, revalidate):
+def publish(host, state, repo, baseline, candidate, updates, old, new, revalidate,
+            release_notes=None):
     if not host.active() or not host.idle():
         raise p.Hold("BOT_OR_OPERATION_BUSY")
     started_at = int(time.time())
@@ -403,7 +406,7 @@ def publish(host, state, repo, baseline, candidate, updates, old, new, revalidat
                   "backup": str(directory),
                   "manifest_sha256": file_digest(directory / "manifest.json"),
                   "started_at": started_at, "restart_required": True,
-                  "file_count": len(updates)}
+                  "file_count": len(updates), "release_notes": release_notes or {}}
     verified_manifest(host, checkpoint)
     # Last read-only checks; no stale saved plan used as authority.
     revalidate()
@@ -494,14 +497,18 @@ def release(state, config, expected):
             raise p.Hold("MASTER_MOVED")
         if p.build_plan(old, new, inventory, host.live) != plan:
             raise p.Hold("PLAN_CHANGED")
+    # Metadata is advisory, fetched before cutover and never part of the gate.
+    release_notes = notes.collect(repo, baseline, candidate)
     if not plan["updates"]:
         revalidate()
         return set_phase(state, {"candidate": candidate, "restart_required": False,
                                  "started_at": int(time.time()), "file_count": 0,
-                                 "previous_deployed": baseline}, "COMMITTED", deployed=candidate)
+                                 "previous_deployed": baseline, "release_notes": release_notes},
+                         "COMMITTED", deployed=candidate)
     # The rollback baseline must already implement the polling contract.
     host.healthy()
-    return publish(host, state, repo, baseline, candidate, plan["updates"], old, new, revalidate)
+    return publish(host, state, repo, baseline, candidate, plan["updates"], old, new,
+                   revalidate, release_notes=release_notes)
 
 
 def accepted_config():

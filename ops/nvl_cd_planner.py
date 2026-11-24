@@ -99,12 +99,12 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def api_json(path):
+def api_json(path, timeout=15):
     req = urllib.request.Request(API + path, headers={
         "User-Agent": "NVL-CD/1", "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28"})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-    with opener.open(req, timeout=15) as res:
+    with opener.open(req, timeout=timeout) as res:
         raw = res.read(MAX_BYTES + 1)
         if len(raw) > MAX_BYTES or 'rel="next"' in res.headers.get("Link", ""):
             raise Hold("API_RESPONSE_INCOMPLETE")

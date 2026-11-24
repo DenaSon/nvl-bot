@@ -48,7 +48,7 @@ class GateTests(unittest.TestCase):
 
     def jobs(self):
         return [dict(name=name, run_id=10, head_sha=B, status="completed",
-                     conclusion="success") for name in sorted(REQUIRED)]
+                     conclusion="success", run_attempt=1) for name in sorted(REQUIRED)]
 
     def verify(self, jobs):
         verify_jobs({"total_count": len(jobs), "jobs": jobs}, run())
@@ -60,7 +60,7 @@ class GateTests(unittest.TestCase):
         base = self.jobs()
         samples = [base[:-1], base + [base[0]]]
         for key, value in (("conclusion", "failure"), ("conclusion", "skipped"),
-                           ("head_sha", A), ("run_id", 11), ("status", "queued")):
+                           ("head_sha", A), ("run_id", 11), ("run_attempt", 2), ("status", "queued")):
             jobs = deepcopy(base)
             jobs[0][key] = value
             samples.append(jobs)

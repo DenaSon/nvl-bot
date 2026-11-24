@@ -138,7 +138,8 @@ def verify_jobs(data, run):
         raise Hold("JOB_LIST_INCOMPLETE")
     names = set()
     for job in jobs:
-        if job["run_id"] != run["id"] or job["head_sha"] != run["head_sha"]:
+        if (job["run_id"] != run["id"] or job["head_sha"] != run["head_sha"]
+                or job["run_attempt"] != run["run_attempt"]):
             raise Hold("CI_JOB_IDENTITY_MISMATCH")
         if job["name"] in names:
             raise Hold("CI_JOB_DUPLICATE")
@@ -196,6 +197,11 @@ def build_plan(old, new, inventory, live_hash):
     drift, updates, manual = [], [], []
     for name in sorted(inventory):
         a, b = old.get(name), new.get(name)
+        if a is None and b is not None and b[:2] == ("100644", "blob"):
+            if live_hash(name) != "ABSENT":
+                drift.append(name)
+            updates.append(name)
+            continue
         if (a is None or b is None or a[:2] != ("100644", "blob")
                 or b[:2] != ("100644", "blob")):
             manual.append(name)
@@ -230,12 +236,21 @@ def live_blob(runtime, name):
                 or path.lstat().st_ino != after.st_ino):
             return None
         return hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw).hexdigest()
+    except FileNotFoundError:
+        # Only a genuinely absent entry can be admitted as a new file.
+        return "ABSENT" if not os.path.lexists(path) else None
     except (OSError, Hold):
         return None
 
 
 def poll(config, state, now=time.time):
     baseline = exact_sha(config["baseline"])
+    checkpoint = state / "release-state.json"
+    if checkpoint.exists():
+        saved = load_json(checkpoint)
+        if saved["phase"] not in ("COMMITTED", "ROLLED_BACK"):
+            raise Hold("RELEASE_RECOVERY_REQUIRED")
+        baseline = exact_sha(saved["deployed"])
     inventory = inventory_paths(config["inventory"])
     repo = trusted(state / "repository.git", directory=True)
     runtime = trusted(Path("/root"), directory=True)

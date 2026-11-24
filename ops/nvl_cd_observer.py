@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -36,8 +37,54 @@ def target(env):
     return token, group
 
 
-def send(text, env=os.environ):
-    configured = target(env)
+def bot_identity():
+    raw = subprocess.check_output(
+        ["/usr/bin/systemctl", "show", "nvlbot.service",
+         "-p", "ActiveState", "-p", "SubState", "-p", "MainPID", "-p", "InvocationID"],
+        text=True, timeout=5, stderr=subprocess.DEVNULL)
+    info = dict(line.split("=", 1) for line in raw.splitlines())
+    pid = int(info["MainPID"])
+    invocation = info["InvocationID"]
+    if (info["ActiveState"] != "active" or info["SubState"] != "running"
+            or pid <= 1 or not re.fullmatch(r"[0-9a-f]{32}", invocation)
+            or invocation == "0" * 32):
+        return None
+    return pid, invocation
+
+
+def bot_environ(pid):
+    with Path(f"/proc/{pid}/environ").open("rb") as stream:
+        raw = stream.read(1024 * 1024 + 1)
+    if len(raw) > 1024 * 1024:
+        return {}
+    values = {}
+    keys = {b"BOT_TOKEN", b"MARZBAN_ALERT_CHAT_ID"}
+    for entry in raw.split(b"\0"):
+        key, sep, value = entry.partition(b"=")
+        if sep and key in keys:
+            name = key.decode("ascii")
+            if name in values:
+                return {}
+            values[name] = value.decode("ascii")
+    return values
+
+
+def live_env(identity=bot_identity, read=bot_environ):
+    """Use only the actual running nvlbot invocation, never another group."""
+    try:
+        first = identity()
+        if first is None:
+            return {}
+        values = read(first[0])
+        if identity() != first or not target(values):
+            return {}
+        return {name: values[name] for name in ("BOT_TOKEN", "MARZBAN_ALERT_CHAT_ID")}
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return {}
+
+
+def send(text, env=None):
+    configured = target(live_env() if env is None else env)
     if not configured:
         return False
     token, group = configured
@@ -137,7 +184,7 @@ def current_plan(plan, checkpoint, plan_mtime, checkpoint_mtime):
             and plan_mtime > checkpoint_mtime)
 
 
-def observe(state, env=os.environ, now=None, sender=None):
+def observe(state, env=None, now=None, sender=None):
     now = int(time.time()) if now is None else now
     if sender is None:
         sender = lambda message: send(message, env)
@@ -195,10 +242,16 @@ def retention_candidates(backups, checkpoint, now):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--retention-report", action="store_true")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--retention-report", action="store_true")
+    group.add_argument("--check-target", action="store_true")
     args = parser.parse_args()
     os.umask(0o077)
     try:
+        if args.check_target:
+            ready = target(live_env()) is not None
+            print(json.dumps({"telegram_target": "READY" if ready else "UNAVAILABLE"}))
+            return 0 if ready else 2
         state = p.trusted(pub.STATE, directory=True)
         # Reuse the deploy lock; observer never blocks or edits bot operations.
         with pub.exclusive(state):

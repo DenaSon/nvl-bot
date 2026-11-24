@@ -71,3 +71,21 @@ class ObserverTests(unittest.TestCase):
         for phase in ("PUBLISHING", "STARTING", "HOLD"):
             self.assertFalse(obs.current_plan({"baseline": SHA},
                                              {"phase": phase, "deployed": SHA}, 30, 20))
+
+    def test_live_env_uses_current_bot_only(self):
+        ident = (753, "1" * 32)
+        read = Mock(return_value=ENV | {"MASTER_PASS": "not-returned"})
+        self.assertEqual(obs.live_env(lambda: ident, read), ENV)
+        read.assert_called_once_with(753)
+
+    def test_live_env_rejects_restarted_bot_and_missing_group(self):
+        first, second = (753, "1" * 32), (754, "2" * 32)
+        self.assertEqual(obs.live_env(Mock(side_effect=[first, second]),
+                                      lambda pid: ENV), {})
+        self.assertEqual(obs.live_env(lambda: first,
+                                      lambda pid: {"BOT_TOKEN": ENV["BOT_TOKEN"]}), {})
+        self.assertEqual(obs.live_env(lambda: None, lambda pid: ENV), {})
+
+    def test_live_env_defers_on_read_error(self):
+        self.assertEqual(obs.live_env(lambda: (753, "1" * 32),
+                                      Mock(side_effect=PermissionError)), {})

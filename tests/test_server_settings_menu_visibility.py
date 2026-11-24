@@ -82,7 +82,8 @@ class ServerMenuVisibilityTests(unittest.TestCase):
         }
         retained = {
             "srv_status",
-            "srv_brand",
+            "apps_home",
+            "hp_filtering",
             "srv_udpgw",
             "srv_health",
             "ipsvc_menu",

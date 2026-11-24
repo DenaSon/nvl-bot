@@ -12,6 +12,9 @@ historical exception itself cannot be independently recovered.
 ## Changes
 - The apply unit retains ProtectSystem=strict, the explicit writable paths,
   PrivateTmp and NoNewPrivileges, with ProtectHome=false for /root.
+- Planner reconciles only the explicitly allowlisted apply unit template after
+  exact manual installation, daemon-reload, no drop-ins and verification of
+  the effective sandbox. Other systemd changes remain manual HOLD.
 - The publisher tests actual atomic create/replace and cleanup in the runtime
   and existing bytecode directory before STOPPING; a failed test defers
   publication without stopping the bot. Rollback requiring writes also tests
@@ -31,6 +34,10 @@ historical exception itself cannot be independently recovered.
 Keep apply and plan timers disabled; observer may continue. Check the effective
 unit and reproduce the write probe before any real deploy. Install exact
 trusted control-plane blobs from the accepted master (they do not self-update).
+Install the exact apply unit template as /etc/systemd/system/nvl-deploy-apply.service,
+backup and remove only the now-redundant reviewed 90-runtime-write.conf drop-in,
+then daemon-reload. Unexpected overrides require operator review; never remove
+them automatically. The planner compares the unit blob and effective settings.
 Review the existing HOLD and manifest; use the explicit recovery path only after
 operator approval and verified runtime/schema/idle/readiness. Legacy HOLD may
 require a controlled restart. Do not edit checkpoint JSON or restore SQLite.

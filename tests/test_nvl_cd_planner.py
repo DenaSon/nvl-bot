@@ -1,6 +1,8 @@
 """Offline gate and plan regressions."""
 import unittest
 from copy import deepcopy
+from unittest.mock import patch
+from ops import nvl_cd_planner as planner
 from ops.nvl_cd_planner import (Hold, REQUIRED, REPO, WORKFLOW, select_run,
                                 verify_jobs, build_plan, inventory_paths)
 
@@ -126,6 +128,50 @@ class PlanTests(unittest.TestCase):
                 plan = build_plan(old, new, set(), lambda _: "ABSENT", lambda _: B)
                 self.assertEqual(plan["status"], "HOLD")
                 self.assertEqual(plan["manual"], ["ops/nvl_cd_publisher.py"])
+
+    def test_apply_unit_requires_exact_installed_candidate(self):
+        name = planner.APPLY_UNIT_TEMPLATE
+        old = {"bot.py": item(A), name: item(A)}
+        new = {"bot.py": item(B), name: item(B)}
+        for installed in (None, A, B):
+            plan = build_plan(old, new, {"bot.py"}, lambda _: A, lambda _: installed)
+            self.assertEqual(plan["status"], "PLAN_READY" if installed == B else "HOLD")
+            self.assertEqual(plan["manual"], [] if installed == B else [name])
+        other = "systemd/nvl-deploy-observer.service.example"
+        self.assertEqual(build_plan(old, new | {other: item(B)}, {"bot.py"},
+                                    lambda _: A, lambda _: B)["manual"], [other])
+
+    def test_apply_unit_requires_effective_reloaded_hardened_config(self):
+        expected = {"FragmentPath": str(planner.APPLY_UNIT), "DropInPaths": "",
+                    "NeedDaemonReload": "no", "ProtectHome": "no",
+                    "ProtectSystem": "strict", "PrivateTmp": "yes",
+                    "NoNewPrivileges": "yes",
+                    "ReadWritePaths": "/root /var/lib/nvl-deploy /var/backups/nvl"}
+        def render(fields):
+            return "\n".join(f"{key}={value}" for key, value in fields.items())
+        with patch.object(planner, "live_blob", return_value=B), \
+                patch.object(planner.subprocess, "check_output", return_value=render(expected)) as show:
+            self.assertEqual(planner.control_plane_blob(planner.APPLY_UNIT_TEMPLATE), B)
+            for changes in ({"ProtectHome": "read-only"}, {"NeedDaemonReload": "yes"},
+                            {"DropInPaths": "/etc/systemd/system/override.conf"},
+                            {"ReadWritePaths": "/root /etc"}, {"ProtectSystem": "no"}):
+                show.return_value = render(expected | changes)
+                self.assertIsNone(planner.control_plane_blob(planner.APPLY_UNIT_TEMPLATE))
+
+    def test_apply_unit_race_or_missing_fragment_holds(self):
+        with patch.object(planner, "live_blob", return_value="ABSENT"), \
+                patch.object(planner.subprocess, "check_output") as show:
+            self.assertIsNone(planner.apply_unit_blob())
+            show.assert_not_called()
+        expected = {"FragmentPath": str(planner.APPLY_UNIT), "DropInPaths": "",
+                    "NeedDaemonReload": "no", "ProtectHome": "no",
+                    "ProtectSystem": "strict", "PrivateTmp": "yes",
+                    "NoNewPrivileges": "yes",
+                    "ReadWritePaths": "/root /var/lib/nvl-deploy /var/backups/nvl"}
+        with patch.object(planner, "live_blob", side_effect=[B, A]), \
+                patch.object(planner.subprocess, "check_output",
+                             return_value="\n".join(f"{k}={v}" for k, v in expected.items())):
+            self.assertIsNone(planner.apply_unit_blob())
 
     def test_inventory_only_explicit_root_python(self):
         self.assertEqual(inventory_paths(["bot.py"]), {"bot.py"})

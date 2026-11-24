@@ -19,7 +19,7 @@ def load_source():
     return BOT.read_text(encoding="utf-8")
 
 
-def load_server_settings_keyboard(source):
+def load_server_settings_keyboard(source, **kwargs):
     tree = ast.parse(source)
     function = next(
         node for node in tree.body
@@ -31,7 +31,7 @@ def load_server_settings_keyboard(source):
         compile(ast.Module(body=[function], type_ignores=[]), str(BOT), "exec"),
         namespace,
     )
-    return namespace["_build_server_settings_kb"]()
+    return namespace["_build_server_settings_kb"](**kwargs)
 
 
 def load_ip_service_keyboard(source):
@@ -93,6 +93,16 @@ class ServerMenuVisibilityTests(unittest.TestCase):
 
         self.assertTrue(hidden.isdisjoint(callbacks))
         self.assertTrue(retained.issubset(callbacks))
+
+    def test_edge_navigation_requires_explicit_authorized_ui(self):
+        new_rows = [[("➕ افزودن Edge جدید · AWG", "apps_edge_manual_new_awg")]]
+        for allowed in (False, True):
+            with self.subTest(allowed=allowed):
+                buttons = flatten(load_server_settings_keyboard(
+                    self.source, edge_allowed=allowed, new_edge_rows=new_rows))
+                callbacks = {button.callback_data for button in buttons}
+                self.assertEqual("apps_edge_quick_home" in callbacks, allowed)
+                self.assertEqual("apps_edge_manual_new_awg" in callbacks, allowed)
 
     def test_ip_service_menu_hides_legacy_entries_and_keeps_active_actions(self):
         buttons = flatten(load_ip_service_keyboard(self.source))

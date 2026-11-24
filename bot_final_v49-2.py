@@ -2005,9 +2005,9 @@ def _db_update_setting(k, v):
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, v))
 
 
-def _build_server_settings_kb():
-    """Canonical infrastructure hub; legacy srv_menu_back is kept."""
-    return [
+def _build_server_settings_kb(*, edge_allowed=False, new_edge_rows=()):
+    """Canonical infrastructure hub; Edge actions require a live private admin."""
+    rows = [
         [InlineKeyboardButton("🖥 سرورها (Core / Edge)", callback_data="srv_status")],
         [InlineKeyboardButton("🧩 Marzban و ابزارهای شبکه", callback_data="apps_home")],
         [InlineKeyboardButton("🛡 پایش فیلترینگ", callback_data="hp_filtering"),
@@ -2017,6 +2017,13 @@ def _build_server_settings_kb():
         [InlineKeyboardButton("🔌 تنظیمات UDPGW", callback_data="srv_udpgw")],
         [InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")],
     ]
+    if edge_allowed:
+        rows[0:0] = [[InlineKeyboardButton("🌐 مدیریت Edge", callback_data="apps_edge_quick_home")]]
+        rows[1:1] = [
+            [InlineKeyboardButton(label, callback_data=callback) for label, callback in row]
+            for row in new_edge_rows
+        ]
+    return rows
 
 # 🆕 توابع دیتابیس مربوط به استخر IP و پایش سلامت خودکار (تشخیص فیلترشدن/از کار افتادن)
 def _normalize_ssh_port(value, fallback=22):
@@ -7915,19 +7922,8 @@ def _build_admin_programs_kb(*, actor=None, chat=None, active_admin_ids=()):
         ],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")],
     ]
-    # Only current private-chat admins see the active Edge entry.
-    # Historical provider cards remain callable from old messages, but are
-    # not advertised in the Programs navigation.
-    if (type(actor) is int and type(chat) is int
-            and actor > 0 and actor == chat and actor in active_admin_ids):
-        rows.insert(0,[InlineKeyboardButton(
-            "🌐 مدیریت Edge", callback_data="apps_edge_quick_home")])
-        # Retain the existing DPT/1 historical quality reports.
-        rows.insert(1,[InlineKeyboardButton(
-            "📊 گزارش DenaProbe", callback_data="apps_dpt_24")])
-        if globals().get("_DP3_ENABLED", False):
-            rows.insert(1,[InlineKeyboardButton(
-                "📡 پایش DenaProbe", callback_data=_DP3_ENTRY)])
+    # Edge now lives in Infrastructure; legacy DenaProbe callbacks and
+    # background monitoring remain intact but are not advertised here.
     return rows
 
 
@@ -8586,10 +8582,10 @@ def _nav_settings_rows(role, *, superadmin=False, card_allowed=False):
 
 def _nav_finance_rows(role, *, superadmin=False, accounting_enabled=False, chart_enabled=False):
     if role == 'admin':
-        rows = [[("📊 گزارش فروش", "info_general")]]
+        reports = [("📊 گزارش فروش", "info_general")]
         if chart_enabled:
-            rows.append([("📈 نمودار فروش", "info_chart")])
-        rows.append([("💳 مدیریت کارت‌ها", "fin_menu")])
+            reports.append(("📈 نمودار فروش", "info_chart"))
+        rows = [reports, [("💳 مدیریت کارت‌ها", "fin_menu")]]
         if superadmin:
             rows.extend([
                 [("💼 سوابق مالی نمایندگان", "super_agent_list")],
@@ -8723,7 +8719,17 @@ async def _show_nav_sale_favorites(target, context):
 
 
 async def _show_nav_infrastructure(target):
-    markup = InlineKeyboardMarkup(_build_server_settings_kb())
+    actor = getattr(getattr(target, "from_user", None), "id", None)
+    message = getattr(target, "message", target)
+    chat = getattr(message, "chat_id", None)
+    edge_allowed = (
+        type(actor) is int and type(chat) is int and actor > 0 and actor == chat
+        and getattr(getattr(message, "chat", None), "type", None) == "private"
+        and actor in await asyncio.to_thread(_db_get_admin_chat_ids)
+    )
+    new_edge_rows = _manual_edge._new_edge_buttons() if edge_allowed else ()
+    markup = InlineKeyboardMarkup(_build_server_settings_kb(
+        edge_allowed=edge_allowed, new_edge_rows=new_edge_rows))
     if hasattr(target, 'edit_message_text'):
         await _safe_edit_or_send(target, "🌐 <b>زیرساخت</b>", reply_markup=markup, parse_mode="HTML")
     else:
@@ -8733,8 +8739,7 @@ async def _show_nav_infrastructure(target):
 async def _show_nav_agents(target):
     await _nav_render(target, "🤝 <b>نمایندگان</b>", [
         [("📋 فهرست نمایندگان", "agm_list"), ("➕ افزودن نماینده", "agm_add")],
-        [("📊 گزارش مالی نمایندگان", "agm_finlist")],
-        [("📢 اطلاعیه‌ها", "bcast_menu")],
+        [("📊 گزارش مالی نمایندگان", "agm_finlist"), ("📢 اطلاعیه‌ها", "bcast_menu")],
         [("🏠 منوی اصلی", "uact_back_to_menu")],
     ])
 
@@ -8906,18 +8911,20 @@ async def _show_buy_start(update, context):
     v2_any = v2_unlimit_en or v2_vol_en
     role = context.user_data.get('role')
 
-    kb = []
+    services = []
     if ssh_en:
-        kb.append([InlineKeyboardButton("🔐 فروش SSH", callback_data="buy_direct")])
+        services.append(InlineKeyboardButton("🔐 فروش SSH", callback_data="buy_direct"))
     if v2_any:
-        kb.append([InlineKeyboardButton("🚀 فروش V2Ray", callback_data="v2ray_buy_menu")])
+        services.append(InlineKeyboardButton("🚀 فروش V2Ray", callback_data="v2ray_buy_menu"))
 
+    shortcuts = []
     if ssh_en and await asyncio.to_thread(_db_get_favs):
-        kb.append([InlineKeyboardButton("⭐ فروش سریع SSH", callback_data="nav:sale_favorites")])
+        shortcuts.append(InlineKeyboardButton("⭐ فروش سریع SSH", callback_data="nav:sale_favorites"))
 
     if bulk_en and ssh_en:
-        kb.append([InlineKeyboardButton("📦 فروش عمده SSH", callback_data="buy_bulk_start")])
+        shortcuts.append(InlineKeyboardButton("📦 فروش عمده SSH", callback_data="buy_bulk_start"))
 
+    kb = [row for row in (services, shortcuts) if row]
     kb.append([InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")])
 
     txt = "➕ <b>فروش اشتراک</b>"
@@ -8959,8 +8966,8 @@ async def _show_users_hub(target, context):
             ("🚀 V2Ray مدت‌دار", "umanage_v2ray"),
             ("📦 V2Ray حجمی", "umanage_v2ray_vol"),
         )
-        kb = [[InlineKeyboardButton(label, callback_data=cb)] for label, cb in labels]
-        kb.append([InlineKeyboardButton("🟢 کاربران آنلاین", callback_data="info_online")])
+        buttons = [InlineKeyboardButton(label, callback_data=cb) for label, cb in labels]
+        kb = [buttons[:2], buttons[2:] + [InlineKeyboardButton("🟢 کاربران آنلاین", callback_data="info_online")]]
         kb.append([InlineKeyboardButton("🛠 مدیریت مستقیم Marzban", callback_data="mza_home")])
     if role == 'agent' and _agent_lifecycle_access(context.user_data.get('agent_id', 0)):
         kb.append([InlineKeyboardButton("⏳ کاربران نزدیک به انقضا", callback_data="aglx_soon_3")])
@@ -10936,8 +10943,8 @@ async def _show_marzban_admin_dashboard(target, context):
         [InlineKeyboardButton("➕ ساخت مستقیم User", callback_data="mza_create")],
         [InlineKeyboardButton("👥 کاربران", callback_data="mza_users_0"),
          InlineKeyboardButton("🟢 آنلاین", callback_data="mza_online_0")],
-        [InlineKeyboardButton("🔍 جستجوی کاربر", callback_data="mza_search")],
-        [InlineKeyboardButton("🧩 زیرساخت Marzban", callback_data="apps_home")],
+        [InlineKeyboardButton("🔍 جستجوی کاربر", callback_data="mza_search"),
+         InlineKeyboardButton("🧩 زیرساخت Marzban", callback_data="apps_home")],
         [InlineKeyboardButton("🔄 به‌روزرسانی", callback_data="mza_home")],
         [InlineKeyboardButton("🔙 کاربران", callback_data="users_hub")],
     ]

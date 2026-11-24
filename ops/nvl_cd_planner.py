@@ -29,6 +29,21 @@ CONTROL_PLANE_PATH = re.compile(r"ops/nvl_cd_[a-z0-9_]+\.py\Z")
 APPLY_UNIT_TEMPLATE = "systemd/nvl-deploy-apply.service.example"
 APPLY_UNIT = Path("/etc/systemd/system/nvl-deploy-apply.service")
 
+# Explicitly reviewed repository-only transitions from UI-02. Match both
+# Git tree entries, not merely a filename. Future edits, re-additions,
+# mode changes and unreviewed removals remain manual HOLD. Inventory
+# entries are evaluated first and cannot be bypassed by this policy.
+REVIEWED_NONRUNTIME_TRANSITIONS = {
+    "cloudzy_phase8_matrix.py": (
+        ("100644", "blob", "da4d245ddd7b3def54eda31a7f345524146f5f5a"),
+        None,
+    ),
+    "ops/denaprobe_r3_stage_bot.py": (
+        ("100644", "blob", "9251cbe62214539ea7dec74e6889c3d5f91cf391"),
+        ("100644", "blob", "5044a4c67c27e7d6b65814c3cc1c30fa38418dad"),
+    ),
+}
+
 
 class Hold(RuntimeError):
     pass
@@ -219,6 +234,8 @@ def build_plan(old, new, inventory, live_hash, control_plane_hash=None):
         if old.get(name) == new.get(name) or name in inventory:
             continue
         if nonruntime(name):
+            continue
+        if REVIEWED_NONRUNTIME_TRANSITIONS.get(name) == (old.get(name), new.get(name)):
             continue
         if CONTROL_PLANE_PATH.fullmatch(name) or name == APPLY_UNIT_TEMPLATE:
             candidate = new.get(name)

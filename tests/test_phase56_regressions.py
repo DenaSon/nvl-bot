@@ -177,3 +177,55 @@ class SaleFavoritesNavigationTests(unittest.IsolatedAsyncioTestCase):
         state["enabled"] = "1"
         await handler(object(), ctx)
         self.assertEqual({cb for row in views[-1] for _, cb in row}, {"buy_back_start", "buyfav_1_2"})
+
+
+class WalletNavigationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_wallet_uses_reseller_scope_and_retains_financial_actions(self):
+        from html import escape
+        tree = ast.parse(BOT.read_text(encoding="utf-8"))
+        node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef)
+                    and n.name == "_show_nav_agent_wallet")
+        calls, views = [], []
+        info = [0] * 18
+        info[1], info[2], info[4], info[10], info[14] = "ref", 125000, "50000", "brand", 70000
+        info[16], info[17] = "160000", "4000"
+        def account(aid):
+            calls.append(aid)
+            return info
+        async def render(target, title, rows):
+            views.append((title, rows))
+        ns = {"asyncio": asyncio, "is_auth": lambda ctx: ctx.user_data.get("logged_in"),
+              "_db_get_agent_info": account, "_db_get_sales_stats": lambda aid: (1, 2, 3, 4, 5),
+              "_db_get_agent_pending_withdrawals": lambda aid: [1],
+              "esc": escape, "AGENT_CASHBACK_MIN_ACTIVE_ACCOUNTS": 10,
+              "AGENT_CASHBACK_PCT": 5, "_nav_render": render}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(BOT), "exec"), ns)
+        handler = ns["_show_nav_agent_wallet"]
+        await handler(object(), SimpleNamespace(user_data={"role": "admin", "logged_in": True, "agent_id": 7}))
+        await handler(object(), SimpleNamespace(user_data={"role": "agent", "agent_id": 7}))
+        self.assertEqual(calls, [])
+        await handler(object(), SimpleNamespace(user_data={"role": "agent", "logged_in": True, "agent_id": 7}))
+        self.assertEqual(calls, [7])
+        title, rows = views[-1]
+        self.assertIn("125,000", title)
+        callbacks = {cb for row in rows for _, cb in row}
+        self.assertEqual(callbacks, {"wd_request", "wd_towallet", "wd_mylist", "mysubs_1", "uact_back_to_menu"})
+        info[14] = 0
+        await handler(object(), SimpleNamespace(user_data={"role": "agent", "logged_in": True, "agent_id": 7}))
+        self.assertNotIn("wd_request", {cb for row in views[-1][1] for _, cb in row})
+
+
+class TelegramStyleCompatibilityTests(unittest.TestCase):
+    def test_native_styles_serialize_with_pinned_telegram_library(self):
+        from telegram import InlineKeyboardButton
+        tree = ast.parse(BOT.read_text(encoding="utf-8"))
+        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                    and n.name == "_nav_button")
+        ns = {"InlineKeyboardButton": InlineKeyboardButton}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(BOT), "exec"), ns)
+        button = ns["_nav_button"]
+        for cb, expected in (("buy_yes", "success"), ("agm_add", "primary"),
+                             ("agself_card_clear", "danger"), ("uact_back_to_menu", None)):
+            payload = button("test", cb).to_dict()
+            self.assertEqual(payload["callback_data"], cb)
+            self.assertEqual(payload.get("style"), expected)

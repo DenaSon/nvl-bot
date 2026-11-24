@@ -8534,6 +8534,8 @@ def _nav_button(label, callback):
     # Default (client theme) for navigation and unclassified operations.
     styles = {
         "nav:logout": "danger",
+        "buy_yes": "success",
+        "rnyes": "success",
         "confirm_logout_yes": "danger",
         "agm_add": "primary",
         "bcast_menu": "primary",
@@ -8615,16 +8617,74 @@ async def _show_nav_settings(target, update, context):
     await _nav_render(target, "⚙️ <b>تنظیمات</b>", rows)
 
 
+async def _show_nav_agent_wallet(target, context):
+    """Read-only wallet view; all existing financial actions retain their handlers."""
+    ag_id = context.user_data.get('agent_id', 0)
+    if not is_auth(context) or context.user_data.get('role') != 'agent' or not ag_id:
+        return
+    info = await asyncio.to_thread(_db_get_agent_info, ag_id)
+    if not info:
+        await _nav_render(target, "❌ حساب نمایندگی یافت نشد.", [[("🏠 منوی اصلی", "uact_back_to_menu")]])
+        return
+    _today, _week, _month, act, _total = await asyncio.to_thread(_db_get_sales_stats, ag_id)
+    
+    referral_income = info[9] if len(info) > 9 and info[9] is not None else 0
+    my_prefix = info[10] if len(info) > 10 and info[10] else None
+    withdrawable = info[14] if len(info) > 14 and info[14] is not None else 0.0
+    cashback_income = info[15] if len(info) > 15 and info[15] is not None else 0.0
+    
+    v2_base_price = info[16] if len(info) > 16 and info[16] else '160000'
+    try: ssh_bp_fmt = f"{int(str(info[4]).replace(',', '')):,}"
+    except: ssh_bp_fmt = esc(str(info[4]))
+    try: v2_bp_fmt = f"{int(str(v2_base_price).replace(',', '')):,}"
+    except: v2_bp_fmt = esc(str(v2_base_price))
+    v2_vol_bp = info[17] if len(info) > 17 and info[17] else '4000'
+    try: v2_vol_bp_fmt = f"{int(str(v2_vol_bp).replace(',', '')):,}"
+    except: v2_vol_bp_fmt = esc(str(v2_vol_bp))
+    
+    prefix_line = f"<code>{esc(my_prefix)}</code>" if my_prefix else "پیش‌فرض سیستم (تنظیم‌نشده)"
+    cashback_note = ""
+    if act >= AGENT_CASHBACK_MIN_ACTIVE_ACCOUNTS:
+        cashback_note = f"🎁 شما به‌خاطر {act} اکانت فعال، از این پس {int(AGENT_CASHBACK_PCT)}٪ کش‌بک هر خرید را دریافت می‌کنید!\n"
+    else:
+        remain_for_cashback = AGENT_CASHBACK_MIN_ACTIVE_ACCOUNTS - act
+        cashback_note = f"🎁 با {remain_for_cashback} اکانت فعال دیگر (مجموع {AGENT_CASHBACK_MIN_ACTIVE_ACCOUNTS}+)، {int(AGENT_CASHBACK_PCT)}٪ کش‌بک هر خرید را دریافت می‌کنید.\n"
+    
+    txt = (f"💰 <b>کیف پول و حساب</b>\n\n"
+           f"💰 موجودی: <b>{int(info[2]):,} تومان</b>\n"
+           f"🔑 کد رفرال: <code>{esc(info[1])}</code>\n"
+           f"💵 نرخ پایه SSH (هر کاربر/ماه): {ssh_bp_fmt} تومان\n"
+           f"🚀 نرخ پایه V2Ray (هر کاربر/ماه): {v2_bp_fmt} تومان\n"
+           f"🪐 نرخ پایه V2Ray حجمی (هر گیگ): {v2_vol_bp_fmt} تومان\n"
+           f"💹 درآمد از زیرمجموعه‌گیری (پورسانت شبکه): {int(referral_income):,} تومان\n"
+           f"🎁 مجموع کش‌بک دریافتی: {int(cashback_income):,} تومان\n"
+           f"💵 <b>استخر قابل‌برداشت (پورسانت + کش‌بک):</b> {int(withdrawable):,} تومان\n"
+           f"{cashback_note}"
+           f"🏷 پیشوند یوزرنیم: {prefix_line}")
+    kb = []
+    if withdrawable > 0:
+        kb.append([("💵 برداشت وجه", "wd_request"), ("➕ افزودن به کیف پول", "wd_towallet")])
+    pending_wds = await asyncio.to_thread(_db_get_agent_pending_withdrawals, ag_id)
+    if pending_wds:
+        kb.append([(f"🧾 برداشت‌های در انتظار ({len(pending_wds)})", "wd_mylist")])
+    kb.append([("👥 زیرمجموعه‌ها", "mysubs_1")])
+    kb.append([("🏠 منوی اصلی", "uact_back_to_menu")])
+    await _nav_render(target, txt, kb)
+
+
 async def _show_nav_finance(target, update, context):
     role = context.user_data.get('role')
-    if role not in ('admin', 'agent'):
+    if role == 'agent':
+        await _show_nav_agent_wallet(target, context)
+        return
+    if role != 'admin':
         return
     rows = _nav_finance_rows(
         role, superadmin=role == 'admin' and _is_superadmin_update(update, context),
         accounting_enabled=NVL_SUPERADMIN_ACCOUNTING_REPORT_ENABLED,
         chart_enabled=MATPLOTLIB_AVAILABLE,
     )
-    await _nav_render(target, "💰 <b>مالی</b>" if role == 'admin' else "💰 <b>کیف پول و حساب</b>", rows)
+    await _nav_render(target, "💰 <b>مالی</b>", rows)
 
 
 async def _show_nav_agent_reports(target, context):
@@ -11887,7 +11947,9 @@ async def _show_agent_detail(query, context, a_id):
     """🆕 پنل جزئیات یک نماینده را (دوباره) رندر می‌کند — هم از دکمهٔ «مشاهده نماینده» در لیست و هم
     بعد از لغو/تکمیل تغییر یوزرنیم/پسورد ورود یک نماینده استفاده می‌شود، تا کد تکراری نشود."""
     info = await asyncio.to_thread(_db_get_agent_info, a_id)
-    if not info: await query.edit_message_text("❌ وجود ندارد."); return
+    if not info:
+        await _nav_render(query, "❌ نماینده یافت نشد.", [[("🔙 نمایندگان", "agm_list")]])
+        return
     t, w, m_val, act, total = await asyncio.to_thread(_db_get_sales_stats, a_id)
     t_ssh, w_ssh, m_ssh, act_ssh, total_ssh = await asyncio.to_thread(_db_get_sales_stats, a_id, 'ssh')
     t_v2, w_v2, m_v2, act_v2, total_v2 = await asyncio.to_thread(_db_get_sales_stats, a_id, 'v2ray')
@@ -11908,11 +11970,11 @@ async def _show_agent_detail(query, context, a_id):
     try: v2_vol_bp_fmt = f"{int(str(v2_vol_bp).replace(',', '')):,}"
     except: v2_vol_bp_fmt = str(v2_vol_bp)
 
-    txt = (f"💼 <b>{esc(info[0])}</b>\n👤 یوزرنیم ورود: <code>{esc(agent_username)}</code>\n🔑 رفرال: <code>{esc(info[1])}</code>\n💰 موجودی: <b>{int(info[2]):,} تومان</b>\n"
-           f"💹 درآمد از زیرمجموعه: {int(referral_income):,} تومان\n"
-           f"💵 نرخ پایه SSH (هر کاربر/ماه): {ssh_bp_fmt} تومان\n"
-           f"🚀 نرخ پایه V2Ray (هر کاربر/ماه): {v2_bp_fmt} تومان\n"
-           f"🪐 نرخ پایه V2Ray حجمی (هر گیگ): {v2_vol_bp_fmt} تومان\n"
+    txt = (f"💼 <b>{esc(info[0])}</b>\nنام کاربری: <code>{esc(agent_username)}</code>\nکد معرفی: <code>{esc(info[1])}</code>\n💰 موجودی: <b>{int(info[2]):,} تومان</b>\n"
+           f"\n<b>مالی</b>\n💹 درآمد از زیرمجموعه: {int(referral_income):,} تومان\n"
+           f"\n<b>تعرفه‌ها</b>\nSSH (کاربر/ماه): {ssh_bp_fmt} تومان\n"
+           f"V2Ray (کاربر/ماه): {v2_bp_fmt} تومان\n"
+           f"V2Ray حجمی (گیگابایت): {v2_vol_bp_fmt} تومان\n"
            f"🎁 مجموع کش‌بک: {int(cashback_income):,} تومان\n"
            f"💵 استخر قابل‌برداشت: {int(withdrawable):,} تومان\n"
            f"🏷 پیشوند یوزرنیم: <code>{esc(agent_prefix)}</code>\n")
@@ -11925,7 +11987,7 @@ async def _show_agent_detail(query, context, a_id):
     txt += (f"\n📉 <b>درصدهای شبکه:</b>\nلایه 1: {info[3]}%\nلایه 2: {info[5]}%\nلایه 3: {info[6]}%\n\n"
             f"📦 <b>آمار کل فروش نماینده:</b>\n"
             f"کل فروخته‌شده: {total} | اکانت فعال: {act}\n"
-            f"فروش امروز: {t} | فروش هفته: {w} | فروش ماه: {m_val}\n\n"
+            f"امروز: {t} · هفته: {w} · ماه: {m_val}\n\n"
             f"🔹 <b>تفکیک SSH:</b>\n"
             f"کل فروخته‌شده: {total_ssh} | اکانت فعال: {act_ssh}\n"
             f"فروش امروز: {t_ssh} | فروش هفته: {w_ssh} | فروش ماه: {m_ssh}\n\n"
@@ -11958,7 +12020,7 @@ async def _show_buy_summary(update_or_message, context, edit=False):
 
     # 📦 در حالت عمده، دکمهٔ افزودن/حذف از «کانفیگ‌های مورد علاقه» نمایش داده نمی‌شود
     kb = [
-        [InlineKeyboardButton("✅ تأیید و ساخت", callback_data="buy_yes", style="success"), InlineKeyboardButton("بازگشت", callback_data="buy_back_start")]
+        [_nav_button("✅ تأیید و ساخت", "buy_yes"), InlineKeyboardButton("بازگشت", callback_data="buy_back_start")]
     ]
     if not bulk_mode:
         is_fav = await asyncio.to_thread(_db_check_fav, m, u)
@@ -12038,7 +12100,7 @@ async def _show_renew_confirm(target, context, un, days, label, edit=True, mode=
                                 * (Decimal(days) / Decimal(30))
                                 * Decimal(account_users_limit))
                 txt += f"\n💳 هزینهٔ این تمدید: {int(preview_cost):,} تومان"
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ بله، انجام شود", callback_data="rnyes"), InlineKeyboardButton("❌ خیر", callback_data="rnno")]])
+    kb = InlineKeyboardMarkup([[_nav_button("✅ تأیید", "rnyes"), InlineKeyboardButton("❌ خیر", callback_data="rnno")]])
     if edit: await target.edit_message_text(txt, reply_markup=kb)
     else: await target.reply_text(txt, reply_markup=kb)
 
@@ -24106,6 +24168,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(txt, reply_markup=kb, parse_mode="HTML")
     elif d.startswith("agm_det_") and role == 'admin':
         a_id = int(d.split("_")[2])
+        safe_clear_context(context)
         await _show_agent_detail(query, context, a_id)
     elif d.startswith("agm_users_") and role == 'admin':
         a_id = int(d.split("_")[2])
@@ -24263,72 +24326,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("✅ نماینده حذف شد.", reply_markup=kb)
     elif d.startswith("agmdelconf_no_") and role == 'admin':
         a_id = int(d.split("_", 2)[2])
-        info = await asyncio.to_thread(_db_get_agent_info, a_id)
-        if not info: return await query.edit_message_text("❌ این نماینده دیگر وجود ندارد.")
-        t, w, m, act, total = await asyncio.to_thread(_db_get_sales_stats, a_id)
-        referral_income = info[9] if len(info) > 9 and info[9] is not None else 0
-        txt = (f"💼 نماینده: {esc(info[0])}\n🔑 رفرال: <code>{esc(info[1])}</code>\n💰 موجودی: {int(info[2]):,} تومان\n"
-               f"💹 درآمد از زیرمجموعه: {int(referral_income):,} تومان\n\n"
-               f"📉 <b>درصدهای شبکه:</b>\nلایه 1: {info[3]}%\nلایه 2: {info[5]}%\nلایه 3: {info[6]}%\n\n"
-               f"📦 کل اکانت‌های فروخته‌شده: {total}\nفروش امروز: {t} | فروش هفته: {w} | فروش ماه: {m}\nاکانت فعال: {act}")
-        kb = [[InlineKeyboardButton("👥 مشاهده کاربران این نماینده", callback_data=f"agm_users_{a_id}")],
-              [InlineKeyboardButton("💰 شارژ مستقیم کیف‌پول", callback_data=f"agm_topup_{a_id}")],
-              [InlineKeyboardButton("💵 تنظیم قیمت پایه", callback_data=f"ag_p_{a_id}"), InlineKeyboardButton("📉 تخفیف مستقیم", callback_data=f"ag_c1_{a_id}")],
-              [InlineKeyboardButton("📉 تخفیف پدر", callback_data=f"ag_c2_{a_id}"), InlineKeyboardButton("📉 تخفیف پدربزرگ", callback_data=f"ag_c3_{a_id}")],
-              [InlineKeyboardButton("🗑 حذف نماینده", callback_data=f"agm_del_{a_id}")],
-              [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="agm_list")]]
-        await query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+        safe_clear_context(context)
+        await _show_agent_detail(query, context, a_id)
 
     # گزارش‌ها و مانیتورینگ
     elif d == "info_general":
         if role not in ('admin', 'agent'):
             return
         if role == 'agent':
-            info = await asyncio.to_thread(_db_get_agent_info, ag_id)
-            if not info: return
-            t, w, m_val, act, total = await asyncio.to_thread(_db_get_sales_stats, ag_id)
-            
-            referral_income = info[9] if len(info) > 9 and info[9] is not None else 0
-            my_prefix = info[10] if len(info) > 10 and info[10] else None
-            withdrawable = info[14] if len(info) > 14 and info[14] is not None else 0.0
-            cashback_income = info[15] if len(info) > 15 and info[15] is not None else 0.0
-            
-            v2_base_price = info[16] if len(info) > 16 and info[16] else '160000'
-            try: ssh_bp_fmt = f"{int(str(info[4]).replace(',', '')):,}"
-            except: ssh_bp_fmt = str(info[4])
-            try: v2_bp_fmt = f"{int(str(v2_base_price).replace(',', '')):,}"
-            except: v2_bp_fmt = str(v2_base_price)
-            v2_vol_bp = info[17] if len(info) > 17 and info[17] else '4000'
-            try: v2_vol_bp_fmt = f"{int(str(v2_vol_bp).replace(',', '')):,}"
-            except: v2_vol_bp_fmt = str(v2_vol_bp)
-            
-            prefix_line = f"<code>{esc(my_prefix)}</code>" if my_prefix else "پیش‌فرض سیستم (تنظیم‌نشده)"
-            cashback_note = ""
-            if act >= AGENT_CASHBACK_MIN_ACTIVE_ACCOUNTS:
-                cashback_note = f"🎁 شما به‌خاطر {act} اکانت فعال، از این پس {int(AGENT_CASHBACK_PCT)}٪ کش‌بک هر خرید را دریافت می‌کنید!\n"
-            else:
-                remain_for_cashback = AGENT_CASHBACK_MIN_ACTIVE_ACCOUNTS - act
-                cashback_note = f"🎁 با {remain_for_cashback} اکانت فعال دیگر (مجموع {AGENT_CASHBACK_MIN_ACTIVE_ACCOUNTS}+)، {int(AGENT_CASHBACK_PCT)}٪ کش‌بک هر خرید را دریافت می‌کنید.\n"
-            
-            txt = (f"💰 <b>کیف پول و حساب</b>\n\n"
-                   f"🔑 کد رفرال شما: <code>{esc(info[1])}</code>\n"
-                   f"💰 موجودی: <b>{int(info[2]):,} تومان</b>\n"
-                   f"💵 نرخ پایه SSH (هر کاربر/ماه): {ssh_bp_fmt} تومان\n"
-                   f"🚀 نرخ پایه V2Ray (هر کاربر/ماه): {v2_bp_fmt} تومان\n"
-                   f"🪐 نرخ پایه V2Ray حجمی (هر گیگ): {v2_vol_bp_fmt} تومان\n"
-                   f"💹 درآمد از زیرمجموعه‌گیری (پورسانت شبکه): {int(referral_income):,} تومان\n"
-                   f"🎁 مجموع کش‌بک دریافتی: {int(cashback_income):,} تومان\n"
-                   f"💵 <b>استخر قابل‌برداشت (پورسانت + کش‌بک):</b> {int(withdrawable):,} تومان\n"
-                   f"{cashback_note}"
-                   f"🏷 پیشوند یوزرنیم: {prefix_line}")
-            kb = []
-            if withdrawable > 0:
-                kb.append([InlineKeyboardButton("💵 برداشت وجه از استخر", callback_data="wd_request"), InlineKeyboardButton("➕ افزودن به کیف‌پول", callback_data="wd_towallet")])
-            pending_wds = await asyncio.to_thread(_db_get_agent_pending_withdrawals, ag_id)
-            if pending_wds:
-                kb.append([InlineKeyboardButton(f"🧾 درخواست‌های برداشت در انتظار ({len(pending_wds)})", callback_data="wd_mylist")])
-            kb.append([InlineKeyboardButton("👥 زیرمجموعه‌ها", callback_data="mysubs_1")])
-            kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="info_back")])
+            safe_clear_context(context)
+            await _show_nav_agent_wallet(query, context)
+            return
         else:
             bp = await asyncio.to_thread(_db_get_setting, 'base_price', '50,000 تومان')
             t, w, m_val, act, total = await asyncio.to_thread(_db_get_sales_stats, None)

@@ -11,6 +11,9 @@ Draft, dependent on UI-01. The PR targets master to run the full release gate an
 - Avoid duplicate automatic-login welcome messages.
 - Move SSH favorites into a dedicated selector; preserve existing sale feature flags and purchase callbacks.
 - Improve SSH/V2Ray user detail readability without changing credentials, ownership or account actions.
+- Open the reseller wallet directly; reuse one read-only renderer for new and legacy entry points.
+- Reuse the canonical representative detail after canceling deletion; clear abandoned form input on return.
+- Verify wallet action visibility and native Telegram style serialization against the pinned library.
 - Correct remaining superadmin access-menu parent and mandatory-brand logout return.
 
 ## Acceptance

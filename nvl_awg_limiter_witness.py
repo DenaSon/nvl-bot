@@ -151,7 +151,9 @@ def _registered_binding(host, db=DB):
         row = con.execute(
             "SELECT m.status,h.active,h.is_default,h.is_standby "
             "FROM manual_edge_operations m JOIN host_pool h ON h.host=m.ip "
-            "WHERE m.ip=? AND m.tunnel_backend='amneziawg'", (host,)
+            "WHERE m.ip=? AND m.tunnel_backend='amneziawg' "
+            "AND m.archived_at IS NULL "
+            "AND m.status IN ('STANDBY','ROUTING','ACTIVE')", (host,)
         ).fetchall()
         if len(row) != 1 or row[0] not in (
                 ("STANDBY", 1, 0, 1),

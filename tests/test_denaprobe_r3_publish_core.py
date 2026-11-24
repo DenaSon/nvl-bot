@@ -64,9 +64,17 @@ class PublisherTests(unittest.TestCase):
         a = live.index("# DenaProbe R3: optional admin dashboard")
         b = live.index("def _cloudzy_markup(rows):", a)
         live = live[:a] + live[b:]
-        a = live.index('        if globals().get("_DP3_ENABLED", False):')
-        b = live.index("    return rows", a)
-        live = live[:a] + live[b:]
+        # Reconstruct the historical R2 menu explicitly rather than assuming
+        # the current release still advertises the R3 dashboard.
+        a = live.index("def _build_admin_programs_kb(")
+        b = live.index("async def _show_admin_programs_hub", a)
+        menu = live[a:b]
+        legacy = (
+            '    if actor == chat and actor in active_admin_ids:\n'
+            '        rows.insert(0, [InlineKeyboardButton("Edge", callback_data="apps_edge_quick_home")])\n'
+            '        rows.insert(1, [InlineKeyboardButton("DPT", callback_data="apps_dpt_24")])\n'
+        )
+        live = live[:a] + menu.replace("    return rows\n", legacy + "    return rows\n", 1) + live[b:]
         a = live.index('    if d == "apps_dp3_home" or d.startswith("dp3:"):')
         b = live.index("    if d == 'apps_home':", a)
         live = live[:a] + live[b:]

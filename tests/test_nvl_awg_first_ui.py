@@ -92,6 +92,32 @@ class ProviderRetirementTests(unittest.TestCase):
         self.assertIn('if d.startswith("apps_cz_") or d.startswith("u7:")',script)
         self.assertIn('"apps_edge_quick_home",role=role',script)
 
+    def test_manual_host_writers_cannot_move_non_ssh_accounts(self):
+        source = (Path(__file__).resolve().parents[1] /
+                  "bot_final_v49-2.py").read_text(encoding="utf-8")
+        start = source.index("def _db_set_account_host(")
+        end = source.index("def _db_get_recent_active_accounts(", start)
+        section = source[start:end]
+        self.assertIn(
+            "UPDATE ssh_accounts SET host=? WHERE username=? AND service_type='ssh'",
+            section)
+        self.assertIn(
+            "UPDATE ssh_accounts SET host=? WHERE status != '⏳ درحال ساخت' AND service_type='ssh'",
+            section)
+        self.assertEqual(section.count("AND service_type='ssh'"), 3)
+
+    def test_legacy_manual_and_k2_routes_keep_existing_safety_fences(self):
+        source = (Path(__file__).resolve().parents[1] /
+                  "bot_final_v49-2.py").read_text(encoding="utf-8")
+        for old in ('elif d in ("hp_addedge", "hpeg_wizard")',
+                    'elif d.startswith("srv_mkactive_")',
+                    'elif d.startswith(("hpdef_migrate_", "hpdefmig_yes_", "hpdef_"))',
+                    'elif d == "hpeg_status"'):
+            self.assertIn(old, source)
+        self.assertIn("pool_active=False", source)
+        self.assertIn("paramiko.RejectPolicy()", source)
+        self.assertIn("NVL_LEGACY_WG_UI_ENABLED", source)
+
 
 if __name__ == "__main__":
     unittest.main()

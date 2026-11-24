@@ -1,4 +1,4 @@
-"""The current R3 admin Rich view must not remove the deployed R2 quality report."""
+"""Both DenaProbe dashboards are hidden from new menus, with legacy handlers retained."""
 from pathlib import Path
 import ast
 import unittest
@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class CoexistenceTests(unittest.TestCase):
-    def test_current_bot_advertises_both_legacy_history_and_r3(self):
+    def test_current_bot_hides_both_legacy_history_and_r3(self):
         source = (ROOT / "bot_final_v49-2.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         bodies = {
@@ -16,10 +16,11 @@ class CoexistenceTests(unittest.TestCase):
         }
         menu = bodies["_build_admin_programs_kb"]
         callback = bodies["callback_handler"]
-        self.assertIn('callback_data="apps_dpt_24"', menu)
-        self.assertIn('callback_data=_DP3_ENTRY', menu)
-        self.assertEqual(menu.count('"📡 پایش DenaProbe"'), 1)
-        self.assertIn('"📊 گزارش DenaProbe"', menu)
+        self.assertNotIn('callback_data="apps_dpt_24"', menu)
+        self.assertNotIn('callback_data=_DP3_ENTRY', menu)
+        self.assertNotIn('"📡 پایش DenaProbe"', menu)
+        self.assertNotIn('"📊 گزارش DenaProbe"', menu)
+        self.assertIn('"apps_dpt_24"', callback)
         self.assertIn("denaprobe_admin_dashboard", callback)
         self.assertIn('d == "apps_dp3_home"', callback)
         self.assertIn('active_admin_ids=active_admin_ids', callback)

@@ -175,7 +175,7 @@ class ManualQuickSwitchUI:
         ])
         if current==HISTORICAL_TARGET:
             rows.append([("📋 ثبت بازیابی اضطراری قبلی","apps_edge_quick_attest")])
-        rows.append([("↩️ برنامه‌ها","apps_home")])
+        rows.append([("↩️ زیرساخت","srv_menu_back")])
         return await self._view(context,chat,text,rows)
 
     async def _status(self,context,chat):

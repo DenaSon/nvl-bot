@@ -29,8 +29,11 @@ class MarzbanProgramsUITests(unittest.TestCase):
             self.assertIn(label, region)
             self.assertIn(callback, region)
         self.assertIn("🧩 <b>برنامه‌ها</b>", region)
-        self.assertIn("🌐 مدیریت Edge", region)
-        self.assertIn('callback_data="apps_edge_quick_home"', region)
+        self.assertNotIn("🌐 مدیریت Edge", region)
+        self.assertNotIn('callback_data="apps_edge_quick_home"', region)
+        infrastructure = self._region("def _build_server_settings_kb", "def _normalize_ssh_port")
+        self.assertIn("🌐 مدیریت Edge", infrastructure)
+        self.assertIn('callback_data="apps_edge_quick_home"', infrastructure)
         self.assertNotIn('callback_data="apps_cz_home"', region)
         self.assertNotIn('callback_data="hpeg_status"', region)
 

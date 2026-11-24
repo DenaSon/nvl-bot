@@ -81,7 +81,11 @@ class SharedSalesNavigationTests(unittest.IsolatedAsyncioTestCase):
         settings = {"sell_ssh": "1", "sell_bulk": "1", "sell_v2ray_unlimit": "1",
                     "sell_v2ray_vol": "1"}
         views = []
+        layouts = []
         async def reply(text, *, reply_markup, parse_mode):
+            self.assertIn("<b>فروش اشتراک</b>", text)
+            self.assertEqual(parse_mode, "HTML")
+            layouts.append(reply_markup)
             views.append({cb for row in reply_markup for cb in row})
         ns = {"asyncio": asyncio,
               "_db_get_setting": lambda key, default: settings.get(key, default),
@@ -99,6 +103,11 @@ class SharedSalesNavigationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual("v2ray_buy_menu" in views[-1], enabled)
                 self.assertIn("nav:sale_favorites", views[-1])
             self.assertEqual(views[-2], views[-1])
+            for rows in layouts[-2:]:
+                self.assertEqual(rows[-1], ["uact_back_to_menu"])
+                self.assertEqual(rows[0], ["buy_direct", "v2ray_buy_menu"] if enabled else ["buy_direct"])
+                self.assertEqual(rows[1], ["nav:sale_favorites", "buy_bulk_start"])
+                self.assertTrue(all(1 <= len(row) <= 2 for row in rows))
 
 
 if __name__ == "__main__":

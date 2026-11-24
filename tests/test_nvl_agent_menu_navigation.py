@@ -100,9 +100,8 @@ class ResellerMenuTests(unittest.IsolatedAsyncioTestCase):
         self.agent.user_data["role"] = "admin"
         target = Target()
         await self.handlers["_show_users_hub"](target, self.agent)
-        self.assertEqual(callbacks(target)[0], ["umanage_ssh"])
-        self.assertEqual(callbacks(target)[1], ["umanage_v2ray"])
-        self.assertEqual(callbacks(target)[2], ["umanage_v2ray_vol"])
+        self.assertEqual(callbacks(target)[0], ["umanage_ssh", "umanage_v2ray"])
+        self.assertEqual(callbacks(target)[1], ["umanage_v2ray_vol", "info_online"])
 
     async def test_v2ray_list_returns_to_v2ray_submenu(self):
         target = Target()

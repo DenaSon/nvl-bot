@@ -50,18 +50,28 @@ def integrate(live: str, release: str) -> str:
     menu_end = "async def _show_admin_programs_hub"
     old_menu = section(result, menu_begin, menu_end, "live admin programs")
     new_menu = section(release, menu_begin, menu_end, "release admin programs")
-    addition = section(
-        new_menu, '        if globals().get("_DP3_ENABLED", False):',
-        "    return rows", "R3 menu entry",
-    )
-    if "apps_edge_quick_home" not in old_menu:
-        raise IntegrationError("live admin programs lack expected Edge entry")
-    if "📡 پایش DenaProbe" in old_menu:
-        raise IntegrationError("live admin programs already have a DenaProbe label; inspect callback")
-    if old_menu.count("    return rows\n") != 1:
-        raise IntegrationError("live admin programs return anchor is ambiguous")
-    updated_menu = old_menu.replace("    return rows\n", addition + "    return rows\n", 1)
-    result = result.replace(old_menu, updated_menu, 1)
+    # Historical R3 releases advertised the dashboard; UI-02 hides both
+    # DenaProbe entries. Do not recreate removed menu buttons during staging.
+    menu_anchor = '        if globals().get("_DP3_ENABLED", False):'
+    visible_release = menu_anchor in new_menu
+    if visible_release:
+        addition = section(new_menu, menu_anchor, "    return rows", "R3 menu entry")
+        if "apps_edge_quick_home" not in old_menu:
+            raise IntegrationError("live admin programs lack expected Edge entry")
+        if "📡 پایش DenaProbe" in old_menu:
+            raise IntegrationError("live admin programs already have a DenaProbe label; inspect callback")
+        if old_menu.count("    return rows\n") != 1:
+            raise IntegrationError("live admin programs return anchor is ambiguous")
+        updated_menu = old_menu.replace("    return rows\n", addition + "    return rows\n", 1)
+        result = result.replace(old_menu, updated_menu, 1)
+    else:
+        # Additive staging must not silently rewrite a customized legacy menu.
+        # Such a baseline needs the normal UI release / explicit manual diff.
+        menu_tokens = ("apps_dpt_24", "apps_dpt_168", "_DP3_ENTRY", "apps_dp3_home")
+        if any(token in new_menu for token in menu_tokens):
+            raise IntegrationError("release DenaProbe menu policy is ambiguous")
+        if any(token in old_menu for token in menu_tokens):
+            raise IntegrationError("live DenaProbe menu differs from hidden release; manual diff required")
 
     callbacks = (
         "    if d == 'apps_home':",
@@ -101,8 +111,8 @@ def integrate(live: str, release: str) -> str:
     result = result.replace(shutdown_anchor,
                             shutdown_anchor + shutdown_block, 1)
 
-    # Verify the five specific locations: an unrelated pre-existing text
-    # label elsewhere in the bot must not cause a false negative.
+    # Verify the runtime hooks and, for historical releases, the menu hook.
+    # An unrelated pre-existing label elsewhere must not cause a false negative.
     tree = ast.parse(result)
     funcs = {
         node.name: ast.get_source_segment(result, node) or ""
@@ -111,11 +121,14 @@ def integrate(live: str, release: str) -> str:
     }
     expected = {
         "_dp3_monitor_loop": ["_DP3_ALERTS_ENABLED"],
-        "_build_admin_programs_kb": ["📡 پایش DenaProbe", "_DP3_ENTRY"],
         "callback_handler": ["_dp3_handle_callback", "apps_dp3_home"],
         "_post_init": ['app.bot_data["dp3_monitor_task"]'],
         "_post_shutdown": ['app.bot_data.get("dp3_monitor_task")'],
     }
+    if visible_release:
+        expected["_build_admin_programs_kb"] = ["📡 پایش DenaProbe", "_DP3_ENTRY"]
+    elif any(token in funcs.get("_build_admin_programs_kb", "") for token in menu_tokens):
+        raise IntegrationError("hidden DenaProbe menu entries were reintroduced")
     for name, tokens in expected.items():
         body = funcs.get(name)
         if not body:
@@ -151,7 +164,9 @@ def main() -> int:
         parser.exit(2, f"STOP: {exc}\n")
     print("MERGE_READY")
     print("AST_PASS")
-    print("DENA_PROBE_HOOKS=5")
+    menu = section(merged, "def _build_admin_programs_kb(",
+                   "async def _show_admin_programs_hub", "staged admin programs")
+    print("DENA_PROBE_HOOKS=" + ("5" if "_DP3_ENTRY" in menu else "4"))
     print(f"LIVE_LINES={len(before.splitlines())}")
     print(f"MERGED_LINES={len(merged.splitlines())}")
     print(f"STAGED_FILE={args.output}")

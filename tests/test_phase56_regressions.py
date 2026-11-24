@@ -1,41 +1,78 @@
-import pathlib
+"""UI-01 contracts: verify real menu routing instead of decorative labels."""
+import ast
+from pathlib import Path
 import unittest
 
+BOT = Path(__file__).resolve().parents[1] / "bot_final_v49-2.py"
 
-BOT_PATH = pathlib.Path(__file__).resolve().parents[1] / "bot_final_v49-2.py"
 
-
-class Phase56NavigationRegressionTests(unittest.TestCase):
+class NavigationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.source = BOT_PATH.read_text(encoding="utf-8")
+        source = BOT.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        wanted = {"_nav_home_rows", "_nav_settings_rows", "_nav_finance_rows",
+                  "_nav_callback_allowed", "_build_server_settings_kb"}
+        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
+        cls.ns = {"InlineKeyboardButton": lambda label, callback_data: callback_data}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(BOT), "exec"), cls.ns)
 
-    def test_phase56_features_survive_current_version(self):
-        self.assertIn("BOT_VERSION_TAG =", self.source)
-        self.assertIn("➕ فروش / ساخت اشتراک", self.source)
-        self.assertIn("👥 کاربران", self.source)
-        self.assertIn("🛠 V2Ray / Marzban", self.source)
+    def test_role_home_and_required_brand_onboarding(self):
+        home = self.ns["_nav_home_rows"]
+        self.assertEqual(sum(map(len, home("admin"))), 6)
+        self.assertIn("🌐 زیرساخت", sum(home("admin"), []))
+        self.assertIn("⚙️ تنظیمات", sum(home("agent"), []))
+        self.assertEqual(home("agent", brand_ready=False), [["✏️ نام برند"], ["❌ خروج"]])
+        self.assertNotIn("🌐 زیرساخت", sum(home("accountant"), []))
 
-    def test_admin_home_is_domain_based(self):
-        for label in (
-            "➕ فروش / ساخت اشتراک",
-            "👥 کاربران",
-            "🤝 نمایندگان",
-            "📊 گزارش‌ها",
-            "💰 مالی و کارت‌ها",
-            "⚙️ تنظیمات",
-            "🛠 V2Ray / Marzban",
-            "📦 بکاپ",
-        ):
-            self.assertIn(label, self.source)
+    def test_settings_permissions(self):
+        settings = self.ns["_nav_settings_rows"]
+        def callbacks(rows):
+            return {cb for row in rows for _, cb in row}
+        self.assertIn("nav:backup", callbacks(settings("admin")))
+        self.assertNotIn("super_admin_users_menu", callbacks(settings("admin")))
+        self.assertIn("super_admin_users_menu", callbacks(settings("admin", superadmin=True)))
+        self.assertNotIn("nav:agent_card", callbacks(settings("agent")))
+        self.assertIn("nav:agent_card", callbacks(settings("agent", card_allowed=True)))
+        self.assertNotIn("nav:backup", callbacks(settings("agent")))
+        self.assertEqual(settings("accountant"), [])
 
-    def test_agent_home_exposes_one_sales_entry_and_owned_users(self):
-        self.assertIn("['➕ فروش اشتراک', '👥 کاربران']", self.source)
-        self.assertIn("['💰 کیف پول و حساب', '💳 شارژ حساب']", self.source)
-        self.assertIn(
-            'SSH و V2Ray هر دو از همین مسیر فروش و کیف پول نمایندگی استفاده می‌کنند.',
-            self.source,
-        )
+    def test_finance_permissions_and_feature_flags(self):
+        finance = self.ns["_nav_finance_rows"]
+        def callbacks(rows):
+            return {cb for row in rows for _, cb in row}
+        self.assertNotIn("nvl_fin:menu", callbacks(finance("admin", accounting_enabled=True)))
+        self.assertNotIn("nvl_fin:menu", callbacks(finance("admin", superadmin=True)))
+        self.assertIn("nvl_fin:menu", callbacks(finance("admin", superadmin=True, accounting_enabled=True)))
+        self.assertNotIn("fin_menu", callbacks(finance("agent", superadmin=True)))
+        self.assertEqual(finance("accountant"), [])
+
+    def test_monitoring_has_one_infrastructure_entry_and_parent(self):
+        home = self.ns["_nav_home_rows"]("admin")
+        self.assertNotIn("🛡 بررسی فیلترینگ", sum(home, []))
+        callbacks = sum(self.ns["_build_server_settings_kb"](), [])
+        self.assertEqual(callbacks.count("hp_filtering"), 1)
+        self.assertEqual(callbacks.count("apps_home"), 1)
+        source = BOT.read_text(encoding="utf-8")
+        start = source.index("async def _render_filtering_monitor_panel")
+        end = source.index("async def _render_filtering_edge_detail", start)
+        self.assertIn('callback_data="srv_menu_back"', source[start:end])
+
+    def test_new_callback_role_boundary(self):
+        allowed = self.ns["_nav_callback_allowed"]
+        for role in ("agent", "accountant", None):
+            self.assertFalse(allowed("nav:backup", role))
+        self.assertTrue(allowed("nav:backup", "admin"))
+        self.assertFalse(allowed("nav:agent_card", "admin"))
+        self.assertTrue(allowed("nav:agent_card", "agent"))
+        self.assertFalse(allowed("nav:settings", "accountant"))
+        self.assertFalse(allowed("nav:unknown", "admin"))
+
+
+class LegacyNavigationCompatibilityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = BOT.read_text(encoding="utf-8")
 
     def test_sales_hub_exposes_ssh_and_v2ray_without_parallel_logic(self):
         self.assertIn('callback_data="buy_direct"', self.source)
@@ -63,14 +100,6 @@ class Phase56NavigationRegressionTests(unittest.TestCase):
         ):
             self.assertIn(old_label, self.source)
 
-    def test_user_hub_is_a_navigation_level_for_admin_and_agent(self):
-        self.assertIn("async def _show_users_hub", self.source)
-        self.assertIn('"umanage_ssh"', self.source)
-        self.assertIn('"umanage_v2ray"', self.source)
-        self.assertIn('"umanage_v2ray_vol"', self.source)
-        self.assertIn('back_cb = f"agm_det_{agent_filter}" if agent_filter is not None else "users_hub"', self.source)
-        self.assertIn('elif d == "users_hub" and role in (\'admin\', \'agent\'):', self.source)
-
     def test_user_navigation_callbacks_are_role_guarded(self):
         self.assertIn('d.startswith("umanage_")', self.source)
         self.assertIn("role not in ('admin', 'agent')", self.source)
@@ -78,11 +107,6 @@ class Phase56NavigationRegressionTests(unittest.TestCase):
             "دسترسی به مدیریت کاربران برای این نقش مجاز نیست.",
             self.source,
         )
-
-    def test_back_and_home_mean_different_levels(self):
-        self.assertIn('InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")', self.source)
-        self.assertIn('InlineKeyboardButton("↩️ انتخاب سرویس", callback_data="buy_back_start")', self.source)
-        self.assertIn('InlineKeyboardButton("↩️ نوع پلن V2Ray", callback_data="v2ray_buy_menu")', self.source)
 
     def test_marzban_direct_create_is_visually_separated_from_sales(self):
         self.assertIn(
@@ -94,33 +118,3 @@ class Phase56NavigationRegressionTests(unittest.TestCase):
             self.source,
         )
         self.assertIn("🛠 <b>V2Ray / Marzban › کاربران</b>", self.source)
-
-    def test_user_lists_have_breadcrumb_style_titles(self):
-        self.assertIn('panel_title = f"👥 کاربران من › {srv_name}"', self.source)
-        self.assertIn('panel_title = f"👥 کاربران › {srv_name}"', self.source)
-        self.assertIn('panel_title = f"🤝 نمایندگان › {esc(agent_name)} › {srv_name}"', self.source)
-
-
-    def test_agent_visible_action_buttons_drop_possessive_mine(self):
-        for rendered in (
-            "kb.append([\'💳 کارت اختصاصی\'])",
-            '("🔐 SSH", "umanage_ssh")',
-            '("🚀 V2Ray مدت‌دار", "umanage_v2ray")',
-            '("📦 V2Ray حجمی", "umanage_v2ray_vol")',
-            'InlineKeyboardButton("🗑 حذف کارت", callback_data="agself_card_clear")',
-            'InlineKeyboardButton("✏️ ثبت کارت", callback_data="agself_card_set")',
-            'InlineKeyboardButton("👥 زیرمجموعه‌ها", callback_data="mysubs_1")',
-        ):
-            self.assertIn(rendered, self.source)
-
-        for old_rendered in (
-            "kb.append([\'💳 کارت اختصاصی من\'])",
-            'InlineKeyboardButton("🗑 حذف کارت من", callback_data="agself_card_clear")',
-            'InlineKeyboardButton("✏️ ثبت کارت من", callback_data="agself_card_set")',
-            'InlineKeyboardButton("👥 زیرمجموعه‌های من", callback_data="mysubs_1")',
-        ):
-            self.assertNotIn(old_rendered, self.source)
-
-
-if __name__ == "__main__":
-    unittest.main()

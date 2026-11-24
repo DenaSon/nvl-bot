@@ -29,6 +29,7 @@ ACTIVE = {
     "failover_operations": ("RUNNING",),
     "manual_quick_switch_jobs": ("DNS_INTENT", "DB_COMMITTED"),
     "manual_edge_operations": ("INSTALLING", "ROUTING"),
+    "cloudzy_edge_operations": ("CREATING", "PROVISIONING"),
     "cloudzy_cz07_jobs": ("QUEUED", "ROUTING", "MIGRATING"),
     "cloudzy_cz04b_operations": ("PREPARING", "DNS_WRITE_INTENT",
                                 "DNS_TARGET_CONFIRMED", "USERS_COMMITTING"),

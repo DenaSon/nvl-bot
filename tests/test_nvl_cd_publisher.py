@@ -24,6 +24,16 @@ class SafetyTests(unittest.TestCase):
             con.execute("INSERT INTO manual_quick_switch_jobs VALUES ('DNS_INTENT')")
             self.assertTrue(pub.busy(con))
 
+    def test_cloudzy_purchase_and_install_defer_publication(self):
+        with sqlite3.connect(":memory:") as con:
+            con.execute("CREATE TABLE failover_operations(status TEXT)")
+            con.execute("CREATE TABLE cloudzy_edge_operations(status TEXT)")
+            for status in ("CREATING", "PROVISIONING", "HOLD_SSH", "EDGE_READY"):
+                with self.subTest(status=status):
+                    con.execute("DELETE FROM cloudzy_edge_operations")
+                    con.execute("INSERT INTO cloudzy_edge_operations VALUES (?)", (status,))
+                    self.assertEqual(pub.busy(con), status in ("CREATING", "PROVISIONING"))
+
     def test_missing_shared_lease_schema_holds(self):
         with sqlite3.connect(":memory:") as con, self.assertRaises(p.Hold):
             pub.busy(con)

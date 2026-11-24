@@ -36,7 +36,8 @@ def tick(state, config, now=time.time):
         plan = p.poll(config, state, now=now)
     except p.Hold as exc:
         plan = {"status": "HOLD", "reason": str(exc)}
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+        pub.report_failure("DISCOVERY", exc)
         plan = {"status": "HOLD", "reason": "DISCOVERY_FAILED"}
     plan.update(mode="AUTO_APPLY", apply_enabled=True, observed_at=int(now()))
     pub.durable_json(state / "latest-plan.json", plan)
@@ -80,7 +81,8 @@ def main():
         result = {"status": "NOT_ACCEPTED_OR_BUSY"}
     except p.Hold as exc:
         result = {"status": "DEFERRED", "reason": str(exc)}
-    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error, subprocess.SubprocessError) as exc:
+        pub.report_failure("AUTO_APPLY", exc)
         result = {"status": "DEFERRED", "reason": "LOCAL_OR_RELEASE_CHECK_FAILED"}
     print(json.dumps(result, sort_keys=True))
     return 2 if result.get("phase") == "HOLD" or result.get("status") == "RECOVERY_REQUIRED" else 0

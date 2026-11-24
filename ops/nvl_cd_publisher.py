@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 
 if __package__:
     from . import nvl_cd_planner as p
@@ -74,6 +75,47 @@ def atomic_bytes(path, raw, mode):
         sync_dir(path.parent)
     finally:
         Path(name).unlink(missing_ok=True)
+
+
+def report_failure(stage, exc):
+    """Log diagnostics without exception text, command arguments or locals."""
+    event = {"event": "NVL_CD_FAILURE", "stage": stage,
+             "error_type": type(exc).__name__}
+    if isinstance(exc, OSError) and isinstance(exc.errno, int):
+        event["errno"] = exc.errno
+    if isinstance(exc, subprocess.CalledProcessError):
+        event["returncode"] = exc.returncode
+    # Hold messages are internal reason codes; never print arbitrary text.
+    if isinstance(exc, p.Hold) and len(exc.args) == 1:
+        reason = exc.args[0]
+        if isinstance(reason, str) and re.fullmatch(r"[A-Z][A-Z_]{2,79}", reason):
+            event["reason"] = reason
+    frames = traceback.extract_tb(exc.__traceback__)
+    if frames:
+        event["function"] = frames[-1].name
+        event["line"] = frames[-1].lineno
+    print(json.dumps(event, sort_keys=True), file=sys.stderr, flush=True)
+
+
+def runtime_write_preflight(runtime):
+    """Exercise the real atomic write path before an intentional shutdown."""
+    directories = [runtime]
+    cache = runtime / "__pycache__"
+    if os.path.lexists(cache):
+        directories.append(cache)
+    try:
+        for directory in directories:
+            p.trusted(directory, directory=True)
+            with tempfile.TemporaryDirectory(prefix=".nvl-cd-probe-", dir=directory) as tmp:
+                probe = Path(tmp) / "probe"
+                atomic_bytes(probe, b"old", 0o600)
+                atomic_bytes(probe, b"new", 0o600)
+                if probe.read_bytes() != b"new":
+                    raise p.Hold("RUNTIME_WRITE_PROBE_MISMATCH")
+            sync_dir(directory)
+    except Exception as exc:
+        report_failure("RUNTIME_WRITE_PREFLIGHT", exc)
+        raise p.Hold("RUNTIME_WRITE_PREFLIGHT_FAILED") from exc
 
 
 @contextlib.contextmanager
@@ -360,15 +402,16 @@ def invalidate_bytecode(runtime, names):
     sync_dir(directory)
 
 
-def resume_unchanged(host, state, checkpoint):
-    """Restore availability after a failed pre-publication stop, not code."""
+def resume_unchanged(host, state, checkpoint, *, allow_running=True,
+                     reason="STOP_UNPROVEN_BASELINE_RESUMED"):
+    """Restore availability of verified unchanged code without rewriting it."""
     _, record = verified_manifest(host, checkpoint)
     if host.schema() != record["schema"] or not host.idle():
         raise p.Hold("OPERATION_OR_SCHEMA_CHANGED")
     if any(host.live(name) != item["old"] for name, item in record["files"].items()):
         raise p.Hold("BASELINE_NOT_UNCHANGED")
     status = host.status()
-    if (status.get("ActiveState"), status.get("SubState")) == ("active", "running"):
+    if allow_running and (status.get("ActiveState"), status.get("SubState")) == ("active", "running"):
         # Stop may have failed without stopping the service.
         pass
     elif (status.get("ActiveState"), status.get("SubState"), status.get("MainPID")) == (
@@ -380,7 +423,7 @@ def resume_unchanged(host, state, checkpoint):
         raise p.Hold("STOP_STATE_UNCERTAIN")
     host.healthy()
     return set_phase(state, checkpoint, "ROLLED_BACK",
-                     reason="STOP_UNPROVEN_BASELINE_RESUMED")
+                     reason=reason)
 
 
 def restore(host, state, checkpoint):
@@ -396,8 +439,25 @@ def restore(host, state, checkpoint):
     for name, item in record["files"].items():
         if host.live(name) not in (item["old"], item["new"]):
             raise p.Hold("UNKNOWN_RUNTIME_NO_AUTO_ROLLBACK")
+    all_old = all(host.live(n) == i["old"] for n, i in record["files"].items())
+    status = host.status()
+    # PUBLISHING is persisted only after a proven clean shutdown, and
+    # STARTING is persisted before any candidate start. If publication failed
+    # before changing any file, no writes (or second stop) are necessary.
+    # An active process or unknown historical HOLD is not proof of generation.
+    phase = checkpoint.get("phase")
+    if phase == "HOLD":
+        phase = checkpoint.get("failure_phase")
+    if (phase == "PUBLISHING" and all_old
+            and (status.get("ActiveState"), status.get("SubState"), status.get("MainPID"))
+            == ("inactive", "dead", "0")):
+        return resume_unchanged(host, state, checkpoint, allow_running=False,
+                                reason="PUBLISH_FAILED_BASELINE_RESUMED")
+    # A rollback that requires writes must not stop a running service if
+    # its sandbox cannot write. Recheck after the clean stop as usual.
+    runtime_write_preflight(host.runtime)
     was_active = host.active()
-    uniform = (all(host.live(n) == i["old"] for n, i in record["files"].items())
+    uniform = (all_old
                or all(host.live(n) == i["new"] for n, i in record["files"].items()))
     host.stop()
     if not host.idle() or host.schema() != record["schema"]:
@@ -440,17 +500,21 @@ def publish(host, state, repo, baseline, candidate, updates, old, new, revalidat
     for name, item in record["files"].items():
         if host.live(name) != item["old"]:
             raise p.Hold("RUNTIME_DRIFT")
+    runtime_write_preflight(host.runtime)
     checkpoint = set_phase(state, checkpoint, "STOPPING")
     try:
         host.stop()
-    except Exception:
+    except Exception as exc:
+        report_failure("STOPPING", exc)
         # Never publish or send a second stop after uncertain shutdown.
         # If the exact old code is intact, resume its service instead of
         # leaving a confirmed inactive bot offline.
         try:
             return resume_unchanged(host, state, checkpoint)
-        except Exception:
-            return set_phase(state, checkpoint, "HOLD", reason="STOP_UNPROVEN")
+        except Exception as exc:
+            report_failure("STOP_RECOVERY", exc)
+            return set_phase(state, checkpoint, "HOLD", reason="STOP_UNPROVEN",
+                             failure_phase="STOPPING")
     try:
         if not host.idle() or host.schema() != record["schema"]:
             host.start()
@@ -473,11 +537,14 @@ def publish(host, state, repo, baseline, candidate, updates, old, new, revalidat
             return set_phase(state, checkpoint, "HOLD", reason="SCHEMA_CHANGED")
         return set_phase(state, checkpoint, "COMMITTED", deployed=candidate,
                          previous_deployed=baseline)
-    except Exception:
+    except Exception as exc:
+        report_failure(checkpoint["phase"], exc)
         try:
             return restore(host, state, checkpoint)
-        except Exception:
-            return set_phase(state, checkpoint, "HOLD", reason="RECOVERY_REQUIRED")
+        except Exception as recovery_exc:
+            report_failure("RECOVERY", recovery_exc)
+            return set_phase(state, checkpoint, "HOLD", reason="RECOVERY_REQUIRED",
+                             failure_phase=checkpoint["phase"])
 
 
 @contextlib.contextmanager
@@ -578,7 +645,8 @@ def main():
                               ("phase", "deployed", "candidate", "reason")}, sort_keys=True))
             return 0 if result["phase"] == "COMMITTED" else 2
     except (p.Hold, OSError, ValueError, KeyError, TypeError,
-            sqlite3.Error, subprocess.SubprocessError):
+            sqlite3.Error, subprocess.SubprocessError) as exc:
+        report_failure("MANUAL_RECOVERY" if args.recover else "MANUAL_APPLY", exc)
         print('{"phase":"HOLD","reason":"RELEASE_NOT_AUTHORIZED_OR_FAILED"}')
         return 2
 

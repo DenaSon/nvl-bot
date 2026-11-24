@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+# CD-06E: production auto-deploy acceptance witness (no behavior change).
+
 import html
 from typing import Iterable, Mapping, Optional
 

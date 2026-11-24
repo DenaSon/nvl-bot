@@ -19,7 +19,7 @@ on:
 # A superseded PR run need not finish both test suites. Never cancel a
 # master push or scheduled release gate mid-flight.
 concurrency:
-  group: python-checks-${{ github.event.pull_request.number || github.ref }}
+  group: python-checks-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('{0}-{1}', github.event_name, github.sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -34,16 +34,19 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: .github/workflows/python-checks.yml
+          cache-dependency-path: requirements.txt
 
       - name: Install test dependencies
-        run: python -m pip install --disable-pip-version-check aiohttp qrcode pillow==12.3.0 python-telegram-bot==22.8
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          python -m pip check
 
       - name: Compile changed Python modules
         run: |
@@ -53,12 +56,12 @@ jobs:
       - name: Select impacted tests from PR / push diff
         run: |
           python -B -m ops.ci_test_selector plan \
-            --event "${{ github.event_name }}" \
+            --event "${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && 'master_push' || github.event_name }}" \
             --base "${{ github.event.pull_request.base.sha || github.event.before }}" \
             --head "$GITHUB_SHA" \
             --output "$RUNNER_TEMP/nvl-ci-plan.json"
 
-      - name: Run impacted tests (full suite nightly and on demand)
+      - name: Run impacted tests (full on master, nightly and on demand)
         run: python -B -m ops.ci_test_selector run --plan "$RUNNER_TEMP/nvl-ci-plan.json"
 
   root-release-safety:
@@ -71,21 +74,24 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: .github/workflows/python-checks.yml
+          cache-dependency-path: requirements.txt
 
       - name: Install test dependencies
-        run: python -m pip install --disable-pip-version-check aiohttp qrcode pillow==12.3.0 python-telegram-bot==22.8
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          python -m pip check
 
       - name: Select matching privileged safety tests
         run: |
           python -B -m ops.ci_test_selector plan \
-            --event "${{ github.event_name }}" \
+            --event "${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && 'master_push' || github.event_name }}" \
             --base "${{ github.event.pull_request.base.sha || github.event.before }}" \
             --head "$GITHUB_SHA" \
             --output "$RUNNER_TEMP/nvl-ci-plan.json"
@@ -103,7 +109,7 @@ jobs:
           cd "$NVL_STAGE/source"
           python -B -m ops.k2_release_bundle verify --directory . --commit "$NVL_COMMIT" --package-sha256 "$NVL_PACKAGE_SHA"
 
-      - name: Run impacted privileged tests (full nightly)
+      - name: Run impacted privileged tests (full on master and nightly)
         run: |
           cd "$NVL_STAGE/source"
           sudo env NVL_CI_PLAN="$RUNNER_TEMP/nvl-ci-plan.json" \
@@ -116,3 +122,58 @@ jobs:
               "run", "--plan", os.environ["NVL_CI_PLAN"], "--root"
           ]))
           PY
+
+  clean-runtime-preflight:
+    name: Clean runtime preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Verify exact checked-out commit
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Install locked runtime dependencies
+        run: |
+          python -m venv "$RUNNER_TEMP/nvl-import-venv"
+          "$RUNNER_TEMP/nvl-import-venv/bin/python" -m pip install --disable-pip-version-check -r requirements.txt
+          "$RUNNER_TEMP/nvl-import-venv/bin/python" -m pip check
+      - name: Compile tracked Python source
+        run: git ls-files -z -- '*.py' | xargs -0 -r "$RUNNER_TEMP/nvl-import-venv/bin/python" -m py_compile
+      - name: Verify imports from a clean code-only stage
+        run: |
+          stage=$(mktemp -d "$RUNNER_TEMP/nvl-bot-code-XXXXXX")
+          rsync -az --prune-empty-dirs \
+            --exclude='__pycache__/' --exclude='.git/' --include='*/' \
+            --include='*.py' --include='*.sh' --include='requirements.txt' --exclude='*' \
+            ./*.py ./*.sh requirements.txt ops server_migration denaprobe_ingest "$stage/"
+          cd "$stage"
+          PYTHONPATH= "$RUNNER_TEMP/nvl-import-venv/bin/python" -B bot_import_preflight.py bot_final_v49-2.py
+
+  release-gate:
+    name: NVL Release Gate
+    needs: [syntax-and-unit-tests, root-release-safety, clean-runtime-preflight]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require successful prerequisites
+        env:
+          UNIT_RESULT: ${{ needs.syntax-and-unit-tests.result }}
+          ROOT_RESULT: ${{ needs.root-release-safety.result }}
+          PREFLIGHT_RESULT: ${{ needs.clean-runtime-preflight.result }}
+        run: |
+          set -eu
+          test "$UNIT_RESULT" = success
+          test "$ROOT_RESULT" = success
+          test "$PREFLIGHT_RESULT" = success
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/master ]; then
+            echo "NVL_RELEASE_ELIGIBLE=$GITHUB_SHA"
+          else
+            echo "CI_PASS=$GITHUB_SHA (not a master push release)"
+          fi

@@ -96,6 +96,47 @@ class PlanTests(unittest.TestCase):
                   a | {"ops/install.sh": item(B)}, a | {".github/workflows/x.yml": item(B)}):
             self.assertEqual(self.plan(a, b)["status"], "HOLD")
 
+    def test_reviewed_ui02_nonruntime_transitions_allow_only_exact_blobs(self):
+        matrix = "cloudzy_phase8_matrix.py"
+        staging = "ops/denaprobe_r3_stage_bot.py"
+        old = {
+            "bot.py": item(A),
+            matrix: item("da4d245ddd7b3def54eda31a7f345524146f5f5a"),
+            staging: item("9251cbe62214539ea7dec74e6889c3d5f91cf391"),
+        }
+        new = {
+            "bot.py": item(B),
+            staging: item("5044a4c67c27e7d6b65814c3cc1c30fa38418dad"),
+        }
+        plan = self.plan(old, new)
+        self.assertEqual(plan["status"], "PLAN_READY")
+        self.assertEqual(plan["manual"], [])
+        self.assertEqual(plan["updates"], ["bot.py"])
+        self.assertTrue(plan["restart_required"])
+        only_tools = self.plan(old, new | {"bot.py": item(A)})
+        self.assertEqual(only_tools["status"], "PLAN_READY")
+        self.assertFalse(only_tools["restart_required"])
+
+        for before, after, expected in (
+            (old | {matrix: item(A)}, new, matrix),
+            (old, new | {matrix: item(B)}, matrix),
+            (new, new | {matrix: old[matrix]}, matrix),
+            (old | {staging: item(A)}, new, staging),
+            (old, new | {staging: item(B)}, staging),
+            (old, {k: v for k, v in new.items() if k != staging}, staging),
+            (old, new | {staging: ("100755", "blob", new[staging][2])}, staging),
+            (old, new | {"ops/another_stage.py": item(B)}, "ops/another_stage.py"),
+        ):
+            with self.subTest(expected=expected, before=before, after=after):
+                blocked = self.plan(before, after)
+                self.assertEqual(blocked["status"], "HOLD")
+                self.assertIn(expected, blocked["manual"])
+
+        managed = build_plan(old, new, {"bot.py", matrix}, lambda _: A)
+        self.assertEqual(managed["status"], "HOLD")
+        self.assertIn(matrix, managed["manual"])
+        self.assertEqual(self.plan(old, new, B)["status"], "HOLD")
+
     def test_control_plane_update_requires_exact_installed_candidate(self):
         old = {"bot.py": item(A), "ops/nvl_cd_publisher.py": item(A)}
         new = {"bot.py": item(B), "ops/nvl_cd_publisher.py": item(B)}

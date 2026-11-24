@@ -36,6 +36,21 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(obs.drain(self.con, 103, send), "IDLE")
         send.assert_called_once()
 
+    def test_pending_legacy_notice_is_sanitized_at_delivery(self):
+        text = ("NVL CI/CD\n✅ استقرار موفق\n📌 release\n"
+                "https://github.com/" + obs.p.REPO + "/pull/42\n"
+                "جزئیات نسخه: https://github.com/" + obs.p.REPO + "/compare/a...b\n"
+                "ℹ️ توضیحات همه تغییرات یا مسیر تست کامل در دسترس نیست؛ جزئیات GitHub را بررسی کنید.")
+        self.con.execute("INSERT INTO events(event_key,message,observed) VALUES(?,?,?)",
+                         ("legacy", text, 100))
+        sender = Mock(return_value=True)
+        self.assertEqual(obs.drain(self.con, 100, sender), "SENT")
+        message = sender.call_args.args[0]
+        self.assertIn("استقرار موفق", message)
+        self.assertIn("release", message)
+        for forbidden in ("github.com", "GitHub", obs.p.REPO, "جزئیات نسخه"):
+            self.assertNotIn(forbidden, message)
+
     def test_retry_backoff_then_delivery(self):
         obs.record(self.con, {"phase": "ROLLED_BACK", "candidate": SHA}, 100)
         send = Mock(side_effect=[False, True])

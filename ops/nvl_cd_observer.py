@@ -190,7 +190,7 @@ def drain(con, now, sender=send):
     if not row:
         return "IDLE"
     key, msg, attempts = row
-    if sender(msg):
+    if sender(notes.sanitize_notice(msg)):
         con.execute("UPDATE events SET sent=? WHERE event_key=?", (now, key))
         return "SENT"
     delay = min(MAX_RETRY, 60 * (2 ** min(attempts, 6)))

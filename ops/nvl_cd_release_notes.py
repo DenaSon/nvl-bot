@@ -13,7 +13,13 @@ HEADINGS = {
     "changes": "changes",
     "acceptance tests": "tests",
 }
-BASE_URL = "https://github.com/" + p.REPO
+
+
+def redact_links(value):
+    """No repository address, including bare host or SSH forms, in notices."""
+    value = re.sub(r"https?://[^\s<>]+", "[لینک حذف شد]", value, flags=re.I)
+    value = re.sub(r"(?<![\w])(?:git@|ssh://)?(?:[\w.-]+\.)?(?:github\.com|githubusercontent\.com)(?:[:/][^\s<>]*)?", "[لینک حذف شد]", value, flags=re.I)
+    return re.sub(re.escape(p.REPO), "[حذف شد]", value, flags=re.I)
 
 
 def clean(value, limit):
@@ -23,7 +29,7 @@ def clean(value, limit):
     # overrides while keeping Persian ZWNJ and ordinary whitespace.
     value = "".join(c for c in value if c in "\n\t\u200c" or
                     unicodedata.category(c) not in ("Cc", "Cf", "Cs"))
-    value = re.sub(r"https?://[^\s<>]+", "[لینک حذف شد]", value, flags=re.I)
+    value = redact_links(value)
     value = re.sub(r"\b[0-9]{5,20}:[A-Za-z0-9_-]{20,100}\b",
                    "[حذف شد]", value)
     value = re.sub(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b",
@@ -87,6 +93,18 @@ def collect(repo, baseline, candidate, fetch=None):
     try:
         p.exact_sha(baseline)
         p.exact_sha(candidate)
+        # Local Git is authoritative for the actual commit message, even
+        # when the PR API is unavailable or the release range is too long.
+        try:
+            raw = p.git(repo, "show", "-s", "--format=%s%n%b", candidate)
+            subject, _, body = raw.decode("utf-8", errors="replace").partition("\n")
+            notes["commit_message"] = clean(subject, 150)
+            notes["commit_changes"] = [
+                value for line in body.splitlines()
+                if (value := clean(line, 150))
+            ][:3]
+        except Exception:
+            pass
         chain = p.git(repo, "rev-list", "--first-parent",
                       "--max-count=" + str(MAX_COMMITS + 1), candidate).decode("ascii").splitlines()
         if not chain or chain[0] != candidate or baseline not in chain:
@@ -101,7 +119,7 @@ def collect(repo, baseline, candidate, fetch=None):
             if item:
                 notes["entries"].append(item)
         notes["complete"] = (len(notes["entries"]) == len(commits)
-                             and all(item.get("summary") and item.get("changes") and item.get("tests")
+                             and all(item.get("summary") and item.get("changes")
                                      for item in notes["entries"]))
     except Exception:
         pass
@@ -117,31 +135,47 @@ def render(state):
     notes = state.get("release_notes")
     if not isinstance(notes, dict):
         notes = {}
+    subject = clean(notes.get("commit_message"), 150)
+    if subject:
+        lines.append("📝 پیام کامیت: " + subject)
     entries = notes.get("entries")
     if not isinstance(entries, list):
         entries = []
+    changes = []
+    structured = False
     for item in entries[:MAX_COMMITS]:
         if not isinstance(item, dict) or type(item.get("number")) is not int or item["number"] <= 0:
             continue
-        number = item["number"]
         title = clean(item.get("title"), 100)
-        lines.append("\n📌 " + (title or "Pull Request") + " (#" + str(number) + ")")
-        for key, label in (("summary", "خلاصه توسعه"), ("changes", "✨ تغییرات"),
-                           ("tests", "🧪 تست عملیاتی پیشنهادی")):
+        if title and title != subject:
+            changes.append("• " + title)
+        for key, limit in (("summary", 1), ("changes", 2)):
             values = item.get(key)
-            if not isinstance(values, list):
-                continue
-            values = [clean(value, 150) for value in values[:(1 if key == "summary" else 2)]]
-            values = [value for value in values if value]
-            if values:
-                lines.append(label + ":")
-                lines.extend("• " + value for value in values)
-        lines.append(BASE_URL + "/pull/" + str(number))
-    if not lines or notes.get("complete") is not True:
-        lines.append("\nℹ️ توضیحات همه تغییرات یا مسیر تست کامل در دسترس نیست؛ جزئیات GitHub را بررسی کنید.")
-    baseline = state.get("previous_deployed")
-    if isinstance(baseline, str) and p.SHA.fullmatch(baseline):
-        lines.append("جزئیات نسخه: " + BASE_URL + "/compare/" + baseline + "..." + sha)
-    else:
-        lines.append("جزئیات نسخه: " + BASE_URL + "/commit/" + sha)
+            if isinstance(values, list):
+                cleaned = [value for raw in values[:limit]
+                           if (value := clean(raw, 150))]
+                structured = structured or bool(cleaned)
+                changes.extend("• " + value for value in cleaned)
+    if not structured:
+        fallback = notes.get("commit_changes")
+        if isinstance(fallback, list):
+            changes.extend("• " + value for raw in fallback[:3]
+                           if (value := clean(raw, 150)))
+    if changes:
+        lines.extend(["", "✨ تغییرات (Changelog):", *changes])
+    if not changes or notes.get("complete") is not True:
+        lines.append("ℹ️ جزئیات کامل تغییرات در دسترس نیست.")
+    return "\n".join(lines)
+
+
+def sanitize_notice(message):
+    """Also protect already-queued notices created by older observers."""
+    lines = []
+    for line in message.splitlines():
+        if line.startswith("جزئیات نسخه: ") or re.match(
+                r"^\s*https?://(?:www\.)?github\.com/", line, flags=re.I):
+            continue
+        if "جزئیات GitHub را بررسی کنید" in line:
+            line = "ℹ️ جزئیات کامل تغییرات در دسترس نیست."
+        lines.append(redact_links(line))
     return "\n".join(lines)

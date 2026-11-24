@@ -128,6 +128,56 @@ class ManualEdgeJournal:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    @staticmethod
+    def _require_shared_superadmin(db, actor, chat):
+        # Database authorization, not a legacy admin-password session.
+        from nvl_superadmin_access import is_revoked_principal
+        if (
+            type(actor) is not int or type(chat) is not int
+            or actor <= 0 or chat != actor or is_revoked_principal(actor)
+        ):
+            raise ManualEdgeHold("SHARED_SUPERADMIN_REQUIRED")
+        try:
+            row = db.execute(
+                "SELECT 1 FROM bot_access WHERE telegram_id=? "
+                "AND role='super_admin' AND active=1 LIMIT 1", (actor,)
+            ).fetchone()
+        except sqlite3.Error:
+            raise ManualEdgeHold("SHARED_SUPERADMIN_REQUIRED") from None
+        if not row:
+            raise ManualEdgeHold("SHARED_SUPERADMIN_REQUIRED")
+
+    def list_shared(self, actor, chat, *, limit=7, offset=0, backend=None):
+        """Inventory visible to *all active* Super Admins, never an actor takeover."""
+        if type(limit) is not int or not 1 <= limit <= 20 or type(offset) is not int or offset < 0:
+            raise ManualEdgeHold("INVALID_PAGE")
+        with self.db() as db:
+            self.initialize(db)
+            self._require_shared_superadmin(db, actor, chat)
+            db.row_factory = sqlite3.Row
+            rows = db.execute(
+                "SELECT id,actor,chat,ip,admin_port,status,reason,route_job,"
+                "created_at,updated_at,archived_at,tunnel_backend "
+                "FROM manual_edge_operations WHERE status!='CANCELLED' "
+                "AND archived_at IS NULL "
+                + ("AND tunnel_backend=? " if backend else "")
+                + "ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?",
+                (backend, limit, offset) if backend else (limit, offset),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def display_state_shared(self, op_id, actor, chat):
+        """Read-only route state; active Super Admin must be verified by SQLite."""
+        with self.db() as db:
+            self.initialize(db)
+            self._require_shared_superadmin(db, actor, chat)
+            owner = db.execute(
+                "SELECT actor,chat FROM manual_edge_operations WHERE id=?", (op_id,)
+            ).fetchone()
+        if not owner:
+            raise ManualEdgeHold("MANUAL_OPERATION_NOT_FOUND")
+        return self.display_state(op_id, int(owner[0]), int(owner[1]))
+
     def display_state(self, op_id, actor, chat):
         """Actual route role for the UI; journal ACTIVE is only historical."""
         with self.db() as db:

@@ -13,19 +13,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def runtime_fixture(stage, missing=None):
-    """A bot import chain covering both lost packages; its body must never run."""
+    """A bot import chain covering local runtime packages; its body must never run."""
     stage.mkdir(parents=True, exist_ok=True)
-    for package in ("ops", "server_migration"):
+    for package in ("ops", "server_migration", "denaprobe_ingest"):
         folder = stage / package
         folder.mkdir()
         # Empty package initializers are valid, as in the real ops package.
         (folder / "__init__.py").write_text("")
         (folder / "runtime_fixture.py").write_text("VALUE = 1\n")
+        if package == "denaprobe_ingest":
+            (folder / "detector.py").write_text("def evaluate(): return True\n")
     (stage / "runtime_helper.py").write_text(
         "from server_migration.runtime_fixture import VALUE\n"
-        "from ops.runtime_fixture import VALUE as OTHER\n")
+        "from ops.runtime_fixture import VALUE as OTHER\n"
+        "from denaprobe_ingest.runtime_fixture import VALUE as DENA\n")
     (stage / "bot_final_v49-2.py").write_text(
-        "from runtime_helper import VALUE, OTHER\n"
+        "from runtime_helper import VALUE, OTHER, DENA\n"
         "raise RuntimeError('BOT_BODY_MUST_NOT_RUN')\n")
     shutil.copy2(ROOT / "bot_import_preflight.py", stage / "bot_import_preflight.py")
     (stage / "02_recreate_ssh_users.py").write_text("# fixture\n")
@@ -77,8 +80,12 @@ class TelegramCoreMigrationTests(unittest.TestCase):
         stop = self.core.index("if ! systemctl stop nvlbot || systemctl is-active --quiet nvlbot; then")
         self.assertLess(marker, stop)
         self.assertIn("python3 -m venv --clear /root/venv", self.core)
+        self.assertIn("/root/denaprobe_ingest", self.core)
+        self.assertIn("from denaprobe_ingest.detector import evaluate", self.core)
+        self.assertIn("from denaprobe_ingest.detector import evaluate", self.promote)
         self.assertIn("python3 -m pip --version", self.core)
-        self.assertIn("demote_core_to_edge.sh --prepare", self.core)
+        self.assertNotIn("demote_core_to_edge.sh --prepare", self.core)
+        self.assertIn("awg show awg0 public-key", self.core)
         self.assertIn("systemctl is-active --quiet nvlbot", self.core)
         self.assertNotIn("با cp خام کپی شد", self.core)
 
@@ -89,11 +96,11 @@ class TelegramCoreMigrationTests(unittest.TestCase):
             "/root/venv/bin/python3", "venv_python").replace(
             "/root/nvlbot_standby/.nvl_promotion_main", '"$TEST_MAIN"').replace(
             "/root/nvlbot_standby", '"$TEST_STATE"')
-        for failure in ("none", "apt", "pip", "compile", "ops", "server_migration"):
+        for failure in ("none", "apt", "pip", "compile", "ops", "server_migration", "denaprobe_ingest"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
                 trace = Path(tmp) / "trace"
                 marker = Path(tmp) / "main"
-                runtime_fixture(Path(tmp), failure if failure in ("ops", "server_migration") else None)
+                runtime_fixture(Path(tmp), failure if failure in ("ops", "server_migration", "denaprobe_ingest") else None)
                 env = dict(os.environ, TRACE=str(trace), TEST_STATE=tmp,
                            TEST_MAIN=str(marker), FAIL_STAGE=failure,
                            TEST_PYTHON=sys.executable, PYTHONPATH="")
@@ -159,7 +166,7 @@ TARGET_EDGE=192.0.2.2
     def test_destination_installs_importable_staged_package_and_rejects_missing_package(self):
         start = self.promote.index('STANDBY_DIR="/root/nvlbot_standby"')
         finish = self.promote.index("# Always prefer the service unit", start)
-        for missing in ("ops", "server_migration", None):
+        for missing in ("ops", "server_migration", "denaprobe_ingest", None):
             with self.subTest(missing_package=missing), tempfile.TemporaryDirectory() as tmp:
                 stage, dest = Path(tmp) / "stage", Path(tmp) / "destination"
                 runtime_fixture(stage, missing)
@@ -173,7 +180,7 @@ TARGET_EDGE=192.0.2.2
                 self.assertEqual(result.returncode, 0 if missing is None else 1,
                                  result.stdout + result.stderr)
                 if missing is None:
-                    for name in ("runtime_helper.py", "ops/runtime_fixture.py", "server_migration/runtime_fixture.py", "fixture.sh"):
+                    for name in ("runtime_helper.py", "ops/runtime_fixture.py", "server_migration/runtime_fixture.py", "denaprobe_ingest/runtime_fixture.py", "fixture.sh"):
                         self.assertTrue((dest / name).is_file(), name)
                     self.assertIn("BOT_IMPORTS_OK=", result.stdout)
 
@@ -190,7 +197,7 @@ TARGET_EDGE=192.0.2.2
 
     def test_old_stage_is_preserved_but_cannot_supply_missing_modules(self):
         start = self.core.index("# Preserve the previous stage")
-        finish = self.core.index("if ! rsync", start)
+        finish = self.core.index("# DenaProbe is imported by the live bot", start)
         with tempfile.TemporaryDirectory() as tmp:
             stage = Path(tmp) / "stage"
             (stage / "ops").mkdir(parents=True)
@@ -217,7 +224,7 @@ TARGET_EDGE=192.0.2.2
             harness = 'EDGE_SSH_KEY=unused; EDGE_PORT=22; TARGET_EDGE=fixture;\n'
             subprocess.run(["bash", "-ec", harness + body],
                            env=dict(os.environ, TEST_STAGE=str(stage)), check=True)
-            for name in ("runtime_helper.py", "ops/runtime_fixture.py", "server_migration/runtime_fixture.py"):
+            for name in ("runtime_helper.py", "ops/runtime_fixture.py", "server_migration/runtime_fixture.py", "denaprobe_ingest/runtime_fixture.py"):
                 self.assertTrue((stage / name).is_file(), name)
             for name in (".env", "master_bot.db", "ops/private.json", "ops/key.pem"):
                 self.assertFalse((stage / name).exists(), name)
@@ -256,7 +263,8 @@ rollback_start_nvlbot() { printf 'SOURCE_RECOVERY\n' >> "$TRACE"; }
                 if not failure:
                     with tarfile.open(export / "root_full_snapshot.tar.gz") as archive:
                         for name in ("./ops/runtime_fixture.py", "./server_migration/runtime_fixture.py",
-                                     "./runtime_helper.py", "./bot_import_preflight.py"):
+                                     "./runtime_helper.py", "./bot_import_preflight.py",
+                                     "./denaprobe_ingest/runtime_fixture.py"):
                             self.assertIn(name, archive.getnames())
 
     def test_source_frozen_before_copy_and_wg_exclusive_before_promote(self):
@@ -287,20 +295,95 @@ rollback_start_nvlbot() { printf 'SOURCE_RECOVERY\n' >> "$TRACE"; }
         self.assertIn("MIGRATION_COMPLETE", self.demote)
         self.assertIn('systemctl disable --now nvlbot', self.demote)
 
-    def test_private_runtime_and_systemd_dropins_restored_before_bot_start(self):
+    def test_private_runtime_archives_both_etc_trees_and_restores_before_bot_start(self):
         self.assertIn('nvlbot_etc.tar.gz', self.core)
         self.assertIn('nvlbot_dropins.tar.gz', self.core)
+        self.assertIn('for env_dir in /etc/nvlbot /etc/nvl', self.core)
+        self.assertIn('environment_files.list', self.core)
+        self.assertIn('readlink -f -- "$env_file"', self.core)
         self.assertIn('nvlbot_etc.tar.gz', self.promote)
         self.assertIn('nvlbot_dropins.tar.gz', self.promote)
-        self.assertIn('chmod 600 /etc/nvlbot/nvlbot.env', self.promote)
-        self.assertLess(
-            self.promote.index('tar -xzf "${MIGRATION_DIR}/nvlbot_etc.tar.gz"'),
-            self.promote.index('systemctl enable --now nvlbot'),
-        )
-        self.assertIn('REQUIRED_ENV_FILE=', self.promote)
+        self.assertIn('environment_files.list', self.promote)
+        self.assertIn('tar --same-owner --same-permissions', self.promote)
+        self.assertIn('validate_required_environment_files()', self.promote)
+        restore_index = self.promote.index('tar --same-owner --same-permissions')
+        daemon_reload_index = self.promote.index('systemctl daemon-reload', restore_index)
+        bot_start_index = self.promote.index('systemctl enable --now nvlbot', restore_index)
+        self.assertLess(restore_index, daemon_reload_index)
+        self.assertLess(restore_index, bot_start_index)
+
+    def test_promote_validates_every_effective_environment_file(self):
+        start = self.promote.index('validate_required_environment_files() {')
+        finish = self.promote.index('\n}', start) + 2
+        function = self.promote[start:finish]
+        for missing_index in (None, 1, 4):
+            with self.subTest(missing_index=missing_index), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                paths = [
+                    root / 'etc/nvlbot/nvlbot.env',
+                    root / 'etc/nvlbot/cloudzy.env',
+                    root / 'etc/nvlbot/awg-flags.env',
+                    root / 'etc/nvl/marzban-alert.env',
+                    root / 'etc/nvl/daily-business.env',
+                ]
+                for index, path in enumerate(paths):
+                    if index == missing_index:
+                        continue
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text('fixture=1\n')
+                env_files = '\n'.join(f'{path} (ignore_errors=no)' for path in paths)
+                harness = 'systemctl() { printf \'%s\\n\' "$TEST_ENV_FILES"; }\n'
+                result = subprocess.run(
+                    ['bash', '-c', harness + function + '\nvalidate_required_environment_files\n'],
+                    env=dict(os.environ, TEST_ENV_FILES=env_files),
+                    capture_output=True, text=True,
+                )
+                expected = 0 if missing_index is None else 1
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                if missing_index is not None:
+                    self.assertIn(str(paths[missing_index]), result.stdout)
 
     def test_endpoint_propagation_fails_on_unreachable_edges(self):
         self.assertIn('[ "$FAIL" -eq 0 ]', self.sync)
+
+    def test_awg_only_promotion_preflight_does_not_require_target_wg(self):
+        start = self.core.index('echo "🔹 ۲.۵) بررسی AWG')
+        end = self.core.index('echo "🔹 ۲.۶) انتقال نسخه دقیق', start)
+        fragment = self.core[start:end]
+        self.assertNotIn('wg show wg0', fragment)
+        self.assertNotIn('wg-quick@wg0', fragment)
+        self.assertNotIn('demote_core_to_edge', fragment)
+        harness = """
+set -uo pipefail
+AWG_SOURCE_ACTIVE=1
+TARGET_EDGE=192.0.2.8
+SSH_OPTS=()
+ssh() {
+  case "${*: -1}" in
+    'awg show awg0 public-key') echo TEST_EDGE_PUBLIC_KEY ;;
+    *) return 0 ;;
+  esac
+}
+awg() {
+  if [ "$*" = "show awg0 peers" ]; then
+    echo TEST_EDGE_PUBLIC_KEY
+  fi
+}
+"""
+        result = subprocess.run(
+            ["bash", "-c", harness + fragment + "\necho AWG_ONLY_PREFLIGHT_PASS\n"],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("AWG_ONLY_PREFLIGHT_PASS", result.stdout)
+
+    def test_wg_sync_skips_awg_only_edges_and_retired_core(self):
+        sync = self.sync
+        self.assertIn('OLD_CORE_PUBLIC_IP="${3:-}"', sync)
+        self.assertIn('WG_ROLE=', sync)
+        self.assertIn('NO_WG', sync)
+        self.assertIn('CORE', sync)
+        self.assertIn('"$EDGE" = "$OLD_CORE_PUBLIC_IP"', sync)
+        self.assertLess(sync.index('WG_ROLE='), sync.index('if ! rsync -az -e'))
 
     @staticmethod
     def _function(source, name):
@@ -348,20 +431,22 @@ SSH=(remote)
     def test_target_exit_cleanup_and_source_restart_order(self):
         rollback = self._function(self.promote, "rollback_on_failure")
         cases = (
-            # changed, success, stopped_old, bot_active, wg_active, wg_interface
-            (1, 0, 0, 0, 0, 0),  # wrapper stopped old Core; only clean target
-            (1, 0, 1, 0, 0, 0),  # standalone flow may resume source after cleanup
-            (1, 0, 1, 1, 0, 0),  # incomplete bot shutdown: do not revive source
-            (1, 0, 1, 0, 1, 0),  # incomplete WG service shutdown
-            (1, 0, 1, 0, 0, 1),  # raw WG identity survives inactive service
-            (0, 0, 0, 0, 0, 0),  # validation failed before target mutations
-            (1, 1, 0, 1, 1, 1),  # successful promotion must keep target alive
+            # changed, success, stopped_old, bot_active, wg_active, wg_interface, awg_interface
+            (1, 0, 0, 0, 0, 0, 0),  # wrapper stopped old Core; only clean target
+            (1, 0, 1, 0, 0, 0, 0),  # standalone flow may resume source after cleanup
+            (1, 0, 1, 1, 0, 0, 0),  # incomplete bot shutdown: do not revive source
+            (1, 0, 1, 0, 1, 0, 0),  # incomplete WG service shutdown
+            (1, 0, 1, 0, 0, 1, 0),  # raw WG identity survives inactive service
+            (1, 0, 1, 0, 0, 0, 1),  # raw AWG identity survives inactive service
+            (0, 0, 0, 0, 0, 0, 0),  # validation failed before target mutations
+            (1, 1, 0, 1, 1, 1, 1),  # successful promotion must keep target alive
         )
-        for changed, success, stopped_old, bot, service, interface in cases:
-            with self.subTest(case=(changed, success, stopped_old, bot, service, interface)), tempfile.TemporaryDirectory() as tmp:
+        for changed, success, stopped_old, bot, service, interface, awg_interface in cases:
+            with self.subTest(case=(changed, success, stopped_old, bot, service, interface, awg_interface)), tempfile.TemporaryDirectory() as tmp:
                 trace = Path(tmp) / "trace"
                 env = dict(os.environ, TRACE=str(trace), BOT_ACTIVE=str(bot),
-                           WG_ACTIVE=str(service), WG_INTERFACE=str(interface))
+                           WG_ACTIVE=str(service), WG_INTERFACE=str(interface),
+                           AWG_INTERFACE=str(awg_interface))
                 harness = '''
 set -u
 systemctl() {
@@ -371,6 +456,7 @@ systemctl() {
     else return 0; fi
 }
 wg() { printf 'wg %s\n' "$*" >> "$TRACE"; [ "$WG_INTERFACE" = 1 ]; }
+awg() { printf 'awg %s\n' "$*" >> "$TRACE"; [ "$AWG_INTERFACE" = 1 ]; }
 ssh() { printf 'ssh %s\n' "$*" >> "$TRACE"; return 0; }
 OLD_CORE_IP=192.0.2.1
 CUSTOMER_SSH_PORT=8443
@@ -385,17 +471,18 @@ CUSTOMER_SSH_PORT=8443
                 else:
                     self.assertIn("systemctl disable --now nvlbot", calls)
                     self.assertIn("systemctl disable --now wg-quick@wg0", calls)
-                    should_restart = stopped_old and not (bot or service or interface)
+                    should_restart = stopped_old and not (bot or service or interface or awg_interface)
                     self.assertEqual("ssh " in calls, bool(should_restart))
                     if should_restart:
                         self.assertLess(calls.index("wg show wg0"), calls.index("ssh "))
 
     def test_source_rollback_requires_target_bot_and_wg_to_be_down(self):
         rollback = self._function(self.core, "rollback_start_nvlbot")
-        for bot, interface in ((0, 0), (1, 0), (0, 1)):
-            with self.subTest(bot=bot, interface=interface), tempfile.TemporaryDirectory() as tmp:
+        for bot, interface, awg_interface in ((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)):
+            with self.subTest(bot=bot, interface=interface, awg_interface=awg_interface), tempfile.TemporaryDirectory() as tmp:
                 trace = Path(tmp) / "trace"
-                env = dict(os.environ, TRACE=str(trace), BOT_ACTIVE=str(bot), WG_INTERFACE=str(interface))
+                env = dict(os.environ, TRACE=str(trace), BOT_ACTIVE=str(bot),
+                           WG_INTERFACE=str(interface), AWG_INTERFACE=str(awg_interface))
                 harness = '''
 set -u
 systemctl() {
@@ -403,8 +490,9 @@ systemctl() {
     if [ "$1" = is-active ]; then [ "$3" = nvlbot ] && [ "$BOT_ACTIVE" = 1 ]; else return 0; fi
 }
 wg() { [ "$WG_INTERFACE" = 1 ]; }
+awg() { [ "$AWG_INTERFACE" = 1 ]; }
 ssh() { SIDE=target bash -c "${!#}"; }
-export -f systemctl wg
+export -f systemctl wg awg
 SSH_OPTS=()
 TARGET_EDGE=192.0.2.2
 SOURCE_WG_STOPPED=1
@@ -412,7 +500,7 @@ SOURCE_WG_STOPPED=1
                 result = subprocess.run(["bash", "-c", harness + rollback + "rollback_start_nvlbot\n"],
                                         env=env, capture_output=True, text=True)
                 calls = trace.read_text()
-                should_restart = not (bot or interface)
+                should_restart = not (bot or interface or awg_interface)
                 self.assertEqual(result.returncode, 0 if should_restart else 1, result.stdout + result.stderr)
                 self.assertEqual("source systemctl start nvlbot" in calls, should_restart)
 
@@ -447,7 +535,7 @@ SOURCE_WG_STOPPED=0
 
     def test_remote_failure_reaches_source_recovery_even_with_errexit(self):
         start = self.core.index('echo "🔹 ۶) اجرای remote')
-        finish = self.core.index('echo "🔹 ۷) تأیید', start)
+        finish = self.core.index('echo "🔹 ۷) هماهنگ', start)
         harness = '''
 set -euo pipefail
 SSH_OPTS=()
@@ -463,6 +551,62 @@ rollback_start_nvlbot() { printf 'SOURCE_RECOVERY_CALLED\n'; }
         self.assertEqual(result.returncode, 27)
         self.assertIn("SOURCE_RECOVERY_CALLED", result.stdout)
 
+
+class CoreAWGPromoteRegressionTests(unittest.TestCase):
+    """Source-level guards for the live legacy Promote Edge -> Core path."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.core = (ROOT / "core_side_failover.sh").read_text()
+        cls.promote = (ROOT / "promote_edge_to_core.sh").read_text()
+        cls.bot = (ROOT / "bot_final_v49-2.py").read_text()
+        cls.awg_sync = (ROOT / "update_all_awg_edges_endpoint.sh").read_text()
+
+    def test_source_exports_awg_and_stops_old_identity_before_promote(self):
+        self.assertIn('install -m 600 /etc/amnezia/amneziawg/awg0.conf', self.core)
+        self.assertIn('awg show awg0 public-key', self.core)
+        self.assertIn('systemctl stop awg-quick@awg0', self.core)
+        self.assertLess(
+            self.core.index('install -m 600 /etc/amnezia/amneziawg/awg0.conf'),
+            self.core.index('systemctl stop awg-quick@awg0'),
+        )
+        self.assertLess(
+            self.core.index('systemctl stop awg-quick@awg0'),
+            self.core.index('PROMOTE_EXIT=$?'),
+        )
+
+    def test_both_rollback_paths_disable_new_awg_before_old_core_is_started(self):
+        self.assertIn('systemctl disable --now awg-quick@awg0', self.core)
+        self.assertIn('systemctl disable --now awg-quick@awg0', self.promote)
+        self.assertIn('systemctl start awg-quick@awg0', self.core)
+
+    def test_promote_restores_awg_identity_and_additional_databases(self):
+        self.assertIn('install -m 600 "${MIGRATION_DIR}/awg0.conf"', self.promote)
+        self.assertIn('systemctl start awg-quick@awg0', self.promote)
+        self.assertIn('awg show awg0 public-key', self.promote)
+        self.assertIn('extra_databases', self.core)
+        self.assertIn('extra_databases', self.promote)
+        self.assertLess(
+            self.promote.index('systemctl start awg-quick@awg0'),
+            self.promote.index('systemctl enable --now nvlbot'),
+        )
+
+    def test_awg_endpoint_sync_not_limited_to_host_pool(self):
+        self.assertIn('mapfile -t EDGES', self.awg_sync)
+        self.assertIn('Endpoint', self.awg_sync)
+        self.assertIn('awg set awg0 peer', self.awg_sync)
+        self.assertIn('EDGE_AWG_ENDPOINT_UPDATED', self.awg_sync)
+        self.assertIn('AWG_EDGE_UPDATE_FAILED', self.awg_sync)
+        self.assertIn('update_all_awg_edges_endpoint.sh', self.core)
+        subprocess.run(["bash", "-n", str(ROOT / "update_all_awg_edges_endpoint.sh")], check=True)
+
+    def test_telegram_launches_promote_without_demoting_old_core(self):
+        handler = self.bot.split('elif d == "srv_promote_confirm"')[1].split(
+            'elif d == "srv_direct_menu"'
+        )[0]
+        self.assertIn('bash /root/core_side_failover.sh', handler)
+        self.assertNotIn('&& bash /root/demote_core_to_edge.sh', handler)
+        self.assertIn('Core قدیمی خاموشِ سرویس', self.bot)
 
 if __name__ == "__main__":
     unittest.main()

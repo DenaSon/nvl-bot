@@ -118,6 +118,14 @@ import marzban_regional_filtering as marzban_regional
 import marzban_observability
 import marzban_alerting
 import nvl_daily_business
+from ssh_refund_policy import calculate_ssh_refund
+from ssh_delete_settlement import (
+    finalize_ssh_delete, preflight_ssh_delete, SSHDeleteSettlementHold,
+)
+from ssh_paid_ledger import (
+    create_paid_purchase, apply_paid_change, preview_delete,
+    quote_time_reduction, record_hold_activation, SSHFinanceHold,
+)
 from cloudzy_rich_transport import RichBotAPI as NVLDailyRichBotAPI
 import secrets
 from nvl_superadmin_access import (
@@ -714,7 +722,7 @@ def _parse_flexible_datetime(s: str) -> datetime:
         return datetime.strptime(s, "%Y-%m-%d")
 
 def activate_on_first_connection(connection: sqlite3.Connection, username: str, connected_at: Optional[datetime] = None, set_linux_expiry: Optional[Callable[[str, str], None]] = None) -> Optional[HoldActivation]:
-    row = connection.execute("SELECT hold_active, hold_deadline, hold_duration_days FROM ssh_accounts WHERE username=?", (username,)).fetchone()
+    row = connection.execute("SELECT hold_active, hold_deadline, hold_duration_days, expire_date FROM ssh_accounts WHERE username=?", (username,)).fetchone()
     if not row or not row[0]: return None
     duration = row[2]; observed = connected_at or datetime.now()
     deadline = _parse_flexible_datetime(row[1])
@@ -722,13 +730,15 @@ def activate_on_first_connection(connection: sqlite3.Connection, username: str, 
     expiry = (started + timedelta(days=duration)).date().strftime("%Y-%m-%d")
     if set_linux_expiry: set_linux_expiry(username, expiry)
     connection.execute("UPDATE ssh_accounts SET expire_date=?, hold_active=0, hold_deadline=NULL, hold_duration_days=NULL, first_connected_at=? WHERE username=?", (expiry, observed.strftime("%Y-%m-%d %H:%M:%S"), username))
+    record_hold_activation(connection, username=username, old_expiry=row[3],
+                           new_expiry=expiry, started_on=started.date())
     return HoldActivation(username, observed.strftime("%Y-%m-%d %H:%M:%S"), expiry, "first_connection")
 
 def activate_expired_holds(connection: sqlite3.Connection, checked_at: Optional[datetime] = None, set_linux_expiry: Optional[Callable[[str, str], None]] = None) -> Iterable[HoldActivation]:
     now = (checked_at or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
-    rows = connection.execute("SELECT username, hold_deadline, hold_duration_days FROM ssh_accounts WHERE hold_active=1 AND hold_deadline <= ?", (now,)).fetchall()
+    rows = connection.execute("SELECT username, hold_deadline, hold_duration_days, expire_date FROM ssh_accounts WHERE hold_active=1 AND hold_deadline <= ?", (now,)).fetchall()
     results = []
-    for un, deadline_s, duration in rows:
+    for un, deadline_s, duration, old_expiry in rows:
         started = _parse_flexible_datetime(deadline_s)
         expiry = (started + timedelta(days=duration)).date().strftime("%Y-%m-%d")
 
@@ -750,6 +760,8 @@ def activate_expired_holds(connection: sqlite3.Connection, checked_at: Optional[
             "hold_deadline=NULL, hold_duration_days=NULL WHERE username=?",
             (expiry, un)
         )
+        record_hold_activation(connection, username=un, old_expiry=old_expiry,
+                               new_expiry=expiry, started_on=started.date())
         results.append(HoldActivation(un, deadline_s, expiry, "hold_deadline"))
     return results
 
@@ -822,6 +834,10 @@ PERSISTENCE_PATH = os.environ.get("BOT_PERSISTENCE_PATH", os.path.join(_SCRIPT_D
 # 🆘 سقف کل «شارژ اضطراری» هر نماینده (تومان) — یعنی موجودی نماینده حداکثر تا این مقدار
 # می‌تواند منفی شود تا در نبود دسترسی به مدیریت هم بتواند اکانت بسازد. مبلغ مصرف‌شده در اولین
 # شارژ واقعی بعدی (دستی توسط ادمین یا تاییدِ رسید کارت‌به‌کارت) به‌طور خودکار کسر می‌شود.
+# New emergency borrowing is disabled; historical emergency debt and its
+# existing repayment workflow remain intact. Keep this explicit fail-closed
+# kill switch rather than deleting financial history or ledger columns.
+EMERGENCY_CREDIT_ENABLED = False
 EMERGENCY_CREDIT_LIMIT = 1_000_000.0
 # 🆘 حداکثر تعداد درخواست‌های «پیاپی» شارژ اضطراری (بدون هیچ شارژ واقعی بین آن‌ها). با هر شارژ
 # واقعی حساب نماینده (حتی جزئی)، این شمارنده صفر می‌شود و دوباره ۲ درخواست در اختیارش قرار می‌گیرد.
@@ -2000,7 +2016,7 @@ def _build_server_settings_kb():
             [InlineKeyboardButton("✏️ تغییر نام برند", callback_data="srv_brand")],
             [InlineKeyboardButton("🎯 تنظیمات مستقیم", callback_data="srv_direct_menu"), InlineKeyboardButton("🔐 تنظیمات TLS", callback_data="srv_tls")],
             [InlineKeyboardButton("🔌 تنظیمات UDPGW", callback_data="srv_udpgw")],
-            [InlineKeyboardButton("🖥 وضعیت سرور (CPU/RAM)", callback_data="srv_health")],
+            [InlineKeyboardButton("🩺 سلامت سرور", callback_data="srv_health")],
             [InlineKeyboardButton("🩺 عیب‌یابی خام اتصالات SSH", callback_data="srv_ssh_debug")],
             [InlineKeyboardButton("🩹 خودتشخیصی و رفع خودکار اتصال SSH", callback_data="srv_ssh_diag")],
             [InlineKeyboardButton("🧹 کاربران یتیم (بدون رکورد در ربات)", callback_data="orphan_menu")],
@@ -4636,6 +4652,14 @@ def _db_get_user(un):
     # 🆕 ستون conn_mode هم به همین ترتیب در انتها اضافه شد (index=7) تا هیچ فراخوانی قدیمیِ
     # _db_get_user که فقط از cur[0..6] استفاده می‌کند خراب نشود.
     with db_conn() as conn: return conn.execute("SELECT password, expire_date, creation_date, users_limit, status, agent_id, host, conn_mode FROM ssh_accounts WHERE username=?", (un,)).fetchone()
+def _db_get_user_service_type(un):
+    # Reject expired Telegram callbacks targeting V2Ray volume plans.
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT service_type FROM ssh_accounts WHERE username=?", (un,)
+        ).fetchone()
+        return row[0] if row else None
+
 def _db_set_conn_mode(un, mode):
     """'direct' یا 'tls' — برای تغییر حالت اتصال یک اکانت از قبل‌ساخته‌شده."""
     with db_conn() as conn: conn.execute("UPDATE ssh_accounts SET conn_mode=? WHERE username=?", (mode, un))
@@ -5021,7 +5045,7 @@ def _db_cancel_reservation(un: str):
     with db_conn() as conn:
         conn.execute("DELETE FROM ssh_accounts WHERE username=? AND status='⏳ درحال ساخت'", (un,))
 
-def _db_finalize_reserved_user(un, pw, exp, cr, lim, cnt, br, agid=0, conn_mode='direct', hold_deadline=None, hold_duration_days=None, host=None):
+def _db_finalize_reserved_user(un, pw, exp, cr, lim, cnt, br, agid=0, conn_mode='direct', hold_deadline=None, hold_duration_days=None, host=None, paid_cost=None):
     """Finalize one reserved SSH account atomically with its owning Edge.
 
     Phase 6G forbids this transition while a manual failover is RUNNING so an
@@ -5049,6 +5073,15 @@ def _db_finalize_reserved_user(un, pw, exp, cr, lim, cnt, br, agid=0, conn_mode=
         )
         if cur.rowcount != 1:
             raise RuntimeError(f"SSH_RESERVATION_FINALIZE_MISMATCH:{un}")
+        # Atomic paid finalization: wallet charge and immutable per-account
+        # journal must commit with SSH metadata, otherwise rollback all three.
+        if agid:
+            if paid_cost is None:
+                raise RuntimeError("SSH_AGENT_PURCHASE_AMOUNT_REQUIRED")
+            create_paid_purchase(
+                conn, username=un, agent=agid, amount=paid_cost,
+                created=cr, expiry=exp, users=lim,
+            )
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (f"counter_{br}", cnt))
 def _db_finalize_v2ray_user(un, pw, exp, cr, lim, cnt, br, agid, data_limit, sub_url, hold_deadline, hold_duration_days):
     with db_conn() as conn:
@@ -5073,7 +5106,11 @@ def _db_get_hold_accounts():
 def _db_activate_hold_account(un, real_exp_db):
     """پایان دادن به دوران آنهولد: انقضای واقعی‌محاسبه‌شده در دیتابیس ثبت و حالت آنهولد خاموش می‌شود."""
     with db_conn() as conn:
+        previous = conn.execute("SELECT expire_date FROM ssh_accounts WHERE username=?", (un,)).fetchone()
         conn.execute("UPDATE ssh_accounts SET expire_date=?, hold_active=0 WHERE username=?", (real_exp_db, un))
+        if previous:
+            record_hold_activation(conn, username=un, old_expiry=previous[0],
+                                   new_expiry=real_exp_db, started_on=datetime.now().date())
 
 # ==========================================
 # 🔢 شمارندهٔ اختصاصیِ هر پیشوند/برند یوزرنیم
@@ -5277,14 +5314,28 @@ def _db_admin_topup_agent(aid, amount):
                              (datetime.now(IRAN_TZ).strftime("%Y-%m-%d %H:%M:%S"), agent_name, "شارژ دستی", "-", amount, "توسط ادمین"))
             acc_conn.commit()
     except Exception: pass
-def _db_admin_deduct_agent(aid, amount):
-    """🆕 کاهش دستی مستقیم کیف‌پول یک نماینده توسط ادمین — برای اصلاح شارژهای اشتباهی
-    (مثلاً وقتی ادمین با تایپ غلط، مبلغی را به‌اشتباه به حساب یک نماینده اضافه کرده).
-    برخلاف تابع شارژ، این عملیات ربطی به جریان «شارژ اضطراری» ندارد (چون کاهش موجودی، بازپرداخت
-    شارژ اضطراری محسوب نمی‌شود) و صرفاً مبلغ داده‌شده را از موجودی کم می‌کند؛ موجودی می‌تواند
-    منفی هم بشود (تشخیص با خودِ ادمین است، مثلاً برای ثبت بدهی)."""
-    with db_conn() as conn:
-        conn.execute("UPDATE agents SET balance = balance - ? WHERE id=?", (amount, aid))
+def _db_admin_deduct_agent(aid, amount, source_key):
+    """کاهش دستی کیف‌پول و ثبت اتمیک رویداد مالی؛ کلید منبع از پیام تایید می‌آید."""
+    if amount <= 0 or not source_key:
+        return False
+    try:
+        with db_conn() as conn:
+            updated = conn.execute(
+                "UPDATE agents SET balance = balance - ? WHERE id=?", (amount, aid)
+            ).rowcount
+            if updated != 1:
+                return False
+            inserted = nvl_daily_business.record_event(
+                conn, kind="MANUAL_DEDUCT", agent_id=aid, amount=amount,
+                source_key=source_key,
+            )
+            if not inserted:
+                raise sqlite3.IntegrityError("DUPLICATE_MANUAL_DEDUCT")
+    except sqlite3.IntegrityError as exc:
+        if str(exc) == "DUPLICATE_MANUAL_DEDUCT":
+            return False
+        raise
+    return True
 def _apply_emergency_repayment(conn, aid, topup_amount):
     """با هر شارژ واقعی (دستی توسط ادمین یا تاییدِ رسید)، تا سقفِ همان مبلغِ واریزی از emergency_used
     کسر می‌شود و emergency_request_count صفر می‌گردد. باید با کانکشن دیتابیسِ باز فراخوانی شود."""
@@ -5295,6 +5346,8 @@ def _apply_emergency_repayment(conn, aid, topup_amount):
 def _db_agent_register_emergency_use(aid, amount):
     """مصرف یک بار «شارژ اضطراری» را ثبت می‌کند: مبلغ به emergency_used اضافه (تا سقف
     EMERGENCY_CREDIT_LIMIT) و emergency_request_count یکی افزایش می‌یابد."""
+    if not EMERGENCY_CREDIT_ENABLED:
+        raise RuntimeError("EMERGENCY_CREDIT_DISABLED")
     with db_conn() as conn:
         row = conn.execute("SELECT emergency_used, emergency_request_count FROM agents WHERE id=?", (aid,)).fetchone()
         used, cnt = ((row[0] or 0.0), (row[1] or 0)) if row else (0.0, 0)
@@ -5307,11 +5360,16 @@ def _check_emergency_option(ainf, cost):
     آیا امکان تکمیل این خرید با «شارژ اضطراری» وجود دارد یا نه.
     خروجی: (has_option, remaining_emergency, shortfall, used, req_count)
     """
+    if not EMERGENCY_CREDIT_ENABLED:
+        # Do not advertise historical emergency borrowing when disabled.
+        return False, 0.0, 0.0, 0.0, 0
     used = ainf[12] if len(ainf) > 12 and ainf[12] else 0.0
     req_count = ainf[13] if len(ainf) > 13 and ainf[13] else 0
     remaining_emergency = EMERGENCY_CREDIT_LIMIT - used
     shortfall = cost - ainf[2]
-    has_option = (req_count < EMERGENCY_MAX_CONSECUTIVE_REQUESTS) and (0 < shortfall <= remaining_emergency)
+    has_option = (EMERGENCY_CREDIT_ENABLED and
+                  req_count < EMERGENCY_MAX_CONSECUTIVE_REQUESTS and
+                  0 < shortfall <= remaining_emergency)
     return has_option, remaining_emergency, shortfall, used, req_count
 def _db_update_agent_username(aid, new_username):
     """🆕 تغییر یوزرنیم لاگین یک نماینده توسط ادمین. چون username در جدول agents یکتا (UNIQUE) است،
@@ -5336,6 +5394,8 @@ def _get_active_account_count_by_agent(agent_id: int) -> int:
 
 def _agent_can_use_emergency_credit(agent_id: int) -> tuple[bool, int]:
     """بررسی اینکه آیا نماینده واجد شرایط استفاده از شارژ اضطراری است (حداقل ۵۰ اکانت فعال)."""
+    if not EMERGENCY_CREDIT_ENABLED:
+        return False, 0
     active_count = _get_active_account_count_by_agent(agent_id)
     can_use = active_count >= EMERGENCY_MIN_ACTIVE_ACCOUNTS
     return can_use, active_count
@@ -5361,12 +5421,26 @@ async def _calc_account_refund(username: str) -> tuple[float, str]:
     def _get_row():
         with db_conn() as conn:
             return conn.execute(
-                "SELECT a.expire_date, a.creation_date, a.hold_active, a.users_limit, ag.base_price, a.service_type, ag.v2ray_base_price, ag.v2ray_vol_price "
+                "SELECT a.expire_date, a.creation_date, a.hold_active, a.users_limit, ag.base_price, a.service_type, ag.v2ray_base_price, ag.v2ray_vol_price, a.hold_duration_days "
                 "FROM ssh_accounts a LEFT JOIN agents ag ON ag.id = a.agent_id WHERE a.username = ?", (username,)
             ).fetchone()
     row = await asyncio.to_thread(_get_row)
     if not row: return 0.0, "اکانت یافت نشد"
-    expire_date, creation_date, hold_active, users_limit, ssh_bp_raw, stype, v2_bp_raw, v2_vol_bp_raw = row
+    expire_date, creation_date, hold_active, users_limit, ssh_bp_raw, stype, v2_bp_raw, v2_vol_bp_raw, hold_duration_days = row
+
+    if stype == 'ssh':
+        quote = calculate_ssh_refund(
+            monthly_price=ssh_bp_raw, users_limit=users_limit,
+            expire_date=expire_date, creation_date=creation_date,
+            hold_active=hold_active, hold_duration_days=hold_duration_days,
+            today=datetime.now(IRAN_TZ).date(),
+        )
+        if quote.reason.startswith("INVALID_"):
+            return 0.0, "اطلاعات قیمت یا مدت این حساب برای بازپرداخت معتبر نیست."
+        desc = (f"بازگشت مدت خریداری‌شده: {quote.days} روز"
+                if hold_active else f"بازگشت زمان باقی‌مانده: {quote.days} روز")
+        return float(quote.amount), f"{desc}، {quote.amount:,} تومان"
+
     
     if stype == 'v2ray_vol':
         try: base_price = float(str(v2_vol_bp_raw or '4000').replace(",", "").strip())
@@ -5605,14 +5679,30 @@ def _db_distribute_commission(aid, retail_amount):
             return
         p2, pct2 = ag2
         share2 = float(retail_amount * Decimal(str(pct2)) / Decimal("100"))
-        conn.execute("UPDATE agents SET withdrawable_balance = withdrawable_balance + ?, referral_income = referral_income + ? WHERE id=?",
-                     (share2, share2, p1))
+        if share2 > 0:
+            updated = conn.execute(
+                "UPDATE agents SET withdrawable_balance = withdrawable_balance + ?, referral_income = referral_income + ? WHERE id=?",
+                (share2, share2, p1),
+            ).rowcount
+            if updated != 1:
+                raise ValueError("REFERRAL_PARENT_NOT_FOUND")
+            nvl_daily_business.record_event(
+                conn, kind="REFERRAL_COMMISSION", agent_id=p1, amount=share2,
+            )
         if p2:
             ag3 = conn.execute("SELECT l3_pct FROM agents WHERE id=?", (p2,)).fetchone()
             if ag3:
                 share3 = float(retail_amount * Decimal(str(ag3[0])) / Decimal("100"))
-                conn.execute("UPDATE agents SET withdrawable_balance = withdrawable_balance + ?, referral_income = referral_income + ? WHERE id=?",
-                             (share3, share3, p2))
+                if share3 > 0:
+                    updated = conn.execute(
+                        "UPDATE agents SET withdrawable_balance = withdrawable_balance + ?, referral_income = referral_income + ? WHERE id=?",
+                        (share3, share3, p2),
+                    ).rowcount
+                    if updated != 1:
+                        raise ValueError("REFERRAL_GRANDPARENT_NOT_FOUND")
+                    nvl_daily_business.record_event(
+                        conn, kind="REFERRAL_COMMISSION", agent_id=p2, amount=share3,
+                    )
 
 # ==========================================
 # 🎁 کش‌بک ترغیبی نمایندگان پرفروش: اگر نمایندهٔ خریدار، از قبل (پیش از همین خرید) ۵۰ اکانت
@@ -5646,36 +5736,80 @@ async def _apply_agent_cashback_if_eligible(aid: int, retail_amount):
     if cashback <= 0:
         return 0.0
     with db_conn() as conn:
-        conn.execute("UPDATE agents SET withdrawable_balance = withdrawable_balance + ?, cashback_income = cashback_income + ? WHERE id=?",
-                     (cashback, cashback, aid))
+        updated = conn.execute(
+            "UPDATE agents SET withdrawable_balance = withdrawable_balance + ?, cashback_income = cashback_income + ? WHERE id=?",
+            (cashback, cashback, aid),
+        ).rowcount
+        if updated != 1:
+            return 0.0
+        nvl_daily_business.record_event(
+            conn, kind="AGENT_CASHBACK", agent_id=aid, amount=cashback,
+        )
     log.info("کش‌بک %s تومان به نمایندهٔ %s تعلق گرفت (کل فروش تابه‌حال: %s).", cashback, aid, lifetime_sold)
     return cashback
 
 # ==========================================
 # 💵 مدیریت استخر «قابل‌برداشت» (پورسانت شبکه + کش‌بک) — انتقال به کیف‌پول یا درخواست برداشت نقدی
 # ==========================================
-def _db_move_withdrawable_to_wallet(aid: int, amount: float) -> bool:
-    """مبلغ داده‌شده را از withdrawable_balance کم و به balance (قابل‌خرج) اضافه می‌کند.
-    اگر مبلغ بیشتر از موجودی استخر باشد، هیچ تغییری اعمال نمی‌شود و False برمی‌گردد."""
-    with db_conn() as conn:
-        row = conn.execute("SELECT withdrawable_balance FROM agents WHERE id=?", (aid,)).fetchone()
-        if not row or row[0] < amount:
+def _db_move_withdrawable_to_wallet(aid: int, amount: float, source_key: str) -> bool:
+    """انتقال اتمیک از استخر قابل‌برداشت به کیف‌پول؛ انتقال تکراری دوباره اعمال نمی‌شود."""
+    if amount <= 0 or not source_key:
+        return False
+    try:
+        with db_conn() as conn:
+            updated = conn.execute(
+                "UPDATE agents SET withdrawable_balance = withdrawable_balance - ?, "
+                "balance = balance + ? WHERE id=? AND withdrawable_balance >= ?",
+                (amount, amount, aid, amount),
+            ).rowcount
+            if updated != 1:
+                return False
+            inserted = nvl_daily_business.record_event(
+                conn, kind="WITHDRAWABLE_TRANSFER", agent_id=aid,
+                amount=amount, source_key=source_key,
+            )
+            if not inserted:
+                raise sqlite3.IntegrityError("DUPLICATE_WITHDRAWABLE_TRANSFER")
+    except sqlite3.IntegrityError as exc:
+        if str(exc) == "DUPLICATE_WITHDRAWABLE_TRANSFER":
             return False
-        conn.execute("UPDATE agents SET withdrawable_balance = withdrawable_balance - ?, balance = balance + ? WHERE id=?", (amount, amount, aid))
-        return True
+        raise
+    return True
 
-def _db_create_withdrawal_request(aid: int, amount: float, card_number: str, full_name: str):
-    """ثبت درخواست برداشت نقدی و رزرو (کسر) همان لحظهٔ مبلغ از withdrawable_balance تا دوبار
-    قابل برداشت/انتقال نباشد. اگر موجودی استخر کافی نباشد، None برمی‌گرداند."""
-    with db_conn() as conn:
-        row = conn.execute("SELECT withdrawable_balance FROM agents WHERE id=?", (aid,)).fetchone()
-        if not row or row[0] < amount:
+def _db_create_withdrawal_request(
+    aid: int, amount: float, card_number: str, full_name: str, source_key: str,
+):
+    """رزرو اتمیک موجودی و ثبت درخواست برداشت؛ درخواست تکراری دوباره رزرو نمی‌شود."""
+    if amount <= 0 or not source_key:
+        return None
+    try:
+        with db_conn() as conn:
+            updated = conn.execute(
+                "UPDATE agents SET withdrawable_balance = withdrawable_balance - ? "
+                "WHERE id=? AND withdrawable_balance >= ?",
+                (amount, aid, amount),
+            ).rowcount
+            if updated != 1:
+                return None
+            inserted = nvl_daily_business.record_event(
+                conn, kind="WITHDRAWAL_REQUEST", agent_id=aid,
+                amount=amount, source_key=source_key,
+            )
+            if not inserted:
+                raise sqlite3.IntegrityError("DUPLICATE_WITHDRAWAL_REQUEST")
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO withdrawal_requests "
+                "(agent_id, amount, card_number, full_name, status, created_at) "
+                "VALUES (?, ?, ?, ?, 'pending', ?)",
+                (aid, amount, card_number, full_name,
+                 datetime.now().strftime("%Y-%m-%d %H:%M")),
+            )
+            return cur.lastrowid
+    except sqlite3.IntegrityError as exc:
+        if str(exc) == "DUPLICATE_WITHDRAWAL_REQUEST":
             return None
-        conn.execute("UPDATE agents SET withdrawable_balance = withdrawable_balance - ? WHERE id=?", (amount, aid))
-        cur = conn.cursor()
-        cur.execute("INSERT INTO withdrawal_requests (agent_id, amount, card_number, full_name, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
-                    (aid, amount, card_number, full_name, datetime.now().strftime("%Y-%m-%d %H:%M")))
-        return cur.lastrowid
+        raise
 
 def _db_get_withdrawal_request(req_id: int):
     with db_conn() as conn:
@@ -5685,19 +5819,68 @@ def _db_get_agent_pending_withdrawals(aid: int):
     with db_conn() as conn:
         return conn.execute("SELECT id, amount, card_number, full_name, created_at FROM withdrawal_requests WHERE agent_id=? AND status='pending' ORDER BY id", (aid,)).fetchall()
 
-def _db_mark_withdrawal_done(req_id: int):
-    with db_conn() as conn:
-        conn.execute("UPDATE withdrawal_requests SET status='done', done_at=? WHERE id=?", (datetime.now().strftime("%Y-%m-%d %H:%M"), req_id))
+def _db_mark_withdrawal_done(req_id: int) -> bool:
+    """یک درخواست pending را فقط یک‌بار به done منتقل و پرداخت را ثبت می‌کند."""
+    try:
+        with db_conn() as conn:
+            row = conn.execute(
+                "SELECT agent_id, amount FROM withdrawal_requests "
+                "WHERE id=? AND status='pending'", (req_id,),
+            ).fetchone()
+            if not row:
+                return False
+            updated = conn.execute(
+                "UPDATE withdrawal_requests SET status='done', done_at=? "
+                "WHERE id=? AND status='pending'",
+                (datetime.now().strftime("%Y-%m-%d %H:%M"), req_id),
+            ).rowcount
+            if updated != 1:
+                return False
+            inserted = nvl_daily_business.record_event(
+                conn, kind="WITHDRAWAL_PAID", agent_id=row[0], amount=row[1],
+                source_key=f"withdrawal-paid:{req_id}",
+            )
+            if not inserted:
+                raise sqlite3.IntegrityError("DUPLICATE_WITHDRAWAL_PAID")
+    except sqlite3.IntegrityError as exc:
+        if str(exc) == "DUPLICATE_WITHDRAWAL_PAID":
+            return False
+        raise
+    return True
 
 def _db_cancel_withdrawal_request(req_id: int):
-    """لغو یک درخواست برداشتِ در انتظار و بازگرداندن مبلغ رزروشده به withdrawable_balance."""
-    with db_conn() as conn:
-        row = conn.execute("SELECT agent_id, amount, status FROM withdrawal_requests WHERE id=?", (req_id,)).fetchone()
-        if not row or row[2] != 'pending':
+    """لغو اتمیک درخواست pending و بازگرداندن رزرو فقط یک‌بار."""
+    try:
+        with db_conn() as conn:
+            row = conn.execute(
+                "SELECT agent_id, amount FROM withdrawal_requests "
+                "WHERE id=? AND status='pending'", (req_id,),
+            ).fetchone()
+            if not row:
+                return False
+            updated = conn.execute(
+                "UPDATE withdrawal_requests SET status='cancelled' "
+                "WHERE id=? AND status='pending'", (req_id,),
+            ).rowcount
+            if updated != 1:
+                return False
+            restored = conn.execute(
+                "UPDATE agents SET withdrawable_balance = withdrawable_balance + ? "
+                "WHERE id=?", (row[1], row[0]),
+            ).rowcount
+            if restored != 1:
+                raise ValueError("WITHDRAWAL_AGENT_NOT_FOUND")
+            inserted = nvl_daily_business.record_event(
+                conn, kind="WITHDRAWAL_CANCELLED", agent_id=row[0], amount=row[1],
+                source_key=f"withdrawal-cancelled:{req_id}",
+            )
+            if not inserted:
+                raise sqlite3.IntegrityError("DUPLICATE_WITHDRAWAL_CANCELLED")
+    except sqlite3.IntegrityError as exc:
+        if str(exc) == "DUPLICATE_WITHDRAWAL_CANCELLED":
             return False
-        conn.execute("UPDATE agents SET withdrawable_balance = withdrawable_balance + ? WHERE id=?", (row[1], row[0]))
-        conn.execute("UPDATE withdrawal_requests SET status='cancelled' WHERE id=?", (req_id,))
-        return True
+        raise
+    return True
 
 
 
@@ -7632,6 +7815,7 @@ _manual_edge = ManualEdgeWizard(
     # No Cloudzy API, HTTPS WebApp or new opt-in flag for native manual path.
     enabled=lambda: True,
     guard=_cloudzy_04a_guard,
+    shared_superadmin=lambda actor, chat: is_private_superadmin(DB_PATH,actor,chat,"private"),
     is_core_host=_manual_edge_is_core_ip,
     os_check=_manual_edge_verify_ubuntu,
     awg_preflight=_manual_awg_preflight,
@@ -7673,7 +7857,8 @@ _manual_quick_engine = ManualQuickSwitch(
     guard=_cloudzy_04b_guard,
 )
 _manual_quick_ui = ManualQuickSwitchUI(
-    engine=_manual_quick_engine, db=db_conn, admin_ids=_db_get_admin_chat_ids,
+    engine=_manual_quick_engine, db=db_conn,
+    admin_ids=lambda: active_superadmin_ids(DB_PATH),
 )
 
 # Phase 7 is opt-in and strictly a read-only Rich admin view. No effectful
@@ -8921,6 +9106,72 @@ async def _ssh_endpoint_info(acc_host: str | None, conn_mode: str | None):
     return host, port, "🔌 مستقیم"
 
 
+def _ssh_invoice_duration_label(days):
+    """Show exact custom-day extensions; only exact 30-day multiples are months."""
+    if not isinstance(days, int) or days <= 0:
+        return "نامشخص"
+    return f"{days // 30} ماه" if days % 30 == 0 else f"{days} روز"
+
+
+def _ssh_invoice_event_time(value):
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _db_ssh_invoice_last_renewal_days(un, created):
+    """Read-only display history, never a substitute for paid settlement proof.
+
+    Legacy/admin renewals are logged in activity_log. New paid renewals also
+    have an immutable SSH paid event. Compare timestamps to avoid using a stale
+    earlier extension, and ignore events from a previous account with the same
+    username. Both historical tables may be absent on older installations.
+    """
+    created_day = str(created or "")[:10]
+    candidates = []
+    with db_conn() as conn:
+        available = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('activity_log','ssh_paid_events')"
+        )}
+        if "activity_log" in available:
+            activity = conn.execute(
+                "SELECT details,created_at FROM activity_log "
+                "WHERE username=? AND service_type='ssh' AND action='extend' "
+                "AND substr(created_at,1,10)>=? ORDER BY id DESC LIMIT 1",
+                (un, created_day),
+            ).fetchone()
+            if activity:
+                match = re.fullmatch(r"\s*([0-9]+)\s*روز\s*", str(activity[0] or ""))
+                if match and int(match.group(1)) > 0:
+                    candidates.append((
+                        _ssh_invoice_event_time(activity[1]), int(match.group(1))
+                    ))
+        if "ssh_paid_events" in available:
+            event = conn.execute(
+                "SELECT period_from,period_to,created_at_utc "
+                "FROM ssh_paid_events WHERE username=? AND kind='EXTEND' "
+                "AND substr(created_at_utc,1,10)>=? ORDER BY id DESC LIMIT 1",
+                (un, created_day),
+            ).fetchone()
+            if event:
+                try:
+                    start = datetime.strptime(event[0][:10], "%Y-%m-%d")
+                    end = datetime.strptime(event[1][:10], "%Y-%m-%d")
+                    added_days = (end - start).days
+                    if added_days > 0:
+                        candidates.append((
+                            _ssh_invoice_event_time(event[2]), added_days
+                        ))
+                except (ValueError, TypeError):
+                    pass
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
 async def _build_invoice_text(un: str):
     """Build a fresh, readable SSH invoice from the current account and routing settings."""
     row = await asyncio.to_thread(_db_get_user, un)
@@ -8930,16 +9181,25 @@ async def _build_invoice_text(un: str):
     host, port, mode_label = await _ssh_endpoint_info(acc_host, acc_conn_mode)
     remaining = get_remaining_days(exp)
     hold_active, _deadline, hold_days = await asyncio.to_thread(_db_get_hold_info, un)
-    months = 1
-    if hold_days:
-        months = max(1, round(int(hold_days) / 30))
+    renewal_days = await asyncio.to_thread(_db_ssh_invoice_last_renewal_days, un, crt)
+    if renewal_days is not None:
+        duration_heading = "مدت آخرین تمدید"
+        duration_days = renewal_days
+    elif hold_days and int(hold_days) > 0:
+        duration_heading = "مدت اشتراک"
+        duration_days = int(hold_days)
     else:
+        # Historical accounts can lack renewal journals. Do not misrepresent
+        # creation-to-expiry lifetime as the purchased/renewed plan duration.
+        duration_heading = "بازه از ساخت تا انقضا"
         try:
-            exp_dt = datetime.strptime(exp[:10], "%Y-%m-%d")
-            crt_dt = datetime.strptime(crt[:10], "%Y-%m-%d")
-            months = max(1, round((exp_dt - crt_dt).days / 30))
-        except Exception:
-            pass
+            duration_days = (
+                datetime.strptime(exp[:10], "%Y-%m-%d")
+                - datetime.strptime(crt[:10], "%Y-%m-%d")
+            ).days
+        except (ValueError, TypeError, AttributeError):
+            duration_days = None
+    duration_text = _ssh_invoice_duration_label(duration_days)
 
     hold_line = (
         f"\n⏸ <b>فعال‌سازی:</b> در انتظار اولین اتصال (مهلت {ACCOUNT_HOLD_DAYS} روز)"
@@ -8950,7 +9210,7 @@ async def _build_invoice_text(un: str):
         f"{credential_fields_text(host, un, pw, port)}\n\n"
         "📋 <b>مشخصات اشتراک</b>\n"
         f"🔀 <b>حالت اتصال:</b> {esc(mode_label)}\n"
-        f"⏳ <b>مدت اشتراک:</b> {months} ماه\n"
+        f"⏳ <b>{duration_heading}:</b> {duration_text}\n"
         f"📅 <b>تاریخ انقضا:</b> {esc(format_db_date_to_jalali(exp))}\n"
         f"⌛ <b>زمان باقی‌مانده:</b> {esc(remaining)}\n"
         f"👥 <b>تعداد اتصال مجاز:</b> {esc(lim)}\n"
@@ -9036,7 +9296,7 @@ async def _show_v2ray_user_detail(update_or_query, username, context, db_res, v2
     
     if not is_vol:
         rn_row = [InlineKeyboardButton("🔄 تمدید اکانت", callback_data=f"v2act_rn_{username}")]
-        if role == 'admin':
+        if role in ('admin', 'agent'):
             rn_row.append(InlineKeyboardButton("🔻 کاهش زمان", callback_data=f"v2act_rd_{username}"))
         kb.append(rn_row)
         
@@ -11595,10 +11855,32 @@ async def _show_renew_confirm(target, context, un, days, label, edit=True, mode=
         ainf = await asyncio.to_thread(_db_get_agent_info, ag_id)
         if ainf:
             account_users_limit = cur[3]
-            preview_cost = _parse_price_to_decimal(ainf[4]) * (Decimal(days) / Decimal(30)) * Decimal(account_users_limit)
             if mode == 'reduce':
-                txt += f"\n💰 مبلغی که به موجودی شما بازگردانده می‌شود: {int(preview_cost):,} تومان"
+                try:
+                    def _paid_reduce_preview():
+                        new_date = (datetime.strptime(cur[1], "%Y-%m-%d").date()
+                                    - timedelta(days=days)).isoformat()
+                        with db_conn() as conn:
+                            return quote_time_reduction(
+                                conn, username=un, agent=cur[5],
+                                created=cur[2], expiry=cur[1],
+                                users=cur[3], new_expiry=new_date,
+                                today=datetime.now(IRAN_TZ).date(),
+                            )
+                    actual = await asyncio.to_thread(_paid_reduce_preview)
+                    txt += f"\n💰 مبلغ بازپرداخت طبق پرداخت واقعی: {actual:,} تومان"
+                except Exception:
+                    unavailable = (
+                        "⛔️ کاهش زمان این حساب به دلیل ناقص‌بودن سوابق "
+                        "مالی قابل انجام خودکار نیست؛ بررسی سوپرادمین لازم است."
+                    )
+                    if edit:
+                        return await target.edit_message_text(unavailable)
+                    return await target.reply_text(unavailable)
             else:
+                preview_cost = (_parse_price_to_decimal(ainf[4])
+                                * (Decimal(days) / Decimal(30))
+                                * Decimal(account_users_limit))
                 txt += f"\n💳 هزینهٔ این تمدید: {int(preview_cost):,} تومان"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ بله، انجام شود", callback_data="rnyes"), InlineKeyboardButton("❌ خیر", callback_data="rnno")]])
     if edit: await target.edit_message_text(txt, reply_markup=kb)
@@ -11659,11 +11941,29 @@ async def _apply_user_limit_increase(context, role, ag_id, un, new_limit, emerge
                 return False, (f"❌ <b>موجودی ناکافی!</b>\n\n💰 موجودی شما: {int(ainf[2]):,} تومان\n"
                                 f"💳 هزینهٔ افزایش {added_users} کاربر برای {rem_months} ماه باقی‌مانده: {int(cost):,} تومان{extra}"), None
 
-        await asyncio.to_thread(_db_update_users_limit, un, new_limit)
-        await _sync_user_limit_file(un, new_limit)  # 🆕 فایل سقف اتصال PAM هم‌زمان با تغییر عدد به‌روز می‌شود
+        # Atomic SSH seat update + debit + per-account purchase history.
+        if cur[5]:
+            def _paid_seat_increase():
+                with db_conn() as conn:
+                    return apply_paid_change(
+                        conn, username=un, agent=cur[5],
+                        expected_created=cur[2], expected_expiry=cur[1],
+                        expected_users=cur_limit, expected_status=cur[4],
+                        new_expiry=cur[1], new_users=new_limit,
+                        kind="SEAT_INCREASE" if role == 'agent' else "ADMIN_ADJUST",
+                        amount=cost if role == 'agent' else 0,
+                        today=datetime.now(IRAN_TZ).date(),
+                    )
+            await asyncio.to_thread(_paid_seat_increase)
+        else:
+            await asyncio.to_thread(_db_update_users_limit, un, new_limit)
+        try:
+            await _sync_user_limit_file(un, new_limit)
+        except Exception:
+            # Financial transaction already committed. Do not retry charging.
+            log.exception("PAM user-limit sync pending manual repair for %s", un)
 
         if role == 'agent':
-            with db_conn() as conn: nvl_daily_business.charge_purchase(conn, ag_id_local, cost)
             await asyncio.to_thread(_db_distribute_commission, ag_id_local, retail_dec)
             # 🎁 کش‌بک ترغیبی نمایندگان پرفروش (۵۰+ اکانت فعال): ۷٪ از هزینهٔ همین افزایش کاربر
             await _apply_agent_cashback_if_eligible(ag_id_local, retail_dec)
@@ -11697,38 +11997,33 @@ async def _apply_user_limit_decrease(context, role, ag_id, un, new_limit):
         return False, f"❌ عدد جدید باید کوچک‌تر از تعداد فعلی ({cur_limit}) باشد."
     if new_limit < 1:
         return False, "❌ تعداد کاربر مجاز نمی‌تواند کمتر از ۱ باشد."
-    removed_users = cur_limit - new_limit
+    # Historical or mixed-tariff seat credits cannot be valued reliably.
+    # Never credit current agent tariff as if it were original purchase price.
+    if role == 'agent':
+        return False, (
+            "⛔️ بازپرداخت کاهش تعداد کاربر نیازمند بررسی مالی سوپرادمین است. "
+            "هیچ تغییری در حساب یا کیف پول انجام نشده است."
+        )
     try:
-        refund = 0.0
-        refund_dec = Decimal("0")
-        if role == 'agent':
-            ainf = await asyncio.to_thread(_db_get_agent_info, ag_id)
-            if not ainf:
-                return False, "❌ خطا: اطلاعات نمایندگی شما یافت نشد."
-            rem_days = (datetime.strptime(cur[1], "%Y-%m-%d").date() - datetime.now().date()).days
-            rem_months = max(1, -(-max(rem_days, 1) // 30))  # سقف تقسیم (ceil) — همان روش محاسبهٔ افزایش
-            base_price_dec = _parse_price_to_decimal(ainf[4])
-            refund_dec = base_price_dec * Decimal(removed_users) * Decimal(rem_months)
-            refund = float(refund_dec)
-
-        await asyncio.to_thread(_db_update_users_limit, un, new_limit)
-        await _sync_user_limit_file(un, new_limit)  # 🆕 فایل سقف اتصال PAM هم‌زمان با تغییر عدد به‌روز می‌شود
-
-        if role == 'agent':
-            emergency_repaid = 0.0
-            with db_conn() as conn:
-                nvl_daily_business.refund_purchase(conn, ag_id, refund)
-                if refund > 0:
-                    used_before_row = conn.execute("SELECT emergency_used FROM agents WHERE id=?", (ag_id,)).fetchone()
-                    used_before = (used_before_row[0] or 0.0) if used_before_row else 0.0
-                    _apply_emergency_repayment(conn, ag_id, refund)
-                    emergency_repaid = min(used_before, refund) if used_before > 0 else 0.0
-            msg = f"✅ تعداد کاربر مجاز اکانت {esc(un)} از {cur_limit} به {new_limit} کاهش یافت.\n💰 مبلغ بازگردانده‌شده به کیف‌پول: {int(refund):,} تومان"
-            if emergency_repaid > 0:
-                msg += f"\n🆘 از همین مبلغ، {int(emergency_repaid):,} تومان بدهیِ شارژ اضطراری نیز پاک شد."
-            return True, msg
+        if cur[5]:
+            def _admin_adjust_seats():
+                with db_conn() as conn:
+                    apply_paid_change(
+                        conn, username=un, agent=cur[5],
+                        expected_created=cur[2], expected_expiry=cur[1],
+                        expected_users=cur_limit, expected_status=cur[4],
+                        new_expiry=cur[1], new_users=new_limit,
+                        kind="ADMIN_ADJUST", amount=0,
+                        today=datetime.now(IRAN_TZ).date(),
+                    )
+            await asyncio.to_thread(_admin_adjust_seats)
         else:
-            return True, f"✅ تعداد کاربر مجاز اکانت {esc(un)} از {cur_limit} به {new_limit} کاهش یافت."
+            await asyncio.to_thread(_db_update_users_limit, un, new_limit)
+        try:
+            await _sync_user_limit_file(un, new_limit)
+        except Exception:
+            log.exception("PAM seat-decrease sync pending manual repair: %s", un)
+        return True, f"✅ تعداد کاربر مجاز اکانت {esc(un)} از {cur_limit} به {new_limit} کاهش یافت."
     except Exception:
         log.exception("خطا در کاهش تعداد کاربر مجاز اکانت %s", un)
         return False, "❌ خطا در کاهش تعداد کاربر. لطفاً دوباره تلاش کنید."
@@ -11889,7 +12184,7 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
 
             # گام ۴: تکمیل نهایی رکورد دیتابیس
             try:
-                await asyncio.to_thread(_db_finalize_reserved_user, un, pw, exp_db, cr_db, u, str(c + 1).zfill(4), br, ag_id, chosen_conn_mode, hold_sched.hold_deadline, exp_days, target_host)
+                await asyncio.to_thread(_db_finalize_reserved_user, un, pw, exp_db, cr_db, u, str(c + 1).zfill(4), br, ag_id, chosen_conn_mode, hold_sched.hold_deadline, exp_days, target_host, cost_per if role == 'agent' else None)
             except Exception:
                 log.exception("خطا در ثبت نهایی اکانت bulk %s در دیتابیس؛ کاربر لینوکسی حذف می‌شود (Rollback).", un)
                 await run_cmd("sudo", "userdel", "-f", un)
@@ -11909,7 +12204,6 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
             # گام ۵: کسر هزینهٔ همین اکانت از کیف‌پول نماینده و توزیع کمیسیون (خطای احتمالی اینجا اکانت را باطل نمی‌کند)
             if role == 'agent':
                 try:
-                    with db_conn() as conn: nvl_daily_business.charge_purchase(conn, ag_id, cost_per)
                     await asyncio.to_thread(_db_distribute_commission, ag_id, retail_per_dec)
                     # 🎁 کش‌بک ترغیبی نمایندگان پرفروش (۵۰+ اکانت فعال): ۷٪ از هزینهٔ همین اکانت
                     await _apply_agent_cashback_if_eligible(ag_id, retail_per_dec)
@@ -11918,7 +12212,7 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
                     if emergency_shortfall > 0:
                         await asyncio.to_thread(_db_agent_register_emergency_use, ag_id, emergency_shortfall)
                 except Exception:
-                    log.exception("خطا در کسر کیف‌پول/توزیع کمیسیون برای اکانت bulk %s (اکانت ساخته‌شده باقی می‌ماند).", un)
+                    log.exception("خطا در توزیع کمیسیون/کش‌بک برای اکانت bulk %s (اکانت ساخته‌شده باقی می‌ماند).", un)
 
             created.append((un, pw))
 
@@ -11977,6 +12271,8 @@ async def _handle_bulk_purchase(query, context, role, ag_id):
 # 📝 هندلر اصلی پیام‌های متنی (و منوها)
 # ==========================================
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not globals().get('EMERGENCY_CREDIT_ENABLED', False):
+        context.user_data.pop('emergency_approved', None)
     text = update.message.text
     if not text: return
     state = context.user_data.get('state')
@@ -13964,6 +14260,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # ⚠️ قبل از اعمال واقعی، تاییدیهٔ بله/خیر گرفته می‌شود تا کاهش اشتباهی/تایپی روی یک
         # حساب واقعی اعمال نشود؛ اگر مبلغ از موجودی فعلی بیشتر باشد، هشدار اضافه نمایش داده می‌شود.
         context.user_data['pending_deduct_amount'] = amount
+        context.user_data['pending_deduct_source_key'] = (
+            f"manual-deduct:{update.effective_chat.id}:"
+            f"{update.effective_message.message_id}"
+        )
         context.user_data['state'] = 'AGENT_MANUAL_DEDUCT_CONFIRM'
         kb = [[InlineKeyboardButton("✅ بله، کم شود", callback_data="deductconf_yes"), InlineKeyboardButton("↩️ خیر، انصراف", callback_data="deductconf_no")]]
         warn = ""
@@ -14456,7 +14756,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚠️ <b>تأیید مهاجرت Core</b>\nمقصد: <code>{target_ip}</code>\n"
             f"پورت مشتری: <code>{proposed}</code>\n\n"
             "ابتدا پیش‌نیازها روی مقصد بررسی می‌شوند؛ سپس ربات فعلی متوقف می‌شود. "
-            "پس از راه‌اندازی Core جدید، Core قدیمی به Edge تبدیل خواهد شد. "
+            "پس از راه‌اندازی Core جدید، Core قدیمی خاموشِ سرویس باقی می‌ماند و به Edge تبدیل نمی‌شود. "
             "اگر بررسی اولیه شکست بخورد، Core فعلی متوقف نمی‌شود.",
             parse_mode="HTML", reply_markup=kb)
 
@@ -14768,7 +15068,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         withdrawable = info[14] if info and len(info) > 14 and info[14] is not None else 0.0
         if amount > withdrawable:
             await update.message.reply_text(f"❌ مبلغ از موجودی استخر ({int(withdrawable):,} تومان) بیشتر است. عدد کوچک‌تری بفرستید:"); return
-        ok = await asyncio.to_thread(_db_move_withdrawable_to_wallet, role_agent_id, amount)
+        source_key = (
+            f"withdrawable-transfer:{update.effective_chat.id}:"
+            f"{update.effective_message.message_id}"
+        )
+        ok = await asyncio.to_thread(
+            _db_move_withdrawable_to_wallet, role_agent_id, amount, source_key,
+        )
         safe_clear_context(context)
         if ok:
             await update.message.reply_text(f"✅ مبلغ {int(amount):,} تومان به کیف‌پول قابل‌خرج شما منتقل شد.")
@@ -14801,6 +15107,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['wd_full_name'] = full_name
         amount = context.user_data.get('wd_amount'); card = context.user_data.get('wd_card')
         context.user_data['pending_wd_amount'] = amount
+        context.user_data['pending_wd_source_key'] = (
+            f"withdrawal-request:{update.effective_chat.id}:"
+            f"{update.effective_message.message_id}"
+        )
         context.user_data['state'] = 'WD_CONFIRM'
         kb = [[InlineKeyboardButton("✅ بله، ثبت شود", callback_data="wdconf_yes"), InlineKeyboardButton("↩️ خیر، انصراف", callback_data="wdconf_no")]]
         await update.message.reply_text(
@@ -14972,12 +15282,16 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     caption=f"🧾 <b>رسید واریز درخواست برداشت شما</b>\n\n💰 مبلغ واریزشده: {int(amount):,} تومان\n👤 نام: {esc(full_name)}\n💳 کارت: <code>{esc(card)}</code>\n\n✅ این درخواست تکمیل شد.",
                     parse_mode="HTML")
                 sent_ok = True
-        await asyncio.to_thread(_db_mark_withdrawal_done, req_id)
+        marked_done = await asyncio.to_thread(_db_mark_withdrawal_done, req_id)
         safe_clear_context(context)
-        if sent_ok:
+        if sent_ok and marked_done:
             await update.message.reply_text(f"✅ رسید برای «{esc(agent_info[0]) if agent_info else a_id}» ارسال شد و درخواست #{req_id} تکمیل‌شده علامت خورد.", parse_mode="HTML")
-        else:
+        elif sent_ok:
+            await update.message.reply_text(f"⚠️ رسید ارسال شد، اما وضعیت درخواست #{req_id} هم‌زمان تغییر کرده است؛ دوباره آن را پردازش نکنید.")
+        elif marked_done:
             await update.message.reply_text(f"⚠️ نماینده هنوز از طریق ربات وارد نشده (chat_id ندارد)؛ رسید ارسال نشد اما درخواست #{req_id} تکمیل‌شده علامت خورد.")
+        else:
+            await update.message.reply_text(f"⚠️ درخواست #{req_id} هم‌زمان پردازش شده یا دیگر در انتظار نیست.")
 
 # ==========================================
 # 🔘 هندلر جامع کالبک‌های شیشه‌ای (Callback)
@@ -16999,6 +17313,18 @@ async def _show_v2_renew_confirm(target, context, un, days):
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_auth(context): return
     query = update.callback_query; await query.answer(); d = query.data
+    if not globals().get('EMERGENCY_CREDIT_ENABLED', False):
+        # Reject stale Telegram buttons AND persisted approval from older sessions.
+        context.user_data.pop('emergency_approved', None)
+        if d in (
+            'uinc_emergency_yes', 'buy_emergency_yes',
+            'v2rn_emergency_yes', 'v2addvol_emergency_yes',
+            'v2_vol_buy_emergency_yes', 'v2_buy_emergency_yes',
+            'rnyes_emergency',
+        ):
+            return await query.message.reply_text(
+                "⛔️ شارژ اضطراری غیرفعال است. لطفاً ابتدا کیف پول را شارژ کنید."
+            )
     role, ag_id = context.user_data.get('role'), context.user_data.get('agent_id', 0)
     # Finance V1 uses one isolated, opt-in read-only callback namespace.
     # Keep this path out of the legacy callback chain and enforce Telegram
@@ -22243,6 +22569,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d.startswith("v2act_rn_"):
         un = d.split("_", 2)[2]
+        cur = await asyncio.to_thread(_db_get_user, un)
+        if not cur:
+            return await query.edit_message_text("❌ اکانت یافت نشد.")
+        if not _can_manage_user(role, ag_id, cur[5]):
+            return await query.message.reply_text("⛔️ شما مجاز به مدیریت این اکانت نیستید.")
+        if await asyncio.to_thread(_db_get_user_service_type, un) != 'v2ray':
+            return await query.edit_message_text("⛔️ تغییر زمان برای این نوع سرویس مجاز نیست.")
         context.user_data['v2_renew_un'] = un
         context.user_data['v2_renew_mode'] = 'extend'
         kb = [[InlineKeyboardButton("۱ ماهه", callback_data="v2rn_30"), InlineKeyboardButton("۲ ماهه", callback_data="v2rn_60")],
@@ -22250,8 +22583,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
               [InlineKeyboardButton("🔙 بازگشت", callback_data=f"udet_{un}")]]
         await query.edit_message_text(f"🔄 تمدید اکانت V2Ray <code>{esc(un)}</code>\nچه مقدار تمدید شود؟", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
-    elif d.startswith("v2act_rd_") and role == 'admin':
+    elif d.startswith("v2act_rd_") and role in ('admin', 'agent'):
         un = d.split("_", 2)[2]
+        cur = await asyncio.to_thread(_db_get_user, un)
+        if not cur: return await query.edit_message_text("❌ اکانت یافت نشد.")
+        if not _can_manage_user(role, ag_id, cur[5]):
+            return await query.message.reply_text("⛔️ شما مجاز به مدیریت این اکانت نیستید.")
+        if await asyncio.to_thread(_db_get_user_service_type, un) != 'v2ray':
+            return await query.edit_message_text("⛔️ کاهش زمان برای این نوع سرویس مجاز نیست.")
         context.user_data['v2_renew_un'] = un
         context.user_data['v2_renew_mode'] = 'reduce'
         kb = [[InlineKeyboardButton("۱ ماهه", callback_data="v2rn_30"), InlineKeyboardButton("۲ ماهه", callback_data="v2rn_60")],
@@ -22288,6 +22627,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         cur = await asyncio.to_thread(_db_get_user, un)
         if not cur: return await query.edit_message_text("❌ اکانت یافت نشد.")
+        if not _can_manage_user(role, ag_id, cur[5]):
+            return await query.message.reply_text("⛔️ شما مجاز به مدیریت این اکانت نیستید.")
+        if await asyncio.to_thread(_db_get_user_service_type, un) != 'v2ray':
+            return await query.edit_message_text("⛔️ تغییر زمان برای این نوع سرویس مجاز نیست.")
 
         try:
             cost = 0.0
@@ -22947,8 +23290,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async def _launch_core_migration():
             try:
                 command = (
-                    f"set -o pipefail; {{ bash /root/core_side_failover.sh {target_ip} {cust_port} "
-                    f"&& bash /root/demote_core_to_edge.sh {target_ip} {cust_port}; }} "
+                    f"set -o pipefail; bash /root/core_side_failover.sh {target_ip} {cust_port} "
                     ">> /root/failover_migration.log 2>&1"
                 )
                 ok, detail, kind = await run_cmd(
@@ -23253,44 +23595,59 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                                  [InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")]]))
 
 
-    elif d == "srv_health" and role == 'admin':
-        await query.edit_message_text("⏳ در حال بررسی وضعیت سرور...")
-        health, herr = await _get_server_health()
-        conn_counts, conn_err = await _get_live_connection_counts()
-        prt_for_conn = await asyncio.to_thread(_db_get_setting, 'port', '22')
-        sock_count, sock_err = await _get_established_socket_count(prt_for_conn)
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 بروزرسانی", callback_data="srv_health")], [InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")]])
+    elif d in ("srv_health", "srv_health_details") and role == 'admin':
+        # Read-only dashboard; an ordinary refresh NEVER walks the filesystem.
+        from nvl_server_health import collect_extra_metrics, render_health
+        detailed = (d == "srv_health_details")
+        await query.edit_message_text("⏳ در حال دریافت وضعیت سرور...")
+        (health, herr), (conn_counts, conn_err), extra = await asyncio.gather(
+            _get_server_health(),
+            _get_live_connection_counts(),
+            asyncio.to_thread(collect_extra_metrics),
+        )
+        kb_rows = [
+            [InlineKeyboardButton("🔄 بروزرسانی", callback_data="srv_health"),
+             InlineKeyboardButton("📊 جزئیات فنی" if not detailed else "📊 نمای خلاصه",
+                                  callback_data="srv_health_details" if not detailed else "srv_health")],
+            [InlineKeyboardButton("📂 فایل‌های حجیم (بیش از ۳ گیگ)", callback_data="srv_health_files")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")],
+        ]
+        kb = InlineKeyboardMarkup(kb_rows)
         if not health:
-            await query.edit_message_text(f"❌ خطا در بررسی وضعیت سرور:\n({esc(herr)})", reply_markup=kb); return
-        proc_total = sum(conn_counts.values()) if conn_counts else 0
-        # 🆕 عدد اصلیِ «اتصالات SSH زنده» فقط از روی شمارش پردازه (همان روش تأییدشده و دقیقی که در
-        # «مشاهده کاربران آنلاین» استفاده می‌شود) محاسبه می‌شود، نه بیشترین مقدار بین آن و شمارش سوکت.
-        # چون شمارش خام سوکت‌های TCP در وضعیت ESTABLISHED می‌تواند شامل اتصالات نیمه‌باز/راکد باشد —
-        # مثلاً وقتی کلاینت موبایل بدون بستن تمیز اتصال (FIN/RST) از شبکه خارج می‌شود، سوکت تا رسیدن
-        # زمان keepalive (که می‌تواند ساعت‌ها طول بکشد) هنوز ESTABLISHED نشان داده می‌شود، در حالی که
-        # آن کاربر واقعاً دیگر متصل/آنلاین نیست. این باعث می‌شد عدد «زنده» خیلی بیشتر از تعداد واقعیِ
-        # کاربران آنلاینِ همان لحظه نمایش داده شود.
-        total_conns = proc_total
-        mismatch_note = ""
-        if sock_count is not None and sock_count != proc_total:
-            mismatch_note = (f"\nℹ️ شمارش بر اساس پردازه (زنده): {proc_total} | بر اساس سوکت TCP کل (شامل احتمالاً اتصالات راکد/نیمه‌باز): {sock_count}")
-        elif sock_count is None and not conn_err:
-            mismatch_note = (f"\n⚠️ شمارش جایگزین (سوکت TCP) ناموفق بود: {esc(sock_err)}"
-                              f"\n🔧 برای فعال‌شدنش این خط را هم به sudoers کاربر ربات اضافه کنید: NOPASSWD: /sbin/ss, /usr/sbin/ss")
-        warns = []
-        if health['cpu_pct'] >= 85: warns.append("⚠️ مصرف CPU بسیار بالاست.")
-        if health['ram_pct'] >= 85: warns.append("⚠️ مصرف RAM بسیار بالاست.")
-        if health['load1'] >= health['cpu_count'] * 1.5: warns.append("⚠️ Load Average نسبت به تعداد هسته‌ها بالاست؛ سرور زیر فشار است.")
-        warn_txt = ("\n\n" + "\n".join(warns) + "\n💡 در صورت افت سرعت، می‌توانید از بخش «تنظیمات سرور ← 🌐 سرویس IP» بخشی از کاربران (یا حتی همه) را به هاست دیگری منتقل کنید؛ یا از همان‌جا دکمهٔ «انجام خودکار» را بزنید.") if warns else "\n\n✅ وضعیت سرور طبیعی است."
-        disk_txt = esc(health['disk_line']) if health['disk_line'] else "در دسترس نیست"
-        txt = (f"🖥 <b>وضعیت لحظه‌ای سرور</b>\n\n"
-               f"⚙️ CPU: {health['cpu_pct']}٪ مصرف (از {health['cpu_count']} هسته)\n"
-               f"🧠 RAM: {health['ram_used_mb']:,} / {health['ram_total_mb']:,} مگابایت ({health['ram_pct']}٪)\n"
-               f"📈 Load Average: {health['load1']} / {health['load5']} / {health['load15']} (۱ / ۵ / ۱۵ دقیقه)\n"
-               f"💾 دیسک (/): <code>{disk_txt}</code>\n"
-               f"🔌 اتصالات SSH زنده: {total_conns}" + (f" ({esc(conn_err)})" if conn_err else "") + mismatch_note +
-               warn_txt)
+            await query.edit_message_text(
+                f"❌ خطا در دریافت وضعیت سرور:\n<code>{esc(herr or 'نامشخص')}</code>",
+                parse_mode="HTML", reply_markup=kb)
+            return
+        socket_count, socket_error = None, None
+        if detailed:
+            port = await asyncio.to_thread(_db_get_setting, 'port', '22')
+            socket_count, socket_error = await _get_established_socket_count(port)
+        txt = render_health(
+            health, extra,
+            sessions=sum(conn_counts.values()) if not conn_err else None,
+            unique_accounts=len(conn_counts) if not conn_err else None,
+            connection_error=conn_err,
+            details=detailed,
+            socket_count=socket_count,
+            socket_error=socket_error,
+        )
         await query.edit_message_text(txt, reply_markup=kb, parse_mode="HTML")
+
+    elif d == "srv_health_files" and role == 'admin':
+        from nvl_server_health import render_large_files, scan_large_files
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 اسکن دوباره", callback_data="srv_health_files")],
+            [InlineKeyboardButton("🖥 بازگشت به سلامت سرور", callback_data="srv_health")],
+        ])
+        await query.edit_message_text(
+            "⏳ در حال بررسی فایل‌های بزرگ‌تر از ۳ گیگابایت روی دیسک اصلی...\n"
+            "اسکن فقط خواندنی است و ممکن است چند ثانیه طول بکشد.",
+            reply_markup=kb,
+        )
+        result = await scan_large_files()
+        await query.edit_message_text(
+            render_large_files(result), parse_mode="HTML", reply_markup=kb,
+        )
     elif d == "srv_brand" and role == 'admin':
         context.user_data['state'] = 'BRAND_INPUT'
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")]])
@@ -23993,7 +24350,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         withdrawable = info[14] if info and len(info) > 14 and info[14] is not None else 0.0
         if withdrawable <= 0:
             await query.message.reply_text("موجودی استخر قابل‌برداشت صفر است."); return
-        ok = await asyncio.to_thread(_db_move_withdrawable_to_wallet, ag_id, withdrawable)
+        source_key = f"withdrawable-transfer:{ag_id}:{query.message.message_id}"
+        ok = await asyncio.to_thread(
+            _db_move_withdrawable_to_wallet, ag_id, withdrawable, source_key,
+        )
         safe_clear_context(context)
         if ok:
             await query.edit_message_text(f"✅ مبلغ {int(withdrawable):,} تومان به کیف‌پول قابل‌خرج شما منتقل شد.")
@@ -24126,15 +24486,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         a_id_local = context.user_data.get('agent_id', ag_id); amount = context.user_data.get('pending_wd_amount', 0)
         card = context.user_data.get('wd_card'); full_name = context.user_data.get('wd_full_name')
         # انصراف قبل از ثبت نهایی؛ چون هنوز چیزی از استخر کسر نشده، فقط context پاک می‌شود
-        for k in ('wd_amount', 'pending_wd_amount', 'wd_card', 'wd_full_name'): context.user_data.pop(k, None)
+        for k in ('wd_amount', 'pending_wd_amount', 'wd_card', 'wd_full_name', 'pending_wd_source_key'): context.user_data.pop(k, None)
         context.user_data['state'] = None
         await query.edit_message_text("✅ انصراف داده شد؛ درخواست برداشتی ثبت نشد.")
     elif d == "wdconf_yes" and role == 'agent':
-        amount = context.user_data.get('pending_wd_amount'); card = context.user_data.get('wd_card'); full_name = context.user_data.get('wd_full_name')
-        if not amount or not card or not full_name:
+        amount = context.user_data.get('pending_wd_amount')
+        card = context.user_data.get('wd_card')
+        full_name = context.user_data.get('wd_full_name')
+        source_key = context.user_data.get('pending_wd_source_key')
+        if not amount or not card or not full_name or not source_key:
             await query.edit_message_text("❌ اطلاعات درخواست ناقص است؛ دوباره تلاش کنید."); safe_clear_context(context); return
-        req_id = await asyncio.to_thread(_db_create_withdrawal_request, ag_id, amount, card, full_name)
-        for k in ('wd_amount', 'pending_wd_amount', 'wd_card', 'wd_full_name'): context.user_data.pop(k, None)
+        req_id = await asyncio.to_thread(
+            _db_create_withdrawal_request, ag_id, amount, card, full_name, source_key,
+        )
+        for k in ('wd_amount', 'pending_wd_amount', 'wd_card', 'wd_full_name', 'pending_wd_source_key'): context.user_data.pop(k, None)
         context.user_data['state'] = None
         if req_id is None:
             await query.edit_message_text("❌ موجودی استخر شما تغییر کرده؛ لطفاً دوباره تلاش کنید."); return
@@ -24903,7 +25268,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # گام ۴: تکمیل نهایی رکورد دیتابیس (فقط پس از موفقیت کامل مراحل لینوکسی)
             try:
-                await asyncio.to_thread(_db_finalize_reserved_user, un, pw, exp_db, cr_db, u, str(c + 1).zfill(4), br, ag_id, chosen_conn_mode, hold_deadline_db, exp_days, target_host)
+                await asyncio.to_thread(_db_finalize_reserved_user, un, pw, exp_db, cr_db, u, str(c + 1).zfill(4), br, ag_id, chosen_conn_mode, hold_deadline_db, exp_days, target_host, cost if role == 'agent' else None)
             except Exception:
                 log.exception("خطا در ثبت نهایی اکانت %s در دیتابیس؛ کاربر لینوکسی حذف می‌شود (Rollback).", un)
                 await run_cmd("sudo", "userdel", "-f", un)
@@ -24930,7 +25295,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # گام ۵: کسر هزینه از کیف پول نماینده و توزیع پورسانت لایه‌ای (خطای احتمالی اینجا اکانت را باطل نمی‌کند)
             if role == 'agent':
                 try:
-                    with db_conn() as conn: nvl_daily_business.charge_purchase(conn, ag_id, cost)
                     await asyncio.to_thread(_db_distribute_commission, ag_id, retail_dec)
                     # 🎁 کش‌بک ترغیبی نمایندگان پرفروش (۵۰+ اکانت فعال): ۷٪ از هزینهٔ همین خرید
                     await _apply_agent_cashback_if_eligible(ag_id, retail_dec)
@@ -24944,7 +25308,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 f"🆘 <b>استفاده از شارژ اضطراری</b>\nنمایندهٔ «{esc(ainf[0])}» برای ساخت اکانت <code>{esc(un)}</code> "
                                 f"مبلغ {int(emergency_shortfall):,} تومان از شارژ اضطراری استفاده کرد.")
                 except Exception:
-                    log.exception("خطا در کسر کیف‌پول/توزیع کمیسیون برای اکانت %s (اکانت ساخته شده باقی می‌ماند).", un)
+                    log.exception("خطا در توزیع کمیسیون/کش‌بک برای اکانت %s (اکانت ساخته شده باقی می‌ماند).", un)
 
             # گام ۶: ارسال فاکتور
             try:
@@ -25003,43 +25367,80 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d.startswith("udelconf_yes_"):
         un = d.split("_", 2)[2]
         owner = await asyncio.to_thread(_db_get_user, un)
-        if not owner: return await query.edit_message_text("❌ این کاربر دیگر وجود ندارد.")
-        if not _can_manage_user(role, ag_id, owner[5]): return await query.message.reply_text("⛔️ شما مجاز به مدیریت این اکانت نیستید.")
+        if not owner:
+            return await query.edit_message_text("❌ این کاربر دیگر وجود ندارد.")
+        if not _can_manage_user(role, ag_id, owner[5]):
+            return await query.message.reply_text("⛔️ شما مجاز به مدیریت این اکانت نیستید.")
 
-        # 💸 بازپرداخت متناسب: اگر این اکانت متعلق به یک نماینده باشد، بخشِ استفاده‌نشدهٔ هزینه
-        # (روزهای باقی‌مانده تا انقضا × تعداد کاربر مجاز، به نسبت قیمت پایهٔ فعلی همان نماینده)
-        # به کیف‌پولِ قابل‌خرج (balance) او برگردانده می‌شود — نه به استخر قابل‌برداشت
-        # (withdrawable_balance). این تفکیک عمدی است: بازپرداخت فقط سرمایهٔ خودِ نماینده را که
-        # قبلاً بابت همین اکانت پرداخته بود برمی‌گرداند تا صرفِ خریدهای بعدی شود، و هرگز مستقیماً
-        # قابل برداشتِ نقدی نیست؛ به این ترتیب چرخهٔ «ساخت اکانت‌های الکی → واجدشرایط کش‌بک شدن →
-        # برداشت نقدی کش‌بک → حذف اکانت‌ها → بازپرداخت هزینه» نمی‌تواند پول واقعی اضافه تولید کند.
-        owner_agent_id = owner[5]
-        refund = 0.0
-        refund_note = ""
-        if owner_agent_id and owner_agent_id != 0:
-            try:
-                refund, refund_desc = await _calc_account_refund(un)
-                if refund > 0:
-                    with db_conn() as conn:
-                        nvl_daily_business.refund_purchase(conn, owner_agent_id, refund)
-                        used_before_row = conn.execute("SELECT emergency_used FROM agents WHERE id=?", (owner_agent_id,)).fetchone()
-                        used_before = (used_before_row[0] or 0.0) if used_before_row else 0.0
-                        _apply_emergency_repayment(conn, owner_agent_id, refund)
-                        emergency_repaid = min(used_before, refund) if used_before > 0 else 0.0
-                    refund_note = f"\n💸 {refund_desc}"
-                    if emergency_repaid > 0:
-                        refund_note += f"\n🆘 از همین مبلغ، {int(emergency_repaid):,} تومان بدهیِ شارژ اضطراری نماینده نیز پاک شد."
-            except Exception:
-                log.exception("خطا در اعمال بازپرداخت حذف اکانت %s", un)
+        # Reject stale/wrong-type SSH accounts and invalid refund inputs
+        # BEFORE the irreversible Linux user deletion. SQLite settlement still
+        # rechecks the same snapshot after the OS operation.
+        try:
+            def _preflight_ssh_delete():
+                with db_conn() as conn:
+                    return preflight_ssh_delete(
+                        conn, username=un, expected_agent_id=owner[5],
+                        expected_expiry=owner[1], expected_created=owner[2],
+                        expected_users=owner[3], expected_status=owner[4],
+                        today=datetime.now(IRAN_TZ).date(),
+                    )
+            await asyncio.to_thread(_preflight_ssh_delete)
+        except Exception:
+            log.exception("SSH delete preflight HOLD before userdel: %s", un)
+            return await query.edit_message_text(
+                "⛔️ حذف قبل از عملیات لینوکس متوقف شد؛ اطلاعات حساب یا "
+                "مبنای محاسبه بازپرداخت معتبر نیست. هیچ حساب یا اعتباری "
+                "تغییر نکرده است؛ لطفاً با سوپرادمین هماهنگ کنید."
+            )
 
-        # Linux account lives on Core; owner.host is endpoint/routing metadata only.
+        # External Linux delete is the first commit point. Never credit the
+        # wallet or delete the local record when Core userdel reports failure.
         ok, err, kind = await run_cmd("sudo", "userdel", "-f", un)
-        await asyncio.to_thread(_db_delete_user, un)
-        await _remove_user_limit_file(un)  # پاک‌سازی فایل PAM روی Core
-        if ok: await query.edit_message_text(f"✅ اکانت {esc(un)} حذف شد. (آمار فروش کسر گردید){refund_note}")
-        else:
-            extra = _fmt_linux_error("حذف اکانت", err, kind)
-            await query.edit_message_text(f"⚠️ اکانت {esc(un)} از دیتابیس حذف شد اما حذف یوزر لینوکسی ناموفق بود:\n\n{extra}\nپیشنهاد می‌شود دستی بررسی شود.{refund_note}", parse_mode="HTML")
+        if not ok:
+            return await query.edit_message_text(
+                "⛔️ حذف اکانت روی Core ناموفق بود؛ "
+                "اکانت و موجودی نماینده در دیتابیس تغییر نکرد.\n\n"
+                + _fmt_linux_error("حذف اکانت", err, kind),
+                parse_mode="HTML",
+            )
+
+        # One BEGIN IMMEDIATE: delete account + credit balance + finance ledger
+        # + repay any historical emergency debt. The snapshot check and DELETE
+        # CAS prevent two stale Telegram confirmations from refunding twice.
+        try:
+            def _settle_deleted_ssh():
+                with db_conn() as conn:
+                    return finalize_ssh_delete(
+                        conn, username=un, expected_agent_id=owner[5],
+                        expected_expiry=owner[1], expected_created=owner[2],
+                        expected_users=owner[3], expected_status=owner[4],
+                        repay_emergency=_apply_emergency_repayment,
+                        today=datetime.now(IRAN_TZ).date(),
+                    )
+            refund, emergency_repaid, refund_reason, refund_days = (
+                await asyncio.to_thread(_settle_deleted_ssh)
+            )
+        except Exception:
+            log.exception("SSH userdel succeeded but local refund/delete settlement needs reconciliation: %s", un)
+            return await query.edit_message_text(
+                "⚠️ حساب از لینوکس حذف شد اما تکمیل دیتابیس/بازپرداخت "
+                "تأیید نشد. هیچ اعتبار نامطمئنی ثبت نشده است. "
+                "برای بررسی دستی به سوپرادمین اطلاع دهید؛ درخواست را تکرار نکنید."
+            )
+
+        await _remove_user_limit_file(un)
+        refund_note = (
+            f"\n💸 بازپرداخت {refund_days} روز استفاده‌نشده: {refund:,} تومان"
+            if refund > 0 else ""
+        )
+        if emergency_repaid > 0:
+            refund_note += (
+                f"\n🆘 {emergency_repaid:,} تومان بدهی شارژ اضطراری قبلی تسویه شد."
+            )
+        await query.edit_message_text(
+            f"✅ اکانت {esc(un)} حذف شد. (آمار فروش کسر گردید){refund_note}",
+            parse_mode="HTML",
+        )
     elif d.startswith("udelconf_no_"):
         un = d.split("_", 2)[2]
         await _show_user_detail(update, un, context)
@@ -25176,13 +25577,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ➖ تاییدیهٔ نهایی کاهش شارژ کیف‌پول یک نماینده از پنل ادمین (برای اصلاح شارژهای اشتباهی)
     elif d == "deductconf_yes":
-        a_id = context.user_data.get('deduct_ag_id'); amount = context.user_data.get('pending_deduct_amount')
-        if not a_id or not amount:
+        a_id = context.user_data.get('deduct_ag_id')
+        amount = context.user_data.get('pending_deduct_amount')
+        source_key = context.user_data.get('pending_deduct_source_key')
+        if not a_id or not amount or not source_key:
             await query.edit_message_text("❌ تراکنش منقضی شده است."); safe_clear_context(context); return
         info = await asyncio.to_thread(_db_get_agent_info, a_id)
         if not info:
             await query.edit_message_text("❌ این نماینده دیگر وجود ندارد."); safe_clear_context(context); return
-        await asyncio.to_thread(_db_admin_deduct_agent, a_id, amount)
+        applied = await asyncio.to_thread(
+            _db_admin_deduct_agent, a_id, amount, source_key,
+        )
+        if not applied:
+            await query.edit_message_text("❌ این عملیات قبلاً ثبت شده یا موجودی نماینده تغییر کرده است.")
+            safe_clear_context(context)
+            return
         new_balance = info[2] - amount
         await query.edit_message_text(f"✅ مبلغ {int(amount):,} تومان از کیف‌پول «{esc(info[0])}» کم شد.\n💰 موجودی جدید: {int(new_balance):,} تومان")
         if info[8]:  # telegram_id نماینده — در صورت وجود، به او هم اطلاع داده می‌شود
@@ -27554,7 +27963,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🔻 کاهش تمدید اکانت — برای مواقعی که اشتباهی اکانت بیش‌ازحد تمدید شده و باید تعداد
     # روز/ماه آن کم شود. دقیقاً همان منوی ۱/۲/۳ ماهه + «تعداد روز دلخواه» را نمایش می‌دهد،
     # اما در انتها به‌جای افزودن، از تاریخ انقضا کم می‌کند.
-    elif d.startswith("uact_rd_") and role == 'admin':
+    elif d.startswith("uact_rd_") and role in ('admin', 'agent'):
         un = d.split("_", 2)[2]
         cur = await asyncio.to_thread(_db_get_user, un)
         if not cur: return await query.edit_message_text("❌ این کاربر دیگر وجود ندارد.")
@@ -27667,6 +28076,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             new_exp_db = new_exp_dt.strftime("%Y-%m-%d")
 
+            if mode == "reduce" and role == 'agent':
+                try:
+                    def _verify_reduce_quote():
+                        with db_conn() as conn:
+                            return quote_time_reduction(
+                                conn, username=un, agent=cur[5],
+                                created=cur[2], expiry=old_exp,
+                                users=cur[3], new_expiry=new_exp_db,
+                                today=datetime.now(IRAN_TZ).date(),
+                            )
+                    await asyncio.to_thread(_verify_reduce_quote)
+                except Exception:
+                    await query.edit_message_text(
+                        "⛔️ کاهش زمان پیش از عملیات لینوکس متوقف شد؛ "
+                        "مبنای پرداخت حساب قابل تأیید نیست و بررسی مالی لازم است."
+                    )
+                    safe_clear_context(context)
+                    return
+
             if mode == "extend":
                 try:
                     await asyncio.to_thread(_db_preflight_ssh_reactivation, un)
@@ -27718,18 +28146,58 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
 
             try:
-                if mode == 'extend':
-                    def _db_extend_and_activate():
-                        with db_conn() as conn:
-                            conn.execute("BEGIN IMMEDIATE")
+                def _commit_time_change():
+                    with db_conn() as conn:
+                        if cur[5]:
+                            kind = ("ADMIN_ADJUST" if role != 'agent' else
+                                    ("EXTEND" if mode == 'extend' else "TIME_REDUCE"))
+                            def _mutate(c):
+                                if mode == 'extend':
+                                    _db_activate_ssh_account_tx(
+                                        c, un, expected_status=cur[4],
+                                        expire_date=new_exp_db,
+                                        actor=f"renewal:{role}:{ag_id}",
+                                    )
+                                else:
+                                    changed = c.execute(
+                                        "UPDATE ssh_accounts SET expire_date=?,hold_active=0 "
+                                        "WHERE username=? AND expire_date=? AND users_limit=? "
+                                        "AND agent_id=? AND status=? AND service_type='ssh'",
+                                        (new_exp_db, un, old_exp, cur[3], cur[5], cur[4]),
+                                    ).rowcount
+                                    if changed != 1:
+                                        raise RuntimeError("SSH_TIME_CHANGE_CAS_FAILED")
+                            return apply_paid_change(
+                                conn, username=un, agent=cur[5],
+                                expected_created=cur[2], expected_expiry=old_exp,
+                                expected_users=cur[3], expected_status=cur[4],
+                                new_expiry=new_exp_db, new_users=cur[3],
+                                kind=kind,
+                                amount=cost if role == 'agent' and mode == 'extend' else 0,
+                                today=datetime.now(IRAN_TZ).date(),
+                                repay_emergency=_apply_emergency_repayment,
+                                mutate=_mutate,
+                            )
+                        conn.execute("BEGIN IMMEDIATE")
+                        if mode == 'extend':
                             _db_activate_ssh_account_tx(
                                 conn, un, expected_status=cur[4],
                                 expire_date=new_exp_db,
                                 actor=f"renewal:{role}:{ag_id}",
                             )
-                    await asyncio.to_thread(_db_extend_and_activate)
-                else:
-                    await asyncio.to_thread(_db_extend_user, un, new_exp_db)
+                        else:
+                            changed = conn.execute(
+                                "UPDATE ssh_accounts SET expire_date=?,hold_active=0 "
+                                "WHERE username=? AND expire_date=? AND status=? "
+                                "AND service_type='ssh'",
+                                (new_exp_db, un, old_exp, cur[4]),
+                            ).rowcount
+                            if changed != 1:
+                                raise RuntimeError("SSH_TIME_CHANGE_CAS_FAILED")
+                        return 0.0
+                paid_delta = await asyncio.to_thread(_commit_time_change)
+                if role == 'agent' and mode == 'reduce':
+                    cost = paid_delta
             except Exception:
                 if mode == 'extend' and cur[4] != "🟢 فعال":
                     await run_cmd("sudo", "usermod", "-L", un)
@@ -27740,7 +28208,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if role == 'agent':
                 if mode == 'extend':
-                    with db_conn() as conn: nvl_daily_business.charge_purchase(conn, ag_id, cost)
                     await asyncio.to_thread(_db_distribute_commission, ag_id, retail_dec)
                     # 🎁 کش‌بک ترغیبی نمایندگان پرفروش (۵۰+ اکانت فعال): ۷٪ از هزینهٔ همین تمدید
                     await _apply_agent_cashback_if_eligible(ag_id, retail_dec)
@@ -27752,10 +28219,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             await _notify_admins(context.application,
                                 f"🆘 <b>استفاده از شارژ اضطراری</b>\nنمایندهٔ «{esc(ainf[0])}» برای تمدید اکانت <code>{esc(un)}</code> "
                                 f"مبلغ {int(emergency_shortfall):,} تومان از شارژ اضطراری استفاده کرد.")
-                else:
-                    # 💰 در حالت کاهش، مبلغ متناظر با روزهای کم‌شده به موجودی نماینده بازگردانده می‌شود
-                    # (بدون دست‌کاری کمیسیون زیرمجموعه‌ها که قبلاً هنگام تمدید اشتباه پرداخت شده بود).
-                    with db_conn() as conn: nvl_daily_business.refund_purchase(conn, ag_id, cost)
+
 
             # 🆕 طبق درخواست: به‌جای یک پیام کوتاهِ «با موفقیت تمدید شد»، همان فاکتور/پنل کامل
             # اکانت (شبیه صفحهٔ جزئیات اکانت) نمایش داده می‌شود تا اطلاعات کامل (مالک، تعداد

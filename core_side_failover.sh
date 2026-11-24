@@ -33,6 +33,9 @@ fi
 TARGET_EDGE="$1"
 CUSTOMER_SSH_PORT="$2"
 SOURCE_WG_STOPPED=0
+SOURCE_AWG_STOPPED=0
+AWG_SOURCE_ACTIVE=0
+AWG_SOURCE_PORT=42372
 # Serialize Telegram-triggered migrations, including their source DB freeze.
 command -v flock >/dev/null 2>&1 || { echo "❌ flock نصب نیست."; exit 1; }
 exec 9>/run/nvl-core-migration.lock
@@ -93,16 +96,29 @@ fi
 SSH_OPTS=(-i "$EDGE_SSH_KEY" -p "$EDGE_PORT" -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 echo "   ✅ اتصال مدیریتی روی پورت ${EDGE_PORT} برقرار شد."
 
+# The live source AWG profile is optional for historic WG-only installations.
+# Require an AWG-capable Edge only if the source actually uses AWG.
+if command -v awg >/dev/null 2>&1 && awg show awg0 >/dev/null 2>&1; then
+    AWG_SOURCE_ACTIVE=1
+    AWG_SOURCE_PORT="$(awg show awg0 listen-port)"
+    if [ ! -s /etc/amnezia/amneziawg/awg0.conf ]; then
+        echo "❌ awg0 فعال است ولی کانفیگ Core موجود نیست."
+        exit 1
+    fi
+    if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
+            "command -v awg >/dev/null && command -v awg-quick >/dev/null && modinfo amneziawg >/dev/null"; then
+        echo "❌ ابزار/ماژول AWG روی Edge مقصد نصب نیست. یک Edge سالم دارای AWG انتخاب کنید."
+        exit 1
+    fi
+    if [ ! -s /root/update_all_awg_edges_endpoint.sh ]; then
+        echo "❌ ابزار به‌روزرسانی Endpointهای AWG روی Core اصلی نصب نیست."
+        exit 1
+    fi
+    echo "   ✅ AWG فعال شناسایی شد؛ ابزار مقصد موجود است."
+fi
+
 # All fallible Python preparation happens while the original Core remains live.
 # The chosen bot is pinned to the live service's script, never a random standby file.
-if [ ! -x /root/demote_core_to_edge.sh ] && [ ! -f /root/demote_core_to_edge.sh ]; then
-    echo "❌ اسکریپت demote_core_to_edge.sh نصب نیست؛ Core را متوقف نمی‌کنیم."
-    exit 1
-fi
-if ! command -v netfilter-persistent >/dev/null 2>&1; then
-    echo "❌ netfilter-persistent روی Core اصلی نیست؛ رله بعد از انتقال پایدار نمی‌ماند."
-    exit 1
-fi
 if [ ! -f /root/02_recreate_ssh_users.py ]; then
     echo "❌ ابزار بازسازی کاربران روی Core موجود نیست؛ انتقال مسدود است."
     exit 1
@@ -115,10 +131,27 @@ if [ ! -f /root/update_all_edges_endpoint.sh ] || [ ! -f /root/update_edge_endpo
     echo "❌ اسکریپت‌های انتقال Endpoint به سایر Edgeها ناقص هستند."
     exit 1
 fi
-echo "🔹 ۲.۵) بررسی نقش واقعی مقصد و نگه‌داری موقت هویت Edge قبلی..."
-if ! bash /root/demote_core_to_edge.sh --prepare "$TARGET_EDGE" "$CUSTOMER_SSH_PORT" "$EDGE_PORT"; then
-    echo "❌ مقصد Edge معتبر نیست. Core فعلی بدون تغییر فعال می‌ماند."
-    exit 1
+echo "🔹 ۲.۵) بررسی AWG Edge مقصد (بدون نیاز به wg0 روی Edge)..."
+# This flow RETIRES the old Core; no old-Core demotion is performed.
+# Therefore we do not need the destination's legacy WG identity or wg0.
+# A running AWG Core must promote an AWG Edge registered in the Core peer set.
+if [ "$AWG_SOURCE_ACTIVE" = 1 ]; then
+    TARGET_AWG_KEY="$(ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
+        'awg show awg0 public-key' 2>/dev/null)" || TARGET_AWG_KEY=""
+    if [ -z "$TARGET_AWG_KEY" ] || [ "$TARGET_AWG_KEY" = "(none)" ]; then
+        echo "❌ AWG Edge مقصد فعال نیست؛ Core فعلی بدون تغییر باقی می‌ماند."
+        exit 1
+    fi
+    if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
+        'systemctl is-active --quiet awg-quick@awg0 && awg show awg0 >/dev/null'; then
+        echo "❌ awg0 روی Edge مقصد فعال نیست؛ ابتدا Edge را سالم راه‌اندازی کنید."
+        exit 1
+    fi
+    if ! awg show awg0 peers | grep -Fxq -- "$TARGET_AWG_KEY"; then
+        echo "❌ AWG Edge مقصد هنوز به‌عنوان Peer روی Core ثبت نشده است."
+        exit 1
+    fi
+    echo "   ✅ هویت AWG Edge روی Core ثبت‌شده و رابط AWG مقصد فعال است."
 fi
 echo "🔹 ۲.۶) انتقال نسخه دقیق ربات و آماده‌سازی Python روی مقصد قبل از قطع سرویس..."
 if [ ! -s /root/bot_import_preflight.py ] || [ ! -d /root/ops ] || [ ! -d /root/server_migration ]; then
@@ -128,11 +161,18 @@ fi
 # Preserve the previous stage, but never let its stale modules mask missing code.
 if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
     'set -e; [ ! -L /root/nvlbot_standby ]; if [ -e /root/nvlbot_standby ]; then [ -d /root/nvlbot_standby ]; previous=$(mktemp -d /root/nvlbot-stage-backup-XXXXXX); mv /root/nvlbot_standby "$previous/code"; fi; install -d -m 700 /root/nvlbot_standby'; then exit 1; fi
+# DenaProbe is imported by the live bot at module startup, inside a guarded
+# branch; the old top-level import-only preflight could not detect its absence.
+[ -f /root/denaprobe_ingest/__init__.py ] &&
+[ -f /root/denaprobe_ingest/detector.py ] || {
+    echo "❌ بسته denaprobe_ingest در Core منبع وجود ندارد؛ عملیات قبل از توقف بات متوقف شد."
+    exit 1
+}
 if ! rsync -az --prune-empty-dirs \
         --exclude='__pycache__/' --exclude='.git/' --include='*/' \
         --include='*.py' --include='*.sh' --include='requirements.txt' --exclude='*' \
         -e "ssh -i ${EDGE_SSH_KEY} -p ${EDGE_PORT} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
-        /root/*.py /root/*.sh /root/requirements.txt /root/server_migration /root/ops \
+        /root/*.py /root/*.sh /root/requirements.txt /root/server_migration /root/ops /root/denaprobe_ingest \
         "root@${TARGET_EDGE}:/root/nvlbot_standby/"; then
     echo "❌ انتقال فایل‌های ربات شکست خورد. Core متوقف نمی‌شود."
     exit 1
@@ -140,12 +180,29 @@ fi
 # --clear is intentional: standby virtualenv copies are not portable between VPSes.
 # Install compiler/headers here: pip may need source builds before Core downtime.
 if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
-    'set -e; apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv python3-pip python3-dev build-essential iptables-persistent >/dev/null; python3 -m venv --clear /root/venv; /root/venv/bin/python3 -m pip --version; /root/venv/bin/python3 -m pip install -q -r /root/nvlbot_standby/requirements.txt; /root/venv/bin/python3 -m py_compile /root/nvlbot_standby/bot_final_v49-2.py /root/nvlbot_standby/02_recreate_ssh_users.py; cd /root/nvlbot_standby; PYTHONPATH= /root/venv/bin/python3 /root/nvlbot_standby/bot_import_preflight.py /root/nvlbot_standby/bot_final_v49-2.py; echo bot_final_v49-2.py > /root/nvlbot_standby/.nvl_promotion_main'; then
+    'set -e; apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv python3-pip python3-dev build-essential iptables-persistent >/dev/null; python3 -m venv --clear /root/venv; /root/venv/bin/python3 -m pip --version; /root/venv/bin/python3 -m pip install -q -r /root/nvlbot_standby/requirements.txt; /root/venv/bin/python3 -m py_compile /root/nvlbot_standby/bot_final_v49-2.py /root/nvlbot_standby/02_recreate_ssh_users.py; cd /root/nvlbot_standby; PYTHONPATH= /root/venv/bin/python3 /root/nvlbot_standby/bot_import_preflight.py /root/nvlbot_standby/bot_final_v49-2.py; PYTHONPATH= /root/venv/bin/python3 -B -c "from denaprobe_ingest.detector import evaluate"; echo bot_final_v49-2.py > /root/nvlbot_standby/.nvl_promotion_main'; then
     echo "❌ Python/PIP/requirements روی مقصد آماده نشد. Core اصلی همچنان فعال است."
     exit 1
 fi
 echo "   ✅ Python و وابستگی‌ها قبل از توقف Core روی مقصد آماده شدند."
 
+# Read the effective EnvironmentFile list while the source Core is still live.
+# Only paths are handled here; secret contents are never printed or logged.
+SOURCE_ENV_FILES_RAW="$(systemctl show nvlbot -p EnvironmentFiles --value 2>/dev/null)" || {
+    echo "❌ خواندن EnvironmentFileهای سرویس nvlbot ناموفق بود."
+    exit 1
+}
+ENV_FILE_PATHS=()
+while IFS= read -r env_line; do
+    [ -n "$env_line" ] || continue
+    env_path="${env_line%% *}"
+    if [[ "$env_path" != /* || ! -f "$env_path" ]]; then
+        echo "❌ فایل EnvironmentFile روی Core فعلی پیدا نشد: ${env_path:-<invalid>}"
+        exit 1
+    fi
+    ENV_FILE_PATHS+=("$env_path")
+done <<< "$SOURCE_ENV_FILES_RAW"
+echo "   ✅ EnvironmentFileهای منبع بررسی شدند: ${#ENV_FILE_PATHS[@]}"
 
 echo "🔹 ۳) توقفِ nvlbot روی همین Core (قبل از بکاپِ نهاییِ دیتابیس، تا نوشته‌ای گم نشود)..."
 # 🐛🔧 رفع باگِ ریشه‌ایِ واقعی (دو مشکل با هم): ۱) promote_edge_to_core.sh (مرحلهٔ ۱۰، محافظِ
@@ -165,16 +222,19 @@ rollback_start_nvlbot() {
         return 1
     fi
     echo "🔹 رول‌بک: بازگرداندن WireGuard و ربات روی Core قبلی..."
-    if [ "$SOURCE_WG_STOPPED" = 1 ]; then
-        # The promoted target may already have the same WG private key even
+    if [ "$SOURCE_WG_STOPPED" = 1 ] || [ "${SOURCE_AWG_STOPPED:-0}" = 1 ]; then
+        # The promoted target may already have the same WG/AWG private keys even
         # though its bot is down. Disable it before restoring the source.
         if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
-                "systemctl disable --now nvlbot >/dev/null 2>&1 || true; systemctl disable --now wg-quick@wg0 >/dev/null 2>&1 || true; ! systemctl is-active --quiet nvlbot && ! systemctl is-active --quiet wg-quick@wg0 && ! wg show wg0 >/dev/null 2>&1"; then
+                "systemctl disable --now nvlbot >/dev/null 2>&1 || true; systemctl disable --now wg-quick@wg0 >/dev/null 2>&1 || true; systemctl disable --now awg-quick@awg0 >/dev/null 2>&1 || true; ! systemctl is-active --quiet nvlbot && ! systemctl is-active --quiet wg-quick@wg0 && ! wg show wg0 >/dev/null 2>&1 && ! awg show awg0 >/dev/null 2>&1"; then
             echo "❌ نتوانستیم خاموش‌بودن WireGuard و ربات مقصد را تأیید کنیم؛ برای جلوگیری از دو Core، رول‌بک خودکار متوقف شد."
             return 1
         fi
     fi
     systemctl start wg-quick@wg0 2>/dev/null || { echo "❌ WireGuard قدیمی شروع نشد."; return 1; }
+    if [ "${AWG_SOURCE_ACTIVE:-0}" = 1 ]; then
+        systemctl start awg-quick@awg0 || { echo "❌ AWG قدیمی شروع نشد."; return 1; }
+    fi
     systemctl start nvlbot 2>/dev/null && echo "   ✅ nvlbot روی Core قدیمی دوباره فعال شد." \
         || echo "   ❌ راه‌اندازی Core قبلی شکست خورد؛ systemctl status nvlbot را بررسی کنید."
 }
@@ -210,6 +270,16 @@ if [ ! -s "${EXPORT_DIR}/core_private.key" ]; then
 fi
 awk '/^\[Peer\]/{f=1} f' "$WG_CONF" > "${EXPORT_DIR}/wg0.conf.peers"
 echo "   ✅ کلید WireGuard + peers استخراج شد."
+if [ "$AWG_SOURCE_ACTIVE" = 1 ]; then
+    install -m 600 /etc/amnezia/amneziawg/awg0.conf "${EXPORT_DIR}/awg0.conf"
+    awg show awg0 public-key > "${EXPORT_DIR}/awg_core_public.key"
+    if [ ! -s "${EXPORT_DIR}/awg_core_public.key" ]; then
+        echo "❌ خواندن هویت AWG Core ناموفق بود."
+        rollback_start_nvlbot
+        exit 1
+    fi
+    echo "   ✅ AWG Core profile + peers جمع‌آوری شد."
+fi
 
 # nvlbot همین الان متوقف است، پس دیگر لازم نیست نگرانِ نوشتنِ هم‌زمان باشیم؛ همچنان از
 # sqlite3 .backup استفاده می‌کنیم چون در برابر یک فایلِ نیمه‌نوشته/WAL هم امن‌تر از cp خام است.
@@ -220,6 +290,22 @@ else
     rollback_start_nvlbot
     exit 1
 fi
+
+# Preserve other root-level SQLite stores (for example accounting.db) too.
+# These are optional, but should not be silently lost in a Core migration.
+mkdir -p "${EXPORT_DIR}/extra_databases"
+for db in "${BOT_DIR}/"*.db; do
+    [ -f "$db" ] || continue
+    name="${db##*/}"
+    [ "$name" = master_bot.db ] && continue
+    if ! sqlite3 "$db" ".backup '${EXPORT_DIR}/extra_databases/${name}'" 2>/dev/null; then
+        echo "⚠️ کپی SQLite ${name} ممکن نبود؛ کپی خام فایل پس از توقف ربات."
+        cp -p "$db" "${EXPORT_DIR}/extra_databases/${name}" || {
+            rollback_start_nvlbot
+            exit 1
+        }
+    fi
+done
 
 if [ -f /etc/gost/config.yaml ]; then
     cp /etc/gost/config.yaml "${EXPORT_DIR}/gost_config.yaml"
@@ -283,16 +369,78 @@ if [ -f /etc/systemd/system/nvlbot.service ]; then
     echo "   ✅ فایل nvlbot.service کپی شد."
 fi
 # Runtime environment and systemd drop-ins are host-local and not in Git.
-# Keep these archives owner-only: they can contain live bot credentials.
-if [ -d /etc/nvlbot ]; then
-    if ! tar -czf "${EXPORT_DIR}/nvlbot_etc.tar.gz" -C /etc nvlbot; then
-        echo "❌ گرفتن بکاپ تنظیمات /etc/nvlbot شکست خورد."
+# Archive both runtime trees plus any EnvironmentFile (and symlink target) elsewhere.
+# Keep the archive and path manifest owner-only: the archive contains live credentials.
+printf '%s\n' "${ENV_FILE_PATHS[@]}" > "${EXPORT_DIR}/environment_files.list"
+chmod 600 "${EXPORT_DIR}/environment_files.list"
+
+RUNTIME_ARCHIVE_PATHS=()
+add_runtime_archive_path() {
+    local source_path="$1"
+    local relative_path existing_path
+    [[ "$source_path" == /* && -e "$source_path" ]] || return 0
+    relative_path="${source_path#/}"
+    for existing_path in "${RUNTIME_ARCHIVE_PATHS[@]}"; do
+        [[ "$existing_path" == "$relative_path" ]] && return 0
+    done
+    RUNTIME_ARCHIVE_PATHS+=("$relative_path")
+}
+
+for env_dir in /etc/nvlbot /etc/nvl; do
+    if [[ -d "$env_dir" || -L "$env_dir" ]]; then
+        add_runtime_archive_path "$env_dir"
+        env_dir_realpath="$(readlink -f -- "$env_dir" 2>/dev/null || true)"
+        if [ -n "$env_dir_realpath" ] && [ "$env_dir_realpath" != "$env_dir" ]; then
+            add_runtime_archive_path "$env_dir_realpath"
+        fi
+    fi
+done
+
+for env_file in "${ENV_FILE_PATHS[@]}"; do
+    case "$env_file" in
+        /etc/nvlbot/*|/etc/nvl/*) ;;
+        *) add_runtime_archive_path "$env_file" ;;
+    esac
+    env_file_realpath="$(readlink -f -- "$env_file" 2>/dev/null || true)"
+    if [ -n "$env_file_realpath" ]; then
+        case "$env_file_realpath" in
+            /etc/nvlbot/*|/etc/nvl/*) ;;
+            *) add_runtime_archive_path "$env_file_realpath" ;;
+        esac
+    fi
+done
+
+if [ "${#RUNTIME_ARCHIVE_PATHS[@]}" -gt 0 ]; then
+    if ! tar -czf "${EXPORT_DIR}/nvlbot_etc.tar.gz" -C / "${RUNTIME_ARCHIVE_PATHS[@]}"; then
+        echo "❌ گرفتن بکاپ تنظیمات Runtime سرویس ربات شکست خورد."
         rollback_start_nvlbot
         exit 1
     fi
-    chmod 600 "${EXPORT_DIR}/nvlbot_etc.tar.gz"
-    echo "   ✅ تنظیمات خصوصی سرویس ربات جمع‌آوری شد."
+else
+    if ! tar -czf "${EXPORT_DIR}/nvlbot_etc.tar.gz" --files-from /dev/null; then
+        echo "❌ ساخت آرشیو خالی تنظیمات Runtime شکست خورد."
+        rollback_start_nvlbot
+        exit 1
+    fi
 fi
+chmod 600 "${EXPORT_DIR}/nvlbot_etc.tar.gz"
+
+# Confirm that each source EnvironmentFile (or its resolved symlink target) is in the archive.
+if ! tar -tzf "${EXPORT_DIR}/nvlbot_etc.tar.gz" > "${EXPORT_DIR}/runtime_archive.list"; then
+    echo "❌ بررسی آرشیو تنظیمات Runtime شکست خورد."
+    rollback_start_nvlbot
+    exit 1
+fi
+for env_file in "${ENV_FILE_PATHS[@]}"; do
+    env_file_realpath="$(readlink -f -- "$env_file" 2>/dev/null || true)"
+    relative_path="${env_file_realpath#/}"
+    if [ -z "$env_file_realpath" ] || ! grep -Fxq -- "$relative_path" "${EXPORT_DIR}/runtime_archive.list"; then
+        echo "❌ فایل EnvironmentFile در آرشیو قرار نگرفت: $env_file"
+        rollback_start_nvlbot
+        exit 1
+    fi
+done
+echo "   ✅ تنظیمات Runtime منتقل‌پذیر شدند؛ EnvironmentFileها: ${#ENV_FILE_PATHS[@]}"
 if [ -d /etc/systemd/system/nvlbot.service.d ]; then
     if ! tar -czf "${EXPORT_DIR}/nvlbot_dropins.tar.gz" -C /etc/systemd/system nvlbot.service.d; then
         echo "❌ گرفتن بکاپ تنظیمات تکمیلی systemd شکست خورد."
@@ -386,6 +534,21 @@ if wg show wg0 >/dev/null 2>&1; then
     rollback_start_nvlbot
     exit 1
 fi
+if [ "$AWG_SOURCE_ACTIVE" = 1 ]; then
+    echo "🔹 ۵.۶) توقف AWG قدیمی پیش از فعال‌سازی هویت یکسان روی Core جدید..."
+    if ! systemctl stop awg-quick@awg0; then
+        echo "❌ توقف AWG قدیمی ناموفق بود."
+        rollback_start_nvlbot
+        exit 1
+    fi
+    SOURCE_AWG_STOPPED=1
+    if awg show awg0 >/dev/null 2>&1; then
+        echo "❌ رابط AWG قدیمی همچنان فعال است."
+        rollback_start_nvlbot
+        exit 1
+    fi
+fi
+
 echo "🔹 ۶) اجرای remote «promote_edge_to_core.sh» روی Edge — با OLD_CORE_IP خودکار=${SELF_IP}..."
 if ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
         "OLD_CORE_IP='${SELF_IP}' bash ${REMOTE_MIGRATION_DIR}/promote_edge_to_core.sh '${CUSTOMER_SSH_PORT}' '${REMOTE_MIGRATION_DIR}'"; then
@@ -401,11 +564,36 @@ if [ "$PROMOTE_EXIT" -ne 0 ]; then
     exit "$PROMOTE_EXIT"
 fi
 
-echo "🔹 ۷) تأییدِ نهایی..."
-echo "   ✅ nvlbot روی این سرور (Core قدیمی) قبلاً (مرحلهٔ ۳) متوقف شده و همچنان متوقف می‌ماند."
-echo ""
+# Keep the retired source Core quiet if it reboots before the operator shuts
+# down the VPS. Do not auto-demote it into another relay.
+systemctl disable nvlbot wg-quick@wg0 >/dev/null 2>&1 || true
+if [ "$AWG_SOURCE_ACTIVE" = 1 ]; then
+    systemctl disable awg-quick@awg0 >/dev/null 2>&1 || true
+fi
+systemctl disable --now nvl-edge-sync.timer >/dev/null 2>&1 || true
+
+echo "🔹 ۷) هماهنگ‌سازی Endpointهای Edgeها از Core جدید..."
+WG_SYNC=0
+AWG_SYNC=0
+if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
+        "bash /root/update_all_edges_endpoint.sh '${TARGET_EDGE}' 51820 '${SELF_IP}'"; then
+    WG_SYNC=1
+    echo "⚠️ برخی Endpointهای WG نیازمند اصلاح هستند."
+fi
+if [ "$AWG_SOURCE_ACTIVE" = 1 ]; then
+    if ! ssh "${SSH_OPTS[@]}" "root@${TARGET_EDGE}" \
+            "bash /root/update_all_awg_edges_endpoint.sh '${SELF_IP}' '${TARGET_EDGE}' '${AWG_SOURCE_PORT}'"; then
+        AWG_SYNC=1
+        echo "⚠️ برخی Endpointهای AWG نیازمند اصلاح هستند."
+    fi
+fi
 echo "════════════════════════════════════════════════════════════"
-echo "✅ Promote موفق شد: ${TARGET_EDGE}:${CUSTOMER_SSH_PORT} Core جدید است."
-echo "   هنوز Demote Core قدیمی و هماهنگ‌سازی Endpointهای سایر Edgeها باقی است."
-echo "   DNS و host_pool جداگانه باید با وضعیت نهایی سرویس تطبیق داده شوند."
+echo "PROMOTE_POSTCHECK_OK: Core جدید فعال شد؛ Core قدیمی bot/WG/AWG متوقف است."
+echo "ENDPOINT_SYNC: wg_fail=${WG_SYNC} awg_fail=${AWG_SYNC}"
+echo "   Core قدیمی را پس از تست واقعی سرویس‌ها می‌توان خاموش کرد؛ Demote اجرا نشده است."
+if [ "$WG_SYNC" -ne 0 ] || [ "$AWG_SYNC" -ne 0 ]; then
+    echo "PARTIAL_MIGRATION: برخی Edgeها هنوز Endpoint قدیمی دارند؛ Core جدید فعال بماند."
+    exit 2
+fi
+echo "MIGRATION_COMPLETE: new Core active, WG/AWG endpoint sync complete"
 echo "════════════════════════════════════════════════════════════"

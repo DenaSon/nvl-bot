@@ -13,6 +13,7 @@ on:
       - demote_core_to_edge.sh
       - update_all_edges_endpoint.sh
       - update_edge_endpoint.sh
+      - update_all_awg_edges_endpoint.sh
       - tests/test_core_migration_flow.py
       - .github/workflows/core-migration-safety.yml
   workflow_dispatch:
@@ -26,7 +27,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Bash syntax
-        run: bash -n core_side_failover.sh promote_edge_to_core.sh demote_core_to_edge.sh update_all_edges_endpoint.sh update_edge_endpoint.sh
+        run: bash -n core_side_failover.sh promote_edge_to_core.sh demote_core_to_edge.sh update_all_edges_endpoint.sh update_edge_endpoint.sh update_all_awg_edges_endpoint.sh
       - name: Python bot syntax
         run: python -m py_compile bot_final_v49-2.py
       - name: Migration regression tests

@@ -32,7 +32,7 @@ class ReleaseNotesTests(unittest.TestCase):
 
     def test_multiple_merges_in_deployment_order(self):
         fetch = Mock(side_effect=[[pr(B)], [pr(C, 43)]])
-        with patch.object(notes.p, "git", return_value=(C + "\n" + B + "\n" + A).encode()):
+        with patch.object(notes.p, "git", side_effect=[b"Merge release\n", (C + "\n" + B + "\n" + A).encode()]):
             result = notes.collect(Path("/repo"), A, C, fetch)
         self.assertTrue(result["complete"])
         self.assertEqual([x["number"] for x in result["entries"]], [42, 43])
@@ -40,13 +40,13 @@ class ReleaseNotesTests(unittest.TestCase):
 
     def test_missing_baseline_and_api_failure_fallback(self):
         fetch = Mock(side_effect=OSError)
-        with patch.object(notes.p, "git", return_value=(C + "\n" + B).encode()):
+        with patch.object(notes.p, "git", side_effect=[b"Subject\nBody", (C + "\n" + B).encode()]):
             self.assertEqual(notes.collect(Path("/repo"), A, C, fetch),
-                             {"entries": [], "complete": False})
+                             {"entries": [], "complete": False, "commit_message": "Subject", "commit_changes": ["Body"]})
         fetch.assert_not_called()
-        with patch.object(notes.p, "git", return_value=(B + "\n" + A).encode()):
+        with patch.object(notes.p, "git", side_effect=[b"Subject\nBody", (B + "\n" + A).encode()]):
             self.assertEqual(notes.collect(Path("/repo"), A, B, fetch),
-                             {"entries": [], "complete": False})
+                             {"entries": [], "complete": False, "commit_message": "Subject", "commit_changes": ["Body"]})
 
     def test_sections_ignore_comments_code_and_technical_notes(self):
         body = "## Release Summary\n<!-- hidden -->\nسلام\u200cدنیا\n## Changes\n- first\n" \
@@ -63,11 +63,12 @@ class ReleaseNotesTests(unittest.TestCase):
     def test_success_notice_has_real_metrics_and_acceptance_not_passed(self):
         state = dict(phase="COMMITTED", candidate=B, deployed=B, previous_deployed=A,
                      restart_required=True, file_count=2, started_at=100, finished_at=119,
-                     release_notes={"complete": True, "entries": [notes.exact_pr([pr()], B)]})
+                     release_notes={"complete": True, "commit_message": "fix: reports", "entries": [notes.exact_pr([pr()], B)]})
         _, text = obs.event(state)
-        for item in ("19 ثانیه", "در انتظار انجام", "ورود به گزارش‌ها", "/pull/42", "/compare/"):
+        for item in ("19 ثانیه", "در انتظار انجام", "fix: reports", "گزارش جدید", "Changelog"):
             self.assertIn(item, text)
-        self.assertNotIn("internal", text)
+        for forbidden in ("internal", "ورود به گزارش‌ها", "github.com", "/pull/42", "/compare/", notes.p.REPO):
+            self.assertNotIn(forbidden, text)
         for phase in ("HOLD", "ROLLED_BACK"):
             _, text = obs.event(state | {"phase": phase})
             self.assertNotIn("ورود به گزارش‌ها", text)
@@ -78,8 +79,21 @@ class ReleaseNotesTests(unittest.TestCase):
                      restart_required=False)
         _, text = obs.event(state)
         self.assertIn("در دسترس نیست", text)
-        self.assertIn("/compare/", text)
+        self.assertNotIn("/compare/", text)
+        self.assertNotIn("GitHub", text)
         self.assertNotIn("بکاپ تأیید شد", text)
+
+    def test_commit_fallback_has_no_repository_links(self):
+        state = dict(phase="COMMITTED", candidate=B, deployed=B,
+                     release_notes={"complete": False, "entries": [],
+                                    "commit_message": "fix: " + notes.p.REPO,
+                                    "commit_changes": ["Improve notices", "git@github.com:" + notes.p.REPO,
+                                                       "github.com/" + notes.p.REPO]})
+        _, text = obs.event(state)
+        self.assertIn("fix:", text)
+        self.assertIn("Improve notices", text)
+        for forbidden in ("github.com", notes.p.REPO, "git@", "https://"):
+            self.assertNotIn(forbidden, text)
 
     def test_message_bounded_for_three_large_prs(self):
         item = {"number": 1, "title": "😀" * 100, "summary": ["😀" * 150],

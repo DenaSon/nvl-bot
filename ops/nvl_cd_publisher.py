@@ -66,6 +66,8 @@ def blob(raw):
 
 
 def atomic_bytes(path, raw, mode):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    p.trusted(path.parent, directory=True)
     fd, name = tempfile.mkstemp(dir=path.parent, prefix=".nvl-cd-")
     try:
         with os.fdopen(fd, "wb") as stream:
@@ -99,12 +101,19 @@ def report_failure(stage, exc):
     print(json.dumps(event, sort_keys=True), file=sys.stderr, flush=True)
 
 
-def runtime_write_preflight(runtime):
-    """Exercise the real atomic write path before an intentional shutdown."""
-    directories = [runtime]
-    cache = runtime / "__pycache__"
-    if os.path.lexists(cache):
-        directories.append(cache)
+def runtime_write_preflight(runtime, names=()):
+    """Exercise atomic writes in every runtime directory before shutdown."""
+    directories = {runtime}
+    for name in names:
+        parent = (runtime / name).parent
+        while parent != runtime and runtime in parent.parents:
+            directories.add(parent)
+            parent = parent.parent
+    for directory in list(directories):
+        cache = directory / "__pycache__"
+        if os.path.lexists(cache):
+            directories.add(cache)
+    directories = sorted(directories, key=lambda item: len(item.parts))
     try:
         for directory in directories:
             p.trusted(directory, directory=True)
@@ -298,6 +307,9 @@ def stage(host, repo, baseline, candidate, updates, old, new):
     for name in updates:
         prior = old.get(name)
         expected = prior[2] if prior else "ABSENT"
+        runtime_parent = (host.runtime / name).parent
+        runtime_parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+        p.trusted(runtime_parent, directory=True)
         if host.live(name) != expected:
             raise p.Hold("RUNTIME_DRIFT")
         raw = p.git(repo, "cat-file", "blob", new[name][2])
@@ -457,7 +469,7 @@ def restore(host, state, checkpoint):
                                 reason="PUBLISH_FAILED_BASELINE_RESUMED")
     # A rollback that requires writes must not stop a running service if
     # its sandbox cannot write. Recheck after the clean stop as usual.
-    runtime_write_preflight(host.runtime)
+    runtime_write_preflight(host.runtime, record["files"])
     was_active = host.active()
     uniform = (all_old
                or all(host.live(n) == i["new"] for n, i in record["files"].items()))
@@ -509,7 +521,7 @@ def publish(host, state, repo, baseline, candidate, updates, old, new, revalidat
     for name, item in record["files"].items():
         if host.live(name) != item["old"]:
             raise p.Hold("RUNTIME_DRIFT")
-    runtime_write_preflight(host.runtime)
+    runtime_write_preflight(host.runtime, updates)
     checkpoint = set_phase(state, checkpoint, "STOPPING")
     try:
         host.stop()

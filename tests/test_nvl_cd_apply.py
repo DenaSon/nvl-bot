@@ -1,5 +1,6 @@
 """Offline auto-apply tick tests. No real systemd, network or bot mutations."""
 import tempfile
+from contextlib import nullcontext
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -69,6 +70,15 @@ class ApplyTests(unittest.TestCase):
         with self.assertRaisesRegex(app.p.Hold, "ACCEPTANCE_CONFIG_CHANGED"):
             self.tick()
         self.release.assert_not_called()
+
+    def test_systemd_no_argument_invocation_runs_auto_tick(self):
+        with patch.object(app.sys, "argv", ["nvl_cd_apply.py"]), \
+                patch.object(app.os, "geteuid", return_value=0), \
+                patch.object(app.pub, "exclusive", return_value=nullcontext()), \
+                patch.object(app, "planner_disabled", return_value=True), \
+                patch.object(app, "tick", return_value={"phase": "COMMITTED"} ) as tick:
+            self.assertEqual(app.main(), 0)
+            tick.assert_called_once_with(self.state, self.config)
 
     def test_dry_run_timer_must_be_inactive_and_disabled(self):
         for active, unit, expected in (("active", "enabled", False),

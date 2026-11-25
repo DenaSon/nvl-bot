@@ -294,7 +294,7 @@ def default_state():
             "incident_open": False, "unknown_alerted": False,
             "incomplete_streak": 0,
             "latest_metrics": None, "last_closed": None,
-            "alerted_phases": []}
+            "alerted_phases": [], "recent_good": [], "latest_reason": None}
 
 
 def db_connect(folder):
@@ -383,10 +383,15 @@ def render_metric(field, metrics, base, *, compact_label=None):
             f" <i>{html.escape(pct(current, reference))}</i>")
 
 
-def render(phase, incident, stamp, metrics, baseline):
+ALERT_MENTIONS = "@raad_co @ja_va_dd"
+LIVE_MAX_GAP_SECONDS = 25
+
+
+def render(phase, incident, stamp, metrics, baseline, *, reason=None):
     """Only the Persian alert title is localized; body is concise English."""
     captions = {
-        "SUSPECTED": "🟠 <b>NVL | اختلال احتمالی ارتباط</b>",
+        "INFO": "🔵 <b>NVL | اختلال احتمالی ارتباط</b>",
+        "SUSPECTED": "🔴 <b>NVL | تأیید اختلال ارتباط</b>",
         "DEGRADED": "🔴 <b>NVL | تشدید اختلال ارتباط</b>",
         "RECOVERED": "🟢 <b>NVL | بازگشت شاخص‌های شبکه</b>",
         "UNKNOWN": "⚪ <b>NVL | وقفه در پایش شبکه</b>",
@@ -414,6 +419,15 @@ def render(phase, incident, stamp, metrics, baseline):
         lines.append("Telemetry resumed · Connectivity not independently verified.")
     elif phase == "TEST":
         lines.append("Delivery test OK · No incident reported.")
+    elif phase == "INFO":
+        if metrics is not None and baseline is not None:
+            lines.extend([
+                render_metric("close_wait", metrics, baseline,
+                              compact_label="CLOSE-WAIT"),
+                f"Baseline: {fmt_metric(baseline['values']['close_wait'], 'CLOSE-WAIT')}",
+            ])
+        lines.extend(["Signal: CLOSE-WAIT spike · Early detection.",
+                      "<i>Core telemetry only · ISP filtering not confirmed.</i>"])
     elif phase in ("SUSPECTED", "DEGRADED", "RECOVERED"):
         if metrics is not None and baseline is not None:
             lines.extend([
@@ -442,11 +456,16 @@ def render(phase, incident, stamp, metrics, baseline):
             "DEGRADED": "Signal: Connection surge + AWG TX / UDPGW decline.",
             "RECOVERED": "Core metrics stabilized · Client access not verified.",
         }
+        signal = summary[phase]
+        if reason and phase in ("SUSPECTED", "DEGRADED") and not reason.startswith("LEGACY_"):
+            signal = "Signal: " + html.escape(reason.replace("_", " ")) + "."
         lines.extend([
             "",
-            summary[phase],
+            signal,
             "<i>Core telemetry only · ISP filtering not confirmed.</i>",
         ])
+    if phase in ("INFO", "SUSPECTED"):
+        lines.extend(["", ALERT_MENTIONS])
     return "\n".join(lines)
 
 
@@ -455,30 +474,26 @@ def make_incident(stamp, state):
     return "NVL-" + instant(stamp).strftime("%Y%m%dT%H%M%SZ") + f"-{state['seq']:03d}"
 
 
-def transition(state, next_phase, stamp, metrics, base, db):
+def transition(state, next_phase, stamp, metrics, base, db, *, reason=None):
     prev = state["phase"]
     if prev == next_phase:
         return
     state["phase"] = next_phase
-    if next_phase in ("SUSPECTED", "DEGRADED"):
+    if next_phase in ("INFO", "SUSPECTED"):
         if not state["incident_open"]:
             state["incident"] = make_incident(stamp, state)
             state["incident_open"] = True
             state["alerted_phases"] = []
-        if next_phase not in state["alerted_phases"]:
-            # Suppress rapid fresh SUSPECTED alerts after a completed incident;
-            # DEGRADED always sends, as material escalation.
-            just_closed = (state["last_closed"] is not None
-                           and (instant(stamp) - instant(state["last_closed"])).total_seconds() < 1200)
-            if not (next_phase == "SUSPECTED" and just_closed):
-                key = f"{state['incident']}:{next_phase}"
-                queue(db, key, render(next_phase, state["incident"], stamp, metrics, base),
-                      instant(stamp).isoformat())
-                state["alerted_phases"].append(next_phase)
-    elif next_phase == "RECOVERING":
-        state["recovering_since"] = instant(stamp).isoformat()
+        announced = state["alerted_phases"]
+        # Legacy confirmed incidents already have SUSPECTED or DEGRADED keys.
+        confirmed = any(p in announced for p in ("SUSPECTED", "DEGRADED"))
+        if next_phase not in announced and not confirmed:
+            key = f"{state['incident']}:{next_phase}"
+            queue(db, key, render(next_phase, state["incident"], stamp, metrics,
+                                  base, reason=reason), instant(stamp).isoformat())
+            announced.append(next_phase)
     elif next_phase == "NORMAL" and state["incident_open"]:
-        if state["alerted_phases"]:
+        if any(p in state["alerted_phases"] for p in ("SUSPECTED", "DEGRADED")):
             key = f"{state['incident']}:RECOVERED"
             queue(db, key, render("RECOVERED", state["incident"], stamp, metrics, base),
                   instant(stamp).isoformat())
@@ -487,23 +502,160 @@ def transition(state, next_phase, stamp, metrics, base, db):
         state["incident"] = None
         state["alerted_phases"] = []
         state["recovering_since"] = None
-    # UNKNOWN doesn't close an existing incident. Missing data cannot recover it.
+        state["window"] = []
+        state["recovery"] = []
+        state["recovery_streak"] = 0
+    # UNKNOWN never closes an incident or counts as recovery.
 
 
-def process_sample(state, stamp, obs, base, db):
+# Adaptive Fast Alert V2: additive high-sensitivity paths, no baseline rewrite.
+ADAPTIVE_FIELDS = ("ssh", "udpgw", "close_wait", "awg_tx_mbps")
+
+
+def adaptive_reference(state, stamp):
+    """Medians of healthy 45m/last 5 minutes; frozen during an incident."""
+    history = state.get("recent_good", [])
+    if not isinstance(history, list):
+        return None
+    if not state.get("incident_open"):
+        cutoff = instant(stamp) - timedelta(minutes=45)
+        history = [h for h in history if instant(h["utc"]) >= cutoff]
+    if (len(history) < 12 or
+            (instant(history[-1]["utc"]) - instant(history[0]["utc"])).total_seconds() < 660):
+        return None
+    recent = history[-180:]
+    short_cutoff = instant(recent[-1]["utc"]) - timedelta(minutes=5)
+    short = [h for h in recent if instant(h["utc"]) > short_cutoff]
+    if any(not all(isinstance(h.get(f), (int, float))
+                   and not isinstance(h.get(f), bool) for f in ADAPTIVE_FIELDS)
+           for h in recent):
+        return None
+    return (
+        {f: statistics.median(h[f] for h in recent) for f in ADAPTIVE_FIELDS},
+        {f: statistics.median(h[f] for h in short) for f in ADAPTIVE_FIELDS},
+    )
+
+
+def high_sensitivity_candidate(metrics, baseline, state, stamp):
+    """Add multi-signal surge, sudden connection loss and traffic collapse."""
+    legacy = classify(metrics, baseline)
+    if legacy in ("UNKNOWN", "SUSPECTED", "DEGRADED"):
+        return legacy, "LEGACY_" + legacy
+    reference = adaptive_reference(state, stamp)
+    if reference is None:
+        # Safe warm-up: preserve legacy rules and flag only strong corroboration.
+        b = baseline["values"]
+        if (metrics["close_wait"] >= max(25, b["close_wait"] * 2,
+                                         b["close_wait"] + 15)
+                and metrics["awg_tx_mbps"] <= b["awg_tx_mbps"] * .60
+                and metrics["udpgw"] <= b["udpgw"] * .80):
+            return "SUSPECTED", "CW_SPIKE+TRAFFIC_DROP_WARMUP"
+        return legacy, "LEGACY_" + legacy
+
+    ref, short = reference
+    ssh, udp, cw, tx = (
+        metrics["ssh"], metrics["udpgw"], metrics["close_wait"],
+        metrics["awg_tx_mbps"]
+    )
+    cw_spike = cw >= max(15, ref["close_wait"] * 2,
+                        ref["close_wait"] + 15)
+    udp_drop = udp <= ref["udpgw"] * .85 and ref["udpgw"] - udp >= 10
+    ssh_drop = ssh <= ref["ssh"] * .85 and ref["ssh"] - ssh >= 10
+    tx_drop = (ref["awg_tx_mbps"] >= 8
+               and tx <= ref["awg_tx_mbps"] * .60
+               and ref["awg_tx_mbps"] - tx >= 8)
+    quick_connection_drop = (
+        ssh <= short["ssh"] * .85 or udp <= short["udpgw"] * .85)
+    connection_collapse = (
+        ssh <= ref["ssh"] * .75
+        and udp <= ref["udpgw"] * .75
+        and ref["ssh"] - ssh >= 12
+        and ref["udpgw"] - udp >= 10
+        and quick_connection_drop)
+    traffic_collapse = (
+        tx_drop and tx <= short["awg_tx_mbps"] * .70
+        and (ssh_drop or udp_drop or cw_spike))
+    abnormal_surge = (
+        cw_spike and ssh >= ref["ssh"] * 1.15
+        and ssh - ref["ssh"] >= 8)
+    degraded = (
+        (cw >= max(40, ref["close_wait"] + 35,
+                   ref["close_wait"] * 4)
+         and (tx <= ref["awg_tx_mbps"] * .55
+              or udp <= ref["udpgw"] * .75))
+        or (connection_collapse and tx_drop))
+
+    if cw_spike and (udp_drop or tx_drop or abnormal_surge):
+        reason = "CW_SPIKE+" + (
+            "AWG_TX_DROP" if tx_drop else
+            "UDPGW_DROP" if udp_drop else "SSH_SURGE")
+        return ("DEGRADED" if degraded else "SUSPECTED"), reason
+    if connection_collapse:
+        return ("DEGRADED" if degraded else "SUSPECTED"), "CONNECTION_COLLAPSE"
+    if traffic_collapse:
+        return "SUSPECTED", "TRAFFIC_COLLAPSE"
+
+    # An unresolved connection loss must not be labelled as recovery.
+    if (state.get("incident_open") and legacy == "RECOVERY_CANDIDATE"
+            and ssh <= ref["ssh"] * .80
+            and udp <= ref["udpgw"] * .80):
+        return "NEUTRAL", "ONGOING_CONNECTION_DROP"
+    return legacy, "LEGACY_" + legacy
+
+
+def record_healthy_reference(state, stamp, metrics):
+    if state.get("incident_open") or state["phase"] != "NORMAL":
+        return
+    if metrics.get("alert_candidate") != "RECOVERY_CANDIDATE":
+        return
+    history = state.get("recent_good", [])
+    cutoff = instant(stamp) - timedelta(minutes=45)
+    history = [h for h in history if instant(h["utc"]) >= cutoff]
+    history.append({"utc": instant(stamp).isoformat(),
+                    **{f: metrics[f] for f in ADAPTIVE_FIELDS}})
+    state["recent_good"] = history[-180:]
+
+
+def early_cw_reference(state, stamp, base):
+    reference = adaptive_reference(state, stamp)
+    return (reference[0]["close_wait"] if reference is not None
+            else base["values"]["close_wait"])
+
+
+def process_sample(state, stamp, obs, base, db, *,
+                   max_gap_seconds=LIVE_MAX_GAP_SECONDS):
     stamp_iso = instant(stamp).isoformat()
     previous = instant(state["last_sample"]) if state["last_sample"] else None
     if previous and instant(stamp) <= previous:
         return
-    if previous and (instant(stamp) - previous).total_seconds() > 150:
+    if previous and (instant(stamp) - previous).total_seconds() > max_gap_seconds:
         state["window"] = []
+        if not state["incident_open"]:
+            state["recent_good"] = []
         state["recovery"] = []
         state["recovery_streak"] = 0
         transition(state, "UNKNOWN", stamp_iso, obs, base, db)
     state["last_sample"] = stamp_iso
     state["latest_metrics"] = obs
+
+    # INFO depends only on valid CLOSE-WAIT evidence.
+    cw = obs.get("close_wait")
+    cw_ref = early_cw_reference(state, stamp_iso, base)
+    cw_spike = (isinstance(cw, (int, float)) and not isinstance(cw, bool)
+                and math.isfinite(cw) and cw >= max(cw_ref * 2, cw_ref + 10))
+    obs["early_cw_spike"] = cw_spike
+    obs["early_cw_reference"] = cw_ref
+    if cw_spike and not state["incident_open"]:
+        info_base = {**base, "values": {**base["values"], "close_wait": cw_ref}}
+        transition(state, "INFO", stamp_iso, obs, info_base, db,
+                   reason="CW_SPIKE")
+
     if not obs["valid"]:
         state["incomplete_streak"] = state.get("incomplete_streak", 0) + 1
+        if not state["incident_open"]:
+            state["recent_good"] = []
+        obs["alert_candidate"] = "UNKNOWN"
+        obs["decision_reason"] = "INCOMPLETE_TELEMETRY"
         state["window"] = []
         state["recovery"] = []
         state["recovery_streak"] = 0
@@ -515,46 +667,32 @@ def process_sample(state, stamp, obs, base, db):
             state["unknown_alerted"] = True
         return
     state["incomplete_streak"] = 0
-    kind = classify(obs, base)
-    state["window"] = (state["window"] + [kind])[-5:]
-    state["recovery"] = (state["recovery"] + [kind == "RECOVERY_CANDIDATE"])[-7:]
-    state["recovery_streak"] = (
-        state["recovery_streak"] + 1 if kind == "RECOVERY_CANDIDATE" else 0)
+    kind, reason = high_sensitivity_candidate(obs, base, state, stamp_iso)
+    obs["alert_candidate"] = kind
+    obs["decision_reason"] = reason
+    state["latest_reason"] = reason
+    state["window"] = (state["window"] + [kind])[-2:]
+    healthy = kind == "RECOVERY_CANDIDATE" and not cw_spike
+    state["recovery_streak"] = state["recovery_streak"] + 1 if healthy else 0
     win = state["window"]
-    phase = state["phase"]
-    nxt = None
-    if len(win) == 5 and sum(k == "DEGRADED" for k in win) >= 3:
-        nxt = "DEGRADED"
-    elif (
-        # Fast, conservative 2-sample gate: still requires the ORIGINAL
-        # two-signal SUSPECTED thresholds; no single-sample alarms.
-        # Gaps >150s or incomplete samples already clear state["window"].
-        (len(win) >= 2 and all(
-            k in ("SUSPECTED", "DEGRADED") for k in win[-2:]))
-        or (len(win) == 5 and sum(
-            k in ("SUSPECTED", "DEGRADED") for k in win) >= 3)
-    ):
-        if phase not in ("DEGRADED", "RECOVERING"):
-            nxt = "SUSPECTED"
-    elif (state["incident_open"]
-          and phase in ("SUSPECTED", "DEGRADED", "RECOVERING", "UNKNOWN")
-          and len(state["recovery"]) == 7
-          and sum(state["recovery"]) >= 5):
-        nxt = "RECOVERING"
-        since = state["recovering_since"]
-        if (phase == "RECOVERING" and since is not None
-                and state["recovery_streak"] >= 10
-                and (instant(stamp) - instant(since)).total_seconds() >= 600):
-            nxt = "NORMAL"
-    elif phase == "UNKNOWN" and not state["incident_open"] and len(win) == 5:
-        nxt = "NORMAL"
+    confirmed = len(win) == 2 and all(k in ("SUSPECTED", "DEGRADED") for k in win)
+    if confirmed:
+        transition(state, "SUSPECTED", stamp_iso, obs, base, db, reason=reason)
+    elif state["incident_open"]:
+        if state["recovery_streak"] >= 5:
+            transition(state, "NORMAL", stamp_iso, obs, base, db)
+        elif state["phase"] == "UNKNOWN":
+            phase = ("SUSPECTED" if any(p in state["alerted_phases"]
+                     for p in ("SUSPECTED", "DEGRADED")) else "INFO")
+            transition(state, phase, stamp_iso, obs, base, db)
+    elif state["phase"] == "UNKNOWN" and state["recovery_streak"] >= 5:
+        transition(state, "NORMAL", stamp_iso, obs, base, db)
 
-    if nxt is not None:
-        transition(state, nxt, stamp_iso, obs, base, db)
-    if state["phase"] not in ("UNKNOWN",) and state["unknown_alerted"]:
+    record_healthy_reference(state, stamp_iso, obs)
+    if state["phase"] != "UNKNOWN" and state["unknown_alerted"]:
         key = f"MONITOR:{instant(stamp).strftime('%Y%m%dT%H%M%SZ')}:RESUMED"
-        queue(db, key, render("RESUMED", state["incident"], stamp_iso,
-                              obs, base), stamp_iso)
+        queue(db, key, render("RESUMED", state["incident"], stamp_iso, obs, base),
+              stamp_iso)
         state["unknown_alerted"] = False
 
 
@@ -582,12 +720,14 @@ def telegram_send(config, message, timeout=8):
 
 
 def drain_outbox(db, config, now, send=telegram_send):
-    row = db.execute("""SELECT event_key, message, attempts FROM outbox
-        WHERE status='PENDING' AND next_attempt <= ?
-        ORDER BY created_at, event_key LIMIT 1""", (int(now.timestamp()),)).fetchone()
+    row = db.execute("""SELECT event_key, message, attempts, next_attempt FROM outbox
+        WHERE status='PENDING'
+        ORDER BY created_at, event_key LIMIT 1""").fetchone()
     if row is None:
         return "IDLE"
-    key, message, attempts = row
+    key, message, attempts, retry_at = row
+    if retry_at > int(now.timestamp()):
+        return "IDLE"
     try:
         msg_id = send(config, message)
     except Exception as exc:
@@ -622,7 +762,7 @@ def recent_samples(source: Path, start: datetime, end: datetime):
         if path.is_symlink() or not path.is_file():
             raise EvidenceError("Unsafe sampler input path")
         with path.open(encoding="utf-8", errors="replace") as f:
-            tail = deque(f, maxlen=90)
+            tail = deque(f, maxlen=360)
         for raw in tail:
             if not raw.strip():
                 continue
@@ -646,7 +786,8 @@ def recent_samples(source: Path, start: datetime, end: datetime):
     return list(unique.items()), malformed
 
 
-def tick(source, store, config_path, *, now=None, send=telegram_send):
+def tick(source, store, config_path, *, now=None, send=telegram_send,
+         max_gap_seconds=LIVE_MAX_GAP_SECONDS):
     now = now or datetime.now(timezone.utc)
     base = baseline_load(store)
     conf = config_load(config_path)
@@ -670,16 +811,20 @@ def tick(source, store, config_path, *, now=None, send=telegram_send):
         fresh.append((t, obs))
     with db_connect(store) as db:
         state = state_read(db)
+        # The old escalation event is retired; retain rows for audit.
+        db.execute("UPDATE outbox SET status='SUPPRESSED' "
+                   "WHERE status='PENDING' AND event_key LIKE '%:DEGRADED'")
         for stamp, obs in fresh:
             previous = state["last_sample"]
-            process_sample(state, stamp, obs, base, db)
+            process_sample(state, stamp, obs, base, db,
+                           max_gap_seconds=max_gap_seconds)
             if state["last_sample"] != previous:
                 db.execute("""INSERT OR IGNORE INTO decisions
                     (sample_utc, recorded_utc, candidate, phase,
                      metrics_json, baseline_start)
                     VALUES (?,?,?,?,?,?)""",
                     (instant(stamp).isoformat(), now.isoformat(),
-                     classify(obs, base), state["phase"],
+                     obs.get("alert_candidate") or classify(obs, base), state["phase"],
                      json.dumps(obs, ensure_ascii=False, allow_nan=False),
                      base["window_start"]))
         last = instant(state["last_sample"]) if state["last_sample"] else None

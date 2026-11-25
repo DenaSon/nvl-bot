@@ -1,4 +1,7 @@
+import ast
+import asyncio
 import pathlib
+from types import SimpleNamespace
 import unittest
 
 
@@ -36,10 +39,6 @@ class Phase57ModernV2RaySalesRegressionTests(unittest.TestCase):
         self.assertIn("👥 ۲ کاربر · ۶۰ روز", self.sales_entry_region)
         self.assertIn('callback_data="v2ray_buy_menu"', self.sales_entry_region)
 
-    def test_agent_and_admin_still_share_same_v2ray_sales_entry(self):
-        self.assertIn('InlineKeyboardButton("🚀 فروش V2Ray", callback_data="v2ray_buy_menu")', self.source)
-        self.assertIn("SSH و V2Ray هر دو از همین مسیر فروش و کیف پول نمایندگی استفاده می‌کنند.", self.source)
-
     def test_existing_agent_settlement_invariants_remain_present(self):
         self.assertIn("v2_bp = ainf[16]", self.source)
         self.assertIn("v2_vol_bp = ainf[17]", self.source)
@@ -72,6 +71,43 @@ class Phase57ModernV2RaySalesRegressionTests(unittest.TestCase):
         self.assertIn("if d.startswith('mza_') and role != 'admin':", self.source)
         self.assertIn("elif d == 'mza_create':", self.source)
         self.assertIn("ساخت مستقیم User در این بخش، فروش یا فاکتور ثبت نمی‌کند.", self.source)
+
+
+class SharedSalesNavigationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_roles_share_feature_gated_v2ray_sale_entry(self):
+        tree = ast.parse(BOT_PATH.read_text(encoding="utf-8"))
+        node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef)
+                    and n.name == "_show_buy_start")
+        settings = {"sell_ssh": "1", "sell_bulk": "1", "sell_v2ray_unlimit": "1",
+                    "sell_v2ray_vol": "1"}
+        views = []
+        layouts = []
+        async def reply(text, *, reply_markup, parse_mode):
+            self.assertIn("<b>فروش اشتراک</b>", text)
+            self.assertEqual(parse_mode, "HTML")
+            layouts.append(reply_markup)
+            views.append({cb for row in reply_markup for cb in row})
+        ns = {"asyncio": asyncio,
+              "_db_get_setting": lambda key, default: settings.get(key, default),
+              "_db_get_favs": lambda: [(1, 2)],
+              "InlineKeyboardButton": lambda label, callback_data: callback_data,
+              "InlineKeyboardMarkup": lambda rows: rows}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(BOT_PATH), "exec"), ns)
+        handler = ns["_show_buy_start"]
+        update = SimpleNamespace(message=SimpleNamespace(reply_text=reply))
+        for enabled in (True, False):
+            settings["sell_v2ray_unlimit"] = settings["sell_v2ray_vol"] = "1" if enabled else "0"
+            for role in ("admin", "agent"):
+                await handler(update, SimpleNamespace(user_data={"role": role}))
+                self.assertIn("buy_direct", views[-1])
+                self.assertEqual("v2ray_buy_menu" in views[-1], enabled)
+                self.assertIn("nav:sale_favorites", views[-1])
+            self.assertEqual(views[-2], views[-1])
+            for rows in layouts[-2:]:
+                self.assertEqual(rows[-1], ["uact_back_to_menu"])
+                self.assertEqual(rows[0], ["buy_direct", "v2ray_buy_menu"] if enabled else ["buy_direct"])
+                self.assertEqual(rows[1], ["nav:sale_favorites", "buy_bulk_start"])
+                self.assertTrue(all(1 <= len(row) <= 2 for row in rows))
 
 
 if __name__ == "__main__":

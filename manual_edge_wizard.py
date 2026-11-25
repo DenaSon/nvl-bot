@@ -22,6 +22,11 @@ from urllib.parse import urlsplit
 from manual_edge_secure_form import IntakeHold, ManualFormStore
 from manual_edge_journal import ManualEdgeHold, ManualEdgeJournal
 from nvl_awg_install_diagnostics import receipt as awg_receipt, describe as awg_describe, validated as awg_validated, classify as awg_classify
+from nvl_awg_limiter_recovery import (
+    limiter_status as awg_limiter_status, repair_stale_limiter,
+    LimiterRecoveryHold, TEXT as AWG_LIMITER_TEXT,
+    RESTARTABLE as AWG_LIMITER_RESTARTABLE,
+)
 from manual_edge_identity import assert_ref as assert_edge_ref
 from cloudzy_cz04b import _digest
 
@@ -139,6 +144,12 @@ FA = {
     "CLOUDFLARE_CONFIG_MISSING":"اتصال Cloudflare تنظیم نشده است؛ سرور در Standby می‌ماند.",
     "DNS_CHANGED_CONCURRENTLY":"DNS در زمان بررسی تغییر کرد؛ انتقال متوقف شد.",
     "DNS_OR_DEFAULT_UNCERTAIN_LOCK_HELD":"نتیجه تغییر DNS مشخص نیست؛ مسیر باید بررسی شود.",
+    "LIMITER_RECOVERY_NOT_ALLOWED":"فقط مدیر کل در پرونده معتبر STANDBY می‌تواند بازیابی Limiter انجام دهد.",
+    "LIMITER_RECOVERY_EXPIRED":"تأیید بازیابی منقضی شده یا قبلاً مصرف شده است؛ دوباره عیب‌یابی را باز کنید.",
+    "RECOVERY_ROOT_REQUIRED":"این عملیات نیازمند اجرای امن با دسترسی Root است.",
+    "RECOVERY_STATE_CHANGED":"وضعیت Limiter تغییر کرده است؛ عیب‌یابی را دوباره انجام دهید.",
+    "LIMITER_RESTART_FAILED":"راه‌اندازی مجدد Limiter موفق نبود؛ وضعیت سرویس را در Core بررسی کنید.",
+    "LIMITER_RESTART_NOT_VERIFIED":"سرویس راه‌اندازی شد، اما هویت پردازش آن تأیید نشد؛ بررسی دستی لازم است.",
 }
 
 
@@ -308,7 +319,8 @@ class ManualEdgeWizard:
                     "🖥 <b>مدیریت Edge</b>\n\n"
                     "برای راه‌اندازی یک سرور جدید، گزینه افزودن Edge را انتخاب کنید.",
                     self._new_edge_buttons()+
-                    [[("↩️ مدیریت سرورها","apps_cz_home")]])
+                    [[("🧰 وضعیت قفل‌های انتقال و بازیابی","apps_cz7_status")],
+                     [("↩️ مدیریت سرورها","apps_cz_home")]])
         listing=(self.journal.list_shared if shared else self.journal.list_by_owner)
         items=await asyncio.to_thread(
             listing,actor,chat,limit=8,offset=page*7,backend=backend_filter)
@@ -339,6 +351,7 @@ class ManualEdgeWizard:
             rows.append(pager)
         rows.extend([
             [("🔄 تازه‌سازی","apps_edge_manual_list_"+str(page))],
+            [("🧰 وضعیت قفل‌های انتقال و بازیابی","apps_cz7_status")],
             [("↩️ مدیریت سرورها","apps_cz_home")],
         ])
         return await self._view(query,
@@ -389,10 +402,15 @@ class ManualEdgeWizard:
                 if os.environ.get("NVL_AWG_CUTOVER_ENABLED")!="1":
                     standby_notice="\n\n⚠️ انتقال AWG در تنظیمات غیرفعال است."
                 else:
+                    diagnosis=await asyncio.to_thread(awg_limiter_status,op["ip"])
                     standby_notice=(
-                        "\n\n⏳ تأیید Limiter این Edge آماده نیست. "
-                        "بررسی مستقل Core خودکار انجام می‌شود؛ "
-                        "در صورت تداوم، لاگ nvl-awg-witness-refresh را بررسی کنید.")
+                        "\n\n⏳ <b>انتقال فعلاً مجاز نیست.</b>\n"
+                        +escape(AWG_LIMITER_TEXT.get(diagnosis,
+                                                     AWG_LIMITER_TEXT["RECOVERY_CHECK_FAILED"]))
+                        +"\nکد: <code>"+escape(diagnosis)+"</code>")
+                    rows.append([("🧰 عیب‌یابی و بازیابی Limiter",
+                                 "apps_edge_manual_limiter_"+opid)])
+                    rows.append([("📋 وضعیت انتقال و بازیابی", "apps_edge_quick_status")])
                 rows.append([("🔄 تازه‌سازی تأییدیه انتقال",
                              "apps_edge_manual_detail_"+opid)])
         if (stage=="ACTIVE" and role=="FORMER" and
@@ -414,6 +432,7 @@ class ManualEdgeWizard:
             rows.append([("🗂 حذف از فهرست (بایگانی)",
                          "apps_edge_manual_archive_"+opid)])
         rows.extend(self._new_edge_buttons() + [
+            [("📋 وضعیت انتقال و بازیابی","apps_cz7_status")],
             [("↩️ همه سرورها","apps_edge_manual_home")],
             [("↩️ مدیریت سرورها","apps_cz_home")],
         ])
@@ -569,6 +588,66 @@ class ManualEdgeWizard:
                 if not raw.isascii() or not raw.isdigit() or len(raw)>5:
                     raise ManualWizardHold("INVALID_PAGE")
                 return await self._show(query,actor,chat,int(raw))
+            if data.startswith("apps_edge_manual_limiter_yes_"):
+                nonce=data[len("apps_edge_manual_limiter_yes_"):]
+                pending=context.user_data.pop("manual_edge_limiter_recovery",None)
+                if (not isinstance(pending,dict)
+                        or pending.get("nonce")!=nonce
+                        or (pending.get("actor"),pending.get("chat"))!=(actor,chat)
+                        or self.now()>=pending.get("expires",0)):
+                    raise ManualWizardHold("LIMITER_RECOVERY_EXPIRED")
+                opid=pending["op"]
+                op=await asyncio.to_thread(self.journal.get,opid)
+                if (not op or (op["actor"],op["chat"])!=(actor,chat)
+                        or op["status"]!="STANDBY"
+                        or op.get("archived_at") is not None
+                        or op.get("tunnel_backend")!="amneziawg"
+                        or not self._shared_viewer(actor,chat)):
+                    raise ManualWizardHold("LIMITER_RECOVERY_NOT_ALLOWED")
+                # Recheck trusted source + process drift just before the
+                # only permitted change: a controlled ssh-limiter restart.
+                # Independent witness attestation remains outside the bot.
+                outcome=await asyncio.to_thread(repair_stale_limiter,op["ip"])
+                log.warning("AWG Limiter operator recovery actor=%s op=%s "
+                            "result=%s",actor,opid,outcome)
+                return await self._view(query,
+                    "✅ <b>بازیابی کنترل‌شده Limiter انجام شد.</b>\n"
+                    "فقط سرویس ssh-limiter راه‌اندازی مجدد شد؛ "
+                    "هیچ انتقال، تغییر DNS یا بازنویسی Marker انجام نشد.\n"
+                    "اکنون تأیید مستقل Witness را دوباره بررسی کنید.",
+                    [[("🔄 بررسی تأییدیه Edge",
+                       "apps_edge_manual_detail_"+opid)],
+                     [("📋 وضعیت انتقال و بازیابی","apps_edge_quick_status")]])
+            if data.startswith("apps_edge_manual_limiter_"):
+                opid=data[len("apps_edge_manual_limiter_"):]
+                op=await asyncio.to_thread(self.journal.get,opid)
+                if (not op or (op["actor"],op["chat"])!=(actor,chat)
+                        or op["status"]!="STANDBY"
+                        or op.get("archived_at") is not None
+                        or op.get("tunnel_backend")!="amneziawg"):
+                    raise ManualWizardHold("LIMITER_RECOVERY_NOT_ALLOWED")
+                diagnosis=await asyncio.to_thread(awg_limiter_status,op["ip"])
+                rows=[[("🔄 بررسی مجدد","apps_edge_manual_limiter_"+opid)],
+                      [("↩️ بازگشت به Edge","apps_edge_manual_detail_"+opid)]]
+                notice=AWG_LIMITER_TEXT.get(
+                    diagnosis,AWG_LIMITER_TEXT["RECOVERY_CHECK_FAILED"])
+                if (diagnosis==AWG_LIMITER_RESTARTABLE and
+                        self._shared_viewer(actor,chat)):
+                    nonce=secrets.token_hex(8)
+                    context.user_data["manual_edge_limiter_recovery"]={
+                        "nonce":nonce,"op":opid,"actor":actor,"chat":chat,
+                        "expires":self.now()+120,
+                    }
+                    rows.insert(0,[("⚠️ تأیید Restart فقط ssh-limiter",
+                                   "apps_edge_manual_limiter_yes_"+nonce)])
+                    notice+=("\n\nاین اقدام سرویس Limiter را کوتاه‌مدت "
+                             "Restart می‌کند و ممکن است بر نشست‌های فعال "
+                             "اثر بگذارد؛ بات، SSHD، تونل و DNS تغییر نمی‌کنند.")
+                return await self._view(query,
+                    "🧰 <b>عیب‌یابی قفل Limiter</b>\n"
+                    "Edge: <code>"+escape(op["ip"])+"</code>\n"
+                    "کد: <code>"+escape(diagnosis)+"</code>\n\n"
+                    +escape(notice),rows)
             if data.startswith("apps_edge_manual_detail_"):
                 opid=data[len("apps_edge_manual_detail_"):]
                 return await self._detail(query,actor,chat,opid)
@@ -1027,10 +1106,10 @@ class ManualEdgeWizard:
                                         [[("↩️ همه سرورها","apps_edge_manual_home")]])
             return await self._show(query,actor,chat)
         except Exception as exc:
-            code=(str(exc) if isinstance(exc,(ManualWizardHold,ManualEdgeHold,IntakeHold))
+            code=(str(exc) if isinstance(exc,(ManualWizardHold,ManualEdgeHold,IntakeHold,LimiterRecoveryHold))
                   or (type(exc) is RuntimeError and str(exc) in FA)
                   else type(exc).__name__)
-            if isinstance(exc,(ManualWizardHold,ManualEdgeHold,IntakeHold)):
+            if isinstance(exc,(ManualWizardHold,ManualEdgeHold,IntakeHold,LimiterRecoveryHold)):
                 log.warning("Manual Edge callback rejected action=%s actor=%s "
                             "code=%s trace=%s",data,actor,code,
                             _safe_trace_location(exc))

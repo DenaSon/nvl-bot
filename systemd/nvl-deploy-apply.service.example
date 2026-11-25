@@ -1,0 +1,19 @@
+[Unit]
+Description=NVL CD accepted Core-only automatic release
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/nvl-deploy/operator-accepted
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 -B /opt/nvl-deploy/nvl_cd_apply.py
+# Stage/backup, fresh CI, stop/start, readiness and recovery all need time.
+TimeoutStartSec=1200
+NoNewPrivileges=true
+ProtectSystem=strict
+# Runtime is /root; ProtectHome=read-only defeats its write exception.
+ProtectHome=false
+ReadWritePaths=/root /var/lib/nvl-deploy /var/backups/nvl
+PrivateTmp=true

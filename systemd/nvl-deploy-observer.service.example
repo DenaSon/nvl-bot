@@ -1,0 +1,16 @@
+[Unit]
+Description=NVL CD history and existing Telegram group notifications
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 -B /opt/nvl-deploy/nvl_cd_observer.py
+TimeoutStartSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/nvl-deploy
+PrivateTmp=true

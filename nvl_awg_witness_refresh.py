@@ -16,7 +16,7 @@ import sqlite3
 import stat
 import sys
 
-from nvl_awg_limiter_witness import attest
+from nvl_awg_limiter_witness import LimiterWitnessHold, attest
 
 DB = Path("/root/master_bot.db")
 MARKER_DIR = Path("/run/nvl-awg-limiter-ready.d")
@@ -113,11 +113,24 @@ def refresh(*, db_path=DB, marker_dir=MARKER_DIR,
             if observed != tunnel:
                 raise WitnessRefreshHold("WITNESS_TARGET_MISMATCH")
             success += 1
-        except Exception:
+        except Exception as exc:
             # Revoke stale approval for a failed candidate. The future
             # runtime cutover gate also enforces a 120-second TTL.
             marker.unlink(missing_ok=True)
             failure += 1
+            # Journal a safe, per-Edge reason. Never print arbitrary exception
+            # text because transport libraries may include sensitive details.
+            reason = (str(exc) if isinstance(
+                exc, (LimiterWitnessHold, WitnessRefreshHold)
+            ) else type(exc).__name__)
+            if (not reason or len(reason) > 96
+                    or not all(ch.isupper() or ch.isdigit() or ch == "_"
+                               for ch in reason)):
+                reason = type(exc).__name__
+            print(
+                f"AWG_WITNESS_EDGE=HOLD host={host} tunnel={tunnel} reason={reason}",
+                file=sys.stderr, flush=True,
+            )
     return success, failure
 
 

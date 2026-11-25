@@ -103,7 +103,11 @@ class Phase3PresentationTests(unittest.TestCase):
         source=BOT.read_text()
         hub=source[source.index('def _build_admin_programs_kb'):source.index('_MIGRATION_INPUT_STATES')]
         # Phase 3 retires the Cloudzy shortcut without removing K2 maintenance.
-        self.assertIn('callback_data="apps_edge_quick_home"', hub)
+        infrastructure=source[source.index('def _build_server_settings_kb'):source.index('def _normalize_ssh_port')]
+        self.assertIn('callback_data="apps_edge_quick_home"', infrastructure)
+        self.assertNotIn('callback_data="apps_edge_quick_home"', hub)
+        self.assertNotIn('callback_data="apps_cz_home"', infrastructure)
+        self.assertNotIn('callback_data="hpeg_status"', infrastructure)
         self.assertNotIn('callback_data="apps_cz_home"', hub)
         self.assertNotIn('callback_data="hpeg_status"', hub)
         self.assertIn('elif d == "hpeg_status"', source)

@@ -73,11 +73,12 @@ class ResellerMenuTests(unittest.IsolatedAsyncioTestCase):
             "logged_in": True, "role": "agent", "agent_id": 8,
         })
 
-    async def test_agent_hub_has_three_buttons_on_one_row(self):
+    async def test_agent_hub_exposes_service_selection_and_search(self):
         target = Target()
         await self.handlers["_show_users_hub"](target, self.agent)
         self.assertEqual(callbacks(target)[0],
-                         ["umanage_ssh", "ag_v2ray_types", "ag_users_search"])
+                         ["umanage_ssh", "ag_v2ray_types"])
+        self.assertIn(["ag_users_search"], callbacks(target))
         self.assertNotIn("umanage_v2ray", callbacks(target)[0])
         self.assertNotIn("umanage_v2ray_vol", callbacks(target)[0])
 
@@ -99,9 +100,8 @@ class ResellerMenuTests(unittest.IsolatedAsyncioTestCase):
         self.agent.user_data["role"] = "admin"
         target = Target()
         await self.handlers["_show_users_hub"](target, self.agent)
-        self.assertEqual(callbacks(target)[0], ["umanage_ssh"])
-        self.assertEqual(callbacks(target)[1], ["umanage_v2ray"])
-        self.assertEqual(callbacks(target)[2], ["umanage_v2ray_vol"])
+        self.assertEqual(callbacks(target)[0], ["umanage_ssh", "umanage_v2ray"])
+        self.assertEqual(callbacks(target)[1], ["umanage_v2ray_vol", "info_online"])
 
     async def test_v2ray_list_returns_to_v2ray_submenu(self):
         target = Target()

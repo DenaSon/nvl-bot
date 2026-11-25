@@ -263,6 +263,7 @@ def _bilingual_label(en: str, fa: str) -> str:
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputMediaPhoto
 from telegram.error import BadRequest
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, TypeHandler, ApplicationHandlerStop, filters, ContextTypes, PicklePersistence, PersistenceInput
+from nvl_cd_bot_lifecycle import PollingHealthRequest, drain_detached, mark_clean_shutdown
 
 from edge_observability import (
     DIAG_CORE_LOCAL,
@@ -2004,26 +2005,25 @@ def _db_update_setting(k, v):
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, v))
 
 
-def _build_server_settings_kb():
-    """
-    🛡️ نکتهٔ ساختاری برای جلوگیری از تکرار باگ امروز: قبلاً این منو در دو جای مختلف کد
-    (مسیر ورود از کیبورد و مسیر بازگشتِ inline) به‌صورت دستی و جداگانه کپی شده بود، و یک‌بار
-    یکی از این دو نسخه از دیگری عقب افتاد (یک دکمه فقط در یکی از آن‌ها بود). با متمرکز کردن
-    ساخت این کیبورد در همین یک تابع، و صدا زدنش از هر دو مسیر، این دسته از باگ‌ها دیگر از نظر
-    ساختاری امکان‌پذیر نیست — هر تغییری این‌جا، خودکار در هر دو مسیر ورودی اعمال می‌شود.
-    """
-    return [[InlineKeyboardButton("🖥 وضعیت و نقش سرورها (Core/Edge)", callback_data="srv_status")],
-            [InlineKeyboardButton("✏️ تغییر نام برند", callback_data="srv_brand")],
-            [InlineKeyboardButton("🎯 تنظیمات مستقیم", callback_data="srv_direct_menu"), InlineKeyboardButton("🔐 تنظیمات TLS", callback_data="srv_tls")],
-            [InlineKeyboardButton("🔌 تنظیمات UDPGW", callback_data="srv_udpgw")],
-            [InlineKeyboardButton("🩺 سلامت سرور", callback_data="srv_health")],
-            [InlineKeyboardButton("🩺 عیب‌یابی خام اتصالات SSH", callback_data="srv_ssh_debug")],
-            [InlineKeyboardButton("🩹 خودتشخیصی و رفع خودکار اتصال SSH", callback_data="srv_ssh_diag")],
-            [InlineKeyboardButton("🧹 کاربران یتیم (بدون رکورد در ربات)", callback_data="orphan_menu")],
-            [InlineKeyboardButton("🌐 سرویس IP / خرید سرور جدید(دستی)", callback_data="ipsvc_menu")],
-            [InlineKeyboardButton("🌍 مدیریت دامنه‌ها", callback_data="dom_menu")],
-            [InlineKeyboardButton("🔴🔵 RED & BLUE", callback_data="srv_rb")],
-            [InlineKeyboardButton("🔙 بازگشت", callback_data="uact_back_to_menu")]]
+def _build_server_settings_kb(*, edge_allowed=False, new_edge_rows=()):
+    """Canonical infrastructure hub; Edge actions require a live private admin."""
+    rows = [
+        [InlineKeyboardButton("🖥 سرورها (Core / Edge)", callback_data="srv_status")],
+        [InlineKeyboardButton("🧩 Marzban و ابزارهای شبکه", callback_data="apps_home")],
+        [InlineKeyboardButton("🛡 پایش فیلترینگ", callback_data="hp_filtering"),
+         InlineKeyboardButton("🩺 سلامت سرور", callback_data="srv_health")],
+        [InlineKeyboardButton("🌍 دامنه‌ها", callback_data="dom_menu"),
+         InlineKeyboardButton("🌐 سرویس‌های IP", callback_data="ipsvc_menu")],
+        [InlineKeyboardButton("🔌 تنظیمات UDPGW", callback_data="srv_udpgw")],
+        [InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")],
+    ]
+    if edge_allowed:
+        rows[0:0] = [[InlineKeyboardButton("🌐 مدیریت Edge", callback_data="apps_edge_quick_home")]]
+        rows[1:1] = [
+            [InlineKeyboardButton(label, callback_data=callback) for label, callback in row]
+            for row in new_edge_rows
+        ]
+    return rows
 
 # 🆕 توابع دیتابیس مربوط به استخر IP و پایش سلامت خودکار (تشخیص فیلترشدن/از کار افتادن)
 def _normalize_ssh_port(value, fallback=22):
@@ -7920,21 +7920,10 @@ def _build_admin_programs_kb(*, actor=None, chat=None, active_admin_ids=()):
             InlineKeyboardButton("🚚 انتقال Marzban", callback_data="apps_marzban_transfer"),
             InlineKeyboardButton("🛰 مانیتورینگ", callback_data="apps_marzban_monitor"),
         ],
-        [InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")],
     ]
-    # Only current private-chat admins see the active Edge entry.
-    # Historical provider cards remain callable from old messages, but are
-    # not advertised in the Programs navigation.
-    if (type(actor) is int and type(chat) is int
-            and actor > 0 and actor == chat and actor in active_admin_ids):
-        rows.insert(0,[InlineKeyboardButton(
-            "🌐 مدیریت Edge", callback_data="apps_edge_quick_home")])
-        # Retain the existing DPT/1 historical quality reports.
-        rows.insert(1,[InlineKeyboardButton(
-            "📊 گزارش DenaProbe", callback_data="apps_dpt_24")])
-        if globals().get("_DP3_ENABLED", False):
-            rows.insert(1,[InlineKeyboardButton(
-                "📡 پایش DenaProbe", callback_data=_DP3_ENTRY)])
+    # Edge now lives in Infrastructure; legacy DenaProbe callbacks and
+    # background monitoring remain intact but are not advertised here.
     return rows
 
 
@@ -7954,17 +7943,7 @@ async def _show_admin_programs_hub(target, context):
     if actor and chat:
         k2_ui_views.navigate(actor,chat)
         k2_m43_approvals.discard(actor,chat)
-    text = (
-        "🧩 <b>برنامه‌ها</b>\n"
-        "━━━━━━━━━━━━━━\n"
-        "یک ابزار را انتخاب کنید.\n\n"
-        "🌐 <b>مدیریت Edge</b> — افزودن سرور دستی و تغییر سریع IP کاربران\n"
-        "🖥 <b>نودها</b> — وضعیت، تنظیمات، راه‌اندازی و اتصال Node\n"
-        "🌐 <b>هاست‌ها</b> — Inboundها و Public Hostها\n"
-        "🚚 <b>انتقال</b> — مهاجرت کنترل‌شده سرور اصلی Marzban\n"
-        "🛰 <b>مانیتورینگ</b> — سلامت و وضعیت دارایی‌های Marzban\n"
-        "📡 <b>DenaProbe</b> — وضعیت اتصال و گزارش"
-    )
+    text = "🧩 <b>برنامه‌ها</b>\nزیرساخت › Marzban و ابزارهای شبکه"
     active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
     markup = InlineKeyboardMarkup(_build_admin_programs_kb(
         actor=actor, chat=chat, active_admin_ids=active_admin_ids))
@@ -8525,63 +8504,335 @@ async def _nvl_revoked_admin_guard(update: Update, context: ContextTypes.DEFAULT
         raise ApplicationHandlerStop
 
 
+def _nav_home_rows(role, *, brand_ready=True):
+    if role == 'admin':
+        return [
+            ['➕ فروش اشتراک', '👥 کاربران'],
+            ['🤝 نمایندگان', '💰 مالی'],
+            ['🌐 زیرساخت', '⚙️ تنظیمات'],
+        ]
+    if role == 'accountant':
+        return [['📊 خروجی مالی امروز (اکسل)', '📅 خروجی مالی این هفته (اکسل)'],
+                ['👑 آمار فروش ادمین']]
+    if role == 'agent':
+        if not brand_ready:
+            return [['✏️ نام برند'], ['❌ خروج']]
+        return [
+            ['➕ فروش اشتراک', '👥 کاربران'],
+            ['💰 کیف پول', '💳 شارژ حساب'],
+            ['📊 گزارش‌ها', '⚙️ تنظیمات'],
+        ]
+    return [['/start']]
+
+
+def _nav_button(label, callback):
+    # Native Telegram styles only for explicitly classified actions.
+    # Default (client theme) for navigation and unclassified operations.
+    styles = {
+        "nav:logout": "danger",
+        "buy_yes": "success",
+        "rnyes": "success",
+        "confirm_logout_yes": "danger",
+        "agm_add": "primary",
+        "bcast_menu": "primary",
+        "agself_card_set": "primary",
+        "agself_card_clear": "danger",
+        "nav:agent_brand": "primary",
+    }
+    style = styles.get(callback)
+    if style:
+        return InlineKeyboardButton(label, callback_data=callback, style=style)
+    return InlineKeyboardButton(label, callback_data=callback)
+
+
+def _nav_markup(rows):
+    return InlineKeyboardMarkup([
+        [_nav_button(label, callback) for label, callback in row]
+        for row in rows
+    ])
+
+
+async def _nav_render(target, title, rows):
+    markup = _nav_markup(rows)
+    if hasattr(target, 'edit_message_text'):
+        await _safe_edit_or_send(target, title, reply_markup=markup, parse_mode="HTML")
+    else:
+        await target.reply_text(title, reply_markup=markup, parse_mode="HTML")
+
+
+def _nav_settings_rows(role, *, superadmin=False, card_allowed=False):
+    if role == 'admin':
+        rows = [
+            [("✏️ نام برند", "srv_brand"), ("📦 پشتیبان‌گیری", "nav:backup")],
+        ]
+        if superadmin:
+            rows.extend([
+                [("⚙️ مدیریت فروش", "super_admin_sales_manage")],
+                [("👥 مدیران و دسترسی‌ها", "super_admin_users_menu")],
+            ])
+    elif role == 'agent':
+        rows = [[("✏️ نام برند", "nav:agent_brand")]]
+        if card_allowed:
+            rows[0].append(("💳 کارت اختصاصی", "nav:agent_card"))
+    else:
+        return []
+    return rows + [[("❌ خروج", "nav:logout")],
+                   [("🏠 منوی اصلی", "uact_back_to_menu")]]
+
+
+def _nav_finance_rows(role, *, superadmin=False, accounting_enabled=False, chart_enabled=False):
+    if role == 'admin':
+        reports = [("📊 گزارش فروش", "info_general")]
+        if chart_enabled:
+            reports.append(("📈 نمودار فروش", "info_chart"))
+        rows = [reports, [("💳 مدیریت کارت‌ها", "fin_menu")]]
+        if superadmin:
+            rows.extend([
+                [("💼 سوابق مالی نمایندگان", "super_agent_list")],
+                [("📊 فعالیت‌های مدیران", "super_admin_stats")],
+            ])
+            if accounting_enabled:
+                rows.append([("💰 گزارش حسابداری", "nvl_fin:menu")])
+    elif role == 'agent':
+        rows = [[("💰 اطلاعات حساب", "info_general")]]
+    else:
+        return []
+    return rows + [[("🏠 منوی اصلی", "uact_back_to_menu")]]
+
+
+async def _show_nav_settings(target, update, context):
+    role = context.user_data.get('role')
+    if role not in ('admin', 'agent'):
+        return
+    card_allowed = False
+    if role == 'agent':
+        aid = context.user_data.get('agent_id', 0)
+        card_allowed = bool(aid and await asyncio.to_thread(_db_get_agent_card_permission, aid))
+    rows = _nav_settings_rows(role, superadmin=role == 'admin' and _is_superadmin_update(update, context),
+                              card_allowed=card_allowed)
+    await _nav_render(target, "⚙️ <b>تنظیمات</b>", rows)
+
+
+async def _show_nav_agent_wallet(target, context):
+    """Read-only wallet view; all existing financial actions retain their handlers."""
+    ag_id = context.user_data.get('agent_id', 0)
+    if not is_auth(context) or context.user_data.get('role') != 'agent' or not ag_id:
+        return
+    info = await asyncio.to_thread(_db_get_agent_info, ag_id)
+    if not info:
+        await _nav_render(target, "❌ حساب نمایندگی یافت نشد.", [[("🏠 منوی اصلی", "uact_back_to_menu")]])
+        return
+    _today, _week, _month, act, _total = await asyncio.to_thread(_db_get_sales_stats, ag_id)
+    
+    referral_income = info[9] if len(info) > 9 and info[9] is not None else 0
+    my_prefix = info[10] if len(info) > 10 and info[10] else None
+    withdrawable = info[14] if len(info) > 14 and info[14] is not None else 0.0
+    cashback_income = info[15] if len(info) > 15 and info[15] is not None else 0.0
+    
+    v2_base_price = info[16] if len(info) > 16 and info[16] else '160000'
+    try: ssh_bp_fmt = f"{int(str(info[4]).replace(',', '')):,}"
+    except: ssh_bp_fmt = esc(str(info[4]))
+    try: v2_bp_fmt = f"{int(str(v2_base_price).replace(',', '')):,}"
+    except: v2_bp_fmt = esc(str(v2_base_price))
+    v2_vol_bp = info[17] if len(info) > 17 and info[17] else '4000'
+    try: v2_vol_bp_fmt = f"{int(str(v2_vol_bp).replace(',', '')):,}"
+    except: v2_vol_bp_fmt = esc(str(v2_vol_bp))
+    
+    prefix_line = f"<code>{esc(my_prefix)}</code>" if my_prefix else "پیش‌فرض سیستم (تنظیم‌نشده)"
+    cashback_note = ""
+    if act >= AGENT_CASHBACK_MIN_ACTIVE_ACCOUNTS:
+        cashback_note = f"🎁 شما به‌خاطر {act} اکانت فعال، از این پس {int(AGENT_CASHBACK_PCT)}٪ کش‌بک هر خرید را دریافت می‌کنید!\n"
+    else:
+        remain_for_cashback = AGENT_CASHBACK_MIN_ACTIVE_ACCOUNTS - act
+        cashback_note = f"🎁 با {remain_for_cashback} اکانت فعال دیگر (مجموع {AGENT_CASHBACK_MIN_ACTIVE_ACCOUNTS}+)، {int(AGENT_CASHBACK_PCT)}٪ کش‌بک هر خرید را دریافت می‌کنید.\n"
+    
+    txt = (f"💰 <b>کیف پول و حساب</b>\n\n"
+           f"💰 موجودی: <b>{int(info[2]):,} تومان</b>\n"
+           f"🔑 کد رفرال: <code>{esc(info[1])}</code>\n"
+           f"💵 نرخ پایه SSH (هر کاربر/ماه): {ssh_bp_fmt} تومان\n"
+           f"🚀 نرخ پایه V2Ray (هر کاربر/ماه): {v2_bp_fmt} تومان\n"
+           f"🪐 نرخ پایه V2Ray حجمی (هر گیگ): {v2_vol_bp_fmt} تومان\n"
+           f"💹 درآمد از زیرمجموعه‌گیری (پورسانت شبکه): {int(referral_income):,} تومان\n"
+           f"🎁 مجموع کش‌بک دریافتی: {int(cashback_income):,} تومان\n"
+           f"💵 <b>استخر قابل‌برداشت (پورسانت + کش‌بک):</b> {int(withdrawable):,} تومان\n"
+           f"{cashback_note}"
+           f"🏷 پیشوند یوزرنیم: {prefix_line}")
+    kb = []
+    if withdrawable > 0:
+        kb.append([("💵 برداشت وجه", "wd_request"), ("➕ افزودن به کیف پول", "wd_towallet")])
+    pending_wds = await asyncio.to_thread(_db_get_agent_pending_withdrawals, ag_id)
+    if pending_wds:
+        kb.append([(f"🧾 برداشت‌های در انتظار ({len(pending_wds)})", "wd_mylist")])
+    kb.append([("👥 زیرمجموعه‌ها", "mysubs_1")])
+    kb.append([("🏠 منوی اصلی", "uact_back_to_menu")])
+    await _nav_render(target, txt, kb)
+
+
+async def _show_nav_finance(target, update, context):
+    role = context.user_data.get('role')
+    if role == 'agent':
+        await _show_nav_agent_wallet(target, context)
+        return
+    if role != 'admin':
+        return
+    rows = _nav_finance_rows(
+        role, superadmin=role == 'admin' and _is_superadmin_update(update, context),
+        accounting_enabled=NVL_SUPERADMIN_ACCOUNTING_REPORT_ENABLED,
+        chart_enabled=MATPLOTLIB_AVAILABLE,
+    )
+    await _nav_render(target, "💰 <b>مالی</b>", rows)
+
+
+async def _show_nav_agent_reports(target, context):
+    if context.user_data.get('role') != 'agent':
+        return
+    aid = context.user_data.get('agent_id', 0)
+    if not aid:
+        return
+    totals = await asyncio.to_thread(_db_get_sales_stats, aid)
+    ssh = await asyncio.to_thread(_db_get_sales_stats, aid, 'ssh')
+    v2ray = await asyncio.to_thread(_db_get_sales_stats, aid, 'v2ray')
+    def summary(label, values):
+        today, week, month, active, total = values
+        return (f"<b>{label}</b>\n"
+                f"فعال: {active} · کل: {total}\n"
+                f"امروز: {today} · هفته: {week} · ماه: {month}")
+    await _nav_render(target, "📊 <b>گزارش فروش</b>\n\n" + "\n\n".join((
+        summary("مجموع", totals), summary("SSH", ssh), summary("V2Ray", v2ray))),
+        [[("⚡️ کاربران آنلاین", "info_online")],
+         [("🏠 منوی اصلی", "uact_back_to_menu")]])
+
+
+async def _show_nav_sale_favorites(target, context):
+    if context.user_data.get('role') not in ('admin', 'agent'):
+        return
+    enabled = await asyncio.to_thread(_db_get_setting, 'sell_ssh', '1') == '1'
+    favs = await asyncio.to_thread(_db_get_favs) if enabled else []
+    rows = [[(f"{m} ماه · {u} کاربر", f"buyfav_{m}_{u}")] for m, u in favs]
+    rows.append([("🔙 فروش اشتراک", "buy_back_start")])
+    title = "⭐ <b>فروش سریع SSH</b>"
+    if not enabled:
+        title += "\n\n⚠️ فروش SSH غیرفعال است."
+    elif not favs:
+        title += "\n\nهنوز پلن محبوبی ثبت نشده است."
+    await _nav_render(target, title, rows)
+
+
+async def _show_nav_infrastructure(target):
+    actor = getattr(getattr(target, "from_user", None), "id", None)
+    message = getattr(target, "message", target)
+    chat = getattr(message, "chat_id", None)
+    edge_allowed = (
+        type(actor) is int and type(chat) is int and actor > 0 and actor == chat
+        and getattr(getattr(message, "chat", None), "type", None) == "private"
+        and actor in await asyncio.to_thread(_db_get_admin_chat_ids)
+    )
+    new_edge_rows = _manual_edge._new_edge_buttons() if edge_allowed else ()
+    markup = InlineKeyboardMarkup(_build_server_settings_kb(
+        edge_allowed=edge_allowed, new_edge_rows=new_edge_rows))
+    if hasattr(target, 'edit_message_text'):
+        await _safe_edit_or_send(target, "🌐 <b>زیرساخت</b>", reply_markup=markup, parse_mode="HTML")
+    else:
+        await target.reply_text("🌐 <b>زیرساخت</b>", reply_markup=markup, parse_mode="HTML")
+
+
+async def _show_nav_agents(target):
+    await _nav_render(target, "🤝 <b>نمایندگان</b>", [
+        [("📋 فهرست نمایندگان", "agm_list"), ("➕ افزودن نماینده", "agm_add")],
+        [("📊 گزارش مالی نمایندگان", "agm_finlist"), ("📢 اطلاعیه‌ها", "bcast_menu")],
+        [("🏠 منوی اصلی", "uact_back_to_menu")],
+    ])
+
+
+async def _show_nav_cards(target):
+    await _nav_render(target, "💳 <b>مدیریت کارت‌ها</b>", [
+        [("💳 کارت مدیر", "fin_admin_card"), ("💳 کارت نمایندگان", "fin_agents_1")],
+        [("🔙 بازگشت", "nav:finance")],
+    ])
+
+
+async def _show_nav_logout(target):
+    await _nav_render(target, "⚠️ آیا مطمئن هستید که می‌خواهید از ربات خارج شوید؟", [
+        [("✅ بله، خارج شو", "confirm_logout_yes"), ("↩️ خیر، انصراف", "confirm_logout_no")],
+    ])
+
+
+async def _show_nav_agent_brand(target, context):
+    aid = context.user_data.get('agent_id', 0)
+    if context.user_data.get('role') != 'agent' or not aid:
+        return
+    info = await asyncio.to_thread(_db_get_agent_info, aid)
+    if not info:
+        return
+    prefix = info[10] if len(info) > 10 else None
+    prefix_line = f"<code>{esc(prefix)}</code>" if prefix else "تنظیم‌نشده"
+    context.user_data['state'] = 'AGENT_SELF_PREFIX_INPUT'
+    await _nav_render(target,
+        f"✏️ <b>نام برند</b>\nوضعیت فعلی: {prefix_line}\n\nنام برند را با حروف و اعداد انگلیسی، بدون فاصله، ارسال کنید.",
+        [[("🔙 انصراف", "nav:settings")]] if prefix else [])
+
+
+async def _show_nav_agent_card(target, context):
+    aid = context.user_data.get('agent_id', 0)
+    if (context.user_data.get('role') != 'agent' or not aid
+            or not await asyncio.to_thread(_db_get_agent_card_permission, aid)):
+        await _nav_render(target, "❌ شما مجوز استفاده از این بخش را ندارید.",
+                          [[("🔙 بازگشت", "nav:settings")]])
+        return
+    card_row = await asyncio.to_thread(_db_get_agent_card, aid)
+    if card_row and card_row[0]:
+        status = f"💳 کارت فعلی شما:\n<code>{esc(card_row[0])}</code>\n👤 {esc(card_row[1] or '')}"
+        rows = [[("✏️ ویرایش کارت", "agself_card_set")], [("🗑 حذف کارت", "agself_card_clear")]]
+    else:
+        status = "💳 هنوز کارت اختصاصی ثبت نکرده‌اید."
+        rows = [[("✏️ ثبت کارت", "agself_card_set")]]
+    await _nav_render(target, status, rows + [[("🔙 بازگشت", "nav:settings")]])
+
+
+async def _nav_send_backup(message):
+    # Existing backup behavior, now reachable from Settings.
+    try:
+        with open(DB_PATH, 'rb') as handle:
+            await message.reply_document(document=handle, filename=f"NeVeL_DB_{datetime.now().strftime('%Y%m%d')}.db", caption="📦 بکاپ دیتابیس")
+        if os.path.exists("bot_operations.log"):
+            with open("bot_operations.log", 'rb') as handle:
+                await message.reply_document(document=handle, filename="operations.log", caption="📝 فایل لاگ سرور")
+    except Exception as e:
+        await message.reply_text(f"❌ خطا در تهیه بکاپ: {e}")
+
+
+def _nav_callback_allowed(action, role):
+    if action in ('nav:settings', 'nav:finance', 'nav:logout', 'nav:sale_favorites'):
+        return role in ('admin', 'agent')
+    if action in ('nav:agent_brand', 'nav:agent_card', 'nav:agent_reports'):
+        return role == 'agent'
+    if action == 'nav:backup':
+        return role == 'admin'
+    return False
+
+
 async def show_main_menu(update_or_query, context):
     role = context.user_data.get('role')
-
-    # Phase 5.6 navigation rule:
-    # Home only exposes top-level domains. Sale, user management and
-    # infrastructure drill down inside their own screens.
-    chat_id = 0
-    if hasattr(update_or_query, 'effective_chat') and update_or_query.effective_chat:
-        chat_id = update_or_query.effective_chat.id
-    elif hasattr(update_or_query, 'message') and update_or_query.message:
-        chat_id = update_or_query.message.chat.id
-
-    if role == 'admin':
-        kb = [
-            ['➕ فروش / ساخت اشتراک', '👥 کاربران'],
-            ['🤝 نمایندگان', '📊 گزارش‌ها'],
-            ['💰 مالی و کارت‌ها', '⚙️ تنظیمات'],
-            ['🛡 بررسی فیلترینگ'],
-            ['🛠 V2Ray / Marzban', '🧩 برنامه‌ها'],
-            ['📦 بکاپ'],
-        ]
-        if _is_superadmin_identity(update_or_query):
-            kb.append(['👑 تنظیمات سوپر ادمین'])
-        kb.append(['❌ خروج'])
-    elif role == 'accountant':
-        kb = [['📊 خروجی مالی امروز (اکسل)', '📅 خروجی مالی این هفته (اکسل)'],
-              ['👑 آمار فروش ادمین']]
-        text = "📊 پنل اختصاصی حسابداری\n\nجهت دریافت گزارشات مالی از دکمه‌های زیر استفاده نمایید:"
-    else:
-        kb = [
-            ['➕ فروش اشتراک', '👥 کاربران'],
-            ['💰 کیف پول و حساب', '💳 شارژ حساب'],
-            ['✏️ نام برند'],
-        ]
-        ag_id = context.user_data.get('agent_id', 0)
-        if ag_id and await asyncio.to_thread(_db_get_agent_card_permission, ag_id):
-            kb.append(['💳 کارت اختصاصی'])
-        kb.append(['❌ خروج'])
-
+    brand_ready = True
+    if role == 'agent':
+        aid = context.user_data.get('agent_id', 0)
+        info = await asyncio.to_thread(_db_get_agent_info, aid) if aid else None
+        brand_ready = bool(info and len(info) > 10 and info[10])
+    kb = _nav_home_rows(role, brand_ready=brand_ready)
     reply_markup = ReplyKeyboardMarkup(kb, resize_keyboard=True)
     if role == 'admin':
-        text = (
-            f"🏛 پورتال و مدیریت {PORTAL_DISPLAY_NAME}\n"
-            "━━━━━━━━━━━━━━\n"
-            "فروش، کاربران و زیرساخت از مسیرهای جدا و مشخص مدیریت می‌شوند."
-        )
-    elif role != 'accountant':
-        text = (
-            "🏛 پنل نمایندگی\n"
-            "━━━━━━━━━━━━━━\n"
-            "فروش SSH و V2Ray از «➕ فروش اشتراک» انجام می‌شود."
-        )
-
+        text = f"🏛 پنل مدیریت {PORTAL_DISPLAY_NAME}"
+    elif role == 'accountant':
+        text = "📊 پنل حسابداری"
+    elif not brand_ready:
+        text = "🏛 پنل نمایندگی\nبرای شروع، نام برند را تعیین کنید."
+    else:
+        text = "🏛 پنل نمایندگی"
     if hasattr(update_or_query, 'message') and update_or_query.message:
         await update_or_query.message.reply_text(text, reply_markup=reply_markup)
     else:
         await update_or_query.effective_message.reply_text(text, reply_markup=reply_markup)
+
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id if hasattr(update, 'effective_chat') else 0
@@ -8592,7 +8843,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await asyncio.to_thread(_db_add_admin_chat_id, chat_id)
         context.user_data.update({'logged_in': True, 'role': 'admin', 'agent_id': 0, 'state': None})
         safe_clear_context(context)
-        await update.message.reply_text(f"👑 <b>لاگین خودکار سوپر ادمین</b>\nبه پنل مدیریت {esc(PORTAL_DISPLAY_NAME)} خوش آمدید.", parse_mode="HTML")
         await show_main_menu(update, context)
         return
 
@@ -8601,7 +8851,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _register_login_success(chat_id)
         context.user_data.update({'logged_in': True, 'role': 'accountant', 'agent_id': 0, 'state': None})
         safe_clear_context(context)
-        await update.message.reply_text(f"📊 <b>لاگین خودکار حسابدار</b>\nبه پنل حسابداری خوش آمدید.", parse_mode="HTML")
         await show_main_menu(update, context)
         return
 
@@ -8661,47 +8910,25 @@ async def _show_buy_start(update, context):
     v2_any = v2_unlimit_en or v2_vol_en
     role = context.user_data.get('role')
 
-    kb = []
+    services = []
     if ssh_en:
-        kb.append([InlineKeyboardButton("🔐 فروش SSH", callback_data="buy_direct")])
+        services.append(InlineKeyboardButton("🔐 فروش SSH", callback_data="buy_direct"))
     if v2_any:
-        kb.append([InlineKeyboardButton("🚀 فروش V2Ray", callback_data="v2ray_buy_menu")])
+        services.append(InlineKeyboardButton("🚀 فروش V2Ray", callback_data="v2ray_buy_menu"))
 
-    # Favorites remain shortcuts, but no longer compete with the service
-    # selection as the first interaction.
-    if ssh_en:
-        favs = await asyncio.to_thread(_db_get_favs)
-        for m, u in favs:
-            kb.append([
-                InlineKeyboardButton(
-                    f"⭐ SSH سریع · {m} ماه · {u} کاربر",
-                    callback_data=f"buyfav_{m}_{u}",
-                )
-            ])
+    shortcuts = []
+    if ssh_en and await asyncio.to_thread(_db_get_favs):
+        shortcuts.append(InlineKeyboardButton("⭐ فروش سریع SSH", callback_data="nav:sale_favorites"))
 
     if bulk_en and ssh_en:
-        kb.append([InlineKeyboardButton("📦 فروش عمده SSH", callback_data="buy_bulk_start")])
+        shortcuts.append(InlineKeyboardButton("📦 فروش عمده SSH", callback_data="buy_bulk_start"))
 
+    kb = [row for row in (services, shortcuts) if row]
     kb.append([InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")])
 
-    if not ssh_en and not v2_any and not bulk_en:
-        txt = (
-            "➕ <b>فروش › انتخاب سرویس</b>\n"
-            "━━━━━━━━━━━━━━\n"
-            "⚠️ فروش تمامی سرویس‌ها موقتاً غیرفعال است."
-        )
-    else:
-        actor_line = (
-            "فروش مستقیم توسط مدیریت؛ عملیات مالی فعلی بدون تغییر باقی می‌ماند."
-            if role == 'admin'
-            else "SSH و V2Ray هر دو از همین مسیر فروش و کیف پول نمایندگی استفاده می‌کنند."
-        )
-        txt = (
-            "➕ <b>فروش › انتخاب سرویس</b>\n"
-            "━━━━━━━━━━━━━━\n"
-            f"{actor_line}\n\n"
-            "نوع سرویس را انتخاب کنید:"
-        )
+    txt = "➕ <b>فروش اشتراک</b>"
+    if not ssh_en and not v2_any:
+        txt += "\n\n⚠️ فروش سرویس‌ها موقتاً غیرفعال است."
 
     if update.message:
         await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
@@ -8727,28 +8954,27 @@ async def _show_users_hub(target, context):
 
     if role == 'agent':
         title = "👥 <b>کاربران من</b>"
-        subtitle = "سرویس موردنظر را انتخاب کنید یا نام کاربری را جستجو کنید."
         kb = [[
             InlineKeyboardButton("🔐 SSH", callback_data="umanage_ssh"),
             InlineKeyboardButton("🚀 V2Ray", callback_data="ag_v2ray_types"),
-            InlineKeyboardButton("🔎 جستجو", callback_data="ag_users_search"),
-        ]]
+        ], [InlineKeyboardButton("🔎 جستجو", callback_data="ag_users_search")]]
     else:
         title = "👥 <b>کاربران</b>"
-        subtitle = "نمای مدیریت کاربران بر اساس نوع سرویس."
         labels = (
             ("🔐 SSH", "umanage_ssh"),
             ("🚀 V2Ray مدت‌دار", "umanage_v2ray"),
             ("📦 V2Ray حجمی", "umanage_v2ray_vol"),
         )
-        kb = [[InlineKeyboardButton(label, callback_data=cb)] for label, cb in labels]
+        buttons = [InlineKeyboardButton(label, callback_data=cb) for label, cb in labels]
+        kb = [buttons[:2], buttons[2:] + [InlineKeyboardButton("🟢 کاربران آنلاین", callback_data="info_online")]]
+        kb.append([InlineKeyboardButton("🛠 مدیریت مستقیم Marzban", callback_data="mza_home")])
     if role == 'agent' and _agent_lifecycle_access(context.user_data.get('agent_id', 0)):
         kb.append([InlineKeyboardButton("⏳ کاربران نزدیک به انقضا", callback_data="aglx_soon_3")])
         if _agent_lifecycle_access(context.user_data.get('agent_id', 0), r2=True):
             kb.append([InlineKeyboardButton("⌛ کاربران منقضی‌شده", callback_data="aglx_expired_0")])
             kb.append([InlineKeyboardButton("📉 حجم رو به اتمام", callback_data="aglx_low_0")])
     kb.append([InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")])
-    text = f"{title}\n━━━━━━━━━━━━━━\n{subtitle}"
+    text = title
 
     if hasattr(target, 'edit_message_text'):
         await target.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
@@ -8772,7 +8998,7 @@ async def _show_agent_v2ray_types(target, context):
         [InlineKeyboardButton("↩️ کاربران من", callback_data="users_hub")],
     ]
     await target.edit_message_text(
-        "👥 کاربران من › 🚀 <b>V2Ray</b>\n\nنوع سرویس را انتخاب کنید.",
+        "👥 کاربران › <b>V2Ray</b>",
         reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML",
     )
 
@@ -8967,8 +9193,6 @@ async def _show_users_panel(update, context, page=0, agent_filter=None):
     if role == 'agent' and manage_type in ('v2ray', 'v2ray_vol'):
         back_cb = "ag_v2ray_types"
     bottom_kb = [[InlineKeyboardButton("🔍 جستجوی کاربر", callback_data="usearch")]]
-    if role == 'admin' and agent_filter is None:
-        bottom_kb.append([InlineKeyboardButton("📢 پیام همگانی به نمایندگان", callback_data="bcast_menu")])
     bottom_label = "↩️ نماینده" if agent_filter is not None else "↩️ نوع سرویس"
     bottom_kb.append([InlineKeyboardButton(bottom_label, callback_data=back_cb)])
     if not users:
@@ -8979,14 +9203,13 @@ async def _show_users_panel(update, context, page=0, agent_filter=None):
         if show_owner_label:
             for u in users:
                 act_label = " (تمدیدی)" if u[2] == 'extend' else (" (جدید)" if u[2] == 'create' else "")
-                cname_label = f" ({u[3]}) " if len(u) > 3 and u[3] else " "
+                cname_label = f" · {u[3]}" if len(u) > 3 and u[3] else ""
                 user_kb.append([InlineKeyboardButton(f"👤 {u[0]}{cname_label}{act_label} — {u[1]}", callback_data=f"udet_{u[0]}")])
         else:
             for u in users:
                 act_label = " (تمدیدی)" if u[1] == 'extend' else (" (جدید)" if u[1] == 'create' else "")
-                cname_label = f" ({u[2]}) " if len(u) > 2 and u[2] else " "
-                user_kb.append([InlineKeyboardButton(f"👤 {u[0]}{cname_label}{act_label}", callback_data=f"udet_{u[0]}"),
-                                InlineKeyboardButton("⚙️ تنظیمات", callback_data=f"udet_{u[0]}")])
+                cname_label = f" · {u[2]}" if len(u) > 2 and u[2] else ""
+                user_kb.append([InlineKeyboardButton(f"👤 {u[0]}{cname_label}{act_label}", callback_data=f"udet_{u[0]}")])
         nav = []
         if page > 0:
             nav.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"upage_{page-1}"))
@@ -8995,7 +9218,7 @@ async def _show_users_panel(update, context, page=0, agent_filter=None):
         if nav:
             user_kb.append(nav)
         kb = user_kb + bottom_kb
-        txt = f"{panel_title} (صفحه {page+1}):"
+        txt = f"{panel_title}\n{total} کاربر · صفحه {page + 1} از {max(1, (total + 9) // 10)}"
     if getattr(update, 'callback_query', None):
         await update.callback_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb))
     else:
@@ -9011,7 +9234,7 @@ async def _bcast_build_menu_kb():
     kb.append([InlineKeyboardButton("➕ افزودن پیام آماده", callback_data="bcast_add_preset")])
     if presets:
         kb.append([InlineKeyboardButton("🗑 مدیریت پیام‌های آماده", callback_data="bcast_manage_presets")])
-    kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="uact_back")])
+    kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="agm_menu_back")])
     return InlineKeyboardMarkup(kb)
 
 async def _bcast_show_preview(query_or_update, context, body: str, edit: bool = True):
@@ -9282,16 +9505,16 @@ async def _show_v2ray_user_detail(update_or_query, username, context, db_res, v2
     exp_txt = "بدون محدودیت زمانی" if is_vol else format_db_date_to_jalali(exp)
     lim_txt = "نامحدود" if is_vol else lim
 
-    txt = (f"username: <code>{esc(username)}</code>{c_name_txt}\n\n"
+    txt = (f"🚀 <b>حساب V2Ray</b>\n<code>{esc(username)}</code>{c_name_txt}\n\n"
            f"👤 مالک: {esc(owner_label)}\n"
-           f"تعداد کاربر: {lim_txt}\n"
+           f"اتصالات مجاز: {lim_txt}\n"
            f"🔀 حالت اتصال: {'V2Ray حجمی' if is_vol else 'V2Ray نامحدود'}\n"
-           f"انقضا: {exp_txt} | ({rem_txt})\n"
+           f"انقضا: {exp_txt}\nزمان باقی‌مانده: {rem_txt}\n"
            f"تاریخ ساخت: {format_db_date_to_jalali(crt)}\n"
-           f"وضعیت: {status_v2}{usage_extra_txt}")
+           f"<b>وضعیت:</b> {status_v2}{usage_extra_txt}")
 
     kb = [
-        [InlineKeyboardButton("🔗 دریافت لینک اتصال", callback_data=f"v2act_sub_{username}")]
+        [InlineKeyboardButton("🔗 لینک اتصال", callback_data=f"v2act_sub_{username}")]
     ]
     
     if not is_vol:
@@ -10719,10 +10942,10 @@ async def _show_marzban_admin_dashboard(target, context):
         [InlineKeyboardButton("➕ ساخت مستقیم User", callback_data="mza_create")],
         [InlineKeyboardButton("👥 کاربران", callback_data="mza_users_0"),
          InlineKeyboardButton("🟢 آنلاین", callback_data="mza_online_0")],
-        [InlineKeyboardButton("🔍 جستجوی کاربر", callback_data="mza_search")],
-        [InlineKeyboardButton("🧩 زیرساخت Marzban", callback_data="apps_home")],
-        [InlineKeyboardButton("🔄 بروزرسانی", callback_data="mza_home")],
-        [InlineKeyboardButton("🔙 منوی اصلی", callback_data="uact_back_to_menu")],
+        [InlineKeyboardButton("🔍 جستجوی کاربر", callback_data="mza_search"),
+         InlineKeyboardButton("🧩 زیرساخت Marzban", callback_data="apps_home")],
+        [InlineKeyboardButton("🔄 به‌روزرسانی", callback_data="mza_home")],
+        [InlineKeyboardButton("🔙 کاربران", callback_data="users_hub")],
     ]
 
     if not ok_stats or not isinstance(stats, dict):
@@ -10754,18 +10977,17 @@ async def _show_marzban_admin_dashboard(target, context):
 
     txt = (
         "🛠 <b>V2Ray / Marzban › کاربران</b>\n"
-        "━━━━━━━━━━━━━━\n"
         "🖥 <b>وضعیت سیستم</b>\n"
         f"CPU  <b>{cpu:.1f}%</b>\n"
         f"RAM  <b>{mem_used}</b> / {mem_total}\n"
-        f"Nodes  <b>{node_line}</b>\n"
-        f"Version  <code>{esc(stats.get('version', '?'))}</code>\n\n"
+        f"نودها: <b>{node_line}</b>\n"
+        f"نسخه: <code>{esc(stats.get('version', '?'))}</code>\n\n"
         "⚙️ <i>ساخت مستقیم User در این بخش، فروش یا فاکتور ثبت نمی‌کند.</i>\n\n"
         "👥 <b>وضعیت کاربران</b>\n"
         f"کل  <b>{total}</b>\n"
         f"🟢 فعال  {active}     🔴 غیرفعال  {disabled}\n"
         f"⌛ منقضی  {expired}     🟠 محدود  {limited}\n"
-        f"⏸ آن‌هولد  {on_hold}"
+        f"⏸ در انتظار اتصال  {on_hold}"
     )
     await _mza_render(target, txt, kb)
 
@@ -11670,7 +11892,7 @@ async def _show_user_detail(update_or_query, username, context):
         host_display_text = f"\n🖥 هاست زیرساخت: <code>{esc(display_host)}</code>"
         conn_counts, conn_err = await _get_live_connection_counts()
         if conn_err:
-            conn_line = "\nتعداد دستگاه های متصل شده: نامشخص (خطای مانیتورینگ سرور)"
+            conn_line = "\nدستگاه‌های متصل: نامشخص (خطای مانیتورینگ سرور)"
         else:
             live_n = conn_counts.get(username.lower(), 0)
             u_det = getattr(conn_counts, 'users_detail', {}).get(username.lower(), {'ssh': 0, 'tls': 0})
@@ -11698,12 +11920,12 @@ async def _show_user_detail(update_or_query, username, context):
     ]
     if role == 'agent' and _agent_lifecycle_access(ag_id, r2=True):
         kb.insert(-1, [InlineKeyboardButton("📝 متن یادآوری تمدید", callback_data=f"aglx_note_{username}")])
-    mode_label = {"tls": "🔐 TLS (اتصال مستقیم با گواهی معتبر)"}.get(acc_conn_mode, "🔌 مستقیم")
+    mode_label = {"tls": "TLS (گواهی معتبر)"}.get(acc_conn_mode, "🔌 مستقیم")
     hold_active, _hd, hold_days = await asyncio.to_thread(_db_get_hold_info, username)
     hold_line = ""
     if hold_active:
         real_days_txt = f"{int(hold_days)} روزه" if hold_days else "خریداری‌شده"
-        hold_line = f"\n⏳ در حال آنهولد (اشتراک {real_days_txt} — منتظر اولین اتصال یا پایان مهلت {ACCOUNT_HOLD_DAYS} روزه)"
+        hold_line = f"\n⏳ در انتظار اتصال (اشتراک {real_days_txt}، مهلت {ACCOUNT_HOLD_DAYS} روز)"
     
     txt = (
         "🔐 <b>حساب SSH</b>\n\n"
@@ -11731,7 +11953,9 @@ async def _show_agent_detail(query, context, a_id):
     """🆕 پنل جزئیات یک نماینده را (دوباره) رندر می‌کند — هم از دکمهٔ «مشاهده نماینده» در لیست و هم
     بعد از لغو/تکمیل تغییر یوزرنیم/پسورد ورود یک نماینده استفاده می‌شود، تا کد تکراری نشود."""
     info = await asyncio.to_thread(_db_get_agent_info, a_id)
-    if not info: await query.edit_message_text("❌ وجود ندارد."); return
+    if not info:
+        await _nav_render(query, "❌ نماینده یافت نشد.", [[("🔙 نمایندگان", "agm_list")]])
+        return
     t, w, m_val, act, total = await asyncio.to_thread(_db_get_sales_stats, a_id)
     t_ssh, w_ssh, m_ssh, act_ssh, total_ssh = await asyncio.to_thread(_db_get_sales_stats, a_id, 'ssh')
     t_v2, w_v2, m_v2, act_v2, total_v2 = await asyncio.to_thread(_db_get_sales_stats, a_id, 'v2ray')
@@ -11752,11 +11976,11 @@ async def _show_agent_detail(query, context, a_id):
     try: v2_vol_bp_fmt = f"{int(str(v2_vol_bp).replace(',', '')):,}"
     except: v2_vol_bp_fmt = str(v2_vol_bp)
 
-    txt = (f"💼 نماینده: {esc(info[0])}\n👤 یوزرنیم ورود: <code>{esc(agent_username)}</code>\n🔑 رفرال: <code>{esc(info[1])}</code>\n💰 موجودی: {int(info[2]):,} تومان\n"
-           f"💹 درآمد از زیرمجموعه: {int(referral_income):,} تومان\n"
-           f"💵 نرخ پایه SSH (هر کاربر/ماه): {ssh_bp_fmt} تومان\n"
-           f"🚀 نرخ پایه V2Ray (هر کاربر/ماه): {v2_bp_fmt} تومان\n"
-           f"🪐 نرخ پایه V2Ray حجمی (هر گیگ): {v2_vol_bp_fmt} تومان\n"
+    txt = (f"💼 <b>{esc(info[0])}</b>\nنام کاربری: <code>{esc(agent_username)}</code>\nکد معرفی: <code>{esc(info[1])}</code>\n💰 موجودی: <b>{int(info[2]):,} تومان</b>\n"
+           f"\n<b>مالی</b>\n💹 درآمد از زیرمجموعه: {int(referral_income):,} تومان\n"
+           f"\n<b>تعرفه‌ها</b>\nSSH (کاربر/ماه): {ssh_bp_fmt} تومان\n"
+           f"V2Ray (کاربر/ماه): {v2_bp_fmt} تومان\n"
+           f"V2Ray حجمی (گیگابایت): {v2_vol_bp_fmt} تومان\n"
            f"🎁 مجموع کش‌بک: {int(cashback_income):,} تومان\n"
            f"💵 استخر قابل‌برداشت: {int(withdrawable):,} تومان\n"
            f"🏷 پیشوند یوزرنیم: <code>{esc(agent_prefix)}</code>\n")
@@ -11769,7 +11993,7 @@ async def _show_agent_detail(query, context, a_id):
     txt += (f"\n📉 <b>درصدهای شبکه:</b>\nلایه 1: {info[3]}%\nلایه 2: {info[5]}%\nلایه 3: {info[6]}%\n\n"
             f"📦 <b>آمار کل فروش نماینده:</b>\n"
             f"کل فروخته‌شده: {total} | اکانت فعال: {act}\n"
-            f"فروش امروز: {t} | فروش هفته: {w} | فروش ماه: {m_val}\n\n"
+            f"امروز: {t} · هفته: {w} · ماه: {m_val}\n\n"
             f"🔹 <b>تفکیک SSH:</b>\n"
             f"کل فروخته‌شده: {total_ssh} | اکانت فعال: {act_ssh}\n"
             f"فروش امروز: {t_ssh} | فروش هفته: {w_ssh} | فروش ماه: {m_ssh}\n\n"
@@ -11777,8 +12001,8 @@ async def _show_agent_detail(query, context, a_id):
             f"کل فروخته‌شده: {total_v2} | اکانت فعال: {act_v2}\n"
             f"فروش امروز: {t_v2} | فروش هفته: {w_v2} | فروش ماه: {m_v2}")
     pending_wds = await asyncio.to_thread(_db_get_agent_pending_withdrawals, a_id)
-    kb = [[InlineKeyboardButton("👥 مشاهده کاربران این نماینده", callback_data=f"agm_users_{a_id}")],
-          [InlineKeyboardButton("💰 شارژ مستقیم کیف‌پول", callback_data=f"agm_topup_{a_id}"), InlineKeyboardButton("➖ کاهش شارژ کیف‌پول", callback_data=f"agm_deduct_{a_id}")],
+    kb = [[InlineKeyboardButton("👥 کاربران", callback_data=f"agm_users_{a_id}")],
+          [InlineKeyboardButton("💰 افزایش اعتبار", callback_data=f"agm_topup_{a_id}"), InlineKeyboardButton("➖ کاهش اعتبار", callback_data=f"agm_deduct_{a_id}")],
           [InlineKeyboardButton(f"🧾 درخواست‌های برداشت{f' ({len(pending_wds)} در انتظار)' if pending_wds else ''}", callback_data=f"agm_wdlist_{a_id}")],
           [InlineKeyboardButton("🏷 تنظیم پیشوند یوزرنیم", callback_data=f"agm_prefix_{a_id}")],
           [InlineKeyboardButton("👤 تغییر یوزرنیم ورود", callback_data=f"agm_edituser_{a_id}"), InlineKeyboardButton("🔑 تغییر پسورد ورود", callback_data=f"agm_editpass_{a_id}")],
@@ -11802,7 +12026,7 @@ async def _show_buy_summary(update_or_message, context, edit=False):
 
     # 📦 در حالت عمده، دکمهٔ افزودن/حذف از «کانفیگ‌های مورد علاقه» نمایش داده نمی‌شود
     kb = [
-        [InlineKeyboardButton("✅ بله، تایید و ساخت", callback_data="buy_yes"), InlineKeyboardButton("❌ خیر، بازگشت", callback_data="buy_back_start")]
+        [_nav_button("✅ تأیید و ساخت", "buy_yes"), InlineKeyboardButton("بازگشت", callback_data="buy_back_start")]
     ]
     if not bulk_mode:
         is_fav = await asyncio.to_thread(_db_check_fav, m, u)
@@ -11815,7 +12039,7 @@ async def _show_buy_summary(update_or_message, context, edit=False):
             ainf = await asyncio.to_thread(_db_get_agent_info, context.user_data.get('agent_id', 0))
             if ainf:
                 price_preview = _parse_price_to_decimal(ainf[4]) * Decimal(m) * Decimal(u) * Decimal(bulk_count)
-                txt += f"💳 مجموع هزینهٔ این خرید ({bulk_count} اکانت): {int(price_preview):,} تومان\n"
+                txt += f"💳 مبلغ کل: <b>{int(price_preview):,} تومان</b>\n"
         txt += f"\nآیا از ساخت این {bulk_count} اکانت مطمئن هستید؟"
     else:
         txt = f"📋 <b>تایید ساخت اکانت SSH</b>\n\n📅 مدت اکانت: {m} ماهه\n👥 تعداد کاربر: {u}\n🔀 حالت اتصال: 🔌 مستقیم\n"
@@ -11823,7 +12047,7 @@ async def _show_buy_summary(update_or_message, context, edit=False):
             ainf = await asyncio.to_thread(_db_get_agent_info, context.user_data.get('agent_id', 0))
             if ainf:
                 price_preview = _parse_price_to_decimal(ainf[4]) * Decimal(m) * Decimal(u)
-                txt += f"💳 هزینهٔ این خرید: {int(price_preview):,} تومان\n"
+                txt += f"💳 مبلغ کل: <b>{int(price_preview):,} تومان</b>\n"
         txt += "\nآیا از ساخت این اکانت مطمئن هستید؟"
 
     if edit:
@@ -11882,7 +12106,7 @@ async def _show_renew_confirm(target, context, un, days, label, edit=True, mode=
                                 * (Decimal(days) / Decimal(30))
                                 * Decimal(account_users_limit))
                 txt += f"\n💳 هزینهٔ این تمدید: {int(preview_cost):,} تومان"
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ بله، انجام شود", callback_data="rnyes"), InlineKeyboardButton("❌ خیر", callback_data="rnno")]])
+    kb = InlineKeyboardMarkup([[_nav_button("✅ تأیید", "rnyes"), InlineKeyboardButton("❌ خیر", callback_data="rnno")]])
     if edit: await target.edit_message_text(txt, reply_markup=kb)
     else: await target.reply_text(txt, reply_markup=kb)
 
@@ -13890,6 +14114,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Phase 5.6 canonical labels
         '➕ فروش / ساخت اشتراک', '➕ فروش اشتراک', '👥 کاربران', '👥 کاربران من',
         '🤝 نمایندگان', '📊 گزارش‌ها', '💰 مالی و کارت‌ها', '⚙️ تنظیمات',
+        '💰 مالی', '🌐 زیرساخت', '💰 کیف پول',
         '🛡 بررسی فیلترینگ', '🛰 بررسی مرزبان',
         '🛠 V2Ray / Marzban', '🧩 برنامه‌ها', '🧩 برنامه ها', '📦 بکاپ',
         '💳 شارژ حساب', '💰 کیف پول و حساب',
@@ -13952,12 +14177,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             
         elif text == '❌ خروج':
-            # 🆕 قبل از خروج واقعی، تاییدیهٔ بله/خیر گرفته می‌شود (هم برای پنل ادمین و هم پنل نمایندگی،
-            # چون هر دو نقش از همین مسیر مشترک عبور می‌کنند). خروج واقعی در callback_handler
-            # (confirm_logout_yes/confirm_logout_no) انجام می‌شود.
-            kb = [[InlineKeyboardButton("✅ بله، خارج شو", callback_data="confirm_logout_yes"),
-                   InlineKeyboardButton("↩️ خیر، انصراف", callback_data="confirm_logout_no")]]
-            await update.message.reply_text("⚠️ آیا مطمئن هستید که می‌خواهید از ربات خارج شوید؟", reply_markup=InlineKeyboardMarkup(kb))
+            await _show_nav_logout(update.message)
             return
         elif text in ('➕ فروش / ساخت اشتراک', '➕ فروش اشتراک', '🛒 خرید اشتراک'):
             await _show_buy_start(update, context)
@@ -13966,15 +14186,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _show_users_hub(update.message, context)
             return
         elif text in ('🤝 نمایندگان', '💼 مدیریت نماینده‌ها') and role == 'admin':
-            kb = [[InlineKeyboardButton("➕ افزودن نماینده جدید", callback_data="agm_add")], [InlineKeyboardButton("📋 لیست نمایندگان", callback_data="agm_list")],
-                  [InlineKeyboardButton("📊 گزارش مالی نمایندگان", callback_data="agm_finlist")],
-                  [InlineKeyboardButton("🔙 بازگشت", callback_data="uact_back_to_menu")]]
-            await update.message.reply_text("💼 <b>پنل مدیریت نمایندگان فروش</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML"); return
-        elif text in ['💰 کیف پول و حساب', '📊 گزارش‌ها', '📊 اطلاعات حساب', '📊 آمار و لاگ']:
-            kb = [[InlineKeyboardButton("📊 اطلاعات کلان و مالی", callback_data="info_general")], [InlineKeyboardButton("⚡️ مشاهده کاربران آنلاین", callback_data="info_online")]]
-            if MATPLOTLIB_AVAILABLE and role == 'admin': kb.append([InlineKeyboardButton("📈 نمودار فروش ۷ روز گذشته", callback_data="info_chart")])
-            kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="uact_back_to_menu")])
-            await update.message.reply_text("📊 <b>پورتال گزارشات سیستم</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML"); return
+            await _show_nav_agents(update.message)
+            return
+        elif text == '📊 گزارش‌ها' and role == 'agent':
+            await _show_nav_agent_reports(update.message, context)
+            return
+        elif text in ('💰 مالی', '💰 کیف پول', '💰 کیف پول و حساب', '📊 گزارش‌ها', '📊 اطلاعات حساب', '📊 آمار و لاگ') and role in ('admin', 'agent'):
+            await _show_nav_finance(update.message, update, context)
+            return
         elif text == '🛡 بررسی فیلترینگ' and role == 'admin':
             await _render_filtering_monitor_panel(update.message)
             return
@@ -13986,40 +14205,29 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif text in ('🧩 برنامه‌ها', '🧩 برنامه ها') and role == 'admin':
             await _show_admin_programs_hub(update.message, context)
             return
-        elif text in ('⚙️ تنظیمات', '⚙️ تنظیمات سرور') and role == 'admin':
-            kb = _build_server_settings_kb()
-            await update.message.reply_text("⚙️ <b>تنظیمات سرور</b>\nیکی از گزینه‌های زیر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML"); return
+        elif text == '⚙️ تنظیمات' and role in ('admin', 'agent'):
+            await _show_nav_settings(update.message, update, context)
+            return
+        elif text in ('🌐 زیرساخت', '⚙️ تنظیمات سرور') and role == 'admin':
+            await _show_nav_infrastructure(update.message)
+            return
         elif text in ('🛠 V2Ray / Marzban', '🛠 مدیریت V2Ray') and role == 'admin':
             await _show_marzban_admin_dashboard(update.message, context)
             return
         elif text == '⚙️ تغییر نام برند' and role == 'admin':
             await update.message.reply_text("✍️ لطفاً نام برند جدید خود را وارد نمایید:"); context.user_data['state'] = 'BRAND_INPUT'; return
         elif text in ('✏️ نام برند', '✏️ تغییر نام برند') and role == 'agent':
-            ag_id_local = context.user_data.get('agent_id', 0)
-            info = await asyncio.to_thread(_db_get_agent_info, ag_id_local)
-            my_prefix = info[10] if info and len(info) > 10 and info[10] else None
-            prefix_line = f"<code>{esc(my_prefix)}</code>" if my_prefix else "تنظیم‌نشده ❌ (اجباری)"
-            context.user_data['state'] = 'AGENT_SELF_PREFIX_INPUT'
-            await update.message.reply_text(
-                f"✏️ <b>تعیین / تغییر نام برند اختصاصی</b>\nوضعیت فعلی: {prefix_line}\n\n"
-                f"نام برند دلخواه خود را بفرستید (فقط حروف و اعداد انگلیسی مجاز است، بدون فاصله. مثلاً: <b>AliVpn</b>).\n"
-                f"تمامی اکانت‌های مشتریان شما از این پس با این نام ساخته خواهند شد (مثال: AliVpn0001).\n"
-                f"💡 در آینده نیز هروقت بخواهید می‌توانید در همین بخش ، نام برندتان را به نام دیگری تغییر دهید.", parse_mode="HTML")
+            await _show_nav_agent_brand(update.message, context)
             return
         elif text == '🌐 تنظیمات هاست' and role == 'admin':
             ch = await asyncio.to_thread(_db_get_setting, 'hosts', LAST_RESORT_HOST_IP)
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("➕ افزودن IP جدید (بدون حذف بقیه)", callback_data="srv_hosts_add")]])
             await update.message.reply_text(f"🌐 هاست فعلی:\n<code>{esc(ch)}</code>\n\n✍️ لیست جدید را با کاما (,) جدا کرده و بفرستید (کل لیست جایگزین می‌شود):", parse_mode="HTML", reply_markup=kb); context.user_data['state'] = 'HOSTS_INPUT'; return
         elif text in ('💰 مالی و کارت‌ها', '💳 تنظیمات مالی') and role == 'admin':
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("💳 شماره کارت مدیر", callback_data="fin_admin_card")],
-                [InlineKeyboardButton("💳 شماره کارت نمایندگان", callback_data="fin_agents_1")]])
-            await update.message.reply_text("💳 <b>تنظیمات مالی</b>\n\nکدام کارت را می‌خواهید مدیریت کنید؟", parse_mode="HTML", reply_markup=kb); return
+            await _show_nav_cards(update.message)
+            return
         elif text in ('📦 بکاپ', '📦 دریافت بکاپ') and role == 'admin':
-            try:
-                await update.message.reply_document(document=open(DB_PATH, 'rb'), filename=f"NeVeL_DB_{datetime.now().strftime('%Y%m%d')}.db", caption="📦 بکاپ دیتابیس")
-                if os.path.exists("bot_operations.log"): await update.message.reply_document(document=open('bot_operations.log', 'rb'), filename="operations.log", caption="📝 فایل لاگ سرور")
-            except Exception as e: await update.message.reply_text(f"❌ خطا در تهیه بکاپ: {e}")
+            await _nav_send_backup(update.message)
             return
         elif text in ('💳 شارژ حساب', '💳 شارژ حساب (کارت به کارت)') and role == 'agent':
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="uact_back_to_menu")]])
@@ -14029,19 +14237,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # حتی اگه کسی با ترفند همین متن رو دستی بفرسته، این چک دیتابیسی جلوی سوءاستفاده رو می‌گیره
         # (دفاع دوم، مستقل از مخفی‌بودن دکمه توی کیبورد).
         elif text in ('💳 کارت اختصاصی', '💳 کارت اختصاصی من') and role == 'agent':
-            ag_id = context.user_data.get('agent_id', 0)
-            if not ag_id or not await asyncio.to_thread(_db_get_agent_card_permission, ag_id):
-                await update.message.reply_text("❌ شما مجوز استفاده از این بخش را ندارید."); return
-            card_row = await asyncio.to_thread(_db_get_agent_card, ag_id)
-            if card_row and card_row[0]:
-                status_txt = f"💳 کارت فعلی شما:\n<code>{esc(card_row[0])}</code>\n👤 {esc(card_row[1] or '')}"
-                kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✏️ ویرایش کارت", callback_data="agself_card_set")],
-                    [InlineKeyboardButton("🗑 حذف کارت", callback_data="agself_card_clear")]])
-            else:
-                status_txt = "💳 شما هنوز کارت اختصاصی ثبت نکرده‌اید.\n\nتا وقتی کارتی ثبت نکنید، زیرمجموعه‌های شما همچنان کارت سیستم (یا کارت یکی از نمایندگان بالادستی‌تان، در صورت وجود) را می‌بینند."
-                kb = InlineKeyboardMarkup([[InlineKeyboardButton("✏️ ثبت کارت", callback_data="agself_card_set")]])
-            await update.message.reply_text(status_txt, parse_mode="HTML", reply_markup=kb); return
+            await _show_nav_agent_card(update.message, context)
+            return
 
     # 🔐 لاگین دو مرحله‌ای
     if not is_auth(context):
@@ -15317,9 +15514,7 @@ async def _render_udpgw_panel(query):
         f"پورت فعلی: <code>{port_i}</code>\n"
         f"وضعیت زنده: {status_line}\n"
         f"Transparent DNS: {'فعال ✅' if tdns else 'غیرفعال ☐'}\n\n"
-        f"این پورت باید دقیقاً همان پورتی باشد که سرویس <code>badvpn-udpgw</code> روی سرور با آن اجرا "
-        f"شده — وگرنه کاربرهایی که برای بازی/تماس صوتی‌تصویری به فوروارد UDP نیاز دارند دچار مشکل "
-        f"می‌شوند، حتی اگر خودِ تونل SSH/TLS بدون مشکل وصل شود.",
+        f"پورت باید با <code>badvpn-udpgw</code> یکسان باشد؛ اختلاف پورت موجب اختلال UDP می‌شود.",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
 
 async def _render_host_pool_panel(query, page=0):
@@ -15888,7 +16083,7 @@ async def _render_filtering_monitor_panel(query, page=0):
         kb.append([InlineKeyboardButton("🛑 غیرفعال‌سازی انتقال خودکار", callback_data="flt_auto_disable")])
     else:
         kb.append([InlineKeyboardButton("🤖 فعال‌سازی انتقال خودکار", callback_data="flt_auto_enable")])
-    kb.append([InlineKeyboardButton("🏠 منوی اصلی", callback_data="uact_back_to_menu")])
+    kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")])
 
     payload = "\n".join(lines)
     markup = InlineKeyboardMarkup(kb)
@@ -17347,7 +17542,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("📚 از ابتدا", callback_data="nvl_fin:all")],
                 [InlineKeyboardButton("📅 ۷ روز اخیر", callback_data="nvl_fin:7d"),
                  InlineKeyboardButton("🗓 ۳۰ روز اخیر", callback_data="nvl_fin:30d")],
-                [InlineKeyboardButton("🔙 پنل سوپر ادمین", callback_data="super_admin_back")],
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="nav:finance")],
             ]
             await query.edit_message_text(
                 "💰 <b>گزارش حسابداری NVL</b>\n\n"
@@ -17388,12 +17583,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             report_text, parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 انتخاب بازه", callback_data="nvl_fin:menu")],
-                [InlineKeyboardButton("👑 پنل سوپر ادمین", callback_data="super_admin_back")],
+                [InlineKeyboardButton("💰 مالی", callback_data="nav:finance")],
             ]),
         )
         return
 
-    if role == 'admin' and (d in ('apps_home','hpeg_status','hpeg_wizard','uact_back_to_menu')
+    if role == 'admin' and (d.startswith('nav:') or d in ('apps_home','hpeg_status','hpeg_wizard','uact_back_to_menu','srv_menu_back')
         or d.startswith(('hpeg_edge_','hpeg_more_','hpeg_page_',
                          'hpeg_m4_home_','hpeg_m4_cancel_','hpeg_m4_single_','hpeg_m4_batch_'))):
         k2_ui_views.navigate(update.effective_user.id,update.effective_chat.id)
@@ -17439,10 +17634,35 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if role == 'agent':
         ainf = await asyncio.to_thread(_db_get_agent_info, ag_id)
         if ainf and not ainf[10]:
-            allowed_cbs = ['confirm_logout_yes', 'confirm_logout_no']
+            allowed_cbs = ['confirm_logout_yes', 'confirm_logout_no', 'uact_back_to_menu']
             if d not in allowed_cbs:
                 await query.message.reply_text("⛔️ <b>کاربر گرامی، ابتدا باید نام برند خود را تعیین کنید (مثلاً: AliVpn).</b>\nلطفاً از منوی اصلی ربات روی دکمه «✏️ نام برند» کلیک کنید.", parse_mode="HTML")
                 return
+
+    # New menu callbacks have an explicit role boundary. Existing business
+    # callbacks retain their own authorization and state machine.
+    if d.startswith('nav:'):
+        if not _nav_callback_allowed(d, role):
+            await query.message.reply_text("⛔️ دسترسی غیرمجاز.")
+            return
+        safe_clear_context(context)
+        if d == 'nav:settings':
+            await _show_nav_settings(query, update, context)
+        elif d == 'nav:finance':
+            await _show_nav_finance(query, update, context)
+        elif d == 'nav:logout':
+            await _show_nav_logout(query)
+        elif d == 'nav:agent_brand':
+            await _show_nav_agent_brand(query, context)
+        elif d == 'nav:agent_card':
+            await _show_nav_agent_card(query, context)
+        elif d == 'nav:agent_reports':
+            await _show_nav_agent_reports(query, context)
+        elif d == 'nav:sale_favorites':
+            await _show_nav_sale_favorites(query, context)
+        elif d == 'nav:backup':
+            await _nav_send_backup(query.message)
+        return
 
     # Phase 5.6: user-navigation callbacks are not security boundaries by
     # themselves. Enforce the role here so stale/forged callbacks cannot expose
@@ -22384,7 +22604,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                         reply_markup=ReplyKeyboardMarkup([['/start']], resize_keyboard=True))
         return
     elif d == "confirm_logout_no":
-        await query.edit_message_text("✅ انصراف داده شد؛ همچنان وارد سیستم هستید.")
+        safe_clear_context(context)
+        await query.edit_message_text("✅ خروج لغو شد.", reply_markup=_nav_markup([[("🏠 منوی اصلی", "uact_back_to_menu")]]))
         return
 
     # 💳 بخش تایید رسیدها — منحصراً ادمین
@@ -22920,6 +23141,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     #---------------------------------------------------------------------
     elif d == "uact_back_to_menu":
+        safe_clear_context(context)
         await query.delete_message()
         await show_main_menu(query, context)
     elif d == "users_hub" and role in ('admin', 'agent'):
@@ -22944,6 +23166,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 📢 پیام همگانی به نمایندگان
     elif d == "bcast_menu" and role == 'admin':
+        context.user_data.pop('state', None)
         context.user_data.pop('bcast_pending_text', None)
         kb = await _bcast_build_menu_kb()
         await query.edit_message_text(
@@ -22998,8 +23221,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ⚙️ زیرمنوی تنظیمات سرور
     elif d == "srv_menu_back" and role == 'admin':
-        kb = _build_server_settings_kb()
-        await query.edit_message_text("⚙️ <b>تنظیمات سرور</b>\nیکی از گزینه‌های زیر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+        safe_clear_context(context)
+        await _show_nav_infrastructure(query)
 
     # 🖥 پنل وضعیت و نقش سرورها (Core/Edge)
     elif d == "srv_status" and role == 'admin':
@@ -23650,7 +23873,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif d == "srv_brand" and role == 'admin':
         context.user_data['state'] = 'BRAND_INPUT'
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")]])
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="nav:settings")]])
         await query.edit_message_text("✍️ لطفاً نام برند جدید خود را وارد نمایید:", reply_markup=kb)
     elif d == "srv_hosts" and role == 'admin':
         ch = await asyncio.to_thread(_db_get_setting, 'hosts', LAST_RESORT_HOST_IP)
@@ -23876,10 +24099,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="agm_menu_back")]])
         await query.edit_message_text("✍️ یوزرنیم برای نماینده را بفرستید:", reply_markup=kb)
     elif d == "agm_menu_back" and role == 'admin':
-        kb = [[InlineKeyboardButton("➕ افزودن نماینده جدید", callback_data="agm_add")], [InlineKeyboardButton("📋 لیست نمایندگان", callback_data="agm_list")],
-              [InlineKeyboardButton("📊 گزارش مالی نمایندگان", callback_data="agm_finlist")],
-              [InlineKeyboardButton("🔙 بازگشت", callback_data="uact_back_to_menu")]]
-        await query.edit_message_text("💼 <b>پنل مدیریت نمایندگان فروش</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+        safe_clear_context(context)
+        await _show_nav_agents(query)
     elif d == "agm_list" and role == 'admin':
         agents = await asyncio.to_thread(_db_get_all_agents)
         kb = [[InlineKeyboardButton(f"💼 {a[1]} ({a[2]})", callback_data=f"agm_det_{a[0]}")] for a in agents]
@@ -23953,6 +24174,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(txt, reply_markup=kb, parse_mode="HTML")
     elif d.startswith("agm_det_") and role == 'admin':
         a_id = int(d.split("_")[2])
+        safe_clear_context(context)
         await _show_agent_detail(query, context, a_id)
     elif d.startswith("agm_users_") and role == 'admin':
         a_id = int(d.split("_")[2])
@@ -24110,81 +24332,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("✅ نماینده حذف شد.", reply_markup=kb)
     elif d.startswith("agmdelconf_no_") and role == 'admin':
         a_id = int(d.split("_", 2)[2])
-        info = await asyncio.to_thread(_db_get_agent_info, a_id)
-        if not info: return await query.edit_message_text("❌ این نماینده دیگر وجود ندارد.")
-        t, w, m, act, total = await asyncio.to_thread(_db_get_sales_stats, a_id)
-        referral_income = info[9] if len(info) > 9 and info[9] is not None else 0
-        txt = (f"💼 نماینده: {esc(info[0])}\n🔑 رفرال: <code>{esc(info[1])}</code>\n💰 موجودی: {int(info[2]):,} تومان\n"
-               f"💹 درآمد از زیرمجموعه: {int(referral_income):,} تومان\n\n"
-               f"📉 <b>درصدهای شبکه:</b>\nلایه 1: {info[3]}%\nلایه 2: {info[5]}%\nلایه 3: {info[6]}%\n\n"
-               f"📦 کل اکانت‌های فروخته‌شده: {total}\nفروش امروز: {t} | فروش هفته: {w} | فروش ماه: {m}\nاکانت فعال: {act}")
-        kb = [[InlineKeyboardButton("👥 مشاهده کاربران این نماینده", callback_data=f"agm_users_{a_id}")],
-              [InlineKeyboardButton("💰 شارژ مستقیم کیف‌پول", callback_data=f"agm_topup_{a_id}")],
-              [InlineKeyboardButton("💵 تنظیم قیمت پایه", callback_data=f"ag_p_{a_id}"), InlineKeyboardButton("📉 تخفیف مستقیم", callback_data=f"ag_c1_{a_id}")],
-              [InlineKeyboardButton("📉 تخفیف پدر", callback_data=f"ag_c2_{a_id}"), InlineKeyboardButton("📉 تخفیف پدربزرگ", callback_data=f"ag_c3_{a_id}")],
-              [InlineKeyboardButton("🗑 حذف نماینده", callback_data=f"agm_del_{a_id}")],
-              [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="agm_list")]]
-        await query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+        safe_clear_context(context)
+        await _show_agent_detail(query, context, a_id)
 
     # گزارش‌ها و مانیتورینگ
     elif d == "info_general":
+        if role not in ('admin', 'agent'):
+            return
         if role == 'agent':
-            info = await asyncio.to_thread(_db_get_agent_info, ag_id)
-            if not info: return
-            t, w, m_val, act, total = await asyncio.to_thread(_db_get_sales_stats, ag_id)
-            t_ssh, w_ssh, m_ssh, act_ssh, total_ssh = await asyncio.to_thread(_db_get_sales_stats, ag_id, 'ssh')
-            t_v2, w_v2, m_v2, act_v2, total_v2 = await asyncio.to_thread(_db_get_sales_stats, ag_id, 'v2ray')
-            
-            referral_income = info[9] if len(info) > 9 and info[9] is not None else 0
-            my_prefix = info[10] if len(info) > 10 and info[10] else None
-            withdrawable = info[14] if len(info) > 14 and info[14] is not None else 0.0
-            cashback_income = info[15] if len(info) > 15 and info[15] is not None else 0.0
-            
-            v2_base_price = info[16] if len(info) > 16 and info[16] else '160000'
-            try: ssh_bp_fmt = f"{int(str(info[4]).replace(',', '')):,}"
-            except: ssh_bp_fmt = str(info[4])
-            try: v2_bp_fmt = f"{int(str(v2_base_price).replace(',', '')):,}"
-            except: v2_bp_fmt = str(v2_base_price)
-            v2_vol_bp = info[17] if len(info) > 17 and info[17] else '4000'
-            try: v2_vol_bp_fmt = f"{int(str(v2_vol_bp).replace(',', '')):,}"
-            except: v2_vol_bp_fmt = str(v2_vol_bp)
-            
-            prefix_line = f"<code>{esc(my_prefix)}</code>" if my_prefix else "پیش‌فرض سیستم (تنظیم‌نشده)"
-            cashback_note = ""
-            if act >= AGENT_CASHBACK_MIN_ACTIVE_ACCOUNTS:
-                cashback_note = f"🎁 شما به‌خاطر {act} اکانت فعال، از این پس {int(AGENT_CASHBACK_PCT)}٪ کش‌بک هر خرید را دریافت می‌کنید!\n"
-            else:
-                remain_for_cashback = AGENT_CASHBACK_MIN_ACTIVE_ACCOUNTS - act
-                cashback_note = f"🎁 با {remain_for_cashback} اکانت فعال دیگر (مجموع {AGENT_CASHBACK_MIN_ACTIVE_ACCOUNTS}+)، {int(AGENT_CASHBACK_PCT)}٪ کش‌بک هر خرید را دریافت می‌کنید.\n"
-            
-            txt = (f"📊 <b>اطلاعات حساب نمایندگی</b>\n\n"
-                   f"🔑 کد رفرال شما: <code>{esc(info[1])}</code>\n"
-                   f"💰 موجودی کیف‌پول (شارژ باقی‌مانده): {int(info[2]):,} تومان\n"
-                   f"💵 نرخ پایه SSH (هر کاربر/ماه): {ssh_bp_fmt} تومان\n"
-                   f"🚀 نرخ پایه V2Ray (هر کاربر/ماه): {v2_bp_fmt} تومان\n"
-                   f"🪐 نرخ پایه V2Ray حجمی (هر گیگ): {v2_vol_bp_fmt} تومان\n"
-                   f"💹 درآمد از زیرمجموعه‌گیری (پورسانت شبکه): {int(referral_income):,} تومان\n"
-                   f"🎁 مجموع کش‌بک دریافتی: {int(cashback_income):,} تومان\n"
-                   f"💵 <b>استخر قابل‌برداشت (پورسانت + کش‌بک):</b> {int(withdrawable):,} تومان\n"
-                   f"{cashback_note}"
-                   f"🏷 پیشوند یوزرنیم اکانت‌های شما: {prefix_line}\n\n"
-                   f"📦 <b>آمار کل فروش شما:</b>\n"
-                   f"کل فروخته‌شده: {total} | اکانت فعال: {act}\n"
-                   f"فروش امروز: {t} | فروش هفته: {w} | فروش ماه: {m_val}\n\n"
-                   f"🔹 <b>تفکیک SSH:</b>\n"
-                   f"کل فروخته‌شده: {total_ssh} | اکانت فعال: {act_ssh}\n"
-                   f"فروش امروز: {t_ssh} | فروش هفته: {w_ssh} | فروش ماه: {m_ssh}\n\n"
-                   f"🚀 <b>تفکیک V2Ray:</b>\n"
-                   f"کل فروخته‌شده: {total_v2} | اکانت فعال: {act_v2}\n"
-                   f"فروش امروز: {t_v2} | فروش هفته: {w_v2} | فروش ماه: {m_v2}")
-            kb = []
-            if withdrawable > 0:
-                kb.append([InlineKeyboardButton("💵 برداشت وجه از استخر", callback_data="wd_request"), InlineKeyboardButton("➕ افزودن به کیف‌پول", callback_data="wd_towallet")])
-            pending_wds = await asyncio.to_thread(_db_get_agent_pending_withdrawals, ag_id)
-            if pending_wds:
-                kb.append([InlineKeyboardButton(f"🧾 درخواست‌های برداشت در انتظار ({len(pending_wds)})", callback_data="wd_mylist")])
-            kb.append([InlineKeyboardButton("👥 زیرمجموعه‌ها", callback_data="mysubs_1")])
-            kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="info_back")])
+            safe_clear_context(context)
+            await _show_nav_agent_wallet(query, context)
+            return
         else:
             bp = await asyncio.to_thread(_db_get_setting, 'base_price', '50,000 تومان')
             t, w, m_val, act, total = await asyncio.to_thread(_db_get_sales_stats, None)
@@ -24216,7 +24374,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not ag_id or not await asyncio.to_thread(_db_get_agent_card_permission, ag_id):
             await query.message.reply_text("❌ شما مجوز این بخش را ندارید."); return
         context.user_data['state'] = 'AGSELF_CARD_NUM'
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 انصراف", callback_data="uact_back_to_menu")]])
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 انصراف", callback_data="nav:agent_card")]])
         await query.message.reply_text("💳 لطفاً شمارهٔ کارت بانکی خودتان را بفرستید (فقط عدد، بدون خط تیره):", reply_markup=kb)
     elif d == "agself_card_clear" and role == 'agent':
         ag_id = context.user_data.get('agent_id', 0)
@@ -24224,8 +24382,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("❌ شما مجوز این بخش را ندارید."); return
         await asyncio.to_thread(_db_clear_agent_card, ag_id)
         await query.edit_message_text(
-            "✅ کارت اختصاصی شما حذف شد.\n\nاز این پس زیرمجموعه‌های شما دوباره کارت سیستم (یا کارت یکی از نمایندگان بالادستی‌تان، در صورت وجود) را می‌بینند.")
+            "✅ کارت اختصاصی شما حذف شد.\n\nاز این پس زیرمجموعه‌های شما دوباره کارت سیستم (یا کارت یکی از نمایندگان بالادستی‌تان، در صورت وجود) را می‌بینند.",
+            reply_markup=_nav_markup([[("🔙 بازگشت", "nav:agent_card")]]))
     elif d == "info_online":
+        if role not in ('admin', 'agent'):
+            return
         counts, monitor_error = await _get_live_connection_counts()
 
         if monitor_error:
@@ -24318,7 +24479,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if len(online_list) > 40:
                     txt += f"\n… و {len(online_list) - 40} مورد دیگر"
             if warn_txt: txt = warn_txt + "\n\n" + txt
-        await query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="info_back")]]), parse_mode="HTML")
+        await query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="users_hub" if role == 'admin' else "nav:agent_reports")]]), parse_mode="HTML")
     elif d == "info_chart" and MATPLOTLIB_AVAILABLE and role == 'admin':
         buf = await asyncio.to_thread(_generate_sales_chart_buffer)
         if buf:
@@ -24326,9 +24487,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_photo(chat_id=update.effective_chat.id, photo=InputFile(buf, filename="chart.png"), caption="📈 نمودار فروش 7 روز گذشته")
         else: await query.message.reply_text("❌ خطا در رسم نمودار")
     elif d == "info_back":
-        kb = [[InlineKeyboardButton("📊 اطلاعات کلی حساب", callback_data="info_general")], [InlineKeyboardButton("⚡️ مشاهده کاربران آنلاین", callback_data="info_online")]]
-        if MATPLOTLIB_AVAILABLE and role == 'admin': kb.append([InlineKeyboardButton("📈 نمودار فروش ۷ روز گذشته", callback_data="info_chart")])
-        await query.edit_message_text("📊 <b>پورتال گزارشات</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+        if role in ('admin', 'agent'):
+            safe_clear_context(context)
+            await _show_nav_finance(query, update, context)
 
     # ==========================================
     # 💵 استخر «قابل‌برداشت» نماینده — برداشت نقدی یا انتقال به کیف‌پول قابل‌خرج
@@ -24415,10 +24576,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 🆕 «تنظیمات مالی» ادمین: دو زیرگزینه — کارت مدیر (سیستم) / کارت هرکدام از نمایندگان
     elif d == "fin_menu" and role == 'admin':
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💳 شماره کارت مدیر", callback_data="fin_admin_card")],
-            [InlineKeyboardButton("💳 شماره کارت نمایندگان", callback_data="fin_agents_1")]])
-        await query.edit_message_text("💳 <b>تنظیمات مالی</b>\n\nکدام کارت را می‌خواهید مدیریت کنید؟", parse_mode="HTML", reply_markup=kb)
+        safe_clear_context(context)
+        await _show_nav_cards(query)
 
     elif d == "fin_admin_card" and role == 'admin':
         card = await asyncio.to_thread(_db_get_setting, 'bank_card', 'تنظیم نشده')
@@ -24519,7 +24678,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['state'] = 'BUY_MONTHS'
         kb = [[InlineKeyboardButton(f"{i} ماهه", callback_data=f"bm_{i}") for i in range(1, 4)],
               [InlineKeyboardButton("↩️ انتخاب سرویس", callback_data="buy_back_start")]]
-        await query.edit_message_text("➕ <b>فروش › SSH</b>\n━━━━━━━━━━━━━━\n📅 مدت اشتراک را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+        await query.edit_message_text("➕ <b>فروش › SSH</b>\n📅 مدت اشتراک را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
     elif d == "v2ray_buy_menu":
         # Phase 5.7: one guided V2Ray sales wizard.  Keep the existing
         # settlement callbacks underneath for compatibility, but do not expose
@@ -24554,14 +24713,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         commercial_hint = []
         if v2_vol_en:
-            commercial_hint.append("حجم مشخص: قیمت‌گذاری فعلی به‌ازای هر گیگ")
+            commercial_hint.append("حجم مشخص: قیمت هر گیگ")
         if v2_unlimit_en:
-            commercial_hint.append("حجم نامحدود: قیمت‌گذاری فعلی بر اساس مدت و تعداد کاربر")
+            commercial_hint.append("حجم نامحدود: قیمت بر اساس مدت و تعداد کاربر")
         hint = "\n".join(f"• {item}" for item in commercial_hint)
 
         await query.edit_message_text(
             "➕ <b>فروش › V2Ray › مرحله ۱: حجم</b>\n"
-            "━━━━━━━━━━━━━━\n"
             "حجم اشتراک را انتخاب کنید.\n\n"
             f"{hint}",
             reply_markup=InlineKeyboardMarkup(kb),
@@ -24583,7 +24741,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await query.edit_message_text(
             "➕ <b>فروش › V2Ray › حجم نامحدود › مرحله ۲</b>\n"
-            "━━━━━━━━━━━━━━\n"
+            ""
             "مدت و تعداد کاربر را انتخاب کنید:",
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode="HTML",
@@ -25728,8 +25886,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         filter_threshold = await asyncio.to_thread(_db_get_filter_detect_threshold)
         kb = [[InlineKeyboardButton("🔍 انتخاب و انتقال کاربر(ها)", callback_data="ipsvc_search")],
               [InlineKeyboardButton("👥 انتقال همهٔ کاربران", callback_data="ipsvc_allusers")],
-              [InlineKeyboardButton("⚖️ تقسیم متوازن (غیرفعال — مسیر قدیمی)", callback_data="ipsvc_distribute")],
-              [InlineKeyboardButton("🩺 بررسی فشار سرور (بدون انتقال)", callback_data="ipsvc_auto")],
               [InlineKeyboardButton("🛡 وضعیت و مسدودسازی IPها / 📡خرید سرور جدید(دستی)", callback_data="hp_menu")],
               [InlineKeyboardButton(f"{filter_icon} شناسایی خودکار فیلتر ({'\u0641\u0639\u0627\u0644' if filter_enabled else '\u063a\u06cc\u0631\u0641\u0639\u0627\u0644'}) — آستانه: {filter_threshold:.0f}\u066a", callback_data="ipsvc_filter_settings")],
               [InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")]]
@@ -27602,8 +27758,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🌍 مدیریت دامنه‌ها (فقط ادمین)
     # ==========================================
     elif d == "dom_menu" and role == 'admin':
-        kb = [[InlineKeyboardButton("➕ افزودن دامنه", callback_data="dom_add")],
-              [InlineKeyboardButton("📋 لیست دامنه‌ها", callback_data="dom_list")],
+        kb = [[InlineKeyboardButton("➕ افزودن دامنه", callback_data="dom_add"),
+               InlineKeyboardButton("📋 لیست دامنه‌ها", callback_data="dom_list")],
               [InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")]]
         await query.edit_message_text("🌍 <b>مدیریت دامنه‌ها</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
     elif d == "dom_add" and role == 'admin':
@@ -28263,7 +28419,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🟢 ساخت عمده SSH (فعال)" if bulk_en else "🔴 ساخت عمده SSH (غیرفعال)", callback_data="tsell_bulk")],
             [InlineKeyboardButton("🟢 فروش V2Ray نامحدود (فعال)" if v2_unlimit_en else "🔴 فروش V2Ray نامحدود (غیرفعال)", callback_data="tsell_v2ray_unlimit")],
             [InlineKeyboardButton("🟢 فروش V2Ray حجمی (فعال)" if v2_vol_en else "🔴 فروش V2Ray حجمی (غیرفعال)", callback_data="tsell_v2ray_vol")],
-            [InlineKeyboardButton("🔙 بازگشت", callback_data="super_admin_back")]
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="nav:settings")]
         ]
         await query.edit_message_text("⚙️ <b>مدیریت فروش و ساخت سرویس‌ها</b>\n\nبا خاموش کردن هر بخش، دکمهٔ آن از منوی «🛒 خرید اشتراک» برای تمامی کاربران (ادمین و نماینده) پنهان می‌شود.", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
@@ -28283,7 +28439,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🟢 ساخت عمده SSH (فعال)" if bulk_en else "🔴 ساخت عمده SSH (غیرفعال)", callback_data="tsell_bulk")],
             [InlineKeyboardButton("🟢 فروش V2Ray نامحدود (فعال)" if v2_unlimit_en else "🔴 فروش V2Ray نامحدود (غیرفعال)", callback_data="tsell_v2ray_unlimit")],
             [InlineKeyboardButton("🟢 فروش V2Ray حجمی (فعال)" if v2_vol_en else "🔴 فروش V2Ray حجمی (غیرفعال)", callback_data="tsell_v2ray_vol")],
-            [InlineKeyboardButton("🔙 بازگشت", callback_data="super_admin_back")]
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="nav:settings")]
         ]
         await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(kb))
 
@@ -28294,14 +28450,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                f"امروز: {cr_tdy} | دیروز: {cr_yest}\nاین هفته: {cr_wk} | این ماه (شمسی): {cr_mo}\n\n"
                f"🔄 <b>تمدید اکانت:</b>\n"
                f"امروز: {rn_tdy} | دیروز: {rn_yest}\nاین هفته: {rn_wk}\nاین ماه (شمسی): {rn_mo} | ماه گذشته: {rn_lmo}")
-        kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="super_admin_back")]]
+        kb = [[InlineKeyboardButton("🔙 بازگشت", callback_data="nav:finance")]]
         await query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
         
     elif d == "super_agent_list" and _is_superadmin_update(update, context):
         agents = await asyncio.to_thread(_db_get_all_agents)
-        if not agents: return await query.edit_message_text("نماینده‌ای یافت نشد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="super_admin_back")]]))
+        if not agents: return await query.edit_message_text("نماینده‌ای یافت نشد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="nav:finance")]]))
         kb = [[InlineKeyboardButton(f"💼 {a[1]}", callback_data=f"super_agent_det_{a[0]}")] for a in agents]
-        kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="super_admin_back")])
+        kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="nav:finance")])
         await query.edit_message_text("👑 <b>سوابق مالی نمایندگان</b>\nنماینده مورد نظر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
         
     elif d.startswith("super_agent_det_") and _is_superadmin_update(update, context):
@@ -28332,11 +28488,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d == "super_admin_users_menu" and _is_superadmin_update(update, context):
         kb = [
-            [InlineKeyboardButton("👮‍♂️ ادمین‌های ربات", callback_data="super_admin_list_admins")],
-            [InlineKeyboardButton("💼 فروشنده‌های ربات", callback_data="super_admin_list_agents")],
-            [InlineKeyboardButton("🔙 بازگشت", callback_data="super_admin_back")]
+            [InlineKeyboardButton("👮‍♂️ مدیران", callback_data="super_admin_list_admins"),
+             InlineKeyboardButton("💼 نمایندگان", callback_data="super_admin_list_agents")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="nav:settings")]
         ]
-        await query.edit_message_text("👥 <b>مدیریت کاربران و ادمین‌های ربات</b>\n\nبخش مورد نظر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+        await query.edit_message_text("👥 <b>مدیران و دسترسی‌ها</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
     elif d == "super_admin_list_admins" and _is_superadmin_update(update, context):
         await query.answer("⏳ در حال دریافت اطلاعات از تلگرام...", show_alert=False)
@@ -32303,6 +32459,12 @@ async def _post_init(app):
     app.bot_data['filter_detect_task'] = asyncio.create_task(_filter_detect_loop(app))  # 🆕 V89
     app.bot_data['weekly_accounting_task'] = asyncio.create_task(_weekly_accounting_report_loop(app))
 
+async def _cd_post_stop(app):
+    # PTB has stopped update admission and drained its own handlers. Keep
+    # the bot API initialized while registered detached work finishes.
+    app.bot_data['_cd_detached_drained'] = await drain_detached(_BACKGROUND_TASKS)
+
+
 async def _post_shutdown(app):
     # 🔧 رفع باگ «Task was destroyed but it is pending!» که هنگام systemctl stop در لاگ سرور
     # دیده می‌شد: قبلاً هیچ post_shutdown ثبت نشده بود، پس وقتی ربات متوقف می‌شد، تسک پس‌زمینهٔ
@@ -32335,6 +32497,10 @@ async def _post_shutdown(app):
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
 
+    mark_clean_shutdown(app.bot_data.get('_cd_detached_drained', False),
+                        _BACKGROUND_TASKS)
+
+
 if __name__ == '__main__':
     init_db()
     # 🆕 Persistence: فقط user_data (وضعیت لاگین هر چت) روی دیسک ذخیره می‌شود تا بعد از هر
@@ -32345,7 +32511,10 @@ if __name__ == '__main__':
     persistence = PicklePersistence(
         filepath=PERSISTENCE_PATH,
         store_data=PersistenceInput(bot_data=False, chat_data=False, user_data=True, callback_data=False))
-    app = ApplicationBuilder().token(TOKEN).persistence(persistence).post_init(_post_init).post_shutdown(_post_shutdown).build()
+    app = (ApplicationBuilder().token(TOKEN).persistence(persistence)
+           .get_updates_request(PollingHealthRequest())
+           .post_init(_post_init).post_stop(_cd_post_stop)
+           .post_shutdown(_post_shutdown).build())
     # Globally deny previously revoked principal before commands, text,
     # photographs and callbacks (including old persisted admin sessions).
     app.add_handler(TypeHandler(Update, _nvl_revoked_admin_guard), group=-2)

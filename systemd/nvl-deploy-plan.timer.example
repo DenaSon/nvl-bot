@@ -1,0 +1,11 @@
+[Unit]
+Description=Poll NVL master for a validated release plan
+
+[Timer]
+OnBootSec=90s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+Unit=nvl-deploy-plan.service
+
+[Install]
+WantedBy=timers.target

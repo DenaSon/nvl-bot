@@ -67,16 +67,33 @@ def tick(state, config, now=time.time):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--auto", action="store_true",
+                       help="run one accepted automatic deployment tick")
+    group.add_argument("--apply", metavar="EXACT_MASTER_SHA",
+                       help="apply one exact master commit")
+    group.add_argument("--recover", action="store_true",
+                       help="recover the interrupted release checkpoint")
+    args = parser.parse_args()
     os.umask(0o077)
     try:
         if os.geteuid() != 0:
             raise p.Hold("ROOT_REQUIRED")
-        config = pub.accepted_config()
-        if not planner_disabled():
-            raise p.Hold("DISABLE_DRY_RUN_TIMER_FIRST")
         state = p.trusted(pub.STATE, directory=True)
         with pub.exclusive(state):
-            result = tick(state, config)
+            config = pub.accepted_config()
+            if args.recover:
+                checkpoint = p.load_json(state / "release-state.json")
+                if checkpoint["phase"] in pub.FINAL:
+                    raise p.Hold("NOTHING_TO_RECOVER")
+                result = pub.restore(pub.Host(), state, checkpoint)
+            elif args.apply:
+                result = pub.release(state, config, args.apply)
+            else:
+                if not planner_disabled():
+                    raise p.Hold("DISABLE_DRY_RUN_TIMER_FIRST")
+                result = tick(state, config)
     except (FileNotFoundError, BlockingIOError):
         result = {"status": "NOT_ACCEPTED_OR_BUSY"}
     except p.Hold as exc:
@@ -85,7 +102,18 @@ def main():
         pub.report_failure("AUTO_APPLY", exc)
         result = {"status": "DEFERRED", "reason": "LOCAL_OR_RELEASE_CHECK_FAILED"}
     print(json.dumps(result, sort_keys=True))
-    return 2 if result.get("phase") == "HOLD" or result.get("status") == "RECOVERY_REQUIRED" else 0
+    status = result.get("status")
+    if result.get("phase") == "COMMITTED":
+        return 0
+    if status in {"NOT_ACCEPTED_OR_BUSY", "API_BACKOFF", "NO_NEW_COMMIT",
+                  "BOT_OR_OPERATION_BUSY", "POLL_BUSY", "STALE_PLAN"}:
+        return 0
+    if result.get("phase") == "HOLD" or status in {
+        "HOLD", "DEFERRED", "RECOVERY_REQUIRED",
+        "FAILED_CANDIDATE_REQUIRES_REVIEW",
+    }:
+        return 2
+    return 0
 
 
 if __name__ == "__main__":

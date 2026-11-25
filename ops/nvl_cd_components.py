@@ -183,7 +183,7 @@ def plan_updates(old_tree, new_tree, read_old, read_new, live_hash):
     old_targets = component_targets(old_tree, read_old)
     new_targets = component_targets(new_tree, read_new)
     keys = old_targets.keys() | new_targets.keys()
-    updates, drift, managed = [], [], set()
+    updates, drift, managed, affected = [], [], set(), set()
 
     for key in sorted(keys):
         old_item = old_targets.get(key)
@@ -204,6 +204,10 @@ def plan_updates(old_tree, new_tree, read_old, read_new, live_hash):
         old_oid = old_entry[2] if old_entry else ABSENT
         new_oid = new_entry[2] if new_entry else ABSENT
         current = live_hash(destination)
+
+        if old_oid != new_oid:
+            affected.update((old_item or {}).get("components", []))
+            affected.update((new_item or {}).get("components", []))
 
         if old_oid == new_oid:
             if current != old_oid:
@@ -235,6 +239,7 @@ def plan_updates(old_tree, new_tree, read_old, read_new, live_hash):
         "updates": updates,
         "drift": sorted(set(drift)),
         "managed": managed,
+        "components": sorted(affected),
     }
 
 
@@ -273,7 +278,8 @@ def _ensure_parent(parent: Path):
     parent.mkdir(parents=True, exist_ok=True, mode=0o755)
     _trusted_directory(parent)
     info = parent.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0:
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
+            or info.st_mode & 0o022):
         raise ComponentApplyError("COMPONENT_PARENT_UNTRUSTED", False)
 
 
@@ -344,14 +350,14 @@ def _health(component, changed):
             raise ComponentApplyError("NETWORK_ALERTS_BASELINE_UNHEALTHY", False)
 
     elif component == "awg-core-routes":
-        if any(name == "nvl-awg-core-routes.service" for name in names):
+        if "nvl-awg-core-routes.service" in names:
             _run(["/usr/bin/systemctl", "daemon-reload"])
         if any(name.endswith(".py") or name == "nvl-awg-core-routes.service"
                for name in names):
             _run(["/usr/bin/systemctl", "restart", "nvl-awg-core-routes.service"])
-            props = _systemd_props("nvl-awg-core-routes.service")
-            if props.get("Result") != "success" or props.get("ExecMainStatus") != "0":
-                raise ComponentApplyError("AWG_CORE_ROUTES_UNHEALTHY", False)
+        props = _systemd_props("nvl-awg-core-routes.service")
+        if props.get("Result") != "success" or props.get("ExecMainStatus") != "0":
+            raise ComponentApplyError("AWG_CORE_ROUTES_UNHEALTHY", False)
 
     elif component == "awg-witness-refresh":
         unit_changed = any(
@@ -376,10 +382,14 @@ def _manifest_write(path: Path, data):
     _atomic_write(path, raw, 0o600)
 
 
-def apply_updates(repo, updates, candidate, read_blob, backup_root=Path("/var/backups/nvl")):
+def apply_updates(repo, updates, candidate, read_blob,
+                  backup_root=Path("/var/backups/nvl"), affected=None):
     """Apply independent component files with per-release backup and rollback."""
+    affected = sorted(set(affected or ()))
     if not updates:
-        return {"updated": 0, "components": [], "backup": None}
+        for component in affected:
+            _health(component, [])
+        return {"updated": 0, "components": affected, "backup": None}
 
     candidate = str(candidate)
     if not re.fullmatch(r"[0-9a-f]{40}", candidate):
@@ -389,6 +399,10 @@ def apply_updates(repo, updates, candidate, read_blob, backup_root=Path("/var/ba
     backup = backup_root / ("components-" + candidate)
     _ensure_parent(backup_root)
     backup.mkdir(mode=0o700, parents=True, exist_ok=True)
+    backup_info = backup.lstat()
+    if (not stat.S_ISDIR(backup_info.st_mode) or backup_info.st_uid != 0
+            or backup_info.st_mode & 0o077):
+        raise ComponentApplyError("COMPONENT_BACKUP_UNTRUSTED", False)
     _trusted_directory(backup)
     before = backup / "before"
     before.mkdir(mode=0o700, exist_ok=True)
@@ -427,6 +441,9 @@ def apply_updates(repo, updates, candidate, read_blob, backup_root=Path("/var/ba
                         compile(new_raw, item["source"], "exec")
                     except (SyntaxError, ValueError) as exc:
                         raise ComponentApplyError("COMPONENT_PYTHON_SYNTAX", False) from exc
+
+            changed.append(item)
+            if new_raw is not None:
                 mode = old_mode if old_mode is not None else item["mode"]
                 _atomic_write(destination, new_raw, mode)
             else:
@@ -435,7 +452,6 @@ def apply_updates(repo, updates, candidate, read_blob, backup_root=Path("/var/ba
 
             if live_blob(item["destination"]) != item["new_oid"]:
                 raise ComponentApplyError("COMPONENT_PUBLISH_HASH_FAILED", False)
-            changed.append(item)
 
         _manifest_write(backup / "manifest.json", {
             "candidate": candidate,
@@ -449,10 +465,9 @@ def apply_updates(repo, updates, candidate, read_blob, backup_root=Path("/var/ba
             } for item in changed],
         })
 
-        for component in components:
+        for component in sorted(set(components) | set(affected)):
             selected = [item for item in changed if component in item["components"]]
-            if selected:
-                _health(component, selected)
+            _health(component, selected)
 
         return {
             "updated": len(changed),

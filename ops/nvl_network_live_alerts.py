@@ -513,7 +513,7 @@ ADAPTIVE_FIELDS = ("ssh", "udpgw", "close_wait", "awg_tx_mbps")
 
 
 def adaptive_reference(state, stamp):
-    """Medians of healthy 45m/last 5 samples; frozen during an incident."""
+    """Medians of healthy 45m/last 5 minutes; frozen during an incident."""
     history = state.get("recent_good", [])
     if not isinstance(history, list):
         return None
@@ -720,12 +720,14 @@ def telegram_send(config, message, timeout=8):
 
 
 def drain_outbox(db, config, now, send=telegram_send):
-    row = db.execute("""SELECT event_key, message, attempts FROM outbox
-        WHERE status='PENDING' AND next_attempt <= ?
-        ORDER BY created_at, event_key LIMIT 1""", (int(now.timestamp()),)).fetchone()
+    row = db.execute("""SELECT event_key, message, attempts, next_attempt FROM outbox
+        WHERE status='PENDING'
+        ORDER BY created_at, event_key LIMIT 1""").fetchone()
     if row is None:
         return "IDLE"
-    key, message, attempts = row
+    key, message, attempts, retry_at = row
+    if retry_at > int(now.timestamp()):
+        return "IDLE"
     try:
         msg_id = send(config, message)
     except Exception as exc:
@@ -809,6 +811,9 @@ def tick(source, store, config_path, *, now=None, send=telegram_send,
         fresh.append((t, obs))
     with db_connect(store) as db:
         state = state_read(db)
+        # The old escalation event is retired; retain rows for audit.
+        db.execute("UPDATE outbox SET status='SUPPRESSED' "
+                   "WHERE status='PENDING' AND event_key LIKE '%:DEGRADED'")
         for stamp, obs in fresh:
             previous = state["last_sample"]
             process_sample(state, stamp, obs, base, db,

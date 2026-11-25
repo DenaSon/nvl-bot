@@ -56,7 +56,7 @@ def replay(source: Path, store: Path, start: datetime, end: datetime, *,
                 ) else None
             previous = state["phase"]
             live.process_sample(state, stamp, obs, baseline, db,
-                                max_gap_seconds=25 if sample_interval == 15 else 150)
+                                max_gap_seconds=25 if sample_interval == 15 else 75)
             seen += 1
             candidates[obs["alert_candidate"]] += 1
             phases[state["phase"]] += 1

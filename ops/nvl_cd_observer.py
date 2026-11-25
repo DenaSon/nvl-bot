@@ -125,6 +125,15 @@ def event(state):
             count = state.get("file_count")
             if type(count) is int and count >= 0:
                 msg += "\nفایل‌های منتشرشده: " + str(count)
+            component_count = state.get("component_count")
+            if type(component_count) is int and component_count > 0:
+                msg += "\nفایل‌های اجزای مستقل: " + str(component_count)
+            components = state.get("components")
+            if isinstance(components, list) and components:
+                msg += "\nاجزا: " + "، ".join(
+                    name for name in components
+                    if name in ("network-alerts", "awg-core-routes", "awg-witness-refresh")
+                )
             start, finish = state.get("started_at"), state.get("finished_at")
             if type(start) is int and type(finish) is int and 0 <= finish - start <= 86400:
                 msg += "\nمدت استقرار: " + str(finish - start) + " ثانیه"
@@ -132,8 +141,10 @@ def event(state):
                 msg += ("\n\n✅ CI موفق | بکاپ تأیید شد"
                         "\n✅ Polling تلگرام و سلامت دیتابیس تأیید شد"
                         "\n🧪 تست عملیاتی مدیران: در انتظار انجام")
+            elif type(component_count) is int and component_count > 0:
+                msg += "\n✅ CI موفق | اجزای مستقل به‌روزرسانی شدند؛ بات Restart نشد"
             elif state.get("restart_required") is False:
-                msg += "\n✅ CI موفق | بدون انتشار فایل عملیاتی"
+                msg += "\n✅ CI موفق | بدون تغییر عملیاتی"
             msg += "\n" + notes.render(state)
         elif phase == "ROLLED_BACK":
             msg += "\nنسخه جدید قابل تست نیست؛ نسخه قبلی بازیابی شده است."

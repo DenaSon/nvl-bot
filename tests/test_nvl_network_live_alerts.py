@@ -74,7 +74,8 @@ class LiveAlertsTests(unittest.TestCase):
 
     def _tick(self, at):
         self._write()
-        return live.tick(self.src, self.store, self.config, now=at, send=self.deliver)
+        return live.tick(self.src, self.store, self.config, now=at, send=self.deliver,
+                         max_gap_seconds=150)
 
     def test_incident_escalation_and_recovery_group_only(self):
         for i in range(85):
@@ -90,7 +91,9 @@ class LiveAlertsTests(unittest.TestCase):
         alltext = "\n".join(self.calls)
         self.assertEqual(len(self.calls), 3)
         self.assertIn("اختلال احتمالی", alltext)
-        self.assertIn("تشدید", alltext)
+        self.assertIn("تأیید اختلال", alltext)
+        self.assertNotIn("تشدید", alltext)
+        self.assertEqual(sum(live.ALERT_MENTIONS in m for m in self.calls), 2)
         self.assertIn("بازگشت", alltext)
         self.assertRegex(alltext, r"AWG  RX <b>[0-9.]+</b>.*TX <b>[0-9.]+</b>")
         self.assertRegex(alltext, r"ETH  RX <b>[0-9.]+</b>.*TX <b>[0-9.]+</b>")
@@ -103,91 +106,77 @@ class LiveAlertsTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 3)
         self.assertEqual(outcome["state"], "NORMAL")
 
-    def test_fast_two_consecutive_issues_alert_one_sample_earlier(self):
-        # Reproduces 22 Nov 20:56:32/20:57:34 evidence with a stable
-        # healthy lead-in. The old 3-of-5 rule would fire on sample 3.
+    def test_fast_two_consecutive_issues_info_then_confirmation(self):
         for i in range(8):
             t = T0 + timedelta(minutes=i)
             r = row(t, ssh=215, cw=44) if i == 6 else (
                 row(t, ssh=244, cw=67) if i == 7 else row(t))
             self.events.append(r)
             self._tick(t + timedelta(seconds=20))
-            if i < 7:
-                self.assertEqual(len(self.calls), 0)
-        self.assertEqual(len(self.calls), 1)
+            self.assertEqual(len(self.calls), 0 if i < 6 else i - 5)
         self.assertIn("اختلال احتمالی", self.calls[0])
+        self.assertIn("تأیید اختلال", self.calls[1])
         with live.db_connect(self.store) as db:
-            sent = db.execute("SELECT event_key FROM outbox WHERE status='SENT'").fetchall()
-            self.assertEqual(len(sent), 1)
-            self.assertTrue(sent[0][0].endswith(":SUSPECTED"))
-
-        # Subsequent suspicious samples must not reannounce same incident.
+            keys = [k for (k,) in db.execute("SELECT event_key FROM outbox ORDER BY created_at")]
+        self.assertTrue(keys[0].endswith(":INFO"))
+        self.assertTrue(keys[1].endswith(":SUSPECTED"))
+        self.assertEqual(keys[0].rsplit(":", 1)[0], keys[1].rsplit(":", 1)[0])
         for i in range(8, 15):
             t = T0 + timedelta(minutes=i)
             self.events.append(row(t, ssh=250, cw=80))
             self._tick(t + timedelta(seconds=20))
-        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(len(self.calls), 2)
 
-    def test_fast_path_single_transient_does_not_alert(self):
-        for i in range(18):
+    def test_fast_path_single_transient_info_only(self):
+        for i in range(9):
             t = T0 + timedelta(minutes=i)
-            is_spike = i in (3, 8, 13)
-            self.events.append(row(t, ssh=210, cw=56) if is_spike else row(t))
+            self.events.append(row(t, ssh=210, cw=56) if i == 3 else row(t))
             self._tick(t + timedelta(seconds=20))
-        self.assertEqual(self.calls, [])
-        self.assertEqual(self._tick(T0 + timedelta(minutes=17, seconds=40))["state"],
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn("اختلال احتمالی", self.calls[0])
+        self.assertEqual(self._tick(T0 + timedelta(minutes=8, seconds=40))["state"],
                          "NORMAL")
 
     def test_fast_path_requires_contiguous_valid_samples(self):
-        # Missing sampling period (>150s) is a monitor UNKNOWN, not
-        # confirmation of a consecutive two-minute fast alarm.
-        self.events = [
-            row(T0, ssh=205, cw=55),
-            row(T0 + timedelta(minutes=4), ssh=205, cw=55),
-        ]
+        self.events = [row(T0, ssh=205, cw=55),
+                       row(T0 + timedelta(minutes=4), ssh=205, cw=55)]
         self._tick(T0 + timedelta(minutes=4, seconds=20))
-        self.assertFalse(any("اختلال احتمالی" in m for m in self.calls))
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn("اختلال احتمالی", self.calls[0])
         self.events.append(row(T0 + timedelta(minutes=5), ssh=205, cw=55))
         self._tick(T0 + timedelta(minutes=5, seconds=20))
-        self.assertEqual(
-            sum("اختلال احتمالی" in m for m in self.calls), 1)
+        self.assertEqual(len(self.calls), 2)
+        self.assertIn("تأیید اختلال", self.calls[1])
 
     def test_fast_path_invalid_sample_breaks_confirmation(self):
-        data = [
-            row(T0, ssh=205, cw=55),
-            row(T0 + timedelta(minutes=1), missing=True),
-            row(T0 + timedelta(minutes=2), ssh=205, cw=55),
-            row(T0 + timedelta(minutes=3), ssh=205, cw=55),
-        ]
+        data = [row(T0, ssh=205, cw=55),
+                row(T0 + timedelta(minutes=1), missing=True),
+                row(T0 + timedelta(minutes=2), ssh=205, cw=55),
+                row(T0 + timedelta(minutes=3), ssh=205, cw=55)]
         for i, entry in enumerate(data):
             self.events.append(entry)
             self._tick(T0 + timedelta(minutes=i, seconds=20))
-            if i <= 2:
-                self.assertFalse(any("اختلال احتمالی" in m for m in self.calls))
-        self.assertEqual(
-            sum("اختلال احتمالی" in m for m in self.calls), 1)
+            self.assertEqual(len(self.calls), 1 if i <= 2 else 2)
+        self.assertIn("تأیید اختلال", self.calls[1])
 
-    def test_fast_and_original_3_of_5_share_single_incident(self):
-        # 2/3 alternating suspicious samples are not consecutive:
-        # preserve 3-of-5 fallback even if fast path never fires.
+    def test_nonconsecutive_anomalies_do_not_confirm(self):
         for i in range(5):
             t = T0 + timedelta(minutes=i)
-            self.events.append(
-                row(t, ssh=200, cw=55) if i in (0, 2, 4) else row(t))
+            self.events.append(row(t, ssh=200, cw=55) if i in (0, 2, 4) else row(t))
             self._tick(t + timedelta(seconds=20))
         self.assertEqual(len(self.calls), 1)
         self.assertIn("اختلال احتمالی", self.calls[0])
         with live.db_connect(self.store) as db:
-            self.assertEqual(
-                db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 1)
 
-    def test_four_of_five_is_not_an_unbounded_stream_of_alerts(self):
+    def test_persistent_anomaly_only_announced_twice(self):
         for i in range(25):
             t = T0 + timedelta(minutes=i)
             self.events.append(row(t, ssh=200, cw=55))
             self._tick(t + timedelta(seconds=20))
-        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(len(self.calls), 2)
         self.assertIn("اختلال احتمالی", self.calls[0])
+        self.assertIn("تأیید اختلال", self.calls[1])
 
     def test_unknown_metric_never_becomes_zero_or_recovery(self):
         for i in range(18):
@@ -219,14 +208,18 @@ class LiveAlertsTests(unittest.TestCase):
             raise live.EvidenceError("Telegram HTTP 503")
         first = live.tick(self.src, self.store, self.config,
                           now=T0 + timedelta(minutes=6, seconds=20),
-                          send=failing)
+                          send=failing, max_gap_seconds=150)
         self.assertIn("SEND_ERROR:", first["delivery"])
-        self.assertEqual(first["outbox_pending"], 1)
+        self.assertEqual(first["outbox_pending"], 2)
         second = self._tick(T0 + timedelta(minutes=6, seconds=30))
-        self.assertEqual(second["outbox_pending"], 1)
+        self.assertEqual(second["outbox_pending"], 2)
         third = self._tick(T0 + timedelta(minutes=8, seconds=21))
-        self.assertEqual(third["outbox_pending"], 0)
-        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(third["outbox_pending"], 1)
+        fourth = self._tick(T0 + timedelta(minutes=8, seconds=40))
+        self.assertEqual(fourth["outbox_pending"], 0)
+        self.assertEqual(len(self.calls), 2)
+        self.assertIn("اختلال احتمالی", self.calls[0])
+        self.assertIn("تأیید اختلال", self.calls[1])
 
     def test_malformed_historical_log_does_not_block_live_alert(self):
         self.events = [row(T0 + timedelta(minutes=i), ssh=205, cw=55)
@@ -356,7 +349,7 @@ class LiveAlertsTests(unittest.TestCase):
         m["eth_tx_mbps"] = 25.0
         incident = "NVL-20261122T110000Z-001"
         moment = (T0 + timedelta(minutes=9)).isoformat()
-        for phase in ("SUSPECTED", "DEGRADED", "RECOVERED"):
+        for phase in ("SUSPECTED", "RECOVERED"):
             msg = live.render(phase, incident, moment, m, base)
             title, *body = msg.splitlines()
             self.assertIn("NVL |", title)
@@ -377,14 +370,17 @@ class LiveAlertsTests(unittest.TestCase):
             self.assertNotIn("بدون", msg)
             self.assertNotIn("📊", msg)
             self.assertNotIn("📶", msg)
-            self.assertLessEqual(len(msg.splitlines()), 14)
+            self.assertLessEqual(len(msg.splitlines()), 16)
+            self.assertEqual(live.ALERT_MENTIONS in msg, phase == "SUSPECTED")
             self.assertLess(len(msg), 1300)
             self.assertEqual(msg.count("<b>"), msg.count("</b>"))
             self.assertEqual(msg.count("<i>"), msg.count("</i>"))
         self.assertIn("Signal: SSH + CLOSE-WAIT elevated.",
                       live.render("SUSPECTED", incident, moment, m, base))
-        self.assertIn("Connection surge",
-                      live.render("DEGRADED", incident, moment, m, base))
+        info = live.render("INFO", incident, moment, m, base)
+        self.assertIn(live.ALERT_MENTIONS, info)
+        self.assertIn("CLOSE-WAIT", info)
+        self.assertNotIn("Traffic", info)
         self.assertIn("Client access not verified.",
                       live.render("RECOVERED", incident, moment, m, base))
 

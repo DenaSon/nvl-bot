@@ -175,9 +175,11 @@ class ComponentCatalogTests(unittest.TestCase):
             "nvl-awg-core-routes.service": b"[Service]\n",
         })
         bot_paths = components.bot_runtime_paths(new, read_new)
+        service_path = "/etc/systemd/system/nvl-awg-core-routes.service"
+        live = {service_path: old["nvl-awg-core-routes.service"][2]}
         plan = components.plan_updates(
             old, new, read_old, read_new,
-            lambda _path: "f" * 40,
+            lambda path: live.get(path, old["nvl_awg_core_routes.py"][2]),
             bot_inventory=bot_paths,
         )
         self.assertEqual(plan["updates"], [])

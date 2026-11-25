@@ -17,9 +17,11 @@ import time
 import traceback
 
 if __package__:
+    from . import nvl_cd_components as components
     from . import nvl_cd_planner as p
     from . import nvl_cd_release_notes as notes
 else:
+    import nvl_cd_components as components
     import nvl_cd_planner as p
     import nvl_cd_release_notes as notes
 
@@ -482,16 +484,23 @@ def restore(host, state, checkpoint):
 
 
 def publish(host, state, repo, baseline, candidate, updates, old, new, revalidate,
-            release_notes=None):
+            release_notes=None, component_result=None):
     if not host.active() or not host.idle():
         raise p.Hold("BOT_OR_OPERATION_BUSY")
     started_at = int(time.time())
     directory, record = stage(host, repo, baseline, candidate, updates, old, new)
+    component_result = component_result or {}
+    component_count = int(component_result.get("updated", 0))
     checkpoint = {"deployed": baseline, "candidate": candidate,
                   "backup": str(directory),
                   "manifest_sha256": file_digest(directory / "manifest.json"),
                   "started_at": started_at, "restart_required": True,
-                  "file_count": len(updates), "release_notes": release_notes or {}}
+                  "file_count": len(updates) + component_count,
+                  "bot_file_count": len(updates),
+                  "component_count": component_count,
+                  "components": component_result.get("components", []),
+                  "component_backup": component_result.get("backup"),
+                  "release_notes": release_notes or {}}
     verified_manifest(host, checkpoint)
     # Last read-only checks; no stale saved plan used as authority.
     revalidate()
@@ -582,29 +591,67 @@ def release(state, config, expected):
     old, new = p.tree(repo, baseline), p.tree(repo, candidate)
     host = Host()
     inventory = p.inventory_paths(config["inventory"])
-    plan = p.build_plan(old, new, inventory, host.live, p.control_plane_blob)
+    read_component_blob = lambda oid: p.git(repo, "cat-file", "blob", oid)
+    build = lambda: p.build_plan(
+        old, new, inventory, host.live, p.control_plane_blob,
+        read_component_blob, components.live_blob,
+    )
+    plan = build()
     if plan["status"] != "PLAN_READY":
         raise p.Hold("PLAN_NOT_READY")
+
+    # Component targets are published independently of nvlbot. Existing live
+    # candidate hashes are reconciled as already deployed; only old->new files
+    # are written. Component state/telemetry databases are never replaced.
+    p.check_gate(candidate)
+    try:
+        component_result = components.apply_updates(
+            repo, plan["component_updates"], candidate, read_component_blob,
+            backup_root=BACKUPS, affected=plan["components"],
+        )
+    except components.ComponentApplyError as exc:
+        report_failure("COMPONENT_DEPLOY", exc)
+        raise p.Hold(
+            "COMPONENT_ROLLBACK_FAILED" if not exc.rolled_back
+            else "COMPONENT_DEPLOY_RETRY"
+        ) from exc
+
+    plan = build()
+    if (plan["status"] != "PLAN_READY" or plan["component_updates"]
+            or plan["component_drift"] if "component_drift" in plan else False):
+        raise p.Hold("COMPONENT_POSTCHECK_FAILED")
+
     def revalidate():
         if p.remote_head() != candidate:
             raise p.Hold("MASTER_MOVED")
         p.check_gate(candidate)
         if p.remote_head() != candidate:
             raise p.Hold("MASTER_MOVED")
-        if p.build_plan(old, new, inventory, host.live, p.control_plane_blob) != plan:
+        if build() != plan:
             raise p.Hold("PLAN_CHANGED")
+
     # Metadata is advisory, fetched before cutover and never part of the gate.
     release_notes = notes.collect(repo, baseline, candidate)
+    component_count = int(component_result.get("updated", 0))
+    total_files = len(plan["updates"]) + component_count
     if not plan["updates"]:
         revalidate()
-        return set_phase(state, {"candidate": candidate, "restart_required": False,
-                                 "started_at": int(time.time()), "file_count": 0,
-                                 "previous_deployed": baseline, "release_notes": release_notes},
-                         "COMMITTED", deployed=candidate)
+        return set_phase(state, {
+            "candidate": candidate, "restart_required": False,
+            "started_at": int(time.time()), "file_count": total_files,
+            "bot_file_count": 0, "component_count": component_count,
+            "components": component_result.get("components", plan["components"]),
+            "component_backup": component_result.get("backup"),
+            "previous_deployed": baseline, "release_notes": release_notes,
+        }, "COMMITTED", deployed=candidate)
+
     # The rollback baseline must already implement the polling contract.
     host.healthy()
-    return publish(host, state, repo, baseline, candidate, plan["updates"], old, new,
-                   revalidate, release_notes=release_notes)
+    return publish(
+        host, state, repo, baseline, candidate, plan["updates"], old, new,
+        revalidate, release_notes=release_notes,
+        component_result=component_result,
+    )
 
 
 def accepted_config():

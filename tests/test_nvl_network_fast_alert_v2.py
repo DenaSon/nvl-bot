@@ -68,7 +68,8 @@ class AdaptiveFastAlertTests(unittest.TestCase):
             self.sent.append(message)
             return 1000 + len(self.sent)
         return live.tick(self.source, self.store, self.config,
-                         now=t + timedelta(seconds=20), send=send)
+                         now=t + timedelta(seconds=20), send=send,
+                         max_gap_seconds=150)
 
     def stable(self, count=20):
         for i in range(count):
@@ -87,9 +88,9 @@ class AdaptiveFastAlertTests(unittest.TestCase):
         self.stable()
         for i in (20, 21):
             self.tick(i, ssh=140, udp=88, cw=43, tx=15000)
-        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(len(self.sent), 2)
         self.assertIn("اختلال احتمالی", self.sent[0])
-        self.assertIn("CW SPIKE", self.sent[0])
+        self.assertIn("CW SPIKE", self.sent[1])
         self.assertNotIn("123456789:", self.sent[0])
         decisions = self.decisions()
         self.assertIn(decisions[-1][0], ("SUSPECTED", "DEGRADED"))
@@ -97,10 +98,10 @@ class AdaptiveFastAlertTests(unittest.TestCase):
 
     def test_warmup_strong_corroborated_problem_still_alerts(self):
         self.tick(0, ssh=130, udp=85, cw=44, tx=13000)
-        self.assertEqual(self.sent, [])
-        self.tick(1, ssh=130, udp=85, cw=44, tx=13000)
         self.assertEqual(len(self.sent), 1)
-        self.assertIn("WARMUP", self.sent[0])
+        self.tick(1, ssh=130, udp=85, cw=44, tx=13000)
+        self.assertEqual(len(self.sent), 2)
+        self.assertIn("WARMUP", self.sent[1])
 
     def test_sudden_ssh_and_udpgw_collapse_alerts_with_no_cw_spike(self):
         self.stable()
@@ -126,31 +127,36 @@ class AdaptiveFastAlertTests(unittest.TestCase):
             candidate in ("SUSPECTED", "DEGRADED")
             for candidate, _, _ in self.decisions()))
 
-    def test_one_minute_spike_not_enough(self):
+    def test_one_minute_spike_only_info(self):
         self.stable()
         self.tick(20, ssh=140, udp=85, cw=45, tx=13000)
         self.tick(21)
-        self.assertEqual(self.sent, [])
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("اختلال احتمالی", self.sent[0])
 
     def test_invalid_sample_breaks_two_sample_gate(self):
         self.stable()
         self.tick(20, ssh=140, udp=85, cw=45, tx=13000)
         self.tick(21, missing=True)
         self.tick(22, ssh=140, udp=85, cw=45, tx=13000)
-        self.assertEqual(self.sent, [])
-        self.tick(23, ssh=140, udp=85, cw=45, tx=13000)
         self.assertEqual(len(self.sent), 1)
+        self.tick(23, ssh=140, udp=85, cw=45, tx=13000)
+        self.assertEqual(len(self.sent), 2)
 
     def test_incident_escalates_recovers_and_never_spams(self):
         self.stable()
         for i in range(20, 27):
             self.tick(i, ssh=120, udp=75, cw=50, tx=12000)
         self.assertEqual(len(self.sent), 2)
-        self.assertIn("تشدید", self.sent[1])
+        self.assertIn("تأیید اختلال", self.sent[1])
+        self.assertNotIn("تشدید", "\n".join(self.sent))
+        self.assertIn(live.ALERT_MENTIONS, self.sent[0])
+        self.assertIn(live.ALERT_MENTIONS, self.sent[1])
         for i in range(27, 60):
             self.tick(i)
         self.assertEqual(len(self.sent), 3)
         self.assertIn("بازگشت", self.sent[2])
+        self.assertNotIn(live.ALERT_MENTIONS, self.sent[2])
         with live.db_connect(self.store) as db:
             self.assertEqual(db.execute(
                 "SELECT COUNT(*) FROM outbox WHERE status='SENT'"
@@ -167,7 +173,7 @@ class AdaptiveFastAlertTests(unittest.TestCase):
         report = offline.replay(
             self.source, self.store, T0, T0 + timedelta(minutes=22))
         self.assertEqual(report["telegram_messages_sent"], 0)
-        self.assertEqual(len(report["would_queue"]), 1)
+        self.assertEqual(len(report["would_queue"]), 2)
         self.assertEqual(report["samples"], 22)
         self.assertEqual(sent_before, len(self.sent))
         self.assertEqual((self.store / "state.sqlite3").read_bytes(), original_state)
@@ -184,6 +190,57 @@ class AdaptiveFastAlertTests(unittest.TestCase):
         with live.db_connect(self.store) as db:
             state = live.state_read(db)
         self.assertEqual(len(state["recent_good"]), original)
+
+
+    def test_fast_cadence_cw_only_partial_info_then_two_full_samples(self):
+        base = live.baseline_load(self.store)
+        state = live.default_state()
+        with live.db_connect(self.store) as db:
+            # Exactly both thresholds met: CW 20, reference 10.
+            obs = live.observation(sample(T0, cw=20, missing=True))
+            live.process_sample(state, T0, obs, base, db)
+            keys = lambda: [k for (k,) in db.execute(
+                "SELECT event_key FROM outbox ORDER BY created_at")]
+            self.assertEqual(len(keys()), 1)
+            self.assertTrue(keys()[0].endswith(":INFO"))
+            for i in (1, 2):
+                t = T0 + timedelta(seconds=15*i)
+                obs = live.observation(sample(t, ssh=215, cw=44))
+                live.process_sample(state, t, obs, base, db)
+                self.assertEqual(len(keys()), i)
+            self.assertTrue(keys()[1].endswith(":SUSPECTED"))
+            for i in range(3, 8):
+                t = T0 + timedelta(seconds=15*i)
+                live.process_sample(state, t, live.observation(sample(t)), base, db)
+                self.assertEqual(len(keys()), 2 if i < 7 else 3)
+            self.assertTrue(keys()[2].endswith(":RECOVERED"))
+            self.assertEqual(state["phase"], "NORMAL")
+
+    def test_fast_cadence_gap_breaks_confirmation_and_cw_only_never_confirms(self):
+        base = live.baseline_load(self.store)
+        state = live.default_state()
+        with live.db_connect(self.store) as db:
+            for seconds in (0, 15, 30):
+                t = T0 + timedelta(seconds=seconds)
+                live.process_sample(state, t, live.observation(sample(t, cw=20)), base, db)
+            self.assertEqual(state["phase"], "INFO")
+            for seconds in (45, 90):
+                t = T0 + timedelta(seconds=seconds)
+                live.process_sample(state, t, live.observation(sample(t, ssh=215, cw=44)), base, db)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 1)
+            t = T0 + timedelta(seconds=105)
+            live.process_sample(state, t, live.observation(sample(t, ssh=215, cw=44)), base, db)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 2)
+
+    def test_fast_reference_retains_45_minutes_not_45_samples(self):
+        base = live.baseline_load(self.store)
+        state = live.default_state()
+        with live.db_connect(self.store) as db:
+            for i in range(200):
+                t = T0 + timedelta(seconds=i*15)
+                live.process_sample(state, t, live.observation(sample(t)), base, db)
+            self.assertEqual(len(state["recent_good"]), 180)
+            self.assertIsNotNone(live.adaptive_reference(state, t))
 
 
 if __name__ == "__main__":

@@ -185,6 +185,16 @@ def plan_updates(old_tree, new_tree, read_old, read_new, live_hash):
     keys = old_targets.keys() | new_targets.keys()
     updates, drift, managed, affected = [], [], set(), set()
 
+    for key in keys:
+        source, _destination = key
+        old_entry = old_tree.get(source)
+        new_entry = new_tree.get(source)
+        old_oid = old_entry[2] if old_entry else ABSENT
+        new_oid = new_entry[2] if new_entry else ABSENT
+        if old_oid != new_oid:
+            affected.update((old_targets.get(key) or {}).get("components", []))
+            affected.update((new_targets.get(key) or {}).get("components", []))
+
     for key in sorted(keys):
         old_item = old_targets.get(key)
         new_item = new_targets.get(key)
@@ -205,12 +215,9 @@ def plan_updates(old_tree, new_tree, read_old, read_new, live_hash):
         new_oid = new_entry[2] if new_entry else ABSENT
         current = live_hash(destination)
 
-        if old_oid != new_oid:
-            affected.update((old_item or {}).get("components", []))
-            affected.update((new_item or {}).get("components", []))
-
         if old_oid == new_oid:
-            if current != old_oid:
+            if (set((old_item or {}).get("components", []))
+                    & affected and current != old_oid):
                 drift.append(source)
             continue
 

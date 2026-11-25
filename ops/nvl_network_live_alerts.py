@@ -288,7 +288,8 @@ def baseline_load(folder):
 
 
 def default_state():
-    return {"version": STATE_VERSION, "phase": "NORMAL", "incident": None,
+    return {"version": STATE_VERSION, "policy_version": DETECTION_POLICY_VERSION,
+            "phase": "NORMAL", "incident": None,
             "seq": 0, "last_sample": None, "window": [], "recovery": [],
             "recovering_since": None, "recovery_streak": 0,
             "incident_open": False, "unknown_alerted": False,
@@ -330,6 +331,15 @@ def state_read(db):
     data = json.loads(row[0]) if row else default_state()
     if data.get("version") != STATE_VERSION:
         raise EvidenceError("Unsupported persisted detector version")
+    policy = data.get("policy_version", 1)
+    if (not isinstance(policy, int) or isinstance(policy, bool)
+            or policy > DETECTION_POLICY_VERSION):
+        raise EvidenceError("Unsupported persisted detection policy")
+    if policy != DETECTION_POLICY_VERSION:
+        # Old two-sample confirmation windows are not valid evidence under
+        # the stricter three-sample policy. Preserve incident/outbox/history.
+        data["window"] = []
+        data["policy_version"] = DETECTION_POLICY_VERSION
     return data
 
 
@@ -385,6 +395,8 @@ def render_metric(field, metrics, base, *, compact_label=None):
 
 ALERT_MENTIONS = "@raad_co @ja_va_dd"
 LIVE_MAX_GAP_SECONDS = 25
+LIVE_CONFIRMATION_SAMPLES = 3
+DETECTION_POLICY_VERSION = 3
 
 
 def render(phase, incident, stamp, metrics, baseline, *, reason=None):
@@ -452,7 +464,7 @@ def render(phase, incident, stamp, metrics, baseline, *, reason=None):
                                compact_label="TX")),
             ])
         summary = {
-            "SUSPECTED": "Signal: SSH + CLOSE-WAIT elevated.",
+            "SUSPECTED": "Signal: Sustained connection / traffic degradation.",
             "DEGRADED": "Signal: Connection surge + AWG TX / UDPGW decline.",
             "RECOVERED": "Core metrics stabilized · Client access not verified.",
         }
@@ -464,7 +476,7 @@ def render(phase, incident, stamp, metrics, baseline, *, reason=None):
             signal,
             "<i>Core telemetry only · ISP filtering not confirmed.</i>",
         ])
-    if phase in ("INFO", "SUSPECTED"):
+    if phase == "SUSPECTED":
         lines.extend(["", ALERT_MENTIONS])
     return "\n".join(lines)
 
@@ -484,14 +496,17 @@ def transition(state, next_phase, stamp, metrics, base, db, *, reason=None):
             state["incident"] = make_incident(stamp, state)
             state["incident_open"] = True
             state["alerted_phases"] = []
-        announced = state["alerted_phases"]
-        # Legacy confirmed incidents already have SUSPECTED or DEGRADED keys.
-        confirmed = any(p in announced for p in ("SUSPECTED", "DEGRADED"))
-        if next_phase not in announced and not confirmed:
-            key = f"{state['incident']}:{next_phase}"
-            queue(db, key, render(next_phase, state["incident"], stamp, metrics,
-                                  base, reason=reason), instant(stamp).isoformat())
-            announced.append(next_phase)
+        # INFO is an internal observation only. A CLOSE-WAIT spike alone
+        # must never create a Telegram notification.
+        if next_phase == "SUSPECTED":
+            announced = state["alerted_phases"]
+            # Legacy confirmed incidents already have SUSPECTED or DEGRADED keys.
+            confirmed = any(p in announced for p in ("SUSPECTED", "DEGRADED"))
+            if next_phase not in announced and not confirmed:
+                key = f"{state['incident']}:{next_phase}"
+                queue(db, key, render(next_phase, state["incident"], stamp, metrics,
+                                      base, reason=reason), instant(stamp).isoformat())
+                announced.append(next_phase)
     elif next_phase == "NORMAL" and state["incident_open"]:
         if any(p in state["alerted_phases"] for p in ("SUSPECTED", "DEGRADED")):
             key = f"{state['incident']}:RECOVERED"
@@ -537,76 +552,97 @@ def adaptive_reference(state, stamp):
 
 
 def high_sensitivity_candidate(metrics, baseline, state, stamp):
-    """Add multi-signal surge, sudden connection loss and traffic collapse."""
+    """Require independent evidence of connection loss or traffic collapse.
+
+    CLOSE-WAIT and the legacy SSH/CLOSE-WAIT heuristic are diagnostic only.
+    Neither may confirm a customer-facing disruption without corroboration.
+    """
     legacy = classify(metrics, baseline)
-    if legacy in ("UNKNOWN", "SUSPECTED", "DEGRADED"):
-        return legacy, "LEGACY_" + legacy
+    if legacy == "UNKNOWN":
+        return "UNKNOWN", "LEGACY_UNKNOWN"
+
     reference = adaptive_reference(state, stamp)
     if reference is None:
-        # Safe warm-up: preserve legacy rules and flag only strong corroboration.
-        b = baseline["values"]
-        if (metrics["close_wait"] >= max(25, b["close_wait"] * 2,
-                                         b["close_wait"] + 15)
-                and metrics["awg_tx_mbps"] <= b["awg_tx_mbps"] * .60
-                and metrics["udpgw"] <= b["udpgw"] * .80):
-            return "SUSPECTED", "CW_SPIKE+TRAFFIC_DROP_WARMUP"
-        return legacy, "LEGACY_" + legacy
+        # Safe warm-up uses the verified baseline, but applies the same
+        # independent-signal requirements as the adaptive path.
+        ref = baseline["values"]
+        ssh, udp, cw, tx = (
+            metrics["ssh"], metrics["udpgw"], metrics["close_wait"],
+            metrics["awg_tx_mbps"]
+        )
+        ssh_drop = ssh <= ref["ssh"] * .85 and ref["ssh"] - ssh >= 10
+        udp_drop = udp <= ref["udpgw"] * .85 and ref["udpgw"] - udp >= 10
+        tx_drop = (ref["awg_tx_mbps"] >= 8
+                   and tx <= ref["awg_tx_mbps"] * .60
+                   and ref["awg_tx_mbps"] - tx >= 8)
+        connection_collapse = (
+            ssh <= ref["ssh"] * .75
+            and udp <= ref["udpgw"] * .75
+            and ref["ssh"] - ssh >= 12
+            and ref["udpgw"] - udp >= 10)
+        traffic_collapse = tx_drop and (ssh_drop or udp_drop)
+        cw_spike = cw >= max(15, ref["close_wait"] * 2,
+                             ref["close_wait"] + 15)
+        if connection_collapse:
+            return "SUSPECTED", "CONNECTION_COLLAPSE_WARMUP"
+        if traffic_collapse:
+            corroboration = "UDPGW_DROP" if udp_drop else "SSH_DROP"
+            prefix = "CW_SPIKE+" if cw_spike else ""
+            return "SUSPECTED", prefix + "TRAFFIC_COLLAPSE_WARMUP+" + corroboration
+        return (("RECOVERY_CANDIDATE", "LEGACY_RECOVERY_CANDIDATE")
+                if legacy == "RECOVERY_CANDIDATE"
+                else ("NEUTRAL", "LEGACY_NEUTRAL"))
 
-    ref, short = reference
+    ref, _short = reference
     ssh, udp, cw, tx = (
         metrics["ssh"], metrics["udpgw"], metrics["close_wait"],
         metrics["awg_tx_mbps"]
     )
     cw_spike = cw >= max(15, ref["close_wait"] * 2,
-                        ref["close_wait"] + 15)
-    udp_drop = udp <= ref["udpgw"] * .85 and ref["udpgw"] - udp >= 10
-    ssh_drop = ssh <= ref["ssh"] * .85 and ref["ssh"] - ssh >= 10
+                         ref["close_wait"] + 15)
+    udp_drop = (udp <= ref["udpgw"] * .85
+                and ref["udpgw"] - udp >= 10)
+    ssh_drop = (ssh <= ref["ssh"] * .85
+                and ref["ssh"] - ssh >= 10)
     tx_drop = (ref["awg_tx_mbps"] >= 8
                and tx <= ref["awg_tx_mbps"] * .60
                and ref["awg_tx_mbps"] - tx >= 8)
-    quick_connection_drop = (
-        ssh <= short["ssh"] * .85 or udp <= short["udpgw"] * .85)
+
+    # A connection collapse needs both independent connection counters to
+    # fall materially. A single UDPGW dip is not sufficient.
     connection_collapse = (
         ssh <= ref["ssh"] * .75
         and udp <= ref["udpgw"] * .75
         and ref["ssh"] - ssh >= 12
         and ref["udpgw"] - udp >= 10
-        and quick_connection_drop)
-    traffic_collapse = (
-        tx_drop and tx <= short["awg_tx_mbps"] * .70
-        and (ssh_drop or udp_drop or cw_spike))
-    abnormal_surge = (
-        cw_spike and ssh >= ref["ssh"] * 1.15
-        and ssh - ref["ssh"] >= 8)
-    degraded = (
-        (cw >= max(40, ref["close_wait"] + 35,
-                   ref["close_wait"] * 4)
-         and (tx <= ref["awg_tx_mbps"] * .55
-              or udp <= ref["udpgw"] * .75))
-        or (connection_collapse and tx_drop))
+    )
+    # A traffic collapse needs a sustained AWG throughput drop plus at least
+    # one independent connection-count drop. CLOSE-WAIT is never corroboration.
+    traffic_collapse = tx_drop and (ssh_drop or udp_drop)
 
-    if cw_spike and (udp_drop or tx_drop or abnormal_surge):
-        reason = "CW_SPIKE+" + (
-            "AWG_TX_DROP" if tx_drop else
-            "UDPGW_DROP" if udp_drop else "SSH_SURGE")
-        return ("DEGRADED" if degraded else "SUSPECTED"), reason
     if connection_collapse:
-        return ("DEGRADED" if degraded else "SUSPECTED"), "CONNECTION_COLLAPSE"
+        return "SUSPECTED", "CONNECTION_COLLAPSE"
     if traffic_collapse:
-        return "SUSPECTED", "TRAFFIC_COLLAPSE"
+        corroboration = "UDPGW_DROP" if udp_drop else "SSH_DROP"
+        prefix = "CW_SPIKE+" if cw_spike else ""
+        return "SUSPECTED", prefix + "TRAFFIC_COLLAPSE+" + corroboration
 
-    # An unresolved connection loss must not be labelled as recovery.
+    # Preserve the old recovery behavior, but suppress legacy SSH/CW alarms.
+    # A rising SSH count or a CLOSE-WAIT spike alone is not an outage signal.
     if (state.get("incident_open") and legacy == "RECOVERY_CANDIDATE"
             and ssh <= ref["ssh"] * .80
             and udp <= ref["udpgw"] * .80):
         return "NEUTRAL", "ONGOING_CONNECTION_DROP"
-    return legacy, "LEGACY_" + legacy
+    if legacy == "RECOVERY_CANDIDATE":
+        return "RECOVERY_CANDIDATE", "LEGACY_RECOVERY_CANDIDATE"
+    return "NEUTRAL", "LEGACY_NEUTRAL"
 
 
 def record_healthy_reference(state, stamp, metrics):
     if state.get("incident_open") or state["phase"] != "NORMAL":
         return
-    if metrics.get("alert_candidate") != "RECOVERY_CANDIDATE":
+    if (metrics.get("alert_candidate") != "RECOVERY_CANDIDATE"
+            or metrics.get("early_cw_spike")):
         return
     history = state.get("recent_good", [])
     cutoff = instant(stamp) - timedelta(minutes=45)
@@ -638,17 +674,17 @@ def process_sample(state, stamp, obs, base, db, *,
     state["last_sample"] = stamp_iso
     state["latest_metrics"] = obs
 
-    # INFO depends only on valid CLOSE-WAIT evidence.
+    # CLOSE-WAIT spikes remain diagnostic. INFO is an internal state only;
+    # it never sends Telegram without independently corroborated disruption.
     cw = obs.get("close_wait")
     cw_ref = early_cw_reference(state, stamp_iso, base)
     cw_spike = (isinstance(cw, (int, float)) and not isinstance(cw, bool)
                 and math.isfinite(cw) and cw >= max(cw_ref * 2, cw_ref + 10))
     obs["early_cw_spike"] = cw_spike
     obs["early_cw_reference"] = cw_ref
-    if cw_spike and not state["incident_open"]:
-        info_base = {**base, "values": {**base["values"], "close_wait": cw_ref}}
-        transition(state, "INFO", stamp_iso, obs, info_base, db,
-                   reason="CW_SPIKE")
+    # A CLOSE-WAIT spike alone is recorded in metrics_json only. It must not
+    # open an incident or change phase. Exclude this anomalous sample from the
+    # adaptive healthy history; later healthy samples continue updating it.
 
     if not obs["valid"]:
         state["incomplete_streak"] = state.get("incomplete_streak", 0) + 1
@@ -671,11 +707,12 @@ def process_sample(state, stamp, obs, base, db, *,
     obs["alert_candidate"] = kind
     obs["decision_reason"] = reason
     state["latest_reason"] = reason
-    state["window"] = (state["window"] + [kind])[-2:]
+    state["window"] = (state["window"] + [kind])[-LIVE_CONFIRMATION_SAMPLES:]
     healthy = kind == "RECOVERY_CANDIDATE" and not cw_spike
     state["recovery_streak"] = state["recovery_streak"] + 1 if healthy else 0
     win = state["window"]
-    confirmed = len(win) == 2 and all(k in ("SUSPECTED", "DEGRADED") for k in win)
+    confirmed = (len(win) == LIVE_CONFIRMATION_SAMPLES
+                 and all(k in ("SUSPECTED", "DEGRADED") for k in win))
     if confirmed:
         transition(state, "SUSPECTED", stamp_iso, obs, base, db, reason=reason)
     elif state["incident_open"]:

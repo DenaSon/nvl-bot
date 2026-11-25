@@ -384,7 +384,7 @@ def poll(config, state, now=time.time):
     if candidate == baseline:
         old = tree(repo, baseline)
         reader = lambda oid: git(repo, "cat-file", "blob", oid)
-        inventory = components.effective_inventory(old, old, inventory, reader)
+        inventory = inventory_paths(sorted(components.effective_inventory(old, old, inventory, reader)))
         plan = build_plan(
             old, old, inventory, lambda n: live_blob(runtime, n),
             control_plane_blob, reader, components.live_blob,

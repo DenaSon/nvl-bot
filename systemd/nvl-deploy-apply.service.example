@@ -15,5 +15,5 @@ NoNewPrivileges=true
 ProtectSystem=strict
 # Runtime is /root; ProtectHome=read-only defeats its write exception.
 ProtectHome=false
-ReadWritePaths=/root /var/lib/nvl-deploy /var/backups/nvl
+ReadWritePaths=/root /var/lib/nvl-deploy /var/backups/nvl /opt/nvl-network-alerts /etc/systemd/system
 PrivateTmp=true

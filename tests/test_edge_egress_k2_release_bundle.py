@@ -25,6 +25,14 @@ class SourceBundleTests(unittest.TestCase):
         (examples/'edge_egress_fra1.json').write_text('{"edge_id":"fra1"}\n')
         (examples/'edge_egress_stg1.json').write_text('{"edge_id":"stg1"}\n')
         (examples/'private.json').write_text('{"TEST_SECRET":"excluded"}\n')
+        sampler=(self.repo/'systemd'/'nvl-network-sampler.timer.d')
+        alerts=(self.repo/'systemd'/'nvl-network-alerts.timer.d')
+        sampler.mkdir(parents=True);alerts.mkdir(parents=True)
+        (sampler/'90-nvl-cadence.conf.example').write_text(
+            '[Timer]\nOnUnitActiveSec=15s\n')
+        (alerts/'90-nvl-cadence.conf.example').write_text(
+            '[Timer]\nOnUnitInactiveSec=20s\n')
+        (sampler/'private.conf').write_text('SECRET=excluded\n')
         (self.repo/'master_bot.db').write_bytes(b'excluded fake db')
         self.git('add','.');self.git('commit','-qm','source fixture')
         self.commit=self.git('rev-parse','HEAD').decode().strip()
@@ -43,7 +51,7 @@ class SourceBundleTests(unittest.TestCase):
         second=self.base/'second.tar'
         self.assertEqual(build(self.repo,self.commit,second),(digest,manifest))
         stage=self.unpack(out)
-        self.assertEqual(verify(stage,self.commit,manifest),6)
+        self.assertEqual(verify(stage,self.commit,manifest),8)
         self.assertEqual((stage/'bot_final_v49-2.py').read_text(),'print("reviewed")\n')
         self.assertFalse((stage/'.env').exists());self.assertFalse((stage/'master_bot.db').exists())
         self.assertEqual((stage/'.env.example').read_text(),'EXAMPLE=fixture\n')
@@ -52,6 +60,13 @@ class SourceBundleTests(unittest.TestCase):
                              {'edge_id':edge})
         self.assertFalse((stage/'.env.production').exists())
         self.assertFalse((stage/'ops'/'examples'/'private.json').exists())
+        sampler=stage/'systemd'/'nvl-network-sampler.timer.d'
+        alerts=stage/'systemd'/'nvl-network-alerts.timer.d'
+        self.assertEqual((sampler/'90-nvl-cadence.conf.example').read_text(),
+                         '[Timer]\nOnUnitActiveSec=15s\n')
+        self.assertEqual((alerts/'90-nvl-cadence.conf.example').read_text(),
+                         '[Timer]\nOnUnitInactiveSec=20s\n')
+        self.assertFalse((sampler/'private.conf').exists())
         release=json.loads((stage/'release.json').read_bytes())
         self.assertEqual(release['git_sha'],self.commit)
         self.assertEqual(sha256(out.read_bytes()).hexdigest(),digest)

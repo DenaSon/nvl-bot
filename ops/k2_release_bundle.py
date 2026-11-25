@@ -25,7 +25,9 @@ def _included(name):
     # Exact committed fixtures needed by the shipped regression suite.
     # Arbitrary JSON and real environment files remain excluded.
     if name in (".env.example", "ops/examples/edge_egress_fra1.json",
-                "ops/examples/edge_egress_stg1.json"):
+                "ops/examples/edge_egress_stg1.json",
+                "systemd/nvl-network-sampler.timer.d/90-nvl-cadence.conf.example",
+                "systemd/nvl-network-alerts.timer.d/90-nvl-cadence.conf.example"):
         return True
     return (not path.is_absolute() and ".." not in path.parts
             and not any(part.startswith(".") for part in path.parts)

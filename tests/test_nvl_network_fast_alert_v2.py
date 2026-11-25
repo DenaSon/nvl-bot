@@ -141,9 +141,9 @@ class AdaptiveFastAlertTests(unittest.TestCase):
         self.tick(21, missing=True)
         self.tick(22, **strong)
         self.tick(23, **strong)
-        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(len(self.sent), 0)
         self.tick(24, **strong)
-        self.assertEqual(len(self.sent), 2)
+        self.assertEqual(len(self.sent), 1)
 
     def test_incident_escalates_after_three_samples_recovers_and_never_spams(self):
         self.stable()

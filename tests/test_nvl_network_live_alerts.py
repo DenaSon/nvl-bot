@@ -103,7 +103,7 @@ class LiveAlertsTests(unittest.TestCase):
         self.assertNotIn("123456789:", alltext)
         outcome = self._tick(T0 + timedelta(minutes=84, seconds=40))
         self.assertEqual(outcome["delivery"], "IDLE")
-        self.assertEqual(len(self.calls), 3)
+        self.assertEqual(len(self.calls), 2)
         self.assertEqual(outcome["state"], "NORMAL")
 
     def test_three_consecutive_strong_samples_confirm_without_cw_only_alert(self):

@@ -88,9 +88,9 @@ class AdaptiveFastAlertTests(unittest.TestCase):
         self.stable()
         for i in (20, 21, 22):
             self.tick(i, ssh=140, udp=88, cw=43, tx=15000)
-            self.assertEqual(len(self.sent), 1 if i < 22 else 2)
-        self.assertIn("اختلال احتمالی", self.sent[0])
-        self.assertIn("CW SPIKE", self.sent[1])
+            self.assertEqual(len(self.sent), 0 if i < 22 else 1)
+        self.assertIn("تأیید اختلال", self.sent[0])
+        self.assertIn("CW SPIKE", self.sent[0])
         self.assertNotIn("123456789:", self.sent[0])
         decisions = self.decisions()
         self.assertIn(decisions[-1][0], ("SUSPECTED", "DEGRADED"))
@@ -99,8 +99,8 @@ class AdaptiveFastAlertTests(unittest.TestCase):
     def test_warmup_strong_corroborated_problem_requires_three_samples(self):
         for i in (0, 1, 2):
             self.tick(i, ssh=130, udp=85, cw=44, tx=13000)
-            self.assertEqual(len(self.sent), 1 if i < 2 else 2)
-        self.assertIn("WARMUP", self.sent[1])
+            self.assertEqual(len(self.sent), 0 if i < 2 else 1)
+        self.assertIn("WARMUP", self.sent[0])
 
     def test_sudden_ssh_and_udpgw_collapse_alerts_after_three_samples(self):
         self.stable()
@@ -125,12 +125,14 @@ class AdaptiveFastAlertTests(unittest.TestCase):
             candidate in ("SUSPECTED", "DEGRADED")
             for candidate, _, _ in self.decisions()))
 
-    def test_one_minute_spike_only_info(self):
+    def test_one_minute_cw_spike_is_internal_only(self):
         self.stable()
         self.tick(20, ssh=140, udp=85, cw=45, tx=13000)
         self.tick(21)
-        self.assertEqual(len(self.sent), 1)
-        self.assertIn("اختلال احتمالی", self.sent[0])
+        self.assertEqual(self.sent, [])
+        with live.db_connect(self.store) as db:
+            state = live.state_read(db)
+        self.assertEqual(state["phase"], "INFO")
 
     def test_invalid_sample_breaks_three_sample_gate(self):
         self.stable()
@@ -147,20 +149,19 @@ class AdaptiveFastAlertTests(unittest.TestCase):
         self.stable()
         for i in range(20, 27):
             self.tick(i, ssh=120, udp=75, cw=50, tx=12000)
-        self.assertEqual(len(self.sent), 2)
-        self.assertIn("تأیید اختلال", self.sent[1])
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("تأیید اختلال", self.sent[0])
         self.assertNotIn("تشدید", "\n".join(self.sent))
         self.assertIn(live.ALERT_MENTIONS, self.sent[0])
-        self.assertIn(live.ALERT_MENTIONS, self.sent[1])
         for i in range(27, 60):
             self.tick(i)
-        self.assertEqual(len(self.sent), 3)
-        self.assertIn("بازگشت", self.sent[2])
-        self.assertNotIn(live.ALERT_MENTIONS, self.sent[2])
+        self.assertEqual(len(self.sent), 2)
+        self.assertIn("بازگشت", self.sent[1])
+        self.assertNotIn(live.ALERT_MENTIONS, self.sent[1])
         with live.db_connect(self.store) as db:
             self.assertEqual(db.execute(
                 "SELECT COUNT(*) FROM outbox WHERE status='SENT'"
-            ).fetchone()[0], 3)
+            ).fetchone()[0], 2)
 
     def test_offline_replay_queues_same_alert_without_live_side_effects(self):
         self.stable()
@@ -174,7 +175,7 @@ class AdaptiveFastAlertTests(unittest.TestCase):
         report = offline.replay(
             self.source, self.store, T0, T0 + timedelta(minutes=23))
         self.assertEqual(report["telegram_messages_sent"], 0)
-        self.assertEqual(len(report["would_queue"]), 2)
+        self.assertEqual(len(report["would_queue"]), 1)
         self.assertEqual(report["samples"], 23)
         self.assertEqual(sent_before, len(self.sent))
         self.assertEqual((self.store / "state.sqlite3").read_bytes(), original_state)
@@ -193,32 +194,31 @@ class AdaptiveFastAlertTests(unittest.TestCase):
         self.assertEqual(len(state["recent_good"]), original)
 
 
-    def test_fast_cadence_cw_only_info_then_three_strong_samples(self):
+    def test_fast_cadence_cw_spike_is_internal_then_three_strong_samples(self):
         base = live.baseline_load(self.store)
         state = live.default_state()
         with live.db_connect(self.store) as db:
-            # A single CLOSE-WAIT sample is sufficient for INFO only.
+            # A single CLOSE-WAIT sample is diagnostic only; it never queues INFO.
             obs = live.observation(sample(T0, cw=20, missing=True))
             live.process_sample(state, T0, obs, base, db)
             keys = lambda: [k for (k,) in db.execute(
                 "SELECT event_key FROM outbox ORDER BY created_at")]
-            self.assertEqual(len(keys()), 1)
-            self.assertTrue(keys()[0].endswith(":INFO"))
+            self.assertEqual(len(keys()), 0)
             strong = {"ssh": 80, "udp": 70, "cw": 44, "tx": 12000}
             for i in (1, 2):
                 t = T0 + timedelta(seconds=15*i)
                 obs = live.observation(sample(t, **strong))
                 live.process_sample(state, t, obs, base, db)
-                self.assertEqual(len(keys()), 1)
+                self.assertEqual(len(keys()), 0)
             t = T0 + timedelta(seconds=45)
             live.process_sample(state, t, live.observation(sample(t, **strong)), base, db)
-            self.assertEqual(len(keys()), 2)
-            self.assertTrue(keys()[1].endswith(":SUSPECTED"))
+            self.assertEqual(len(keys()), 1)
+            self.assertTrue(keys()[0].endswith(":SUSPECTED"))
             for i in range(4, 9):
                 t = T0 + timedelta(seconds=15*i)
                 live.process_sample(state, t, live.observation(sample(t)), base, db)
-                self.assertEqual(len(keys()), 2 if i < 8 else 3)
-            self.assertTrue(keys()[2].endswith(":RECOVERED"))
+                self.assertEqual(len(keys()), 1 if i < 8 else 2)
+            self.assertTrue(keys()[1].endswith(":RECOVERED"))
             self.assertEqual(state["phase"], "NORMAL")
 
     def test_fast_cadence_gap_resets_three_sample_confirmation_window(self):
@@ -229,14 +229,15 @@ class AdaptiveFastAlertTests(unittest.TestCase):
                 t = T0 + timedelta(seconds=seconds)
                 live.process_sample(state, t, live.observation(sample(t, cw=20)), base, db)
             self.assertEqual(state["phase"], "INFO")
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 0)
             strong = {"ssh": 80, "udp": 70, "cw": 44, "tx": 12000}
             for seconds in (45, 90, 105):
                 t = T0 + timedelta(seconds=seconds)
                 live.process_sample(state, t, live.observation(sample(t, **strong)), base, db)
-                self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 1)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 0)
             t = T0 + timedelta(seconds=120)
             live.process_sample(state, t, live.observation(sample(t, **strong)), base, db)
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 2)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 1)
 
     def test_cw_udpgw_spike_and_legacy_ssh_surge_without_traffic_drop_stays_info_only(self):
         base = live.baseline_load(self.store)
@@ -264,9 +265,50 @@ class AdaptiveFastAlertTests(unittest.TestCase):
                         t, ssh=ssh, udp=udp, cw=cw, tx=tx)), base, db)
             keys = [key for (key,) in db.execute(
                 "SELECT event_key FROM outbox ORDER BY created_at")]
-            self.assertEqual(len(keys), 1)
-            self.assertTrue(keys[0].endswith(":INFO"))
+            self.assertEqual(len(keys), 0)
             self.assertEqual(state["phase"], "INFO")
+            self.assertFalse(any(
+                item in ("SUSPECTED", "DEGRADED") for item in state["window"]))
+
+    def test_20261125_historical_false_positive_is_internal_only(self):
+        baseline_path = self.store / "baseline.json"
+        baseline_data = json.loads(baseline_path.read_text())
+        baseline_data["values"].update({
+            "ssh": 153.0,
+            "udpgw": 135.0,
+            "close_wait": 12.0,
+            "awg_rx_mbps": 4.931035,
+            "awg_tx_mbps": 35.39244,
+        })
+        live.atomic_json(baseline_path, baseline_data)
+        base = live.baseline_load(self.store)
+        state = live.default_state()
+        historical = [
+            (181, 139, 29, 39.23862),
+            (206, 140, 54, 25.80593),
+            (224, 126, 84, 20.42940),
+            (239, 56, 167, 25.50691),
+            (280, 71, 194, 27.54817),
+            (261, 83, 167, 26.81031),
+            (188, 94, 88, 21.56500),
+            (138, 110, 23, 26.47243),
+            (126, 114, 8, 30.10134),
+            (138, 121, 10, 35.20544),
+            (153, 134, 10, 46.26227),
+            (153, 133, 12, 47.55169),
+            (156, 135, 14, 51.04339),
+        ]
+        with live.db_connect(self.store) as db:
+            for i, (ssh, udp, cw, tx) in enumerate(historical):
+                stamp = T0 + timedelta(seconds=62*i)
+                obs = live.observation(sample(
+                    stamp, ssh=ssh, udp=udp, cw=cw, tx=round(tx*1000)))
+                live.process_sample(
+                    state, stamp, obs, base, db, max_gap_seconds=75)
+            keys = [key for (key,) in db.execute(
+                "SELECT event_key FROM outbox ORDER BY created_at")]
+            self.assertEqual(keys, [])
+            self.assertEqual(state["phase"], "NORMAL")
             self.assertFalse(any(
                 item in ("SUSPECTED", "DEGRADED") for item in state["window"]))
 

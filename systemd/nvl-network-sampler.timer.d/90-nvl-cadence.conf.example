@@ -1,0 +1,13 @@
+[Timer]
+# Dedicated NVL cadence override. Clears previous timer trigger expressions.
+# Sampler is Type=oneshot and must complete in less than 15 seconds.
+OnActiveSec=
+OnBootSec=
+OnStartupSec=
+OnUnitActiveSec=
+OnUnitInactiveSec=
+OnCalendar=
+OnActiveSec=1s
+OnUnitActiveSec=15s
+AccuracySec=1s
+RandomizedDelaySec=0

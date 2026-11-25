@@ -7,46 +7,132 @@
 
 ## Fixed scope
 
-- **Core only**, one active Edge at any time; the existing JSONL collector is scheduled every 30 seconds by a dedicated systemd timer drop-in. The collector source and metrics remain unchanged.
+- **Core only**, one active Edge at any time; the existing JSONL collector is scheduled every 15 seconds by a dedicated systemd timer drop-in. The collector source and metrics remain unchanged.
 - SSH established local TCP `2252`; UDPGW established local TCP `7300`; UDPGW CLOSE-WAIT **remote** TCP `7300`. Do not sum opposite loopback sides.
 - AWG `awg0` RX/TX Mbps calculated from Linux kernel counters; no dependency on Netdata API uptime.
 - Delivery: one **explicit, negative Telegram group chat ID** using the existing NVL bot's sendMessage token; optional topic ID. Never fallback to administrator DMs. No additional Telegram getUpdates poller.
 - Do not modify Core's live `gost`, SSH, UDPGW, `awg0`, `wg0`, DNS, user sessions, firewall, failover, bot worker, or Netdata.
-- The monitor is its own `nvl-network-alerts.service` + timer. Only the sampler timer cadence changes to 30 seconds; the alert evaluator remains on its existing one-minute timer. No collector-source edit or `nvlbot` restart.
+- The monitor is its own `nvl-network-alerts.service` + timer. The sampler timer runs every 15 seconds and the alert evaluator runs 20 seconds after each completed evaluation. No detector logic, collector-source, metric, baseline, or `nvlbot` changes.
 - No client IPs, user IDs, usernames, plaintext bot token, or raw customer telemetry in group notifications or GitHub.
 
-## Sampler cadence change — 30 seconds
+## Timer cadence changes — sampler 15 seconds, detector 20 seconds
 
-The Core collector is installed separately at `/root/nvl_network_sampler.py` and is not part of this repository. This change adjusts only its systemd timer; it does not edit the collector, change metric calculations, or restart the sampler service. The alert-evaluation timer remains at 60 seconds.
+Only two systemd timer drop-ins are changed. The collector program, detector program, detector thresholds, confirmation count, alert transitions, recovery rules, baseline, SQLite state, Telegram outbox and bot services remain unchanged.
 
-Before applying, inspect the effective units and confirm the collector completes comfortably within 30 seconds. Review all existing timer drop-ins; do not proceed if another override conflicts with the 30-second schedule.
+- **Sampler:** one sample every 15 seconds, measured from the previous sampler service activation. The existing sampler is a short-running `Type=oneshot` job; confirm its runtime stays below 15 seconds.
+- **Detector:** run 1 second after timer activation, then 20 seconds after each completed detector run (`OnUnitInactiveSec=20s`). This avoids overlapping oneshot evaluations. Actual start-to-start time is 20 seconds plus detector execution time.
+
+### Preflight — read-only
+
+Inspect both effective timers, all existing drop-ins, and recent service runtimes before applying. Stop if another drop-in or calendar trigger conflicts with these schedules.
 
 ```bash
-systemctl is-active nvl-network-sampler.timer
+systemctl is-active nvl-network-sampler.timer nvl-network-alerts.timer
 systemctl cat nvl-network-sampler.timer
-systemctl show nvl-network-sampler.timer -p ActiveState -p OnActiveUSec -p OnUnitActiveUSec -p OnUnitInactiveUSec -p AccuracyUSec -p RandomizedDelayUSec
-systemctl show nvl-network-sampler.service -p Type -p ActiveState -p SubState -p ExecStart
+systemctl cat nvl-network-alerts.timer
+systemctl show nvl-network-sampler.service -p Type -p TimeoutStartUSec -p ExecStart
+systemctl show nvl-network-alerts.service -p Type -p TimeoutStartUSec -p ExecStart
 journalctl -u nvl-network-sampler.service --since "-10 minutes" --no-pager
+journalctl -u nvl-network-alerts.service --since "-10 minutes" --no-pager
 ```
 
-After confirming the sampler is a short-running job and the 30-second cadence is safe, apply the pinned template:
+### Apply — timer-only change
+
+Use the exact reviewed merge SHA. Back up existing files with the same dedicated name before replacing them. No service executable or environment file is changed.
 
 ```bash
-SHA=REVIEWED_COMMIT_SHA
-curl -fLsS "https://raw.githubusercontent.com/DenaSon/nvl-bot/$SHA/systemd/nvl-network-sampler.timer.d/30s.conf.example" -o /root/nvl-network-sampler-30s.conf
-install -d -m 755 /etc/systemd/system/nvl-network-sampler.timer.d
-test ! -e /etc/systemd/system/nvl-network-sampler.timer.d/30s.conf
-install -m 644 /root/nvl-network-sampler-30s.conf /etc/systemd/system/nvl-network-sampler.timer.d/30s.conf
+set -Eeuo pipefail
+
+SHA=REVIEWED_MERGE_SHA
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+ROOT=/etc/systemd/system
+
+STAGE=$(mktemp -d /root/nvl-timer-cadence-XXXXXXXX)
+chmod 700 "$STAGE"
+
+curl -fLsS --retry 2 \
+  "https://raw.githubusercontent.com/DenaSon/nvl-bot/$SHA/systemd/nvl-network-sampler.timer.d/90-nvl-cadence.conf.example" \
+  -o "$STAGE/sampler.conf"
+
+curl -fLsS --retry 2 \
+  "https://raw.githubusercontent.com/DenaSon/nvl-bot/$SHA/systemd/nvl-network-alerts.timer.d/90-nvl-cadence.conf.example" \
+  -o "$STAGE/alerts.conf"
+
+grep -qx 'OnUnitActiveSec=15s' "$STAGE/sampler.conf"
+grep -qx 'OnUnitInactiveSec=20s' "$STAGE/alerts.conf"
+
+install -d -m 755 \
+  "$ROOT/nvl-network-sampler.timer.d" \
+  "$ROOT/nvl-network-alerts.timer.d"
+
+for pair in \
+  "nvl-network-sampler.timer.d/90-nvl-cadence.conf" \
+  "nvl-network-alerts.timer.d/90-nvl-cadence.conf"; do
+  if [ -e "$ROOT/$pair" ]; then
+    cp -a "$ROOT/$pair" "$ROOT/$pair.bak.$STAMP"
+  fi
+done
+
+install -m 644 "$STAGE/sampler.conf" \
+  "$ROOT/nvl-network-sampler.timer.d/90-nvl-cadence.conf"
+install -m 644 "$STAGE/alerts.conf" \
+  "$ROOT/nvl-network-alerts.timer.d/90-nvl-cadence.conf"
+
+systemd-analyze verify \
+  "$ROOT/nvl-network-sampler.timer" \
+  "$ROOT/nvl-network-alerts.timer"
+
 systemctl daemon-reload
-systemctl restart nvl-network-sampler.timer
-systemctl is-active nvl-network-sampler.timer
-systemctl show nvl-network-sampler.timer -p OnActiveUSec -p OnUnitActiveUSec -p OnUnitInactiveUSec -p AccuracyUSec -p RandomizedDelayUSec
-systemctl list-timers --all nvl-network-sampler.timer
+systemctl restart nvl-network-sampler.timer nvl-network-alerts.timer
+
+systemctl is-active nvl-network-sampler.timer nvl-network-alerts.timer
+systemctl show nvl-network-sampler.timer \
+  -p OnActiveUSec -p OnUnitActiveUSec -p OnUnitInactiveUSec \
+  -p AccuracyUSec -p RandomizedDelayUSec
+systemctl show nvl-network-alerts.timer \
+  -p OnActiveUSec -p OnUnitActiveUSec -p OnUnitInactiveUSec \
+  -p AccuracyUSec -p RandomizedDelayUSec
+systemctl list-timers --all --no-pager \
+  nvl-network-sampler.timer nvl-network-alerts.timer
+
+echo "TIMER_CADENCE_APPLIED SHA=$SHA BACKUP_SUFFIX=$STAMP"
+rm -rf "$STAGE"
 ```
 
-Expected effective schedule: initial sample after 1 second, then every 30 seconds. Verify the resulting JSONL timestamps are approximately 30 seconds apart. Only the timer is restarted; do not restart `nvl-network-sampler.service`, `nvlbot`, or network services.
+Expected effective schedule:
+- Sampler: initial sample after 1 second, then every 15 seconds from the previous service activation.
+- Detector: initial evaluation after 1 second, then 20 seconds after each completed evaluation.
+- Both timers remain independent. Only timer units are restarted; do not restart either oneshot service, the collector process manually, `nvlbot`, or network services.
 
-Rollback: remove only the newly added `30s.conf`, then run `systemctl daemon-reload` and `systemctl restart nvl-network-sampler.timer`. This restores the timer's previously effective configuration.
+Verify the raw JSONL timestamps are approximately 15 seconds apart and detector journal entries show a stable cadence of approximately 20 seconds plus service runtime:
+
+```bash
+python3 - <<'PY'
+import json
+from pathlib import Path
+from datetime import datetime
+
+files=sorted(Path("/root/nvl-network-observations").glob("nvl-samples-*.jsonl"))
+if not files:
+    raise SystemExit("NO_SAMPLE_FILES")
+rows=[]
+for path in files[-2:]:
+    for line in path.open():
+        try:
+            rows.append(datetime.fromisoformat(
+                json.loads(line)["timestamp_utc"].replace("Z","+00:00")
+            ))
+        except (ValueError, KeyError, TypeError):
+            pass
+rows=sorted(set(rows))[-21:]
+for a,b in zip(rows,rows[1:]):
+    print(round((b-a).total_seconds(),2))
+PY
+
+journalctl -u nvl-network-alerts.service --since "-10 minutes" --no-pager
+```
+
+Rollback: restore the timestamped `90-nvl-cadence.conf.bak.$STAMP` files if they existed before deployment; otherwise remove only the two newly created `90-nvl-cadence.conf` files. Then run `systemctl daemon-reload` and restart only the two timer units. Existing timer files and all detector state remain untouched.
 
 ## Gate 1 — exact-release stage and installation
 

@@ -624,7 +624,7 @@ def release(state, config, expected):
     host = Host()
     inventory = p.inventory_paths(config["inventory"])
     read_component_blob = lambda oid: p.git(repo, "cat-file", "blob", oid)
-    inventory = components.effective_inventory(old, new, inventory, read_component_blob)
+    inventory = p.inventory_paths(sorted(components.effective_inventory(old, new, inventory, read_component_blob)))
     build = lambda: p.build_plan(
         old, new, inventory, host.live, p.control_plane_blob,
         read_component_blob, components.live_blob,

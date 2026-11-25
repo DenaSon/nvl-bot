@@ -125,14 +125,15 @@ class AdaptiveFastAlertTests(unittest.TestCase):
             candidate in ("SUSPECTED", "DEGRADED")
             for candidate, _, _ in self.decisions()))
 
-    def test_one_minute_cw_spike_is_internal_only(self):
+    def test_one_minute_cw_spike_does_not_open_an_incident(self):
         self.stable()
         self.tick(20, ssh=140, udp=85, cw=45, tx=13000)
         self.tick(21)
         self.assertEqual(self.sent, [])
         with live.db_connect(self.store) as db:
             state = live.state_read(db)
-        self.assertEqual(state["phase"], "INFO")
+        self.assertEqual(state["phase"], "NORMAL")
+        self.assertFalse(state["incident_open"])
 
     def test_invalid_sample_breaks_three_sample_gate(self):
         self.stable()
@@ -228,7 +229,8 @@ class AdaptiveFastAlertTests(unittest.TestCase):
             for seconds in (0, 15, 30):
                 t = T0 + timedelta(seconds=seconds)
                 live.process_sample(state, t, live.observation(sample(t, cw=20)), base, db)
-            self.assertEqual(state["phase"], "INFO")
+            self.assertEqual(state["phase"], "NORMAL")
+            self.assertFalse(state["incident_open"])
             self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 0)
             strong = {"ssh": 80, "udp": 70, "cw": 44, "tx": 12000}
             for seconds in (45, 90, 105):
@@ -239,7 +241,7 @@ class AdaptiveFastAlertTests(unittest.TestCase):
             live.process_sample(state, t, live.observation(sample(t, **strong)), base, db)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 1)
 
-    def test_cw_udpgw_spike_and_legacy_ssh_surge_without_traffic_drop_stays_info_only(self):
+    def test_cw_udpgw_spike_and_legacy_ssh_surge_without_traffic_drop_stays_unconfirmed(self):
         base = live.baseline_load(self.store)
         state = live.default_state()
         with live.db_connect(self.store) as db:
@@ -266,7 +268,8 @@ class AdaptiveFastAlertTests(unittest.TestCase):
             keys = [key for (key,) in db.execute(
                 "SELECT event_key FROM outbox ORDER BY created_at")]
             self.assertEqual(len(keys), 0)
-            self.assertEqual(state["phase"], "INFO")
+            self.assertEqual(state["phase"], "NORMAL")
+            self.assertFalse(state["incident_open"])
             self.assertFalse(any(
                 item in ("SUSPECTED", "DEGRADED") for item in state["window"]))
 

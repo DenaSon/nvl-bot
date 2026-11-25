@@ -22,7 +22,10 @@ except ImportError:
     from nvl_network_intelligence import iter_samples, observation, utc
 
 
-def replay(source: Path, store: Path, start: datetime, end: datetime):
+def replay(source: Path, store: Path, start: datetime, end: datetime, *,
+           sample_interval=60):
+    if sample_interval not in (15, 60):
+        raise ValueError("Unsupported sample interval")
     if end <= start:
         raise ValueError("End must follow start")
     baseline = live.baseline_load(store)  # reads JSON; does not modify it
@@ -52,7 +55,8 @@ def replay(source: Path, store: Path, start: datetime, end: datetime):
                     and not isinstance(value, bool) and value >= 0
                 ) else None
             previous = state["phase"]
-            live.process_sample(state, stamp, obs, baseline, db)
+            live.process_sample(state, stamp, obs, baseline, db,
+                                max_gap_seconds=25 if sample_interval == 15 else 150)
             seen += 1
             candidates[obs["alert_candidate"]] += 1
             phases[state["phase"]] += 1
@@ -90,8 +94,10 @@ def main(argv=None):
         "--source", type=Path, default=live.SOURCE)
     parser.add_argument(
         "--store", type=Path, default=live.STATE_DIR)
+    parser.add_argument("--sample-interval", type=int, choices=(15, 60), default=60)
     args = parser.parse_args(argv)
-    result = replay(args.source, args.store, utc(args.start), utc(args.end))
+    result = replay(args.source, args.store, utc(args.start), utc(args.end),
+                    sample_interval=args.sample_interval)
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 

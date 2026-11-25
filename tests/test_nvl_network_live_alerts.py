@@ -228,6 +228,61 @@ class LiveAlertsTests(unittest.TestCase):
         self.assertEqual(third["outbox_pending"], 0)
         self.assertEqual(len(self.calls), 1)
 
+    def test_oldest_pending_outbox_event_blocks_newer_event_during_retry_backoff(self):
+        now = T0 + timedelta(minutes=30)
+        retry_at = int(now.timestamp()) + 60
+        with live.db_connect(self.store) as db:
+            db.executemany("""INSERT INTO outbox
+                (event_key,message,status,attempts,next_attempt,created_at)
+                VALUES (?,?,'PENDING',?,?,?)""", [
+                ("incident:SUSPECTED", "older disruption", 1, retry_at,
+                 T0.isoformat()),
+                ("incident:RECOVERED", "newer recovery", 0, 0,
+                 (T0 + timedelta(seconds=1)).isoformat()),
+            ])
+            db.commit()
+            self.assertEqual(
+                live.drain_outbox(db, {}, now, send=self.deliver), "IDLE")
+            self.assertEqual(self.calls, [])
+            self.assertEqual(
+                live.drain_outbox(
+                    db, {}, now + timedelta(seconds=61), send=self.deliver),
+                "SENT")
+            self.assertEqual(self.calls, ["older disruption"])
+            self.assertEqual(
+                live.drain_outbox(
+                    db, {}, now + timedelta(seconds=61), send=self.deliver),
+                "SENT")
+            self.assertEqual(
+                self.calls, ["older disruption", "newer recovery"])
+
+    def test_persisted_info_incident_recovers_after_restoring_original_policy(self):
+        state = live.default_state()
+        state.update({
+            "phase": "INFO",
+            "incident": "NVL-20261122T105900Z-001",
+            "incident_open": True,
+            "alerted_phases": ["INFO"],
+            "last_sample": (T0 - timedelta(minutes=1)).isoformat(),
+            "seq": 1,
+        })
+        with live.db_connect(self.store) as db:
+            live.state_write(db, state)
+            db.commit()
+
+        report = None
+        for i in range(17):
+            stamp = T0 + timedelta(minutes=i)
+            self.events.append(row(stamp))
+            report = self._tick(stamp + timedelta(seconds=20))
+
+        self.assertEqual(report["state"], "NORMAL")
+        with live.db_connect(self.store) as db:
+            recovered = live.state_read(db)
+        self.assertFalse(recovered["incident_open"])
+        self.assertIsNone(recovered["incident"])
+        self.assertIn("بازگشت", "\n".join(self.calls))
+
     def test_malformed_historical_log_does_not_block_live_alert(self):
         self.events = [row(T0 + timedelta(minutes=i), ssh=205, cw=55)
                        for i in range(7)]

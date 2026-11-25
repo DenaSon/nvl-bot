@@ -537,7 +537,7 @@ def process_sample(state, stamp, obs, base, db):
         if phase not in ("DEGRADED", "RECOVERING"):
             nxt = "SUSPECTED"
     elif (state["incident_open"]
-          and phase in ("SUSPECTED", "DEGRADED", "RECOVERING", "UNKNOWN")
+          and phase in ("INFO", "SUSPECTED", "DEGRADED", "RECOVERING", "UNKNOWN")
           and len(state["recovery"]) == 7
           and sum(state["recovery"]) >= 5):
         nxt = "RECOVERING"
@@ -582,12 +582,16 @@ def telegram_send(config, message, timeout=8):
 
 
 def drain_outbox(db, config, now, send=telegram_send):
-    row = db.execute("""SELECT event_key, message, attempts FROM outbox
-        WHERE status='PENDING' AND next_attempt <= ?
-        ORDER BY created_at, event_key LIMIT 1""", (int(now.timestamp()),)).fetchone()
+    # Always inspect the oldest pending event first. A retry deadline on an
+    # earlier incident must block later recovery notices from overtaking it.
+    row = db.execute("""SELECT event_key, message, attempts, next_attempt FROM outbox
+        WHERE status='PENDING'
+        ORDER BY created_at, event_key LIMIT 1""").fetchone()
     if row is None:
         return "IDLE"
-    key, message, attempts = row
+    key, message, attempts, retry_at = row
+    if retry_at > int(now.timestamp()):
+        return "IDLE"
     try:
         msg_id = send(config, message)
     except Exception as exc:

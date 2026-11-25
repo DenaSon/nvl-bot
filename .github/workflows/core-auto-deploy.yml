@@ -1,0 +1,246 @@
+name: Core Auto Deploy
+
+on:
+  workflow_run:
+    workflows: ["Python checks"]
+    types: [completed]
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nvl-core-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'master' &&
+      github.event.workflow_run.workflow_id == 372499896 &&
+      github.event.workflow_run.repository.full_name == 'DenaSon/nvl-bot' &&
+      github.event.workflow_run.head_repository.full_name == 'DenaSon/nvl-bot'
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 25
+    steps:
+      - name: Bootstrap the approved CD controller and trigger Core Apply
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -Eeuo pipefail
+
+          [[ "$EXPECTED_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$(id -u)" == "0" ]]
+
+          REPO_DIR=/var/lib/nvl-deploy/repository.git
+          STATE_DIR=/var/lib/nvl-deploy
+          DEPLOY_DIR=/opt/nvl-deploy
+          BACKUP_ROOT=/var/backups/nvl
+          LOCK="$STATE_DIR/poll.lock"
+          UNIT_SOURCE=systemd/nvl-deploy-apply.service.example
+          UNIT_TARGET=/etc/systemd/system/nvl-deploy-apply.service
+
+          test -d "$REPO_DIR"
+          test -d "$STATE_DIR"
+          test -d "$DEPLOY_DIR"
+          test -d "$BACKUP_ROOT"
+
+          if [[ ! -e "$LOCK" ]]; then
+            install -m 600 /dev/null "$LOCK"
+          fi
+          [[ ! -L "$LOCK" && -f "$LOCK" ]]
+          exec 9<> "$LOCK"
+          flock -x 9
+
+          git -c core.hooksPath=/dev/null \
+            -c protocol.allow=never \
+            -c protocol.https.allow=always \
+            -c http.sslVerify=true \
+            -c http.followRedirects=false \
+            -c credential.helper= \
+            -c fetch.fsckObjects=true \
+            --git-dir="$REPO_DIR" fetch --no-tags --no-recurse-submodules \
+            https://github.com/DenaSon/nvl-bot.git \
+            +refs/heads/master:refs/nvl/master
+
+          CURRENT_SHA="$(git --git-dir="$REPO_DIR" rev-parse refs/nvl/master)"
+          if [[ "$CURRENT_SHA" != "$EXPECTED_SHA" ]]; then
+            echo "CORE_DEPLOY_SUPERSEDED expected=$EXPECTED_SHA current=$CURRENT_SHA"
+            flock -u 9
+            exit 0
+          fi
+
+          MODULE_COUNT="$(git --git-dir="$REPO_DIR" ls-tree -r "$EXPECTED_SHA" ops/ |
+            grep -Ec '^100644 blob [0-9a-f]{40}[[:space:]]ops/nvl_cd_[a-z0-9_]+\.py$')"
+          [[ "$MODULE_COUNT" -ge 8 ]]
+
+          STAGE="$(mktemp -d "$DEPLOY_DIR/.cd-bootstrap-XXXXXXXX")"
+          BACKUP="$(mktemp -d "$BACKUP_ROOT/cd-control-plane-$EXPECTED_SHA-XXXXXXXX")"
+          chmod 700 "$STAGE" "$BACKUP"
+          mkdir -m 700 "$BACKUP/modules" "$BACKUP/systemd"
+
+          BOOTSTRAP_OK=0
+          restore_bootstrap() {
+            rc=$?
+            trap - EXIT
+            if [[ "$BOOTSTRAP_OK" != "1" ]]; then
+              while IFS= read -r source; do
+                name="$(basename "$source")"
+                target="$DEPLOY_DIR/$name"
+                if [[ -f "$BACKUP/modules/$name" ]]; then
+                  install -m 700 "$BACKUP/modules/$name" "$target"
+                elif [[ -e "$BACKUP/modules/$name.absent" ]]; then
+                  rm -f "$target"
+                fi
+              done < <(git --git-dir="$REPO_DIR" ls-tree -r --name-only "$EXPECTED_SHA" ops/ |
+                grep -E '^ops/nvl_cd_[a-z0-9_]+\.py$' | sort)
+
+              if [[ -f "$BACKUP/systemd/nvl-deploy-apply.service" ]]; then
+                install -m 644 "$BACKUP/systemd/nvl-deploy-apply.service" "$UNIT_TARGET"
+              elif [[ -e "$BACKUP/systemd/nvl-deploy-apply.service.absent" ]]; then
+                rm -f "$UNIT_TARGET"
+              fi
+              systemctl daemon-reload || true
+            fi
+            rm -rf "$STAGE"
+            exit "$rc"
+          }
+          trap restore_bootstrap EXIT
+
+          while IFS= read -r source; do
+            entry="$(git --git-dir="$REPO_DIR" ls-tree "$EXPECTED_SHA" "$source")"
+            mode="$(printf '%s\n' "$entry" | awk '{print $1}')"
+            [[ "$mode" == "100644" ]]
+            name="$(basename "$source")"
+            git --git-dir="$REPO_DIR" cat-file blob "$EXPECTED_SHA:$source" > "$STAGE/$name"
+            chmod 600 "$STAGE/$name"
+          done < <(git --git-dir="$REPO_DIR" ls-tree -r --name-only "$EXPECTED_SHA" ops/ |
+            grep -E '^ops/nvl_cd_[a-z0-9_]+\.py$' | sort)
+
+          unit_entry="$(git --git-dir="$REPO_DIR" ls-tree "$EXPECTED_SHA" "$UNIT_SOURCE")"
+          unit_mode="$(printf '%s\n' "$unit_entry" | awk '{print $1}')"
+          [[ "$unit_mode" == "100644" ]]
+          git --git-dir="$REPO_DIR" cat-file blob "$EXPECTED_SHA:$UNIT_SOURCE" \
+            > "$STAGE/nvl-deploy-apply.service"
+          chmod 600 "$STAGE/nvl-deploy-apply.service"
+
+          /usr/bin/python3 - "$STAGE" <<'PY'
+          from pathlib import Path
+          import sys
+
+          stage = Path(sys.argv[1])
+          modules = sorted(stage.glob("nvl_cd_*.py"))
+          if len(modules) < 8:
+              raise SystemExit("CD_MODULE_SET_INCOMPLETE")
+          for path in modules:
+              compile(path.read_bytes(), str(path), "exec")
+          PY
+
+          while IFS= read -r source; do
+            name="$(basename "$source")"
+            target="$DEPLOY_DIR/$name"
+            if [[ -e "$target" ]]; then
+              cp -a "$target" "$BACKUP/modules/$name"
+            else
+              : > "$BACKUP/modules/$name.absent"
+            fi
+            install -m 700 "$STAGE/$name" "$target"
+          done < <(git --git-dir="$REPO_DIR" ls-tree -r --name-only "$EXPECTED_SHA" ops/ |
+            grep -E '^ops/nvl_cd_[a-z0-9_]+\.py$' | sort)
+
+          if [[ -e "$UNIT_TARGET" ]]; then
+            cp -a "$UNIT_TARGET" "$BACKUP/systemd/nvl-deploy-apply.service"
+          else
+            : > "$BACKUP/systemd/nvl-deploy-apply.service.absent"
+          fi
+          install -m 644 "$STAGE/nvl-deploy-apply.service" "$UNIT_TARGET"
+          systemd-analyze verify "$UNIT_TARGET"
+          systemctl daemon-reload
+          systemctl show nvl-deploy-apply.service -p ExecStart --value |
+            grep -F -- '--auto'
+
+          find "$DEPLOY_DIR/__pycache__" -maxdepth 1 -type f \
+            -name 'nvl_cd_*.pyc' -delete 2>/dev/null || true
+
+          BOOTSTRAP_OK=1
+          rm -rf "$STAGE"
+          trap - EXIT
+          flock -u 9
+          exec 9>&-
+
+          echo "CORE_CD_CONTROLLER_READY SHA=$EXPECTED_SHA BACKUP=$BACKUP"
+          systemctl start nvl-deploy-apply.service || true
+
+          deadline=$((SECONDS + 1080))
+          while (( SECONDS < deadline )); do
+            current="$(git ls-remote https://github.com/DenaSon/nvl-bot.git refs/heads/master | awk '{print $1}')"
+            if [[ "$current" != "$EXPECTED_SHA" ]]; then
+              echo "CORE_DEPLOY_SUPERSEDED expected=$EXPECTED_SHA current=$current"
+              exit 0
+            fi
+
+            set +e
+            /usr/bin/python3 - "$EXPECTED_SHA" "$REPO_DIR" <<'PY'
+          import json
+          import re
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          expected, repo = sys.argv[1], sys.argv[2]
+          state_path = Path("/var/lib/nvl-deploy/release-state.json")
+          plan_path = Path("/var/lib/nvl-deploy/latest-plan.json")
+
+          def read(path):
+              try:
+                  return json.loads(path.read_text(encoding="utf-8"))
+              except (OSError, ValueError):
+                  return {}
+
+          state = read(state_path)
+          phase = state.get("phase")
+          deployed = state.get("deployed")
+          candidate = state.get("candidate")
+
+          if phase == "COMMITTED" and isinstance(deployed, str) and re.fullmatch(r"[0-9a-f]{40}", deployed):
+              if deployed == expected:
+                  raise SystemExit(0)
+              result = subprocess.run(
+                  ["git", "--git-dir=" + repo, "merge-base", "--is-ancestor", expected, deployed],
+                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+              )
+              if result.returncode == 0:
+                  raise SystemExit(0)
+
+          if candidate == expected and phase in ("ROLLED_BACK", "HOLD"):
+              raise SystemExit(2)
+
+          plan = read(plan_path)
+          if plan.get("candidate") == expected and plan.get("status") == "HOLD":
+              raise SystemExit(2)
+
+          raise SystemExit(1)
+          PY
+            result=$?
+            set -e
+
+            if [[ "$result" == "0" ]]; then
+              echo "CORE_DEPLOY_COMMITTED SHA=$EXPECTED_SHA"
+              exit 0
+            elif [[ "$result" == "2" ]]; then
+              echo "CORE_DEPLOY_FAILED SHA=$EXPECTED_SHA"
+              cat /var/lib/nvl-deploy/latest-plan.json 2>/dev/null || true
+              exit 1
+            fi
+
+            systemctl start nvl-deploy-apply.service || true
+            sleep 20
+          done
+
+          echo "CORE_DEPLOY_TIMEOUT SHA=$EXPECTED_SHA"
+          cat /var/lib/nvl-deploy/latest-plan.json 2>/dev/null || true
+          cat /var/lib/nvl-deploy/release-state.json 2>/dev/null || true
+          exit 1

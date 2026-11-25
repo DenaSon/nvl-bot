@@ -144,6 +144,46 @@ class ComponentCatalogTests(unittest.TestCase):
         self.assertEqual(len(plan["updates"]), 1)
         self.assertEqual(plan["components"], ["network-alerts"])
 
+    def test_bot_imports_are_added_without_manual_inventory_edits(self):
+        files = {
+            "bot_final_v49-2.py": b"import bot_runtime_module\n",
+            "bot_runtime_module.py": b"from ops.runtime_helpers import run\n",
+            "ops/runtime_helpers.py": b"VALUE = 1\n",
+            "nvl_awg_core_routes.py": b"import subprocess\n",
+            "nvl-awg-core-routes.service": b"[Service]\n",
+        }
+        tree, read = make_tree(files)
+        paths = components.bot_runtime_paths(tree, read)
+        self.assertEqual(
+            paths,
+            {"bot_final_v49-2.py", "bot_runtime_module.py",
+             "ops/runtime_helpers.py"},
+        )
+        effective = components.effective_inventory(tree, tree, set(), read)
+        self.assertEqual(effective, paths)
+        self.assertNotIn("nvl_awg_core_routes.py", effective)
+
+    def test_shared_awg_module_is_left_to_bot_transaction(self):
+        old, read_old = make_tree({
+            "bot_final_v49-2.py": b"import nvl_awg_core_routes\n",
+            "nvl_awg_core_routes.py": b"VALUE = 1\n",
+            "nvl-awg-core-routes.service": b"[Service]\n",
+        })
+        new, read_new = make_tree({
+            "bot_final_v49-2.py": b"import nvl_awg_core_routes\n",
+            "nvl_awg_core_routes.py": b"VALUE = 2\n",
+            "nvl-awg-core-routes.service": b"[Service]\n",
+        })
+        bot_paths = components.bot_runtime_paths(new, read_new)
+        plan = components.plan_updates(
+            old, new, read_old, read_new,
+            lambda _path: "f" * 40,
+            bot_inventory=bot_paths,
+        )
+        self.assertEqual(plan["updates"], [])
+        self.assertEqual(plan["post_components"], ["awg-core-routes"])
+        self.assertEqual(plan["post_sources"], ["nvl_awg_core_routes.py"])
+
     def test_edge_sync_is_explicitly_excluded(self):
         for path in (
             "nvl_edge_sync.py",

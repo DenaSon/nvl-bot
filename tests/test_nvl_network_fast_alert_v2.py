@@ -127,9 +127,11 @@ class AdaptiveFastAlertTests(unittest.TestCase):
 
     def test_one_minute_cw_spike_does_not_open_an_incident(self):
         self.stable()
-        self.tick(20, ssh=140, udp=85, cw=45, tx=13000)
+        self.tick(20, ssh=120, udp=112, cw=45, tx=30000)
         self.tick(21)
         self.assertEqual(self.sent, [])
+        decisions = self.decisions()
+        self.assertTrue(json.loads(decisions[-2][2])["early_cw_spike"])
         with live.db_connect(self.store) as db:
             state = live.state_read(db)
         self.assertEqual(state["phase"], "NORMAL")

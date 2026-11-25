@@ -1,10 +1,10 @@
 [Unit]
-Description=NVL Network Intelligence — one-minute group alert evaluation
+Description=NVL Network Intelligence — 15-second group alert evaluation
 
 [Timer]
-OnActiveSec=10s
-OnUnitInactiveSec=60s
-AccuracySec=5s
+OnActiveSec=2s
+OnUnitActiveSec=15s
+AccuracySec=1s
 Persistent=false
 Unit=nvl-network-alerts.service
 

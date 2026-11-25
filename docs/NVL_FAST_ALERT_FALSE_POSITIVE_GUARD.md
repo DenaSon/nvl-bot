@@ -1,7 +1,8 @@
 # NVL Fast Alert — False-positive guard
 
 ## Changelog
-- ثبت جهش منفرد CLOSE-WAIT صرفاً به‌عنوان داده تشخیصی؛ بدون ارسال هشدار، بازکردن رخداد یا توقف به‌روزرسانی خط پایه.
+- ثبت جهش منفرد CLOSE-WAIT صرفاً به‌عنوان داده تشخیصی؛ بدون ارسال هشدار یا بازکردن رخداد.
+- کنارگذاشتن نمونه دارای جهش از تاریخچه خط پایه سالم، بدون توقف ثبت نمونه‌های سالم بعدی.
 - حذف مسیر تأیید قدیمی مبتنی بر افزایش SSH و CLOSE-WAIT بدون شواهد مستقل.
 - الزام به سه نمونه معتبر و متوالی برای اعلام اختلال، همراه با شواهد مستقل افت ارتباط یا ترافیک.
 - حفظ زمان‌بندی عملیاتی ۱۵ ثانیه‌ای و بازنشانی پنجره تأیید در صورت وقفه نمونه‌برداری.
@@ -9,6 +10,7 @@
 
 ## Detection policy
 - CLOSE-WAIT spikes are diagnostic metadata only; they do not open an incident, change detector phase or queue a Telegram message.
+- A sample containing a CLOSE-WAIT spike is excluded from adaptive healthy history; subsequent healthy samples continue updating it.
 - A confirmed incident requires three consecutive valid samples.
 - Connection collapse: SSH and UDPGW both fall to at most 75% of their adaptive reference, with absolute decreases of at least 12 and 10.
 - Traffic collapse: AWG TX falls to at most 60% of its adaptive reference (reference at least 8 Mbps, absolute fall at least 8 Mbps) and either SSH or UDPGW also falls by at least 15% and 10 connections.

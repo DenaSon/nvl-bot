@@ -683,7 +683,8 @@ def process_sample(state, stamp, obs, base, db, *,
     obs["early_cw_spike"] = cw_spike
     obs["early_cw_reference"] = cw_ref
     # A CLOSE-WAIT spike alone is recorded in metrics_json only. It must not
-    # open an incident, change phase, or freeze the adaptive healthy baseline.
+    # open an incident or change phase. Exclude this anomalous sample from the
+    # adaptive healthy history; later healthy samples continue updating it.
 
     if not obs["valid"]:
         state["incomplete_streak"] = state.get("incomplete_streak", 0) + 1

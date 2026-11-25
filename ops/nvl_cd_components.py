@@ -19,6 +19,8 @@ import tempfile
 import time
 
 
+BOT_ENTRYPOINTS = ("bot_final_v49-2.py",)
+
 COMPONENT_ENTRYPOINTS = {
     "network-alerts": ("ops/nvl_network_live_alerts.py",),
     "awg-core-routes": ("nvl_awg_core_routes.py",),
@@ -145,6 +147,22 @@ def dependency_closure(entrypoints, tree, read_blob) -> set[str]:
     return found
 
 
+def bot_runtime_paths(tree, read_blob) -> set[str]:
+    """Discover tracked Python modules statically imported by the bot entrypoint."""
+    return dependency_closure(BOT_ENTRYPOINTS, tree, read_blob)
+
+
+def effective_inventory(old_tree, new_tree, inventory, read_blob) -> set[str]:
+    """Keep the legacy inventory, auto-add bot imports, and separate AWG-only files."""
+    bot = bot_runtime_paths(old_tree, read_blob) | bot_runtime_paths(new_tree, read_blob)
+    independent = set()
+    for tree in (old_tree, new_tree):
+        for (source, destination) in component_targets(tree, read_blob):
+            if destination == str(Path("/root") / source):
+                independent.add(source)
+    return (set(inventory) - (independent - bot)) | bot
+
+
 def component_targets(tree, read_blob) -> dict[tuple[str, str], dict]:
     """Map source blobs to fixed, reviewed Core runtime destinations."""
     result = {}
@@ -179,11 +197,14 @@ def component_targets(tree, read_blob) -> dict[tuple[str, str], dict]:
     return result
 
 
-def plan_updates(old_tree, new_tree, read_old, read_new, live_hash):
+def plan_updates(old_tree, new_tree, read_old, read_new, live_hash,
+                 bot_inventory=()):
     old_targets = component_targets(old_tree, read_old)
     new_targets = component_targets(new_tree, read_new)
     keys = old_targets.keys() | new_targets.keys()
     updates, drift, managed, affected = [], [], set(), set()
+    post_components, post_sources = set(), set()
+    bot_inventory = set(bot_inventory)
 
     for key in keys:
         source, _destination = key
@@ -213,8 +234,17 @@ def plan_updates(old_tree, new_tree, read_old, read_new, live_hash):
 
         old_oid = old_entry[2] if old_entry else ABSENT
         new_oid = new_entry[2] if new_entry else ABSENT
-        current = live_hash(destination)
 
+        # A source shared with the bot is written by the existing bot
+        # transaction. Its independent AWG service is refreshed afterwards.
+        if source in bot_inventory and destination == str(Path("/root") / source):
+            if old_oid != new_oid:
+                post_components.update((old_item or {}).get("components", []))
+                post_components.update((new_item or {}).get("components", []))
+                post_sources.add(source)
+            continue
+
+        current = live_hash(destination)
         if old_oid == new_oid:
             if (set((old_item or {}).get("components", []))
                     & affected and current != old_oid):
@@ -247,6 +277,8 @@ def plan_updates(old_tree, new_tree, read_old, read_new, live_hash):
         "drift": sorted(set(drift)),
         "managed": managed,
         "components": sorted(affected),
+        "post_components": sorted(post_components),
+        "post_sources": sorted(post_sources),
     }
 
 
@@ -387,6 +419,13 @@ def _manifest_write(path: Path, data):
     _ensure_parent(path.parent)
     raw = json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8") + b"\n"
     _atomic_write(path, raw, 0o600)
+
+
+def post_deploy(component_names, source_names):
+    """Refresh only independent services that share files with a bot release."""
+    changed = [{"source": name} for name in source_names]
+    for component in sorted(set(component_names)):
+        _health(component, changed)
 
 
 def apply_updates(repo, updates, candidate, read_blob,

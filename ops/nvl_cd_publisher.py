@@ -617,8 +617,7 @@ def release(state, config, expected):
         ) from exc
 
     plan = build()
-    if (plan["status"] != "PLAN_READY" or plan["component_updates"]
-            or plan["component_drift"] if "component_drift" in plan else False):
+    if plan["status"] != "PLAN_READY" or plan["component_updates"]:
         raise p.Hold("COMPONENT_POSTCHECK_FAILED")
 
     def revalidate():

@@ -498,21 +498,26 @@ def restore(host, state, checkpoint):
 
 
 def publish(host, state, repo, baseline, candidate, updates, old, new, revalidate,
-            release_notes=None, component_result=None):
+            release_notes=None, component_result=None,
+            post_components=(), post_sources=()):
     if not host.active() or not host.idle():
         raise p.Hold("BOT_OR_OPERATION_BUSY")
     started_at = int(time.time())
     directory, record = stage(host, repo, baseline, candidate, updates, old, new)
     component_result = component_result or {}
-    component_count = int(component_result.get("updated", 0))
+    component_file_count = int(component_result.get("updated", 0))
+    component_names = sorted(
+        set(component_result.get("components", [])) | set(post_components)
+    )
     checkpoint = {"deployed": baseline, "candidate": candidate,
                   "backup": str(directory),
                   "manifest_sha256": file_digest(directory / "manifest.json"),
                   "started_at": started_at, "restart_required": True,
-                  "file_count": len(updates) + component_count,
+                  "file_count": len(updates) + component_file_count,
                   "bot_file_count": len(updates),
-                  "component_count": component_count,
-                  "components": component_result.get("components", []),
+                  "component_count": len(component_names),
+                  "component_file_count": component_file_count,
+                  "components": component_names,
                   "component_backup": component_result.get("backup"),
                   "release_notes": release_notes or {}}
     verified_manifest(host, checkpoint)
@@ -554,6 +559,8 @@ def publish(host, state, repo, baseline, candidate, updates, old, new, revalidat
         checkpoint = set_phase(state, checkpoint, "STARTING")
         host.start()
         host.healthy()
+        if post_components:
+            components.post_deploy(post_components, post_sources)
         # Successful but schema-changing start needs explicit review before
         # recording a reversible release. Do not undo database changes.
         if host.schema() != record["schema"]:
@@ -563,7 +570,18 @@ def publish(host, state, repo, baseline, candidate, updates, old, new, revalidat
     except Exception as exc:
         report_failure(checkpoint["phase"], exc)
         try:
-            return restore(host, state, checkpoint)
+            recovered = restore(host, state, checkpoint)
+            if post_components:
+                try:
+                    components.post_deploy(post_components, post_sources)
+                except Exception as post_exc:
+                    report_failure("COMPONENT_POST_ROLLBACK", post_exc)
+                    return set_phase(
+                        state, recovered, "HOLD",
+                        reason="COMPONENT_POST_ROLLBACK_FAILED",
+                        failure_phase="ROLLED_BACK",
+                    )
+            return recovered
         except Exception as recovery_exc:
             report_failure("RECOVERY", recovery_exc)
             return set_phase(state, checkpoint, "HOLD", reason="RECOVERY_REQUIRED",
@@ -606,6 +624,7 @@ def release(state, config, expected):
     host = Host()
     inventory = p.inventory_paths(config["inventory"])
     read_component_blob = lambda oid: p.git(repo, "cat-file", "blob", oid)
+    inventory = components.effective_inventory(old, new, inventory, read_component_blob)
     build = lambda: p.build_plan(
         old, new, inventory, host.live, p.control_plane_blob,
         read_component_blob, components.live_blob,
@@ -621,7 +640,8 @@ def release(state, config, expected):
     try:
         component_result = components.apply_updates(
             repo, plan["component_updates"], candidate, read_component_blob,
-            backup_root=BACKUPS, affected=plan["components"],
+            backup_root=BACKUPS,
+            affected=set(plan["components"]) - set(plan["component_post_actions"]),
         )
     except components.ComponentApplyError as exc:
         report_failure("COMPONENT_DEPLOY", exc)
@@ -645,15 +665,22 @@ def release(state, config, expected):
 
     # Metadata is advisory, fetched before cutover and never part of the gate.
     release_notes = notes.collect(repo, baseline, candidate)
-    component_count = int(component_result.get("updated", 0))
-    total_files = len(plan["updates"]) + component_count
+    component_file_count = int(component_result.get("updated", 0))
+    component_names = plan["components"]
+    component_result = dict(component_result, components=component_names)
+    total_files = len(plan["updates"]) + component_file_count
     if not plan["updates"]:
         revalidate()
+        if plan["component_post_actions"]:
+            components.post_deploy(
+                plan["component_post_actions"], plan["component_post_sources"]
+            )
         return set_phase(state, {
             "candidate": candidate, "restart_required": False,
             "started_at": int(time.time()), "file_count": total_files,
-            "bot_file_count": 0, "component_count": component_count,
-            "components": component_result.get("components", plan["components"]),
+            "bot_file_count": 0, "component_count": len(component_names),
+            "component_file_count": component_file_count,
+            "components": component_names,
             "component_backup": component_result.get("backup"),
             "previous_deployed": baseline, "release_notes": release_notes,
         }, "COMMITTED", deployed=candidate)
@@ -664,6 +691,8 @@ def release(state, config, expected):
         host, state, repo, baseline, candidate, plan["updates"], old, new,
         revalidate, release_notes=release_notes,
         component_result=component_result,
+        post_components=plan["component_post_actions"],
+        post_sources=plan["component_post_sources"],
     )
 
 

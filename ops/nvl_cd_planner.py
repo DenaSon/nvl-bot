@@ -408,7 +408,7 @@ def poll(config, state, now=time.time):
     git(repo, "merge-base", "--is-ancestor", baseline, candidate)
     old, new = tree(repo, baseline), tree(repo, candidate)
     reader = lambda oid: git(repo, "cat-file", "blob", oid)
-    inventory = components.effective_inventory(old, new, inventory, reader)
+    inventory = inventory_paths(sorted(components.effective_inventory(old, new, inventory, reader)))
     plan = build_plan(
         old, new, inventory, lambda n: live_blob(runtime, n),
         control_plane_blob, reader, components.live_blob,

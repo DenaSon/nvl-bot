@@ -205,9 +205,15 @@ def inventory_paths(paths):
         raise Hold("INVENTORY_REQUIRED")
     valid = set()
     for name in paths:
-        if (not isinstance(name, str)
-                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.py", name)
-                or name in valid):
+        if not isinstance(name, str) or name in valid:
+            raise Hold("INVENTORY_PATH_INVALID")
+        path = PurePosixPath(name)
+        if (path.is_absolute() or ".." in path.parts or str(path) != name
+                or not path.parts or path.suffix != ".py"
+                or any(part.startswith(".") for part in path.parts)
+                or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", part)
+                       for part in path.parts[:-1])
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.py", path.name)):
             raise Hold("INVENTORY_PATH_INVALID")
         valid.add(name)
     return valid
@@ -265,6 +271,7 @@ def build_plan(old, new, inventory, live_hash, control_plane_hash=None,
         component_plan = components.plan_updates(
             old, new, component_read, component_read,
             component_live_hash or components.live_blob,
+            inventory,
         )
         component_updates = component_plan["updates"]
         component_drift = component_plan["drift"]
@@ -294,6 +301,8 @@ def build_plan(old, new, inventory, live_hash, control_plane_hash=None,
         "component_updates": component_updates,
         "component_drift": component_drift,
         "components": component_plan["components"] if component_read is not None else [],
+        "component_post_actions": component_plan["post_components"] if component_read is not None else [],
+        "component_post_sources": component_plan["post_sources"] if component_read is not None else [],
         "manual": sorted(set(manual)),
         "restart_required": bool(updates),
         "status": "HOLD" if drift or manual else "PLAN_READY",
@@ -374,11 +383,11 @@ def poll(config, state, now=time.time):
     candidate = remote_head()
     if candidate == baseline:
         old = tree(repo, baseline)
+        reader = lambda oid: git(repo, "cat-file", "blob", oid)
+        inventory = components.effective_inventory(old, old, inventory, reader)
         plan = build_plan(
             old, old, inventory, lambda n: live_blob(runtime, n),
-            control_plane_blob,
-            lambda oid: git(repo, "cat-file", "blob", oid),
-            components.live_blob,
+            control_plane_blob, reader, components.live_blob,
         )
         if plan["status"] == "PLAN_READY":
             plan["status"] = "NO_NEW_COMMIT"
@@ -398,11 +407,11 @@ def poll(config, state, now=time.time):
         raise Hold("MASTER_MOVED")
     git(repo, "merge-base", "--is-ancestor", baseline, candidate)
     old, new = tree(repo, baseline), tree(repo, candidate)
+    reader = lambda oid: git(repo, "cat-file", "blob", oid)
+    inventory = components.effective_inventory(old, new, inventory, reader)
     plan = build_plan(
         old, new, inventory, lambda n: live_blob(runtime, n),
-        control_plane_blob,
-        lambda oid: git(repo, "cat-file", "blob", oid),
-        components.live_blob,
+        control_plane_blob, reader, components.live_blob,
     )
     return dict(plan, baseline=baseline, candidate=candidate, ci=proof)
 

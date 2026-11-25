@@ -672,9 +672,13 @@ def release(state, config, expected):
     if not plan["updates"]:
         revalidate()
         if plan["component_post_actions"]:
-            components.post_deploy(
-                plan["component_post_actions"], plan["component_post_sources"]
-            )
+            try:
+                components.post_deploy(
+                    plan["component_post_actions"], plan["component_post_sources"]
+                )
+            except components.ComponentApplyError as exc:
+                report_failure("COMPONENT_POST_ACTION", exc)
+                raise p.Hold("COMPONENT_POST_ACTION_FAILED") from exc
         return set_phase(state, {
             "candidate": candidate, "restart_required": False,
             "started_at": int(time.time()), "file_count": total_files,

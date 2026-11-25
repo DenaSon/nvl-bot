@@ -1,5 +1,6 @@
 [Timer]
-# Apply only after verifying the current sampler unit and runtime duration.
+# Dedicated NVL cadence override. Clears previous timer trigger expressions.
+# Sampler is Type=oneshot and must complete in less than 15 seconds.
 OnActiveSec=
 OnBootSec=
 OnStartupSec=

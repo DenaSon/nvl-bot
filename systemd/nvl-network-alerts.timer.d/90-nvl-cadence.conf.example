@@ -1,0 +1,13 @@
+[Timer]
+# Dedicated NVL cadence override. Re-run 20 seconds after each completed tick.
+# OnUnitInactiveSec avoids overlapping Type=oneshot detector executions.
+OnActiveSec=
+OnBootSec=
+OnStartupSec=
+OnUnitActiveSec=
+OnUnitInactiveSec=
+OnCalendar=
+OnActiveSec=1s
+OnUnitInactiveSec=20s
+AccuracySec=1s
+RandomizedDelaySec=0

@@ -126,8 +126,11 @@ def event(state):
             if type(count) is int and count >= 0:
                 msg += "\nفایل‌های منتشرشده: " + str(count)
             component_count = state.get("component_count")
+            component_file_count = state.get("component_file_count")
             if type(component_count) is int and component_count > 0:
-                msg += "\nفایل‌های اجزای مستقل: " + str(component_count)
+                msg += "\nاجزای مستقل: " + str(component_count)
+            if type(component_file_count) is int and component_file_count > 0:
+                msg += "\nفایل‌های مستقل منتشرشده: " + str(component_file_count)
             components = state.get("components")
             if isinstance(components, list) and components:
                 msg += "\nاجزا: " + "، ".join(
@@ -142,7 +145,10 @@ def event(state):
                         "\n✅ Polling تلگرام و سلامت دیتابیس تأیید شد"
                         "\n🧪 تست عملیاتی مدیران: در انتظار انجام")
             elif type(component_count) is int and component_count > 0:
-                msg += "\n✅ CI موفق | اجزای مستقل به‌روزرسانی شدند؛ بات Restart نشد"
+                if type(component_file_count) is int and component_file_count > 0:
+                    msg += "\n✅ CI موفق | اجزای مستقل به‌روزرسانی شدند؛ بات Restart نشد"
+                else:
+                    msg += "\n✅ CI موفق | وضعیت اجزای مستقل تأیید شد؛ بات Restart نشد"
             elif state.get("restart_required") is False:
                 msg += "\n✅ CI موفق | بدون تغییر عملیاتی"
             msg += "\n" + notes.render(state)

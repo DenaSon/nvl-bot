@@ -214,9 +214,11 @@ class PlanTests(unittest.TestCase):
                              return_value="\n".join(f"{k}={v}" for k, v in expected.items())):
             self.assertIsNone(planner.apply_unit_blob())
 
-    def test_inventory_only_explicit_root_python(self):
+    def test_inventory_accepts_safe_nested_python_packages(self):
         self.assertEqual(inventory_paths(["bot.py"]), {"bot.py"})
-        for paths in ([], ["../bot.py"], ["ops/x.py"], ["a.sh"],
-                      ["bot.py", "bot.py"], [".secret.py"]):
+        self.assertEqual(inventory_paths(["ops/x.py"]), {"ops/x.py"})
+        for paths in ([], ["../bot.py"], ["/root/bot.py"], ["a.sh"],
+                      ["bot.py", "bot.py"], [".secret.py"], [".hidden/x.py"],
+                      ["ops/../bot.py"]):
             with self.assertRaises(Hold):
                 inventory_paths(paths)

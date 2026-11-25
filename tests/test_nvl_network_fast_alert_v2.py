@@ -106,14 +106,14 @@ class AdaptiveFastAlertTests(unittest.TestCase):
         self.stable()
         for i in (20, 21, 22):
             self.tick(i, ssh=80, udp=70, cw=5, tx=29000)
-            self.assertEqual(len(self.sent), 1)
+            self.assertEqual(len(self.sent), 0 if i < 22 else 1)
         self.assertIn("CONNECTION COLLAPSE", self.sent[0])
 
     def test_traffic_collapse_with_udpgw_corroboration_requires_three_samples(self):
         self.stable()
         for i in (20, 21, 22):
             self.tick(i, ssh=108, udp=90, cw=5, tx=12000)
-            self.assertEqual(len(self.sent), 1)
+            self.assertEqual(len(self.sent), 0 if i < 22 else 1)
         self.assertIn("TRAFFIC COLLAPSE", self.sent[0])
 
     def test_slow_night_ramp_down_does_not_trigger_drop_path(self):

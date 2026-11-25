@@ -396,7 +396,7 @@ def render_metric(field, metrics, base, *, compact_label=None):
 ALERT_MENTIONS = "@raad_co @ja_va_dd"
 LIVE_MAX_GAP_SECONDS = 25
 LIVE_CONFIRMATION_SAMPLES = 3
-DETECTION_POLICY_VERSION = 2
+DETECTION_POLICY_VERSION = 3
 
 
 def render(phase, incident, stamp, metrics, baseline, *, reason=None):
@@ -476,7 +476,7 @@ def render(phase, incident, stamp, metrics, baseline, *, reason=None):
             signal,
             "<i>Core telemetry only · ISP filtering not confirmed.</i>",
         ])
-    if phase in ("INFO", "SUSPECTED"):
+    if phase == "SUSPECTED":
         lines.extend(["", ALERT_MENTIONS])
     return "\n".join(lines)
 
@@ -496,14 +496,17 @@ def transition(state, next_phase, stamp, metrics, base, db, *, reason=None):
             state["incident"] = make_incident(stamp, state)
             state["incident_open"] = True
             state["alerted_phases"] = []
-        announced = state["alerted_phases"]
-        # Legacy confirmed incidents already have SUSPECTED or DEGRADED keys.
-        confirmed = any(p in announced for p in ("SUSPECTED", "DEGRADED"))
-        if next_phase not in announced and not confirmed:
-            key = f"{state['incident']}:{next_phase}"
-            queue(db, key, render(next_phase, state["incident"], stamp, metrics,
-                                  base, reason=reason), instant(stamp).isoformat())
-            announced.append(next_phase)
+        # INFO is an internal observation only. A CLOSE-WAIT spike alone
+        # must never create a Telegram notification.
+        if next_phase == "SUSPECTED":
+            announced = state["alerted_phases"]
+            # Legacy confirmed incidents already have SUSPECTED or DEGRADED keys.
+            confirmed = any(p in announced for p in ("SUSPECTED", "DEGRADED"))
+            if next_phase not in announced and not confirmed:
+                key = f"{state['incident']}:{next_phase}"
+                queue(db, key, render(next_phase, state["incident"], stamp, metrics,
+                                      base, reason=reason), instant(stamp).isoformat())
+                announced.append(next_phase)
     elif next_phase == "NORMAL" and state["incident_open"]:
         if any(p in state["alerted_phases"] for p in ("SUSPECTED", "DEGRADED")):
             key = f"{state['incident']}:RECOVERED"
@@ -670,7 +673,8 @@ def process_sample(state, stamp, obs, base, db, *,
     state["last_sample"] = stamp_iso
     state["latest_metrics"] = obs
 
-    # INFO depends only on valid CLOSE-WAIT evidence.
+    # CLOSE-WAIT spikes remain diagnostic. INFO is an internal state only;
+    # it never sends Telegram without independently corroborated disruption.
     cw = obs.get("close_wait")
     cw_ref = early_cw_reference(state, stamp_iso, base)
     cw_spike = (isinstance(cw, (int, float)) and not isinstance(cw, bool)
@@ -678,8 +682,7 @@ def process_sample(state, stamp, obs, base, db, *,
     obs["early_cw_spike"] = cw_spike
     obs["early_cw_reference"] = cw_ref
     if cw_spike and not state["incident_open"]:
-        info_base = {**base, "values": {**base["values"], "close_wait": cw_ref}}
-        transition(state, "INFO", stamp_iso, obs, info_base, db,
+        transition(state, "INFO", stamp_iso, obs, base, db,
                    reason="CW_SPIKE")
 
     if not obs["valid"]:

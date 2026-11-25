@@ -8,7 +8,7 @@ ConditionPathExists=/etc/nvl-deploy/operator-accepted
 Type=oneshot
 User=root
 UMask=0077
-ExecStart=/usr/bin/python3 -B /opt/nvl-deploy/nvl_cd_apply.py
+ExecStart=/usr/bin/python3 -B /opt/nvl-deploy/nvl_cd_apply.py --auto
 # Stage/backup, fresh CI, stop/start, readiness and recovery all need time.
 TimeoutStartSec=1200
 NoNewPrivileges=true

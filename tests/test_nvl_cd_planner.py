@@ -187,7 +187,7 @@ class PlanTests(unittest.TestCase):
                     "NeedDaemonReload": "no", "ProtectHome": "no",
                     "ProtectSystem": "strict", "PrivateTmp": "yes",
                     "NoNewPrivileges": "yes",
-                    "ReadWritePaths": "/root /var/lib/nvl-deploy /var/backups/nvl"}
+                    "ReadWritePaths": "/root /var/lib/nvl-deploy /var/backups/nvl /opt/nvl-network-alerts /etc/systemd/system"}
         def render(fields):
             return "\n".join(f"{key}={value}" for key, value in fields.items())
         with patch.object(planner, "live_blob", return_value=B), \
@@ -208,7 +208,7 @@ class PlanTests(unittest.TestCase):
                     "NeedDaemonReload": "no", "ProtectHome": "no",
                     "ProtectSystem": "strict", "PrivateTmp": "yes",
                     "NoNewPrivileges": "yes",
-                    "ReadWritePaths": "/root /var/lib/nvl-deploy /var/backups/nvl"}
+                    "ReadWritePaths": "/root /var/lib/nvl-deploy /var/backups/nvl /opt/nvl-network-alerts /etc/systemd/system"}
         with patch.object(planner, "live_blob", side_effect=[B, A]), \
                 patch.object(planner.subprocess, "check_output",
                              return_value="\n".join(f"{k}={v}" for k, v in expected.items())):

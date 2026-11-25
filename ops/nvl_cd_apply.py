@@ -1,4 +1,5 @@
 """Accepted Core-only automatic release tick. Never enables itself."""
+import argparse
 import json
 import os
 import sqlite3

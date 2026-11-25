@@ -14,6 +14,11 @@ import time
 import urllib.parse
 import urllib.request
 
+if __package__:
+    from . import nvl_cd_components as components
+else:
+    import nvl_cd_components as components
+
 REPO = "DenaSon/nvl-bot"
 REMOTE = "https://github.com/" + REPO + ".git"
 API = "https://api.github.com/repos/" + REPO
@@ -209,29 +214,65 @@ def inventory_paths(paths):
 
 
 def nonruntime(name):
-    return (name in {"README.md", "LICENSE", ".gitignore", "AGENTS.md"}
-            or name.startswith(("docs/", "tests/")))
+    return (
+        name in {
+            "README.md", "LICENSE", ".gitignore", "AGENTS.md",
+            "ops/k2_release_bundle.py",
+            ".github/workflows/core-auto-deploy.yml",
+        }
+        or name.startswith(("docs/", "tests/"))
+        or components.is_edge_sync_path(name)
+    )
 
 
-def build_plan(old, new, inventory, live_hash, control_plane_hash=None):
+def build_plan(old, new, inventory, live_hash, control_plane_hash=None,
+               component_read=None, component_live_hash=None):
     drift, updates, manual = [], [], []
     for name in sorted(inventory):
         a, b = old.get(name), new.get(name)
-        if a is None and b is not None and b[:2] == ("100644", "blob"):
-            if live_hash(name) != "ABSENT":
+        if a is None and b is not None:
+            if b[:2] != ("100644", "blob"):
+                manual.append(name)
+                continue
+            current = live_hash(name)
+            if current == b[2]:
+                continue
+            if current != "ABSENT":
                 drift.append(name)
-            updates.append(name)
+            else:
+                updates.append(name)
             continue
         if (a is None or b is None or a[:2] != ("100644", "blob")
                 or b[:2] != ("100644", "blob")):
             manual.append(name)
             continue
-        if live_hash(name) != a[2]:
+        current = live_hash(name)
+        if a == b:
+            if current != a[2]:
+                drift.append(name)
+            continue
+        # Reconcile files that were already published outside CD. A live
+        # candidate hash is current, not drift and not another update.
+        if current == b[2]:
+            continue
+        if current != a[2]:
             drift.append(name)
-        if a != b:
+        else:
             updates.append(name)
+
+    component_updates, component_drift, component_managed = [], [], set()
+    if component_read is not None:
+        component_plan = components.plan_updates(
+            old, new, component_read, component_read,
+            component_live_hash or components.live_blob,
+        )
+        component_updates = component_plan["updates"]
+        component_drift = component_plan["drift"]
+        component_managed = component_plan["managed"]
+        drift.extend(component_drift)
+
     for name in sorted(old.keys() | new.keys()):
-        if old.get(name) == new.get(name) or name in inventory:
+        if old.get(name) == new.get(name) or name in inventory or name in component_managed:
             continue
         if nonruntime(name):
             continue
@@ -239,17 +280,23 @@ def build_plan(old, new, inventory, live_hash, control_plane_hash=None):
             continue
         if CONTROL_PLANE_PATH.fullmatch(name) or name == APPLY_UNIT_TEMPLATE:
             candidate = new.get(name)
-            # Control-plane code is not self-deployed. A changed module is
-            # accepted only when its installed counterpart already matches
-            # the exact candidate Git blob; otherwise it remains a manual HOLD.
+            # The runner bootstraps only the trusted CD control-plane modules
+            # from the exact CI-approved master commit before invoking Apply.
             if (candidate is not None and candidate[:2] == ("100644", "blob")
                     and control_plane_hash is not None
                     and control_plane_hash(name) == candidate[2]):
                 continue
         manual.append(name)
-    return {"drift": drift, "updates": updates, "manual": sorted(set(manual)),
-            "restart_required": bool(updates),
-            "status": "HOLD" if drift or manual else "PLAN_READY"}
+
+    return {
+        "drift": sorted(set(drift)),
+        "updates": updates,
+        "component_updates": component_updates,
+        "components": sorted({c for item in component_updates for c in item["components"]}),
+        "manual": sorted(set(manual)),
+        "restart_required": bool(updates),
+        "status": "HOLD" if drift or manual else "PLAN_READY",
+    }
 
 
 def live_blob(runtime, name):
@@ -325,7 +372,12 @@ def poll(config, state, now=time.time):
     candidate = remote_head()
     if candidate == baseline:
         old = tree(repo, baseline)
-        plan = build_plan(old, old, inventory, lambda n: live_blob(runtime, n), control_plane_blob)
+        plan = build_plan(
+            old, old, inventory, lambda n: live_blob(runtime, n),
+            control_plane_blob,
+            lambda oid: git(repo, "cat-file", "blob", oid),
+            components.live_blob,
+        )
         if plan["status"] == "PLAN_READY":
             plan["status"] = "NO_NEW_COMMIT"
         return dict(plan, baseline=baseline, candidate=candidate)
@@ -344,7 +396,12 @@ def poll(config, state, now=time.time):
         raise Hold("MASTER_MOVED")
     git(repo, "merge-base", "--is-ancestor", baseline, candidate)
     old, new = tree(repo, baseline), tree(repo, candidate)
-    plan = build_plan(old, new, inventory, lambda n: live_blob(runtime, n), control_plane_blob)
+    plan = build_plan(
+        old, new, inventory, lambda n: live_blob(runtime, n),
+        control_plane_blob,
+        lambda oid: git(repo, "cat-file", "blob", oid),
+        components.live_blob,
+    )
     return dict(plan, baseline=baseline, candidate=candidate, ci=proof)
 
 

@@ -1,6 +1,7 @@
 """Read-only Core inventory review; never writes config or imports candidate code."""
 import argparse
 import ast
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -72,6 +73,63 @@ def closure(roots, tracked, read):
         found.add(name)
         pending.extend(source_imports(read(name), name, tracked) - found)
     return found
+
+
+def expand(repo, old, new, approved, runtime):
+    """Derive additional root bot dependencies from pinned Git blobs.
+
+    Existing reviewed entries are retained. Newly reachable shared, package
+    and operator scripts are not admitted to the bot-only publisher.
+    Both sides of the release are inspected to protect shared ownership.
+    """
+    cache = {}
+
+    def graph(tree):
+        tracked = {name: item for name, item in tree.items()
+                   if name.endswith(".py") and not name.startswith("tests/")}
+
+        def read(name):
+            mode, kind, oid = tracked[name]
+            if (mode, kind) != ("100644", "blob"):
+                raise p.Hold("DEPENDENCY_MODE_UNSUPPORTED")
+            p.exact_sha(oid)
+            if oid not in cache:
+                raw = p.git(repo, "cat-file", "blob", oid)
+                if len(raw) > p.MAX_BYTES:
+                    raise p.Hold("SOURCE_TOO_LARGE")
+                if hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw).hexdigest() != oid:
+                    raise p.Hold("DEPENDENCY_HASH_MISMATCH")
+                cache[oid] = raw
+            return cache[oid]
+
+        if ENTRY not in tracked:
+            raise p.Hold("ENTRYPOINT_MISSING")
+        bot = closure([ENTRY], tracked, read)
+        independent = closure([name for name in INDEPENDENT if name in tracked],
+                              tracked, read)
+        for name in INDEPENDENT:
+            if name not in tracked and os.path.lexists(runtime / name):
+                raw = p.trusted(runtime / name).read_bytes()
+                if len(raw) > p.MAX_BYTES:
+                    raise p.Hold("SOURCE_TOO_LARGE")
+                independent |= closure(source_imports(raw, name, tracked), tracked, read)
+        return bot, independent
+
+    try:
+        old_bot, old_independent = graph(old)
+        new_bot, new_independent = graph(new)
+    except (SyntaxError, UnicodeError, RecursionError) as exc:
+        raise p.Hold("DEPENDENCY_ANALYSIS_FAILED") from exc
+
+    excluded = set(INDEPENDENT) | MANUAL | old_independent | new_independent
+    # Recompute on every release so a discovered dependency stays managed.
+    # Old-only dependencies remain in the plan for the transition; deletion
+    # is still rejected by the existing publisher. Never auto-delete files.
+    additions = {name for name in old_bot | new_bot
+                 if "/" not in name and name not in excluded}
+    if additions:
+        p.inventory_paths(sorted(additions))
+    return set(approved) | additions
 
 
 def review(repo, sha, runtime):

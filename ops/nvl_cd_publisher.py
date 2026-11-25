@@ -582,7 +582,7 @@ def release(state, config, expected):
     old, new = p.tree(repo, baseline), p.tree(repo, candidate)
     host = Host()
     inventory = p.inventory_paths(config["inventory"])
-    plan = p.build_plan(old, new, inventory, host.live, p.control_plane_blob)
+    plan = p.build_release_plan(repo, old, new, inventory, host.runtime, host.live)
     if plan["status"] != "PLAN_READY":
         raise p.Hold("PLAN_NOT_READY")
     def revalidate():
@@ -591,7 +591,7 @@ def release(state, config, expected):
         p.check_gate(candidate)
         if p.remote_head() != candidate:
             raise p.Hold("MASTER_MOVED")
-        if p.build_plan(old, new, inventory, host.live, p.control_plane_blob) != plan:
+        if p.build_release_plan(repo, old, new, inventory, host.runtime, host.live) != plan:
             raise p.Hold("PLAN_CHANGED")
     # Metadata is advisory, fetched before cutover and never part of the gate.
     release_notes = notes.collect(repo, baseline, candidate)

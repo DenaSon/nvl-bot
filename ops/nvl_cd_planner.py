@@ -213,7 +213,89 @@ def nonruntime(name):
             or name.startswith(("docs/", "tests/")))
 
 
-def build_plan(old, new, inventory, live_hash, control_plane_hash=None):
+# These are repository-only tools, not automatically executed on Core.
+# Do not extend this to arbitrary ops scripts or migration utilities.
+REPOSITORY_ONLY = frozenset({
+    "ops/nvl_network_fast_alert_v2_replay.py",
+    "sync_bot_to_edges.sh",
+})
+
+MONITOR_FILES = {
+    "ops/nvl_network_live_alerts.py": Path("/opt/nvl-network-alerts/nvl_network_live_alerts.py"),
+    "ops/nvl_network_intelligence.py": Path("/opt/nvl-network-alerts/nvl_network_intelligence.py"),
+    "systemd/nvl-network-alerts.timer.example": Path("/etc/systemd/system/nvl-network-alerts.timer"),
+    "systemd/nvl-network-sampler.timer.d/15s.conf.example": Path("/etc/systemd/system/nvl-network-sampler.timer.d/15s.conf"),
+}
+
+
+def monitor_reconciled(old, new):
+    """Recognize an already-installed coherent monitor release; never write it."""
+    changed = {name for name in MONITOR_FILES if old.get(name) != new.get(name)}
+    if not changed:
+        return set()
+    for name, path in MONITOR_FILES.items():
+        item = new.get(name)
+        if item is None or item[:2] != ("100644", "blob") or live_blob(path.parent, path.name) != item[2]:
+            return set()
+    # Verify the actual loaded timers, not just the files. The sampler's
+    # checked-in override resets the old monotonic/calendar schedule.
+    try:
+        for component, dropins in (
+            ("sampler", str(MONITOR_FILES["systemd/nvl-network-sampler.timer.d/15s.conf.example"])),
+            ("alerts", ""),
+        ):
+            unit = "nvl-network-" + component
+            expected = {
+                "FragmentPath": "/etc/systemd/system/" + unit + ".timer",
+                "DropInPaths": dropins,
+                "NeedDaemonReload": "no",
+                "ActiveState": "active",
+                "UnitFileState": "enabled",
+                "Unit": unit + ".service",
+                "AccuracyUSec": "1s",
+                "RandomizedDelayUSec": "0",
+            }
+            raw = subprocess.check_output(
+                ["/usr/bin/systemctl", "show", unit + ".timer",
+                 *["-p" + key for key in expected], "-pTimersMonotonic", "-pTimersCalendar"],
+                text=True, stderr=subprocess.DEVNULL, timeout=10)
+            actual = dict(line.split("=", 1) for line in raw.splitlines())
+            if any(actual.get(key) != value for key, value in expected.items()):
+                return set()
+            # Match the systemd timer property representation; reject extra
+            # schedules or unknown output rather than assuming correctness.
+            timers = re.findall(r"On[A-Za-z]+USec=([^ ;}]+)", actual.get("TimersMonotonic", ""))
+            keys = re.findall(r"(On[A-Za-z]+USec)=", actual.get("TimersMonotonic", ""))
+            if dict(zip(keys, timers)) != {
+                    "OnActiveUSec": "1s" if component == "sampler" else "2s",
+                    "OnUnitActiveUSec": "15s"} or len(keys) != 2 or actual.get("TimersCalendar", ""):
+                return set()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return set()
+    # Re-read after systemd inspection so a concurrent edit cannot be
+    # reconciled on the basis of the earlier hash.
+    if any(live_blob(path.parent, path.name) != new[name][2]
+           for name, path in MONITOR_FILES.items()):
+        return set()
+    return changed
+
+
+def build_release_plan(repo, old, new, inventory, runtime, live_hash):
+    # Lazy import avoids a circular import during standalone CLI startup.
+    if __package__:
+        from . import nvl_cd_inventory as discovery
+    else:
+        import nvl_cd_inventory as discovery
+    effective = discovery.expand(repo, old, new, inventory, runtime)
+    reconciled = monitor_reconciled(old, new)
+    plan = build_plan(old, new, effective, live_hash, control_plane_blob,
+                      reconciled=reconciled)
+    plan["discovered"] = sorted(effective - set(inventory))
+    plan["reconciled"] = sorted(reconciled)
+    return plan
+
+
+def build_plan(old, new, inventory, live_hash, control_plane_hash=None, *, reconciled=()):
     drift, updates, manual = [], [], []
     for name in sorted(inventory):
         a, b = old.get(name), new.get(name)
@@ -233,7 +315,7 @@ def build_plan(old, new, inventory, live_hash, control_plane_hash=None):
     for name in sorted(old.keys() | new.keys()):
         if old.get(name) == new.get(name) or name in inventory:
             continue
-        if nonruntime(name):
+        if nonruntime(name) or name in REPOSITORY_ONLY or name in reconciled:
             continue
         if REVIEWED_NONRUNTIME_TRANSITIONS.get(name) == (old.get(name), new.get(name)):
             continue
@@ -325,7 +407,8 @@ def poll(config, state, now=time.time):
     candidate = remote_head()
     if candidate == baseline:
         old = tree(repo, baseline)
-        plan = build_plan(old, old, inventory, lambda n: live_blob(runtime, n), control_plane_blob)
+        plan = build_release_plan(repo, old, old, inventory, runtime,
+                                  lambda n: live_blob(runtime, n))
         if plan["status"] == "PLAN_READY":
             plan["status"] = "NO_NEW_COMMIT"
         return dict(plan, baseline=baseline, candidate=candidate)
@@ -344,7 +427,8 @@ def poll(config, state, now=time.time):
         raise Hold("MASTER_MOVED")
     git(repo, "merge-base", "--is-ancestor", baseline, candidate)
     old, new = tree(repo, baseline), tree(repo, candidate)
-    plan = build_plan(old, new, inventory, lambda n: live_blob(runtime, n), control_plane_blob)
+    plan = build_release_plan(repo, old, new, inventory, runtime,
+                              lambda n: live_blob(runtime, n))
     return dict(plan, baseline=baseline, candidate=candidate, ci=proof)
 
 

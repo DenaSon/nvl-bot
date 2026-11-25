@@ -7,13 +7,46 @@
 
 ## Fixed scope
 
-- **Core only**, one active Edge at any time; existing 60-second JSONL collector only.
+- **Core only**, one active Edge at any time; the existing JSONL collector is scheduled every 30 seconds by a dedicated systemd timer drop-in. The collector source and metrics remain unchanged.
 - SSH established local TCP `2252`; UDPGW established local TCP `7300`; UDPGW CLOSE-WAIT **remote** TCP `7300`. Do not sum opposite loopback sides.
 - AWG `awg0` RX/TX Mbps calculated from Linux kernel counters; no dependency on Netdata API uptime.
 - Delivery: one **explicit, negative Telegram group chat ID** using the existing NVL bot's sendMessage token; optional topic ID. Never fallback to administrator DMs. No additional Telegram getUpdates poller.
 - Do not modify Core's live `gost`, SSH, UDPGW, `awg0`, `wg0`, DNS, user sessions, firewall, failover, bot worker, or Netdata.
-- The monitor is its own `nvl-network-alerts.service` + timer; no changes to `nvl-network-sampler.timer` and no restart to `nvlbot`.
+- The monitor is its own `nvl-network-alerts.service` + timer. Only the sampler timer cadence changes to 30 seconds; the alert evaluator remains on its existing one-minute timer. No collector-source edit or `nvlbot` restart.
 - No client IPs, user IDs, usernames, plaintext bot token, or raw customer telemetry in group notifications or GitHub.
+
+## Sampler cadence change — 30 seconds
+
+The Core collector is installed separately at `/root/nvl_network_sampler.py` and is not part of this repository. This change adjusts only its systemd timer; it does not edit the collector, change metric calculations, or restart the sampler service. The alert-evaluation timer remains at 60 seconds.
+
+Before applying, inspect the effective units and confirm the collector completes comfortably within 30 seconds. Review all existing timer drop-ins; do not proceed if another override conflicts with the 30-second schedule.
+
+```bash
+systemctl is-active nvl-network-sampler.timer
+systemctl cat nvl-network-sampler.timer
+systemctl show nvl-network-sampler.timer -p ActiveState -p OnActiveUSec -p OnUnitActiveUSec -p OnUnitInactiveUSec -p AccuracyUSec -p RandomizedDelayUSec
+systemctl show nvl-network-sampler.service -p Type -p ActiveState -p SubState -p ExecStart
+journalctl -u nvl-network-sampler.service --since "-10 minutes" --no-pager
+```
+
+After confirming the sampler is a short-running job and the 30-second cadence is safe, apply the pinned template:
+
+```bash
+SHA=REVIEWED_COMMIT_SHA
+curl -fLsS "https://raw.githubusercontent.com/DenaSon/nvl-bot/$SHA/systemd/nvl-network-sampler.timer.d/30s.conf.example" -o /root/nvl-network-sampler-30s.conf
+install -d -m 755 /etc/systemd/system/nvl-network-sampler.timer.d
+test ! -e /etc/systemd/system/nvl-network-sampler.timer.d/30s.conf
+install -m 644 /root/nvl-network-sampler-30s.conf /etc/systemd/system/nvl-network-sampler.timer.d/30s.conf
+systemctl daemon-reload
+systemctl restart nvl-network-sampler.timer
+systemctl is-active nvl-network-sampler.timer
+systemctl show nvl-network-sampler.timer -p OnActiveUSec -p OnUnitActiveUSec -p OnUnitInactiveUSec -p AccuracyUSec -p RandomizedDelayUSec
+systemctl list-timers --all nvl-network-sampler.timer
+```
+
+Expected effective schedule: initial sample after 1 second, then every 30 seconds. Verify the resulting JSONL timestamps are approximately 30 seconds apart. Only the timer is restarted; do not restart `nvl-network-sampler.service`, `nvlbot`, or network services.
+
+Rollback: remove only the newly added `30s.conf`, then run `systemctl daemon-reload` and `systemctl restart nvl-network-sampler.timer`. This restores the timer's previously effective configuration.
 
 ## Gate 1 — exact-release stage and installation
 

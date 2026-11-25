@@ -74,6 +74,7 @@ class ApplyTests(unittest.TestCase):
     def test_systemd_no_argument_invocation_runs_auto_tick(self):
         with patch.object(app.sys, "argv", ["nvl_cd_apply.py"]), \
                 patch.object(app.os, "geteuid", return_value=0), \
+                patch.object(app.p, "trusted", return_value=self.state), \
                 patch.object(app.pub, "exclusive", return_value=nullcontext()), \
                 patch.object(app, "planner_disabled", return_value=True), \
                 patch.object(app, "tick", return_value={"phase": "COMMITTED"} ) as tick:

@@ -172,7 +172,7 @@ jobs:
           exec 9>&-
 
           echo "CORE_CD_CONTROLLER_READY SHA=$EXPECTED_SHA BACKUP=$BACKUP"
-          systemctl start nvl-deploy-apply.service || true
+          systemctl start --no-block nvl-deploy-apply.service || true
 
           deadline=$((SECONDS + 1080))
           while (( SECONDS < deadline )); do
@@ -236,7 +236,7 @@ jobs:
               exit 1
             fi
 
-            systemctl start nvl-deploy-apply.service || true
+            systemctl start --no-block nvl-deploy-apply.service || true
             sleep 20
           done
 

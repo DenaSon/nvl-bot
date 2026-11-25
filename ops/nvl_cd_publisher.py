@@ -400,20 +400,22 @@ def set_phase(state, checkpoint, phase, **fields):
 
 
 def invalidate_bytecode(runtime, names):
-    # CPython can otherwise reuse a timestamp/size-matched .pyc after an
-    # atomic replacement, including rollback within the same second.
-    directory = runtime / "__pycache__"
-    if os.path.lexists(directory):
-        p.trusted(directory, directory=True)
-    else:
-        return
+    # CPython can otherwise reuse timestamp/size-matched bytecode after an
+    # atomic replacement, including nested packages and rollback.
     stems = {Path(name).stem for name in names}
-    for path in directory.iterdir():
-        if path.suffix == ".pyc" and any(
-                path.name.startswith(stem + ".") for stem in stems):
-            p.trusted(path)
-            path.unlink()
-    sync_dir(directory)
+    for directory in runtime.rglob("__pycache__"):
+        if directory.is_symlink():
+            continue
+        p.trusted(directory, directory=True)
+        removed = False
+        for path in directory.iterdir():
+            if path.suffix == ".pyc" and any(
+                    path.name.startswith(stem + ".") for stem in stems):
+                p.trusted(path)
+                path.unlink()
+                removed = True
+        if removed:
+            sync_dir(directory)
 
 
 def resume_unchanged(host, state, checkpoint, *, allow_running=True,

@@ -342,7 +342,8 @@ def apply_unit_blob():
         if any(status.get(key) != value for key, value in expected.items()):
             return None
         if set(status.get("ReadWritePaths", "").split()) != {
-                "/root", "/var/lib/nvl-deploy", "/var/backups/nvl"}:
+                "/root", "/var/lib/nvl-deploy", "/var/backups/nvl",
+                "/opt/nvl-network-alerts", "/etc/systemd/system"}:
             return None
     except (OSError, ValueError, subprocess.SubprocessError):
         return None

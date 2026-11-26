@@ -94,6 +94,12 @@ def reserve_auto(db, plan, actor, authorization, job):
             or not isinstance(event.get("created_at"), (int, float))
             or event["created_at"] <= cfg["armed_at"]):
         raise QuickSwitchHold("AUTO_RELAY_EVENT_INVALID")
+    # Re-read the same committed detector event after the final target
+    # preflight, immediately before consuming the authorization. No additional
+    # wait or route lock. A stale/recovered/replaced incident must not switch.
+    revalidate = authorization.get("revalidate")
+    if not callable(revalidate) or revalidate() != event:
+        raise QuickSwitchHold("AUTO_RELAY_EVENT_CHANGED")
     # Same SQLite transaction as the existing DNS intent and 6G lease.
     # No separate lock or durable pre-write claim that can strand a transfer.
     _write(db, {**cfg, "enabled": False, "last_event": key, "last_job": job})
@@ -168,7 +174,10 @@ class AutoRelaySwitch:
                 return None
             return await self.engine.start_auto(
                 plan, actor=cfg["actor"],
-                authorization={"config": cfg, "event": event})
+                authorization={"config": cfg, "event": event,
+                               "revalidate": lambda: (
+                                   read_event(self.monitor_db, cfg["armed_at"], self.now())
+                                   if not self.stopping and self.released() else None)})
         lock = self.effect_lock
         if lock is not None and not lock.acquire(blocking=False):
             return None

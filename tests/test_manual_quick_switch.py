@@ -193,6 +193,34 @@ class QuickSwitchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.dns.writes, 0)
         self.assertIsNone(self.one("SELECT id FROM failover_operations"))
 
+    async def test_auto_relay_revalidates_incident_after_final_preflight(self):
+        import asyncio
+        import json
+        auto = self._auto_monitor()
+        auto.arm(NEW, 7)
+        auto.now = lambda:106
+        original = self.engine.check_target
+        checks = 0
+
+        async def recover_during_final_preview(plan):
+            nonlocal checks
+            checks += 1
+            if checks == 2:
+                with sqlite3.connect(auto.monitor_db) as db:
+                    row = db.execute("SELECT v FROM kv WHERE k='detector'").fetchone()
+                    state = json.loads(row[0])
+                    state["phase"] = "RECOVERING"
+                    db.execute("UPDATE kv SET v=? WHERE k='detector'",
+                               (json.dumps(state),))
+            return await original(plan)
+
+        self.engine.check_target = recover_during_final_preview
+        with self.assertRaisesRegex(QuickSwitchHold, "AUTO_RELAY_EVENT_CHANGED"):
+            await asyncio.to_thread(auto.tick)
+        self.assertTrue(auto.status()["enabled"])
+        self.assertEqual(self.dns.writes, 0)
+        self.assertIsNone(self.one("SELECT id FROM failover_operations"))
+
     async def test_auto_relay_uncertain_dns_is_not_replayed(self):
         import asyncio
         auto = self._auto_monitor()

@@ -78,6 +78,8 @@ class ManualQuickSwitchUI:
         # The engine runs in a worker thread to avoid blocking Telegram on
         # synchronous Cloudflare HTTP, so serialize effects across actors.
         self.effect_lock = threading.Lock()
+        if self.auto is not None:
+            self.auto.effect_lock = self.effect_lock
 
     async def _view(self, context, chat, text, rows):
         return await ManualHtmlDelivery(context.application.bot).show(
@@ -154,8 +156,12 @@ class ManualQuickSwitchUI:
                               "apps_edge_quick_auto_off")])
             else:
                 text += "\n\nتعویض خودکار: <b>غیرفعال</b>"
-                rows.append([("🟢 فعال‌سازی تعویض خودکار",
-                              "apps_edge_quick_auto_home")])
+                if len(standby) == 1:
+                    rows.append([("🟢 فعال‌سازی تعویض خودکار | "+standby[0],
+                                  "apps_edge_quick_auto_on_"+standby[0])])
+                else:
+                    rows.append([("🟢 فعال‌سازی تعویض خودکار",
+                                  "apps_edge_quick_auto_home")])
         if rec and rec["kind"]=="QUICK" and rec["status"] not in ("DONE","ABORTED"):
             rows.append([("⚠️ بررسی انتقال ناتمام","apps_edge_quick_status")])
         waiting=[]

@@ -110,6 +110,7 @@ class AutoRelaySwitch:
         self.now = now
         self.stopping = False
         self.last_error = None
+        self.effect_lock = None  # reuse the existing UI worker mutex if wired
 
     def status(self):
         with self.db() as db:
@@ -168,7 +169,14 @@ class AutoRelaySwitch:
             return await self.engine.start_auto(
                 plan, actor=cfg["actor"],
                 authorization={"config": cfg, "event": event})
-        return asyncio.run(execute())
+        lock = self.effect_lock
+        if lock is not None and not lock.acquire(blocking=False):
+            return None
+        try:
+            return asyncio.run(execute())
+        finally:
+            if lock is not None:
+                lock.release()
 
     async def loop(self):
         while not self.stopping:

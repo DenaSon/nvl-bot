@@ -433,6 +433,7 @@ from cloudzy_cz04b_dns import CloudflareExactDNS
 from manual_edge_wizard import ManualEdgeWizard
 from manual_quick_switch import ManualQuickSwitch, check_manual_relay_via_cz04b, QuickSwitchHold
 from manual_quick_switch_ui import ManualQuickSwitchUI
+from manual_quick_switch_auto import AutoRelaySwitch
 from manual_edge_secure_form import ManualFormStore, serve_private
 from edge_egress_k2_root_direct import (
     bound_root_client as k2_root_direct_client,
@@ -7856,9 +7857,13 @@ _manual_quick_engine = ManualQuickSwitch(
     check_target=_manual_target_backend_preflight,
     guard=_cloudzy_04b_guard,
 )
+_manual_auto_relay = AutoRelaySwitch(
+    db=db_conn, engine=_manual_quick_engine,
+    released=lambda: os.environ.get("NVL_MANUAL_QUICK_SWITCH_ENABLED", "0") == "1",
+)
 _manual_quick_ui = ManualQuickSwitchUI(
     engine=_manual_quick_engine, db=db_conn,
-    admin_ids=lambda: active_superadmin_ids(DB_PATH),
+    admin_ids=lambda: active_superadmin_ids(DB_PATH), auto=_manual_auto_relay,
 )
 
 # Phase 7 is opt-in and strictly a read-only Rich admin view. No effectful
@@ -32407,6 +32412,8 @@ async def cmd_daily_business_report(update: Update, context: ContextTypes.DEFAUL
     )
 
 async def _post_init(app):
+    _manual_auto_relay.stopping = False
+    app.bot_data["auto_relay_task"] = spawn_bg_task(_manual_auto_relay.loop())
     if globals().get("_DP3_ENABLED", False):
         # No new poller or systemd unit. Opt-in only AFTER hardware/Core E2E.
         app.bot_data["dp3_monitor_task"] = asyncio.create_task(
@@ -32460,6 +32467,7 @@ async def _post_init(app):
     app.bot_data['weekly_accounting_task'] = asyncio.create_task(_weekly_accounting_report_loop(app))
 
 async def _cd_post_stop(app):
+    _manual_auto_relay.stopping = True
     # PTB has stopped update admission and drained its own handlers. Keep
     # the bot API initialized while registered detached work finishes.
     app.bot_data['_cd_detached_drained'] = await drain_detached(_BACKGROUND_TASKS)

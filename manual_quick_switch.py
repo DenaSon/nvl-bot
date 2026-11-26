@@ -62,8 +62,8 @@ class ManualQuickSwitch:
 
     check_target(plan) MUST independently verify pinned Core SSH identity,
     management/customer path, WG, NAT and readiness; sync or async permitted.
-    Actor confirmation and an independently observed customer witness are
-    required at the calling UI boundary; no unattended switch is exposed.
+    Manual calls require an operator witness; unattended calls require an
+    exact persisted admin opt-in consumed in the shared reservation.
     """
 
     def __init__(self, *, db_conn, dns, check_target, guard, now=time.time):
@@ -354,7 +354,7 @@ class ManualQuickSwitch:
         plan["issued_at"] = int(self.now())
         return plan
 
-    def _reserve(self, plan, *, actor, evidence):
+    def _reserve(self, plan, *, actor, evidence, auto_authorization=None):
         job = secrets.token_hex(16)
         now = int(self.now())
         with self.db() as db:
@@ -370,6 +370,9 @@ class ManualQuickSwitch:
                 "WHERE kind='QUICK' AND status NOT IN ('DONE','ABORTED')"
             ).fetchone():
                 raise QuickSwitchHold("QUICK_ROUTE_UNRESOLVED")
+            if auto_authorization is not None:
+                from manual_quick_switch_auto import reserve_auto
+                evidence = reserve_auto(db, plan, actor, auto_authorization, job)
             lock = db.execute(
                 "INSERT INTO failover_operations "
                 "(mode,source_host,target_host,status,started_at,updated_at,"
@@ -398,13 +401,24 @@ class ManualQuickSwitch:
         if (not str(actor).strip() or not isinstance(client_witness, str)
                 or not client_witness.strip()):
             raise QuickSwitchHold("OPERATOR_WITNESS_REQUIRED")
+        return await self._start(plan, actor=actor, evidence=client_witness)
+
+    async def start_auto(self, plan, *, actor, authorization):
+        """Use an exact stored admin opt-in, never fabricate a client witness."""
+        if not isinstance(authorization, dict):
+            raise QuickSwitchHold("AUTO_RELAY_AUTHORIZATION_CHANGED")
+        return await self._start(plan, actor=actor, evidence="",
+                                 auto_authorization=authorization)
+
+    async def _start(self, plan, *, actor, evidence, auto_authorization=None):
         if int(self.now()) - plan["issued_at"] not in range(0, TTL + 1):
             raise QuickSwitchHold("PREVIEW_EXPIRED")
         fresh = await self.preview(plan["target"])
         if any(fresh[k] != plan[k] for k in
                ("source","target","hosts","fingerprint","count","identity","dns")):
             raise QuickSwitchHold("PREVIEW_CHANGED")
-        job = self._reserve(plan, actor=actor, evidence=client_witness)
+        job = self._reserve(plan, actor=actor, evidence=evidence,
+                            auto_authorization=auto_authorization)
         # Crashes after the durable intent are handled by explicit resume.
         await self.resume(job, actor=actor, retry_dns=True)
         return job

@@ -63,10 +63,11 @@ def _message(error):
 
 class ManualQuickSwitchUI:
     def __init__(self, *, engine, db, admin_ids, now=time.time,
-                 enabled=None):
+                 enabled=None, auto=None):
         self.enabled = enabled or (
             lambda: os.environ.get("NVL_MANUAL_QUICK_SWITCH_ENABLED","0")=="1")
         self.engine = engine
+        self.auto = auto
         self.db = db
         self.admin_ids = admin_ids
         self.now = now
@@ -77,6 +78,8 @@ class ManualQuickSwitchUI:
         # The engine runs in a worker thread to avoid blocking Telegram on
         # synchronous Cloudflare HTTP, so serialize effects across actors.
         self.effect_lock = threading.Lock()
+        if self.auto is not None:
+            self.auto.effect_lock = self.effect_lock
 
     async def _view(self, context, chat, text, rows):
         return await ManualHtmlDelivery(context.application.bot).show(
@@ -145,6 +148,20 @@ class ManualQuickSwitchUI:
         if not self.enabled():
             text += "\n\n⚠️ انتقال کاربران فعلاً غیرفعال است."
         rows=[]
+        if self.auto is not None:
+            cfg = await asyncio.to_thread(self.auto.status)
+            if cfg.get("enabled") is True:
+                text += "\n\nتعویض خودکار: <b>فعال</b> — " + escape(cfg["target"])
+                rows.append([("🔴 غیرفعال‌سازی تعویض خودکار",
+                              "apps_edge_quick_auto_off")])
+            else:
+                text += "\n\nتعویض خودکار: <b>غیرفعال</b>"
+                if len(standby) == 1:
+                    rows.append([("🟢 فعال‌سازی تعویض خودکار | "+standby[0],
+                                  "apps_edge_quick_auto_on_"+standby[0])])
+                else:
+                    rows.append([("🟢 فعال‌سازی تعویض خودکار",
+                                  "apps_edge_quick_auto_home")])
         if rec and rec["kind"]=="QUICK" and rec["status"] not in ("DONE","ABORTED"):
             rows.append([("⚠️ بررسی انتقال ناتمام","apps_edge_quick_status")])
         waiting=[]
@@ -370,6 +387,30 @@ class ManualQuickSwitchUI:
                 return await self._home(context,chat)
             if data=="apps_edge_quick_status":
                 return await self._status(context,chat)
+            if self.auto is not None and data=="apps_edge_quick_auto_off":
+                await asyncio.to_thread(self.auto.disarm, actor)
+                return await self._home(context,chat)
+            if self.auto is not None and data=="apps_edge_quick_auto_home":
+                if not self.enabled():
+                    raise QuickSwitchHold("QUICK_SWITCH_NOT_RELEASED")
+                _, standby, _ = await asyncio.to_thread(self._inventory)
+                rows = [[("فعال‌سازی برای "+ip, "apps_edge_quick_auto_on_"+ip)]
+                        for ip in standby]
+                rows.append([("↩️ مدیریت Edge", "apps_edge_quick_home")])
+                return await self._view(
+                    context,chat,"<b>تعویض خودکار رله</b>\n\n"
+                    "Standby تست‌شده را انتخاب کنید. با اولین هشدار اختلال، "
+                    "انتقال بدون تأیید مجدد اجرا می‌شود.",rows)
+            if self.auto is not None and data.startswith("apps_edge_quick_auto_on_"):
+                if not self.enabled():
+                    raise QuickSwitchHold("QUICK_SWITCH_NOT_RELEASED")
+                target = data[len("apps_edge_quick_auto_on_"):]
+                _, standby, _ = await asyncio.to_thread(self._inventory)
+                if target not in standby:
+                    raise QuickSwitchHold("MANUAL_STANDBY_NOT_READY")
+                self._require_awg_witness(target)
+                await asyncio.to_thread(self.auto.arm, target, actor)
+                return await self._home(context,chat)
             if data.startswith("apps_edge_quick_force_yes_"):
                 nonce=data[len("apps_edge_quick_force_yes_"):]
                 pending=self.pending.pop((actor,chat),None)

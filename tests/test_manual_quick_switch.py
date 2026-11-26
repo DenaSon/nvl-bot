@@ -131,6 +131,109 @@ class QuickSwitchTests(unittest.IsolatedAsyncioTestCase):
         with self.connect() as db:
             return db.execute(sql,params).fetchone()
 
+
+    def _auto_monitor(self, *, phase="SUSPECTED", event_stamp=101, last=105):
+        from datetime import datetime, timezone
+        from manual_quick_switch_auto import AutoRelaySwitch
+        import json
+        p = self.dbpath.parent / "monitor.db"
+        iso = lambda ts: datetime.fromtimestamp(ts, timezone.utc).isoformat()
+        with sqlite3.connect(p) as db:
+            db.executescript("CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY,v TEXT);"
+                             "CREATE TABLE IF NOT EXISTS outbox(event_key TEXT PRIMARY KEY,"
+                             "created_at TEXT,status TEXT);")
+            db.execute("INSERT OR REPLACE INTO kv VALUES('detector',?)",
+                       (json.dumps({"phase":phase,"incident":"NVL-test",
+                                    "incident_open":phase!="NORMAL",
+                                    "last_sample":iso(last)}),))
+            db.execute("INSERT OR REPLACE INTO outbox VALUES(?,?,?)",
+                       ("NVL-test:SUSPECTED",iso(event_stamp),"PENDING"))
+        with self.connect() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS bot_access("
+                       "telegram_id INTEGER, role TEXT, active INTEGER)")
+            db.execute("INSERT INTO bot_access VALUES(7,'super_admin',1)")
+        return AutoRelaySwitch(db=self.connect,engine=self.engine,
+                               released=lambda:True,monitor_db=p,now=lambda:100)
+
+    async def test_auto_relay_first_queued_warning_runs_once_without_telegram(self):
+        import asyncio
+        auto = self._auto_monitor()
+        auto.arm(NEW, 7)
+        auto.now = lambda:106
+        job = await asyncio.to_thread(auto.tick)
+        self.assertEqual(self.engine.get(job)["status"], "DONE")
+        self.assertEqual(self.engine.get(job)["evidence"],
+                         "AUTO_FIRST_ALERT:NVL-test:SUSPECTED")
+        self.assertEqual(self.dns.writes, 1)
+        self.assertFalse(auto.status()["enabled"])
+        self.assertIsNone(await asyncio.to_thread(auto.tick))
+        self.assertEqual(self.dns.writes, 1)
+
+    async def test_auto_relay_does_not_replay_old_warning_or_disabled_opt_in(self):
+        import asyncio
+        auto = self._auto_monitor(event_stamp=99)
+        auto.arm(NEW, 7)
+        auto.now = lambda:106
+        self.assertIsNone(await asyncio.to_thread(auto.tick))
+        auto.disarm(7)
+        self.assertIsNone(await asyncio.to_thread(auto.tick))
+        self.assertEqual(self.dns.writes, 0)
+
+    async def test_auto_relay_disable_between_preview_and_reservation(self):
+        from manual_quick_switch_auto import read_config
+        auto = self._auto_monitor()
+        auto.arm(NEW, 7)
+        with self.connect() as db:
+            cfg = read_config(db)
+        plan = await self.engine.preview(NEW)
+        auto.disarm(7)
+        with self.assertRaisesRegex(QuickSwitchHold, "AUTO_RELAY_AUTHORIZATION_CHANGED"):
+            await self.engine.start_auto(plan, actor=7, authorization={
+                "config":cfg,"event":{"key":"NVL-test:SUSPECTED","created_at":101}})
+        self.assertEqual(self.dns.writes, 0)
+        self.assertIsNone(self.one("SELECT id FROM failover_operations"))
+
+    async def test_auto_relay_revalidates_incident_after_final_preflight(self):
+        import asyncio
+        import json
+        auto = self._auto_monitor()
+        auto.arm(NEW, 7)
+        auto.now = lambda:106
+        original = self.engine.check_target
+        checks = 0
+
+        async def recover_during_final_preview(plan):
+            nonlocal checks
+            checks += 1
+            if checks == 2:
+                with sqlite3.connect(auto.monitor_db) as db:
+                    row = db.execute("SELECT v FROM kv WHERE k='detector'").fetchone()
+                    state = json.loads(row[0])
+                    state["phase"] = "RECOVERING"
+                    db.execute("UPDATE kv SET v=? WHERE k='detector'",
+                               (json.dumps(state),))
+            return await original(plan)
+
+        self.engine.check_target = recover_during_final_preview
+        with self.assertRaisesRegex(QuickSwitchHold, "AUTO_RELAY_EVENT_CHANGED"):
+            await asyncio.to_thread(auto.tick)
+        self.assertTrue(auto.status()["enabled"])
+        self.assertEqual(self.dns.writes, 0)
+        self.assertIsNone(self.one("SELECT id FROM failover_operations"))
+
+    async def test_auto_relay_uncertain_dns_is_not_replayed(self):
+        import asyncio
+        auto = self._auto_monitor()
+        auto.arm(NEW, 7)
+        auto.now = lambda:106
+        self.dns.error = "partial"
+        with self.assertRaises(QuickSwitchHold):
+            await asyncio.to_thread(auto.tick)
+        self.assertFalse(auto.status()["enabled"])
+        self.assertIsNone(await asyncio.to_thread(auto.tick))
+        self.assertEqual(self.dns.writes, 1)
+        self.assertEqual(self.engine.latest()["status"], "HOLD")
+
     async def test_cutover_ignores_unrelated_historical_hold_but_preserves_it(self):
         plan = await self.engine.preview(NEW)
         self.assertEqual(plan["count"],3)  # includes inactive old + active NULL

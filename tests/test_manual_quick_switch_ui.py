@@ -144,6 +144,36 @@ class Phase3UITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.ui.last_errors["7"], "AWG_LIMITER_WITNESS_PENDING")
         self.assertFalse(any(e[0]=="start" for e in self.engine.events))
 
+    async def test_auto_relay_toggle_selects_only_existing_standby(self):
+        class FakeAuto:
+            def __init__(self):
+                self.cfg = {}
+                self.calls = []
+            def status(self):
+                return self.cfg
+            def arm(self, target, actor):
+                self.calls.append(("arm", target, actor))
+                self.cfg = {"enabled":True,"target":target}
+            def disarm(self, actor):
+                self.calls.append(("off", actor))
+                self.cfg["enabled"] = False
+
+        self.ui.auto = FakeAuto()
+        await self.cb("apps_edge_quick_home")
+        callbacks=[d for row in FakeHtml.cards[-1][1] for _,d in row]
+        self.assertIn("apps_edge_quick_auto_on_45.59.126.73",callbacks)
+        await self.cb("apps_edge_quick_auto_on_192.0.2.99")
+        self.assertEqual(self.ui.auto.calls, [])
+        await self.cb("apps_edge_quick_auto_on_45.59.126.73",role="member")
+        self.assertEqual(self.ui.auto.calls, [])
+        await self.cb("apps_edge_quick_auto_on_45.59.126.73")
+        self.assertEqual(self.ui.auto.calls, [("arm","45.59.126.73",7)])
+        callbacks=[d for row in FakeHtml.cards[-1][1] for _,d in row]
+        self.assertIn("apps_edge_quick_auto_off",callbacks)
+        await self.cb("apps_edge_quick_auto_off")
+        self.assertEqual(self.ui.auto.calls[-1],("off",7))
+        self.assertEqual(self.engine.events, [])
+
     async def test_home_contains_only_manual_edge_navigation(self):
         await self.cb("apps_edge_quick_home")
         text,rows=FakeHtml.cards[-1]

@@ -7874,44 +7874,6 @@ _manual_quick_ui = ManualQuickSwitchUI(
 # Phase 7 is opt-in and strictly a read-only Rich admin view. No effectful
 # Cloudzy/CZ07 callback is forwarded through this bridge.
 
-# DenaProbe R3: optional admin dashboard and independently gated alerts.
-# Both run in the existing bot; the Collector remains isolated.
-_DP3_ENABLED = os.environ.get("NVL_DENAPROBE_R3_ENABLED", "0") == "1"
-_DP3_ALERTS_ENABLED = (_DP3_ENABLED and
-    os.environ.get("NVL_DENAPROBE_R3_ALERTS_ENABLED", "0") == "1")
-_DP3_DB_PATH = os.environ.get(
-    "NVL_DENAPROBE_DB_PATH", "/var/lib/denaprobe/telemetry-r3.sqlite3")
-_DP3_ENTRY = "apps_dp3_home"
-if _DP3_ENABLED:
-    from pathlib import Path as _DenaProbePath
-    from denaprobe_ingest.detector import evaluate as _dp3_evaluate
-    from denaprobe_rich_admin import handle_callback as _dp3_handle_callback
-    if _DP3_ALERTS_ENABLED:
-        from cloudzy_rich_transport import RichBotAPI as _DenaProbeRichBotAPI
-        from denaprobe_alerts import tick as _dp3_alert_tick
-
-
-async def _dp3_monitor_loop(app):
-    """Refresh incident evidence every 30s; send only with alert opt-in."""
-    while True:
-        try:
-            if _DP3_ALERTS_ENABLED:
-                recipients = await asyncio.to_thread(_db_get_admin_chat_ids)
-                outcome = await _dp3_alert_tick(
-                    _DP3_DB_PATH, recipients, _DenaProbeRichBotAPI(app.bot.token))
-                if outcome["sent"] or outcome["held"]:
-                    log.info("DenaProbe alert delivery sent=%s held=%s",
-                             outcome["sent"], outcome["held"])
-            else:
-                await asyncio.to_thread(_dp3_evaluate, _DenaProbePath(_DP3_DB_PATH))
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            log.warning("DenaProbe monitor check unavailable (%s)",
-                        type(exc).__name__)
-        await asyncio.sleep(30)
-
-
 def _cloudzy_markup(rows):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(label, callback_data=callback) for label, callback in row]
@@ -7932,8 +7894,7 @@ def _build_admin_programs_kb(*, actor=None, chat=None, active_admin_ids=()):
         ],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="srv_menu_back")],
     ]
-    # Edge now lives in Infrastructure; legacy DenaProbe callbacks and
-    # background monitoring remain intact but are not advertised here.
+    # Edge now lives in Infrastructure.
     return rows
 
 
@@ -17870,33 +17831,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat=update.effective_chat.id,
             is_private=(getattr(update.effective_chat,"type",None)=="private"),
         )
-        return
-    if d in ("apps_dpt_24", "apps_dpt_168", "apps_dpt_help_24", "apps_dpt_help_168"):
-        from denaprobe_admin_dashboard import handle_dashboard as _handle_dpt_dashboard
-        active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
-        # Existing callbacks from older cards remain authorized and replay-safe.
-        normalized = ("apps_dpt_168" if d.endswith("_168") else "apps_dpt_24")
-        await _handle_dpt_dashboard(
-            query, data=normalized, role=role, actor=update.effective_user.id,
-            chat=update.effective_chat.id,
-            is_private=(getattr(update.effective_chat, "type", None) == "private"),
-            active_admin_ids=active_admin_ids,
-        )
-        return
-    if d == "apps_dp3_home" or d.startswith("dp3:"):
-        # Always revalidate private-chat and live admin membership.
-        # Existing bot authentication already ran at callback entry.
-        if globals().get("_DP3_ENABLED", False):
-            active_admin_ids = await asyncio.to_thread(_db_get_admin_chat_ids)
-            result = await _dp3_handle_callback(
-                data=d, query=query, context=context, db_path=_DP3_DB_PATH,
-                role=role, actor=update.effective_user.id,
-                chat=update.effective_chat.id,
-                is_private=(getattr(update.effective_chat, "type", None) == "private"),
-                active_admin_ids=active_admin_ids,
-            )
-            if result in ("RICH_UNAVAILABLE", "STALE_OR_FORWARDED_CARD"):
-                log.warning("DenaProbe R3 dashboard hold code=%s", result)
         return
     if d == 'apps_home':
         context.user_data.pop("mza_nodes_origin", None)
@@ -32569,10 +32503,6 @@ async def cmd_daily_business_report(update: Update, context: ContextTypes.DEFAUL
 async def _post_init(app):
     _manual_auto_relay.stopping = False
     app.bot_data["auto_relay_task"] = spawn_bg_task(_manual_auto_relay.loop())
-    if globals().get("_DP3_ENABLED", False):
-        # No new poller or systemd unit. Opt-in only AFTER hardware/Core E2E.
-        app.bot_data["dp3_monitor_task"] = asyncio.create_task(
-            _dp3_monitor_loop(app))
     # K2 Single shares this application's existing root process and 6G.
     # Missing release profile is OFF; a failed optional startup must not
     # prevent the existing bot and its legacy features from starting.
@@ -32639,7 +32569,7 @@ async def _post_shutdown(app):
     # قلم افتاده بود — پس هیچ‌وقت cancel نمی‌شد و روی asyncio.sleep(...) منتظر می‌ماند، پروسه
     # واقعاً خارج نمی‌شد تا systemd صبرش تمام شود و به‌زور بکشدش (که همان قطعیِ طولانی و نیازِ
     # نماینده‌ها به ورودِ مجدد را رقم می‌زد).
-    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 V119A Regional Filter Monitor'), ('radar_monitor_task', '🌐 Cloudflare Radar Network Context'), ('fast_default_sentinel_task', '⚡ V119A Fast Default Sentinel'), ('standby_readiness_task', '🛟 V119C Warm Standby Watchdog'), ('marzban_asset_discovery_task', '🧭 V120A Marzban Asset Discovery'), ('marzban_local_health_task', '🩺 V120B Marzban Local Health'), ('marzban_regional_task', '🌍 V120C Marzban Regional Filtering'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('daily_business_report_task', '📊 گزارش روزانه کسب‌وکار'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار'), ('dp3_monitor_task', '📡 DenaProbe R3')):
+    for key, label in (('capacity_monitor_task', '🛡️ حلقهٔ پایش ظرفیت'), ('hold_activation_task', '⏳ حلقهٔ پایش آنهولد'), ('expiry_monitor_task', '🧹 حلقهٔ پایش انقضا'), ('ip_pressure_monitor_task', '🌐 حلقهٔ پایش فشار IP'), ('host_health_task', '🛡️ حلقهٔ پایش سلامت IPها'), ('regional_filter_task', '🛡 V119A Regional Filter Monitor'), ('radar_monitor_task', '🌐 Cloudflare Radar Network Context'), ('fast_default_sentinel_task', '⚡ V119A Fast Default Sentinel'), ('standby_readiness_task', '🛟 V119C Warm Standby Watchdog'), ('marzban_asset_discovery_task', '🧭 V120A Marzban Asset Discovery'), ('marzban_local_health_task', '🩺 V120B Marzban Local Health'), ('marzban_regional_task', '🌍 V120C Marzban Regional Filtering'), ('udpgw_health_task', '🛰️ حلقهٔ پایش سلامت UDPGW'), ('daily_sales_report_task', '📊 حلقهٔ گزارش روزانهٔ فروش'), ('daily_business_report_task', '📊 گزارش روزانه کسب‌وکار'), ('filter_detect_task', '🛡 حلقهٔ پایش فیلتر خودکار'), ('weekly_accounting_task', '📅 حلقه گزارش هفتگی حسابدار')):
         task = app.bot_data.get(key)
         if task and not task.done():
             task.cancel()

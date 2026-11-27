@@ -1,6 +1,11 @@
 """
 NeVeL Enterprise Bot - نسخه تجاری (v54.1)
 ==================================================
+بهبود رابط کاربری رادار کاربران آنلاین:
+  1. نمایش تفکیک‌شده و خلاصهٔ آمار SSH و V2Ray.
+  2. انتقال فهرست کاربران آنلاین SSH به صفحات جداگانه و افزودن امکان بروزرسانی.
+  3. نمایش وضعیت نامشخص یا خطا برای آمار در دسترس‌نبودۀ V2Ray، به‌جای عدد صفر.
+
 تمامی امکانات نسخه‌های قبلی (رزرو اتمیک یوزرنیم، Rollback کامل، پایش ظرفیت، هش رمزها،
 WAL دیتابیس، ضدِ SQLi، درگاه کارت‌به‌کارت، نمودار فروش، بکاپ، تاییدیهٔ خروج، پایش کاربران
 آنلاین) حفظ شده و این دور، موارد زیر اضافه شدند (طبق درخواست صریح کاربر):
@@ -24389,14 +24394,95 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "✅ کارت اختصاصی شما حذف شد.\n\nاز این پس زیرمجموعه‌های شما دوباره کارت سیستم (یا کارت یکی از نمایندگان بالادستی‌تان، در صورت وجود) را می‌بینند.",
             reply_markup=_nav_markup([[("🔙 بازگشت", "nav:agent_card")]]))
-    elif d == "info_online":
+    elif d == "info_online_dashboard" and role == 'admin':
+        snapshot = context.user_data.get("info_online_snapshot")
+        if not isinstance(snapshot, dict) or not snapshot.get("dashboard_text"):
+            kb = [
+                [InlineKeyboardButton("🔄 دریافت آمار", callback_data="info_online_refresh")],
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="users_hub")],
+            ]
+            await query.edit_message_text(
+                "اطلاعات رادار در دسترس نیست. لطفاً آمار را دوباره دریافت کنید.",
+                reply_markup=InlineKeyboardMarkup(kb),
+            )
+        else:
+            rows = snapshot.get("rows") or []
+            kb = [
+                [InlineKeyboardButton(
+                    f"👥 فهرست کاربران آنلاین SSH ({fa_digits(len(rows))})",
+                    callback_data="info_online_list_0",
+                )],
+                [InlineKeyboardButton("🔄 بروزرسانی", callback_data="info_online_refresh")],
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="users_hub")],
+            ]
+            await query.edit_message_text(
+                snapshot["dashboard_text"],
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(kb),
+            )
+
+    elif d.startswith("info_online_list_") and role == 'admin':
+        snapshot = context.user_data.get("info_online_snapshot")
+        rows = snapshot.get("rows") if isinstance(snapshot, dict) else None
+        if not isinstance(rows, list):
+            kb = [
+                [InlineKeyboardButton("🔄 دریافت دوباره آمار", callback_data="info_online_refresh")],
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="users_hub")],
+            ]
+            await query.edit_message_text(
+                "فهرست کاربران آنلاین در دسترس نیست. آمار را دوباره دریافت کنید.",
+                reply_markup=InlineKeyboardMarkup(kb),
+            )
+        else:
+            page_raw = d.rsplit("_", 1)[-1]
+            page = int(page_raw) if page_raw.isdigit() else 0
+            page_size = 20
+            total_pages = max(1, (len(rows) + page_size - 1) // page_size)
+            page = min(max(page, 0), total_pages - 1)
+            start_index = page * page_size
+            page_rows = rows[start_index:start_index + page_size]
+
+            lines = [
+                "👥 <b>فهرست کاربران آنلاین SSH</b>",
+                f"تعداد کاربران: <b>{fa_digits(len(rows))}</b>",
+                f"صفحه {fa_digits(page + 1)} از {fa_digits(total_pages)}",
+                f"زمان دریافت آمار: {esc(snapshot.get('updated_at') or '—')}",
+                "",
+            ]
+            if page_rows:
+                for index, row in enumerate(page_rows, start=start_index + 1):
+                    if not isinstance(row, (list, tuple)) or len(row) != 4:
+                        continue
+                    username, owner, ssh_count, tls_count = row
+                    lines.append(
+                        f"{fa_digits(index)}. <code>{esc(username)}</code>\n"
+                        f"   {esc(owner)} · مستقیم: {fa_digits(ssh_count)} | TLS: {fa_digits(tls_count)}"
+                    )
+            else:
+                lines.append("در حال حاضر کاربر SSH آنلاینی ثبت نشده است.")
+
+            nav = []
+            if page > 0:
+                nav.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"info_online_list_{page - 1}"))
+            if page + 1 < total_pages:
+                nav.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"info_online_list_{page + 1}"))
+            kb = [nav] if nav else []
+            kb.append([InlineKeyboardButton("🔄 بروزرسانی آمار", callback_data="info_online_refresh")])
+            kb.append([InlineKeyboardButton("🔙 بازگشت به رادار", callback_data="info_online_dashboard")])
+            await query.edit_message_text(
+                "\n".join(lines),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(kb),
+            )
+
+    elif d in ("info_online", "info_online_refresh"):
         if role not in ('admin', 'agent'):
             return
         counts, monitor_error = await _get_live_connection_counts()
 
         if monitor_error:
             log.error("مانیتورینگ کاربران آنلاین شکست خورد: %s", monitor_error)
-            warn_txt = f"⚠️ <b>شمارش کاربران آنلاین ناموفق بود:</b>\n{esc(monitor_error)}\n\nاعداد زیر ممکن است نادرست (صفر) باشند."
+            warn_txt = f"⚠️ <b>شمارش کاربران آنلاین ناموفق بود:</b>\n{esc(monitor_error)}\n\nاعداد زیر ممکن است ناقص باشند."
         else:
             warn_txt = None
 
@@ -24406,21 +24492,34 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             online_users = sorted(u for u in my_users if counts.get(u.lower(), 0) > 0)
             conns = sum(counts.get(u.lower(), 0) for u in my_users)
             my_active = await asyncio.to_thread(_db_get_active_accounts_count_by_agent, ag_id)
-            
+
             total_my_ssh = sum(counts.users_detail[u.lower()]['ssh'] for u in my_users)
             total_my_tls = sum(counts.users_detail[u.lower()]['tls'] for u in my_users)
 
-            txt = (f"⚡️ <b>کاربران آنلاین شما:</b>\n"
-                   f"👤 تعداد کاربران آنلاین: {len(online_users)} نفر (از مجموع {len(my_users)} اکانت شما)\n"
-                   f"✅ تعداد کاربران فعال (غیرمنقضی): {my_active} نفر\n"
-                   f"🔌 تعداد کل اتصالات هم‌زمان: {conns} (مستقیم: {total_my_ssh} | TLS: {total_my_tls})")
+            txt = (
+                f"⚡️ <b>کاربران آنلاین شما</b>\n"
+                f"👤 کاربران آنلاین: <b>{fa_digits(len(online_users))}</b> از {fa_digits(len(my_users))} اکانت\n"
+                f"✅ کاربران فعال: {fa_digits(my_active)}\n"
+                f"🔌 اتصالات هم‌زمان: <b>{fa_digits(conns)}</b>\n"
+                f"مستقیم: {fa_digits(total_my_ssh)} · TLS: {fa_digits(total_my_tls)}"
+            )
             if online_users:
                 shown = online_users[:40]
-                txt += "\n\n📋 <b>لیست دقیق کاربران آنلاین شما:</b>\n" + "\n".join(
-                    f"• <code>{esc(u)}</code> (مستقیم: {counts.users_detail[u.lower()]['ssh']} | TLS: {counts.users_detail[u.lower()]['tls']})" for u in shown)
+                txt += "\n\n📋 <b>کاربران آنلاین شما:</b>\n" + "\n".join(
+                    f"• <code>{esc(u)}</code> · مستقیم: {fa_digits(counts.users_detail[u.lower()]['ssh'])} | TLS: {fa_digits(counts.users_detail[u.lower()]['tls'])}"
+                    for u in shown
+                )
                 if len(online_users) > 40:
-                    txt += f"\n… و {len(online_users) - 40} مورد دیگر"
-            if warn_txt: txt = warn_txt + "\n\n" + txt
+                    txt += f"\n… و {fa_digits(len(online_users) - 40)} مورد دیگر"
+            if warn_txt:
+                txt = warn_txt + "\n\n" + txt
+            await query.edit_message_text(
+                txt,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 بازگشت", callback_data="nav:agent_reports")
+                ]]),
+                parse_mode="HTML",
+            )
         else:
             agents = {a[0]: a[1] for a in await asyncio.to_thread(_db_get_all_agents)}
             total_users, total_conns, adm_u, adm_c, ag_u, ag_c = 0, 0, 0, 0, {}, {}
@@ -24428,63 +24527,119 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for u, aid in all_u:
                 c = counts.get(u.lower(), 0)
                 if c > 0:
-                    total_users += 1; total_conns += c
+                    total_users += 1
+                    total_conns += c
                     online_list.append((u, aid, c))
-                    if aid == 0: adm_u += 1; adm_c += c
+                    if aid == 0:
+                        adm_u += 1
+                        adm_c += c
                     else:
                         ag_u[aid] = ag_u.get(aid, 0) + 1
                         ag_c[aid] = ag_c.get(aid, 0) + c
-            b_txt = f"• مستقیم: {adm_u} کاربر ({adm_c} اتصال)\n" + "".join(
-                [f"• نماینده {esc(agents.get(i, '?'))}: {ag_u.get(i, 0)} کاربر ({ag_c.get(i, 0)} اتصال)\n" for i in ag_u])
-            
-            # کل اکانت‌های فروخته شده فارغ از نوع سرویس
+
             total_active_accounts = await asyncio.to_thread(_db_get_active_accounts_count)
-            
             global_ssh = getattr(counts, 'global_ssh', 0)
             global_tls = getattr(counts, 'global_tls', 0)
 
-            # --- بخش جدید دریافت آمار V2Ray ---
             with db_conn() as conn:
-                v2ray_db_count_row = conn.execute("SELECT COUNT(*) FROM ssh_accounts WHERE status='🟢 فعال' AND service_type IN ('v2ray', 'v2ray_vol')").fetchone()
+                v2ray_db_count_row = conn.execute(
+                    "SELECT COUNT(*) FROM ssh_accounts WHERE status='🟢 فعال' "
+                    "AND service_type IN ('v2ray', 'v2ray_vol')"
+                ).fetchone()
                 v2ray_db_count = v2ray_db_count_row[0] if v2ray_db_count_row else 0
                 ssh_db_count = total_active_accounts - v2ray_db_count
 
-            v2_online_count = 0
+            v2_online_text = "تنظیم نشده"
             m_url = await asyncio.to_thread(_db_get_setting, 'marzban_url', '')
             m_user = await asyncio.to_thread(_db_get_setting, 'marzban_username', '')
             m_pwd = await asyncio.to_thread(_db_get_setting, 'marzban_password', '')
             if m_url and m_user:
                 try:
                     ok_v2, v2_online = await v2ray_engine.get_online_users_count(m_url, m_user, m_pwd)
-                    if ok_v2:
-                        v2_online_count = v2_online
+                    if ok_v2 and v2_online is not None:
+                        v2_online_text = f"{fa_digits(v2_online)} نفر"
                     else:
-                        v2_online_count = "نامشخص"
+                        v2_online_text = "نامشخص"
                 except Exception as e:
                     log.error(f"خطا در دریافت آمار آنلاین V2Ray: {e}")
-                    v2_online_count = "خطا"
+                    v2_online_text = "خطا در دریافت"
 
-            txt = (f"⚡️ <b>رادار زنده سرور</b>\n"
-                   f"📦 <b>کل اکانت های فروخته شده:</b> {total_active_accounts} نفر\n"
-                   f"────────────────\n"
-                   f"🔹 <b>بخش SSH</b>\n"
-                   f"✅ کاربران فعال در دیتابیس: {ssh_db_count} نفر\n"
-                   f"👤 کاربران آنلاین لحظه‌ای: {total_users} نفر\n"
-                   f"🔌 کل اتصالات: {total_conns} (مستقیم: {global_ssh} | TLS/گاست: {global_tls})\n\n"
-                   f"تفکیک آنلاین‌های SSH به ازای نماینده:\n{b_txt or '—'}\n"
-                   f"────────────────\n"
-                   f"🚀 <b>بخش V2Ray</b>\n"
-                   f"✅ کل کاربران V2Ray: {v2ray_db_count} نفر\n"
-                   f"🟢 کاربران آنلاین V2Ray: {v2_online_count} نفر")
-                   
-            if online_list:
-                shown = sorted(online_list)[:40]
-                txt += "\n\n📋 <b>لیست کاربران آنلاین SSH:</b>\n" + "\n".join(
-                    f"• <code>{esc(u)}</code> — {esc(agents.get(aid, 'مستقیم')) if aid else 'مستقیم'} (مستقیم: {counts.users_detail[u.lower()]['ssh']} | TLS: {counts.users_detail[u.lower()]['tls']})" for u, aid, c in shown)
-                if len(online_list) > 40:
-                    txt += f"\n… و {len(online_list) - 40} مورد دیگر"
-            if warn_txt: txt = warn_txt + "\n\n" + txt
-        await query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="users_hub" if role == 'admin' else "nav:agent_reports")]]), parse_mode="HTML")
+            def _format_online_count(value):
+                try:
+                    return fa_digits(f"{int(value):,}")
+                except (TypeError, ValueError, OverflowError):
+                    return fa_digits(value)
+
+            ranked_agents = sorted(
+                ag_u.items(),
+                key=lambda item: (
+                    -item[1],
+                    str(agents.get(item[0], "") or "").casefold(),
+                ),
+            )
+            online_rows = []
+            for username, agent_id, _connection_count in sorted(
+                online_list, key=lambda item: str(item[0]).lower()
+            ):
+                detail = counts.users_detail[username.lower()]
+                owner = agents.get(agent_id, "مستقیم") if agent_id else "مستقیم"
+                online_rows.append((
+                    username,
+                    owner or "—",
+                    detail.get("ssh", 0),
+                    detail.get("tls", 0),
+                ))
+
+            updated_at = fa_digits(datetime.now(IRAN_TZ).strftime("%H:%M:%S"))
+            txt = (
+                "⚡️ <b>رادار زنده سرور</b>\n"
+                f"<i>زمان دریافت آمار: {updated_at}</i>\n\n"
+                f"📦 <b>کل اشتراک‌های فعال:</b> {_format_online_count(total_active_accounts)}\n"
+                "━━━━━━━━━━━━━━\n"
+                "🔐 <b>SSH</b>\n"
+                f"کاربران فعال: {_format_online_count(ssh_db_count)}\n"
+                f"کاربران آنلاین: <b>{_format_online_count(total_users)}</b>\n"
+                f"اتصالات هم‌زمان: <b>{_format_online_count(total_conns)}</b>\n"
+                f"مستقیم: {_format_online_count(global_ssh)} · TLS/Gost: {_format_online_count(global_tls)}\n\n"
+                "🚀 <b>V2Ray</b>\n"
+                f"اشتراک‌های فعال: {_format_online_count(v2ray_db_count)}\n"
+                f"کاربران آنلاین: <b>{v2_online_text}</b>\n\n"
+                "👥 <b>تفکیک کاربران آنلاین SSH</b>\n"
+                f"مستقیم: {_format_online_count(adm_u)} کاربر\n"
+                f"نمایندگان: {_format_online_count(sum(ag_u.values()))} کاربر"
+            )
+            if ranked_agents:
+                txt += "\n\n<b>نمایندگان آنلاین</b>\n" + "\n".join(
+                    f"• {esc(agents.get(agent_id, '?'))}: {_format_online_count(user_count)} کاربر · "
+                    f"{_format_online_count(ag_c.get(agent_id, 0))} اتصال"
+                    for agent_id, user_count in ranked_agents[:8]
+                )
+                if len(ranked_agents) > 8:
+                    txt += f"\n… و {_format_online_count(len(ranked_agents) - 8)} نماینده دیگر"
+            else:
+                txt += "\n\nنماینده‌ای آنلاین نیست."
+
+            if warn_txt:
+                txt = warn_txt + txt
+
+            context.user_data["info_online_snapshot"] = {
+                "dashboard_text": txt,
+                "rows": online_rows,
+                "updated_at": updated_at,
+            }
+            kb = [
+                [InlineKeyboardButton(
+                    f"👥 فهرست کاربران آنلاین SSH ({_format_online_count(len(online_rows))})",
+                    callback_data="info_online_list_0",
+                )],
+                [InlineKeyboardButton("🔄 بروزرسانی", callback_data="info_online_refresh")],
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="users_hub")],
+            ]
+            await query.edit_message_text(
+                txt,
+                reply_markup=InlineKeyboardMarkup(kb),
+                parse_mode="HTML",
+            )
     elif d == "info_chart" and MATPLOTLIB_AVAILABLE and role == 'admin':
         buf = await asyncio.to_thread(_generate_sales_chart_buffer)
         if buf:
